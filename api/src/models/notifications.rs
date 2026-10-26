@@ -103,7 +103,7 @@ impl NotificationLevel {
     }
 }
 
-/// A log message related to an image about whether/why it's been
+/// A log message related to an image, pipeline, model entity, or user about whether/why it's been
 /// banned and other information that could be pertinent to a user
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
@@ -175,6 +175,8 @@ impl<N: NotificationSupport> PartialEq<NotificationRequest<N>> for Notification<
 /// The parameters for a notification create request
 #[derive(Serialize, Deserialize, Debug, Default)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 pub struct NotificationParams {
     /// Whether or not the notification should automatically expire
     ///

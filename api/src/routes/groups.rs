@@ -6,7 +6,7 @@ use tracing::instrument;
 
 use utoipa::OpenApi;
 
-use super::OpenApiSecurity;
+use super::{OpenApiParameterExamples, OpenApiSecurity};
 // our imports
 use crate::is_admin;
 use crate::models::AuthedUser;
@@ -27,15 +27,19 @@ use crate::utils::{ApiError, AppState};
 #[utoipa::path(
     post,
     path = "/api/groups/",
-    params(
-        ("group" = GroupRequest, description = "The group to create")
-    ),
+    request_body = GroupRequest,
     responses(
         (status = 204, description = "Group created"),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation"),
+        (status = 401, description = "This user is not authorized to access this route. Only a full token may use this route: a scoped token, including a run token, is refused."),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::groups::create", skip_all, err(Debug))]
@@ -60,16 +64,20 @@ async fn create(
 /// * `shared` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/groups/:group/details",
+    path = "/api/groups/{group}/details",
     params(
         ("group" = String, Path, description = "The group to get details on")
     ),
     responses(
         (status = 200, description = "Group details", body = Group),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::groups::get_group", skip_all, err(Debug))]
@@ -95,14 +103,18 @@ async fn get_group(
     get,
     path = "/api/groups/",
     params(
-        ("params" = GroupListParams, Query, description = "The query params for the groups to list")
+        GroupListParams,
     ),
     responses(
         (status = 200, description = "Group list", body = GroupList),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::groups::list", skip_all, err(Debug))]
@@ -128,14 +140,18 @@ async fn list(
     get,
     path = "/api/groups/details/",
     params(
-        ("params" = GroupListParams, Query, description = "The query params for the groups to list")
+        GroupListParams,
     ),
     responses(
         (status = 200, description = "Group details list", body = GroupDetailsList),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::groups::list_details", skip_all, err(Debug))]
@@ -159,17 +175,24 @@ async fn list_details(
 /// * `shared` - Shared Thorium objects
 #[utoipa::path(
     patch,
-    path = "/api/groups/:group",
+    path = "/api/groups/{group}",
     params(
         ("group" = String, Path, description = "The name of the group to update"),
-        ("update" = GroupUpdate, description = "The update to apply to this group")
     ),
+    request_body = GroupUpdate,
     responses(
         (status = 204, description = "Group updated"),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation"),
+        (status = 401, description = "This user is not authorized to access this route. Only a full token may use this route: a scoped token, including a run token, is refused."),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 409, description = "The update would remove the requesting user as an owner or leave the group with no owners"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::groups::update", skip(user, state, update), err(Debug))]
@@ -197,16 +220,20 @@ async fn update(
 /// * `shared` - Shared Thorium objects
 #[utoipa::path(
     delete,
-    path = "/api/groups/:group",
+    path = "/api/groups/{group}",
     params(
         ("group" = String, Path, description = "The name of the group to delete")
     ),
     responses(
         (status = 204, description = "Group deleted"),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 401, description = "This user is not authorized to access this route. Only a full token may use this route: a scoped token, including a run token, is refused."),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::groups::delete_group", skip(user, state), err(Debug))]
@@ -237,9 +264,12 @@ async fn delete_group(
     responses(
         (status = 204, description = "Ldap metagroups and users sync'd"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::groups::sync_ldap", skip(user, state), err(Debug))]
@@ -254,26 +284,31 @@ async fn sync_ldap(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Gets details on a specific group
+/// Gets statistics on a specific group
 ///
 /// # Arguments
 ///
-/// * `group` - The group to get details on
-/// * `user` - The user that is creating this group
+/// * `group` - The group to get statistics on
+/// * `user` - The user that is getting these statistics
 /// * `shared` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/groups/:group/stats",
+    path = "/api/groups/{group}/stats",
     params(
         ("group" = String, Path, description = "The group to get details on"),
-        ("params" = GroupListParams, Query, description = "The query params for the groups for which to get details")
+        GroupListParams,
     ),
     responses(
         (status = 200, description = "Group stats", body = GroupStats),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::groups::get_stats", skip_all, err(Debug))]
@@ -295,7 +330,7 @@ async fn get_stats(
 #[openapi(
     paths(create, list, get_group, list_details, update, delete_group, sync_ldap, get_stats),
     components(schemas(Group, GroupAllowed, GroupAllowedUpdate, GroupAllowAction, GroupDetailsList, GroupList, GroupListParams, GroupMap, GroupRequest, GroupStats, GroupUpdate, GroupUsersRequest, GroupUsers, GroupUsersUpdate, PipelineStats, Roles, StageStats)),
-    modifiers(&OpenApiSecurity),
+    modifiers(&OpenApiSecurity, &OpenApiParameterExamples),
 )]
 pub struct GroupApiDocs;
 

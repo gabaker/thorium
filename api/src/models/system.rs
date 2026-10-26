@@ -29,8 +29,10 @@ pub const EXTERNAL_CACHE_KEY: &str = "external_cache";
 /// The query params for getting system info
 #[derive(Deserialize, Serialize, Debug)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 pub struct SystemInfoParams {
-    /// Whether to reset any system info flage
+    /// The scaler to reset any system info flags for
     pub reset: Option<ImageScaler>,
 }
 
@@ -177,6 +179,8 @@ const fn default_true() -> bool {
 /// The params for resetting system settings
 #[derive(Serialize, Deserialize, Debug)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 pub struct SystemSettingsResetParams {
     /// Whether to run the consistency scan after resetting system settings
     #[serde(default = "default_true")]
@@ -204,6 +208,8 @@ impl SystemSettingsResetParams {
 /// The params for updating system settings
 #[derive(Serialize, Deserialize, Debug)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 pub struct SystemSettingsUpdateParams {
     /// Whether to run the consistency scan after updating system settings
     #[serde(default = "default_true")]
@@ -741,6 +747,8 @@ pub struct Backup {
 /// The params for taking a backup
 #[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 pub struct BackupParams {
     /// Drop the user and group references that are still dangling after every read of the
     /// backup and whose referent is confirmed gone, instead of failing the backup
@@ -761,6 +769,8 @@ impl BackupParams {
 /// The params for restoring a backup
 #[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 pub struct RestoreParams {
     /// Delete every key in the API's Redis database with `FLUSHDB ASYNC` before writing the
     /// backup, other namespaces' keys included, instead of only this namespace's keys
@@ -1059,6 +1069,8 @@ pub fn default_scalers() -> Vec<ImageScaler> {
 /// The parameters for a node get request
 #[derive(Serialize, Deserialize, Debug)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 pub struct NodeGetParams {
     /// The scalers to limit our worker listing too
     #[serde(default = "default_scalers")]
@@ -1107,6 +1119,8 @@ fn default_list_page_size() -> usize {
 /// The parameters for a node list request
 #[derive(Serialize, Deserialize, Debug)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 pub struct NodeListParams {
     /// The cursor id to user if one exists
     pub cursor: Option<Uuid>,

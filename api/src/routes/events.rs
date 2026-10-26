@@ -6,7 +6,7 @@ use axum::routing::{delete, get, patch};
 use tracing::instrument;
 use utoipa::OpenApi;
 
-use super::OpenApiSecurity;
+use super::{OpenApiParameterExamples, OpenApiSecurity};
 use crate::models::AuthedUser;
 use crate::models::{
     Event, EventCacheStatus, EventCacheStatusOpts, EventIds, EventPeekOpts, EventPopOpts,
@@ -25,17 +25,21 @@ use crate::utils::{ApiError, AppState};
 #[instrument(name = "routes::events::pop", skip_all, err(Debug))]
 #[utoipa::path(
     patch,
-    path = "/api/events/pop/:kind",
+    path = "/api/events/pop/{kind}/",
     params(
-        ("kind" = EventType, description = "The type of events to pop"),
-        ("params" = EventPopOpts, description = "Query params for popping events")
+        ("kind" = EventType, Path, description = "The type of events to pop"),
+        EventPopOpts,
     ),
     responses(
         (status = 200, description = "A List of popped events in Thorium", body = Vec<Event>),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 async fn pop(
@@ -65,15 +69,18 @@ async fn pop(
     path = "/api/events/peek/{kind}/",
     params(
         ("kind" = EventType, Path, description = "The type of events to peek at"),
-        ("params" = EventPeekOpts, description = "Query params for peeking at events")
+        EventPeekOpts,
     ),
     responses(
         (status = 200, description = "The queued events of this kind, oldest first", body = Vec<Event>),
         (status = 400, description = "The event kind is unknown"),
         (status = 401, description = "This user is not an admin"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 async fn peek(
@@ -98,18 +105,23 @@ async fn peek(
 /// * `state` - Shared Thorium objects
 #[instrument(name = "routes::events::clear", skip_all, err(Debug))]
 #[utoipa::path(
-    patch,
-    path = "/api/events/clear/:kind",
+    delete,
+    path = "/api/events/clear/{kind}/",
     params(
-        ("kind" = EventType, description = "The type of events to clear"),
-        ("id_list" = EventIds, description = "JSON-formatted list of event ids to clear")
+        ("kind" = EventType, Path, description = "The type of events to clear"),
     ),
+    request_body = EventIds,
     responses(
-        (status = 200, description = "The requested events were cleared"),
+        (status = 204, description = "The requested events were cleared"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation; a path parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 async fn clear(
@@ -123,7 +135,7 @@ async fn clear(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Eeset all in flight events
+/// Reset all in flight events
 ///
 /// # Arguments
 //
@@ -134,16 +146,20 @@ async fn clear(
 #[instrument(name = "routes::events::rest_all", skip_all, err(Debug))]
 #[utoipa::path(
     patch,
-    path = "/api/events/reset/:kind",
+    path = "/api/events/reset/{kind}/",
     params(
-        ("kind" = EventType, description = "The type of events to reset"),
+        ("kind" = EventType, Path, description = "The type of events to reset"),
     ),
     responses(
-        (status = 200, description = "All events currently in process were cleared"),
+        (status = 204, description = "All events currently in process were cleared"),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 async fn reset_all(
@@ -163,14 +179,18 @@ async fn reset_all(
     get,
     path = "/api/events/cache/status/",
     params(
-        ("params" = EventCacheStatusOpts, Query, description = "Whether to reset any cahce statuses")
+        EventCacheStatusOpts,
     ),
     responses(
         (status = 200, description = "Event handler cache status", body = EventCacheStatus),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::events::get_cache_status", skip_all, err(Debug))]
@@ -189,7 +209,7 @@ async fn get_cache_status(
 #[openapi(
     paths(pop, peek, clear, reset_all, get_cache_status),
     components(schemas(Event, EventCacheStatus, EventCacheStatusOpts, EventType, EventPeekOpts, EventPopOpts, WorkflowGraphEvent, WorkflowGraphChange)),
-    modifiers(&OpenApiSecurity),
+    modifiers(&OpenApiSecurity, &OpenApiParameterExamples),
 )]
 pub struct EventApiDocs;
 

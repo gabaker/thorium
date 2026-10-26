@@ -11,7 +11,7 @@ use crate::models::AuthedUser;
 use crate::models::{
     ResultSearchEvent, SearchEvent, SearchEventBackend, SearchEventPopOpts, SearchEventStatus,
 };
-use crate::routes::docs::OpenApiSecurity;
+use crate::routes::docs::{OpenApiParameterExamples, OpenApiSecurity};
 use crate::utils::{ApiError, AppState};
 
 /// Pops the given number of result search events from the queue
@@ -25,14 +25,18 @@ use crate::utils::{ApiError, AppState};
     patch,
     path = format!("/api/search/events/{}/pop/", ResultSearchEvent::url()),
     params(
-        ("params" = SearchEventPopOpts, description = "The query params to use with this request"),
+        SearchEventPopOpts,
     ),
     responses(
         (status = 200, description = "Returned result search events", body = Vec<ResultSearchEvent>),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::search::events::results::pop", skip_all, err(Debug))]
@@ -47,7 +51,8 @@ async fn pop(
 }
 
 /// Clears specific result search events from the in-flight queue
-/// and re-adds failed events to the main queue
+///
+/// Failed events are added back to the main queue.
 ///
 /// # Arguments
 ///
@@ -60,10 +65,15 @@ async fn pop(
     request_body = SearchEventStatus,
     responses(
         (status = 204, description = "Status report handled successfully"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::search::events::results::status", skip_all, err(Debug))]
@@ -89,13 +99,15 @@ async fn status(
 #[utoipa::path(
     patch,
     path = format!("/api/search/events/{}/reset/", ResultSearchEvent::url()),
-    request_body = SearchEventStatus,
     responses(
         (status = 204, description = "All results search events reset"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(
@@ -117,7 +129,7 @@ async fn reset_all(
 #[openapi(
     paths(pop, status, reset_all),
     components(schemas(ResultSearchEvent, SearchEventPopOpts, SearchEventStatus)),
-    modifiers(&OpenApiSecurity),
+    modifiers(&OpenApiSecurity, &OpenApiParameterExamples),
 )]
 pub struct ResultSearchEventApiDocs;
 

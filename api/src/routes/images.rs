@@ -5,10 +5,11 @@ use axum::extract::{Json, Path, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, patch, post};
 use tracing::instrument;
-use utoipa::OpenApi;
+use utoipa::openapi::Deprecated;
+use utoipa::{Modify, OpenApi};
 use uuid::Uuid;
 
-use super::OpenApiSecurity;
+use super::{OpenApiParameterExamples, OpenApiSecurity};
 // our imports
 use crate::models::AuthedUser;
 use crate::models::images::{GenericBan, InvalidHostPathBan, InvalidUrlBan};
@@ -30,6 +31,9 @@ use crate::models::{
     ToolVersion, Volume, VolumeTypes,
 };
 use crate::utils::{ApiError, AppState};
+
+/// A notification for an image as the documents describe it
+pub type ImageNotification = Notification<Image>;
 
 /// Why image creates and updates are refused
 const IMAGE_WRITES_GONE: &str = "Images can no longer be created or updated; Thorium runs Tools \
@@ -69,11 +73,14 @@ fn image_writes_gone(group: &str) -> Result<(), ApiError> {
     path = "/api/images/",
     request_body = ImageRequest,
     responses(
-        (status = 410, description = "Images can no longer be created; create a Tool instead"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 410, description = "Images can no longer be created; create a Tool instead"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::images::create", skip_all, err(Debug))]
@@ -110,7 +117,7 @@ async fn create(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/images/data/:group/:image",
+    path = "/api/images/data/{group}/{image}",
     params(
         ("group" = String, Path, description = "The group this image is in"),
         ("image" = String, Path, description = "The name of the image to get details about")
@@ -118,9 +125,13 @@ async fn create(
     responses(
         (status = 200, description = "Image details", body = Image),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::images::get_image", skip_all, err(Debug))]
@@ -144,17 +155,22 @@ async fn get_image(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/images/:group/",
+    path = "/api/images/{group}/",
     params(
         ("group" = String, Path, description = "The group to list images from"),
-        ("params" = ImageListParams, description = "The query params to use for this request")
+        ImageListParams,
     ),
     responses(
         (status = 200, description = "Group images details", body = ImageList),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::images::list", skip_all, err(Debug))]
@@ -181,17 +197,22 @@ async fn list(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/images/:group/details/",
+    path = "/api/images/{group}/details/",
     params(
         ("group" = String, Path, description = "The group to list images from"),
-        ("params" = ImageListParams, description = "The query params to use for this request")
+        ImageListParams,
     ),
     responses(
         (status = 200, description = "Group images details", body = ImageDetailsList),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[axum_macros::debug_handler]
@@ -222,18 +243,21 @@ async fn list_details(
 /// * `body` - The update that would have been applied
 #[utoipa::path(
     patch,
-    path = "/api/images/:group/:image",
+    path = "/api/images/{group}/{image}",
     params(
         ("group" = String, Path, description = "The group to update an image from"),
         ("image" = String, Path, description = "The name of the image to update"),
     ),
     request_body = ImageUpdate,
     responses(
-        (status = 410, description = "Images can no longer be updated; update a Tool instead"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 410, description = "Images can no longer be updated; update a Tool instead"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::images::update", skip_all, err(Debug))]
@@ -266,17 +290,22 @@ async fn update(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     delete,
-    path = "/api/images/:group/:image",
+    path = "/api/images/{group}/{image}",
     params(
         ("group" = String, Path, description = "The group to delete an image from"),
         ("image" = String, Path, description = "The name of the image to delete")
     ),
     responses(
         (status = 204, description = "Image deleted"),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 401, description = "This user is not authorized to access this route. A run token is refused."),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 409, description = "The image is still used by one or more pipelines"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::images::delete_image", skip_all, err(Debug))]
@@ -307,9 +336,12 @@ async fn delete_image(
     responses(
         (status = 204, description = "Runtimes updated"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::images::runtimes_update", skip_all, err(Debug))]
@@ -334,19 +366,25 @@ async fn runtimes_update(
 /// * `req` - The notification request that was sent
 #[utoipa::path(
     post,
-    path = "/api/images/notifications/:group/:image",
+    path = "/api/images/notifications/{group}/{image}",
     params(
         ("group" = String, Path, description = "The group the image is in"),
         ("image" = String, Path, description = "The name of the image the notification will be created for"),
-        ("params" = NotificationParams, description = "The notification params sent with the request"),
-        ("req" = NotificationRequest<Image>, description = "The notification request that was sent")
+        NotificationParams,
     ),
+    request_body = NotificationRequest<Image>,
     responses(
         (status = 204, description = "Notification created"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::images::create_notification", skip_all, err(Debug))]
@@ -367,7 +405,7 @@ async fn create_notification(
     shared::notifications::create_notification(image, key, req, params, &state.shared).await
 }
 
-/// Get the all of the image's notifications
+/// Get all of the image's notifications
 ///
 /// # Arguments
 ///
@@ -377,17 +415,21 @@ async fn create_notification(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/images/notifications/:group/:image",
+    path = "/api/images/notifications/{group}/{image}",
     params(
         ("group" = String, Path, description = "The group the image is in"),
         ("image" = String, Path, description = "The name of the image whose notifications are being requested"),
     ),
     responses(
-        //(status = 200, description = "Notifications returned for image", body = Vec<Notification<Image>>),
+        (status = 200, description = "Notifications returned for image", body = Vec<ImageNotification>),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::images::get_notifications", skip_all, err(Debug))]
@@ -415,7 +457,7 @@ async fn get_notifications(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     delete,
-    path = "/api/images/notifications/:group/:image/:id",
+    path = "/api/images/notifications/{group}/{image}/{id}",
     params(
         ("group" = String, Path, description = "The group the image is in"),
         ("image" = String, Path, description = "The name of the image whose log is being deleted"),
@@ -423,10 +465,15 @@ async fn get_notifications(
     ),
     responses(
         (status = 204, description = "Notification deleted"),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::images::delete_notification", skip_all, err(Debug))]
@@ -445,13 +492,46 @@ async fn delete_notification(
     shared::notifications::delete_notification(image, key, None, id, &state.shared).await
 }
 
-/// Add the images routes to our router
+/// The struct that marks the image routes which no longer write images as deprecated
+///
+/// Creating and updating an image always answers `410 Gone`, so the Swagger UI shows both routes as
+/// removed instead of as usable routes.
+pub struct RemovedImageWrites;
+
+impl Modify for RemovedImageWrites {
+    /// Mark the image create and update operations as deprecated
+    ///
+    /// # Arguments
+    ///
+    /// * `openapi` - The document to mark the removed operations in
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        // the create route answers 410 for every request
+        if let Some(operation) = openapi
+            .paths
+            .paths
+            .get_mut("/api/images/")
+            .and_then(|item| item.post.as_mut())
+        {
+            operation.deprecated = Some(Deprecated::True);
+        }
+        // the update route answers 410 for every request too
+        if let Some(operation) = openapi
+            .paths
+            .paths
+            .get_mut("/api/images/{group}/{image}")
+            .and_then(|item| item.patch.as_mut())
+        {
+            operation.deprecated = Some(Deprecated::True);
+        }
+    }
+}
+
 /// The struct containing our openapi docs
 #[derive(OpenApi)]
 #[openapi(
     paths(create, get_image, list, list_details, update, delete_image, runtimes_update, get_notifications, create_notification, delete_notification),
     components(schemas(ArgStrategy, AutoTag, AutoTagLogic, AutoTagUpdate, ChildFilters, ChildFiltersUpdate, ChildrenDependencySettings, ChildrenDependencySettingsUpdate, Cleanup, CleanupUpdate, ConfigMap, Dependencies, DependenciesUpdate, DependencyPassStrategy, SampleDependencySettingsUpdate, RepoDependencySettingsUpdate, EphemeralDependencySettings, EphemeralDependencySettingsUpdate, FileSystemDependencySettings, FileSystemDependencySettingsUpdate, FilesHandler, FilesHandlerUpdate, GenericBan, HostPath, HostPathTypes, Image, ImageArgs, ImageArgsUpdate, ImageBan, ImageBanKind, ImageBanUpdate, ImageDetailsList, ImageLifetime, ImageList, ImageListParams, ImageNetworkPolicyUpdate, ImageRequest, ImageScaler, ImageUpdate, ToolVersion, InvalidHostPathBan, InvalidUrlBan, Kvm, KvmUpdate, KwargDependency, NFS, Notification<Image>, NotificationLevel, NotificationParams, NotificationRequest<Image>, OutputCollection, OutputCollectionUpdate, OutputDisplayType, OutputHandler, RepoDependencySettings, Resources, ResourcesRequest, ResourcesUpdate, ResultDependencySettings, ResultDependencySettingsUpdate, SampleDependencySettings, Secret, SecurityContext, SecurityContextUpdate, SpawnLimits, TagDependencySettings, TagDependencySettingsUpdate, Volume, VolumeTypes)),
-    modifiers(&OpenApiSecurity),
+    modifiers(&OpenApiSecurity, &OpenApiParameterExamples, &RemovedImageWrites),
 )]
 pub struct ImageApiDocs;
 

@@ -5,7 +5,7 @@ use axum::routing::{get, patch, post};
 use tracing::{Level, event, instrument, span};
 use utoipa::OpenApi;
 
-use super::OpenApiSecurity;
+use super::{OpenApiParameterExamples, OpenApiSecurity};
 use crate::models::AuthedUser;
 use crate::models::images::{GenericBan, InvalidHostPathBan, InvalidUrlBan};
 use crate::models::pipelines::BannedImageBan;
@@ -43,9 +43,13 @@ use crate::utils::{ApiError, AppState};
     responses(
         (status = 204, description = "System info initialized"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::system::init", skip_all, err(Debug))]
@@ -68,14 +72,19 @@ async fn init(user: AuthedUser, State(state): State<AppState>) -> Result<StatusC
     get,
     path = "/api/system/",
     params(
-        ("params" = SystemInfoParams, Query, description = "The query params to use for this request"),
+        SystemInfoParams,
     ),
     responses(
         (status = 200, description = "Backend system data", body = SystemInfo),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::system::info", skip_all, err(Debug))]
@@ -102,9 +111,12 @@ async fn info(
     responses(
         (status = 200, description = "Thorium statistics", body = SystemStats),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::system::stats", skip_all, err(Debug))]
@@ -130,9 +142,13 @@ async fn stats(
     responses(
         (status = 200, description = "Current dynamic system settings", body = SystemSettings),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::system::settings", skip_all, err(Debug))]
@@ -156,14 +172,19 @@ async fn settings(
     patch,
     path = "/api/system/settings/reset",
     params(
-        ("params" = SystemSettingsResetParams, Query, description = "The settings reset params"),
+        SystemSettingsResetParams,
     ),
     responses(
         (status = 204, description = "System settings reset to default"),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::system::settings_reset", skip_all, err(Debug))]
@@ -215,15 +236,21 @@ async fn settings_reset(
     patch,
     path = "/api/system/settings",
     params(
-        ("params" = SystemSettingsUpdateParams, Query, description = "The settings update params"),
-        ("update" = SystemSettingsUpdate, description = "The update to apply to system settings"),
+        SystemSettingsUpdateParams,
     ),
+    request_body = SystemSettingsUpdate,
     responses(
         (status = 204, description = "System settings updated"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::system::settings_update", skip_all, err(Debug))]
@@ -280,8 +307,10 @@ async fn settings_update(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Performs a scan of Thorium data, checking that all data is compliant with current [`SystemSettings`]
-/// and cleaning/marking/modifying data that isn't; additionally signals the scaler to refresh its cache
+/// Scans Thorium data for compliance with the current system settings
+///
+/// The scan checks that all data is compliant with the current [`SystemSettings`] and cleans, marks,
+/// or modifies data that isn't, and it signals the scaler to refresh its cache.
 ///
 /// Currently this only applies to images with host path mounts that may not be on the configured
 /// whitelist after a settings update; also applies to the pipelines that have those images
@@ -297,9 +326,13 @@ async fn settings_update(
     responses(
         (status = 204, description = "System scanned and scaler cache reset"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::system::consistency_scan", skip_all, err(Debug))]
@@ -339,9 +372,12 @@ async fn consistency_scan(
     responses(
         (status = 204, description = "System data cleaned"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::system::cleanup", skip_all, err(Debug))]
@@ -366,9 +402,12 @@ async fn cleanup(user: AuthedUser, State(state): State<AppState>) -> Result<Stat
     responses(
         (status = 204, description = "Scalars cache invalidated"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::system::reset_cache", skip_all, err(Debug))]
@@ -397,15 +436,19 @@ async fn reset_cache(
     get,
     path = "/api/system/backup",
     params(
-        ("params" = BackupParams, Query, description = "The backup params"),
+        BackupParams,
     ),
     responses(
         (status = 200, description = "Backup of Thorium data", body = Backup),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 401, description = "This user is not authorized to access this route. Only a full token may use this route: a scoped token, including a run token, is refused."),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
         (status = 422, description = "Some Redis records don't parse or don't fit together; no backup was built", body = BackupProblems),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::system::backup", skip_all, err(Debug))]
@@ -438,17 +481,21 @@ async fn backup(
     post,
     path = "/api/system/restore",
     params(
-        ("params" = RestoreParams, Query, description = "The restore params"),
-        ("backup" = Backup, description = "The backup to restore"),
+        RestoreParams,
     ),
+    request_body = Backup,
     responses(
         (status = 204, description = "Backup restored; this namespace's Redis keys, or with flush_db every key in the API's Redis database, were replaced"),
         (status = 400, description = "The backup's records don't fit together; nothing was changed", body = BackupProblems),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 401, description = "This user is not authorized to access this route. Only a full token may use this route: a scoped token, including a run token, is refused."),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
         (status = 500, description = "A restore step failed; the error names it and what the steps before it wrote, and the same restore can be run again"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::system::restore", skip_all, err(Debug))]
@@ -476,15 +523,18 @@ async fn restore(
 #[utoipa::path(
     post,
     path = "/api/system/nodes/",
-    params(
-        ("backup" = NodeRegistration, description = "This nodes registration info"),
-    ),
+    request_body = NodeRegistration,
     responses(
         (status = 201, description = "New bare metal/windows node registered"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::system::get_register", skip_all, err(Debug))]
@@ -509,18 +559,22 @@ async fn register_node(
 /// * `heatbeat` - The heart beat info for this node
 #[utoipa::path(
     get,
-    path = "/api/system/nodes/:cluster/:node",
+    path = "/api/system/nodes/{cluster}/{node}",
     params(
         ("cluster" = String, Path, description = "The cluster this node is in"),
         ("node" = String, Path, description = "The node this heart beat is from"),
-        ("params" = NodeGetParams, description = "The parameters for this node get request"),
+        NodeGetParams,
     ),
     responses(
         (status = 200, description = "Node info", body = Node),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "The node was not found"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::system::get_node", skip_all, err(Debug))]
@@ -546,18 +600,24 @@ async fn get_node(
 /// * `update` - The update to apply to this nodes info
 #[utoipa::path(
     patch,
-    path = "/api/system/nodes/:cluster/:node",
+    path = "/api/system/nodes/{cluster}/{node}",
     params(
         ("cluster" = String, Path, description = "The cluster this node is in"),
         ("node" = String, Path, description = "The node this heart beat is from"),
-        ("update" = NodeUpdate, description = "The update to apply to this nodes info"),
     ),
+    request_body = NodeUpdate,
     responses(
         (status = 201, description = "Node info updated"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::system::update_node", skip_all, err(Debug))]
@@ -588,14 +648,19 @@ async fn update_node(
     get,
     path = "/api/system/nodes/",
     params(
-        ("params" = NodeListParams, description = "The params to use when listing node names"),
+        NodeListParams,
     ),
     responses(
         (status = 200, description = "Nodes list", body = ApiCursor<NodeListLine>),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::system::list_nodes", skip_all, err(Debug))]
@@ -621,14 +686,19 @@ async fn list_nodes(
     get,
     path = "/api/system/nodes/details/",
     params(
-        ("params" = NodeListParams, description = "The params to use when listing node details"),
+        NodeListParams,
     ),
     responses(
         (status = 200, description = "Nodes list", body = ApiCursor<Node>),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::system::list_node_details", skip_all, err(Debug))]
@@ -652,17 +722,22 @@ async fn list_node_details(
 /// * `worker` - The workers to register
 #[utoipa::path(
     post,
-    path = "/api/system/worker/:scaler_or_name",
+    path = "/api/system/worker/{scaler_or_name}",
     params(
-        ("scaler" = ImageScaler, Path, description = "The scaler this worker is under"),
-        ("workers" = WorkerRegistrationList, description = "The workers to register"),
+        ("scaler_or_name" = ImageScaler, Path, description = "The scaler these workers are under"),
     ),
+    request_body = WorkerRegistrationList,
     responses(
         (status = 204, description = "Node registered"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation; a path parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::system::register_worker", skip_all, err(Debug))]
@@ -694,16 +769,20 @@ async fn register_worker(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/system/worker/:scaler_or_name",
+    path = "/api/system/worker/{scaler_or_name}",
     params(
-        ("name" = String, Path, description = "The name of this worker"),
+        ("scaler_or_name" = String, Path, description = "The name of this worker"),
     ),
     responses(
         (status = 200, description = "Worker info", body = Worker),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::system::get_worker", skip_all, err(Debug))]
@@ -728,17 +807,23 @@ async fn get_worker(
 /// * `worker` - The worker to update
 #[utoipa::path(
     patch,
-    path = "/api/system/worker/:scaler_or_name",
+    path = "/api/system/worker/{scaler_or_name}",
     params(
-        ("name" = String, Path, description = "The name of this worker"),
-        ("update" = WorkerUpdate, description = "The name of this worker"),
+        ("scaler_or_name" = String, Path, description = "The name of this worker"),
     ),
+    request_body = WorkerUpdate,
     responses(
         (status = 204, description = "Worker updated"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::system::update_worker", skip_all, err(Debug))]
@@ -765,17 +850,23 @@ async fn update_worker(
 /// * `worker` - The worker to remove
 #[utoipa::path(
     delete,
-    path = "/api/system/worker/:scaler_or_name",
+    path = "/api/system/worker/{scaler_or_name}",
     params(
-        ("scaler" = ImageScaler, Path, description = "The scaler this worker was under"),
-        ("deletes" = WorkerDeleteMap, Path, description = "The worker to remove"),
+        ("scaler_or_name" = ImageScaler, Path, description = "The scaler the workers were under"),
     ),
+    request_body = WorkerDeleteMap,
     responses(
         (status = 204, description = "Worker(s) deleted"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation; a path parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::system::delete_workers", skip_all, err(Debug))]
@@ -797,7 +888,7 @@ async fn delete_workers(
 #[openapi(
     paths(init, info, stats, settings, settings_update, consistency_scan, settings_reset, cleanup, reset_cache, backup, restore, register_node, list_nodes, list_node_details, get_node, update_node, register_worker, delete_workers, get_worker, update_worker),
     components(schemas(ActiveJob, ApiCursor<NodeListLine>, ArgStrategy, AutoTag, AutoTagLogic, Backup, BackupParams, BackupProblem, BackupProblems, BannedImageBan, ChildFilters, ChildFiltersUpdate, ChildrenDependencySettings, Cleanup, ConfigMap, Dependencies, DependencyPassStrategy, EphemeralDependencySettings, EventTrigger, FileSystemDependencySettings, FilesHandler, GenericBan, Group, GroupAllowed, GroupStats, GroupUsers, HostPath, HostPathTypes, HostPathWhitelistUpdate, Image, ImageArgs, ImageBan, ImageBanKind, ImageBanUpdate, ImageLifetime, ImageScaler, ToolVersion, InvalidHostPathBan, InvalidUrlBan, Kvm, KwargDependency, NetworkPolicySet, NFS, Node, NodeGetParams, NodeHealth, NodeListLine, NodeListParams, NodeRegistration, NodeUpdate, OutputCollection, OutputDisplayType, OutputHandler, Pipeline, PipelineBan, PipelineBanKind, PipelineBanUpdate, PipelineStats, Pools, PruneAction, PrunedReference, PrunedReferent, RepoDependencySettings, Resources, RestoreParams, ResultDependencySettings, SampleDependencySettings, ScalerStats, ScopedToken, ScopedTokenRole, Secret, SecurityContext, SpawnLimits, StageStats, SystemInfo, SystemInfoParams, SystemSettings, SystemSettingsUpdate, SystemSettingsResetParams, SystemSettingsUpdateParams, SystemStats, TagDependencySettings, TagType, Theme, UnixInfo, User, UserRole, UserSettings, Volume, VolumeTypes, Worker, WorkerDeleteMap, WorkerDelete, WorkerRegistration, WorkerRegistrationList, WorkerStatus, WorkerUpdate)),
-    modifiers(&OpenApiSecurity),
+    modifiers(&OpenApiSecurity, &OpenApiParameterExamples),
 )]
 pub struct SystemApiDocs;
 

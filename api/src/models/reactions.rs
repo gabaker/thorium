@@ -579,6 +579,8 @@ fn default_list_limit() -> usize {
 /// The parameters for a reaction list request
 #[derive(Serialize, Deserialize, Debug)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 pub struct ReactionListParams {
     /// The cursor id to use if one exists
     #[serde(default)]
@@ -613,6 +615,8 @@ impl ReactionListParams {
 /// The parameters for listing reactions across groups with a redis cursor
 #[derive(Deserialize, Debug)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 pub struct ReactionCursorParams {
     /// The groups to list reactions from
     #[serde(default)]

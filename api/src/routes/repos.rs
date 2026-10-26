@@ -9,24 +9,7 @@ use axum_extra::body::AsyncReadBody;
 use tracing::instrument;
 use utoipa::OpenApi;
 
-/* TODO_UTOIPA: many routes in this file depend on path wildcards (e.g.
-   /repos/data/\*repo_path), but Utoipa (and maybe OpenAPI?) does not
-   handle this format. If the utoipa annotations for those functions
-   are left in, the code will not compile because rust marks them as
-   "unreachable".
-
-   One potential fix for this is to convert all the wildcards currently
-   handled as Vec<String> into a single String argument that can be
-   split on '/' later.
-
-   All functions affected by this are marked with 'TODO_UTOIPA: WIDLCARD'
-   and have their utoipa annotations commented out. The annotations
-   should be at least somewhat functional if they were able to be used
-   but have not been tested due to the afforementioned compilation
-   issue.
-*/
-
-use super::OpenApiSecurity;
+use super::{OpenApiParameterExamples, OpenApiSecurity};
 use crate::models::AuthedUser;
 use crate::models::backends::TagSupport;
 use crate::models::{
@@ -50,15 +33,19 @@ use crate::utils::{ApiError, AppState, bounder};
 #[utoipa::path(
     post,
     path = "/api/repos/",
-    params(
-        ("req" = RepoRequest, description = "The repo that is being added"),
-    ),
+    request_body = RepoRequest,
     responses(
         (status = 200, description = "Repo created", body = RepoCreateResponse),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::repos::create", skip_all, err(Debug))]
@@ -79,21 +66,24 @@ async fn create(
 /// * `user` - The user that is uploading sample
 /// * `path` - The path of the repo to get info about
 /// * `shared` - Shared Thorium objects
-// TODO_UTOIPA: WIDLCARD
-// #[utoipa::path(
-//     get,
-//     path = "/api/repos/data/*repo_path",
-//     params(
-//         ("path" = Vec<String>, Path, description = "The path of the repo to get info about"),
-//     ),
-//     responses(
-//         (status = 200, description = "Repo created", body = Repo),
-//         (status = 401, description = "This user is not authorized to access this route"),
-//     ),
-//     security(
-//         ("basic" = []),
-//     )
-// )]
+#[utoipa::path(
+    get,
+    path = "/api/repos/data/{repo_path}",
+    params(
+        ("repo_path" = String, Path, description = "The repo's path (for example `github.com/org/repo`), which contains slashes"),
+    ),
+    responses(
+        (status = 200, description = "The repo", body = Repo),
+        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "The repo does not exist"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
 #[instrument(name = "routes::repos::get_repo", skip_all, err(Debug))]
 async fn get_repo(
     user: AuthedUser,
@@ -112,21 +102,30 @@ async fn get_repo(
 /// * `user` - The user that is updating this repos commit data
 /// * `path` - The path of the repo to add commits too
 /// * `shared` - Shared Thorium objects
-// TODO_UTOIPA: WIDLCARD
-// #[utoipa::path(
-//     post,
-//     path = "/api/repos/data/*repo_path",
-//     params(
-//         ("path" = Vec<String>, Path, description = "The path of the repo to add commits too"),
-//     ),
-//     responses(
-//         (status = 200, description = "Repo updated", body = RepoDataUploadResponse),
-//         (status = 401, description = "This user is not authorized to access this route"),
-//     ),
-//     security(
-//         ("basic" = []),
-//     )
-// )]
+#[utoipa::path(
+    post,
+    path = "/api/repos/data/{repo_path}",
+    params(
+        ("repo_path" = String, Path, description = "The repo's path (for example `github.com/org/repo`), which contains slashes"),
+    ),
+    request_body(
+        content = Vec<u8>,
+        content_type = "multipart/form-data",
+        description = "The multipart form containing the repo data to upload",
+    ),
+    responses(
+        (status = 200, description = "The repo data was uploaded", body = RepoDataUploadResponse),
+        (status = 400, description = "The request is invalid: the multipart form is malformed or fails validation"),
+        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "The repo does not exist"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
 #[instrument(name = "routes::repos::upload", skip_all, err(Debug))]
 async fn upload(
     user: AuthedUser,
@@ -148,22 +147,28 @@ async fn upload(
 /// * `user` - The user that is updating this repos commit data
 /// * `path` - The path containing this urls args
 /// * `shared` - Shared Thorium objects
-// TODO_UTOIPA: WIDLCARD
-// #[utoipa::path(
-//     post,
-//     path = "/api/repos/commitishes/:data/*repo_path",
-//     params(
-//         ("path" = Vec<String>, Path, description = "The path containing this urls args"),
-//         ("req" = CommitishMapRequest, description = "Commits to update"),
-//     ),
-//     responses(
-//         (status = 204, description = "Commitishes added"),
-//         (status = 401, description = "This user is not authorized to access this route"),
-//     ),
-//     security(
-//         ("basic" = []),
-//     )
-// )]
+#[utoipa::path(
+    post,
+    path = "/api/repos/commitishes/{data}/{repo_path}",
+    params(
+        ("data" = String, Path, description = "The sha256 of the repo data zip these commitishes come from"),
+        ("repo_path" = String, Path, description = "The repo's path (for example `github.com/org/repo`), which contains slashes"),
+    ),
+    request_body = CommitishMapRequest,
+    responses(
+        (status = 204, description = "Commitishes added"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation"),
+        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "The repo does not exist"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
 #[instrument(name = "routes::repos::update_commitishes", skip_all, err(Debug))]
 async fn update_commitishes(
     user: AuthedUser,
@@ -187,22 +192,27 @@ async fn update_commitishes(
 /// * `sha256` - The sample to add a tag too
 /// * `state` - Shared Thorium objects
 /// * `tags` - The new tags to apply
-// TODO_UTOIPA: WIDLCARD
-// #[utoipa::path(
-//     post,
-//     path = "/api/repos/tags/*repo_path",
-//     params(
-//         ("path" = Vec<String>, Path, description = "The path containing this urls args"),
-//         ("tags" = TagRequest<Repo>, description = "The new tags to apply"),
-//     ),
-//     responses(
-//         (status = 204, description = "Tags added"),
-//         (status = 401, description = "This user is not authorized to access this route"),
-//     ),
-//     security(
-//         ("basic" = []),
-//     )
-// )]
+#[utoipa::path(
+    post,
+    path = "/api/repos/tags/{repo_path}",
+    params(
+        ("repo_path" = String, Path, description = "The repo's path (for example `github.com/org/repo`), which contains slashes"),
+    ),
+    request_body = TagRequest<Repo>,
+    responses(
+        (status = 204, description = "Tags added"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation"),
+        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "The repo does not exist"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
 #[instrument(name = "routes::repos::tag", skip_all, err(Debug))]
 async fn tag(
     user: AuthedUser,
@@ -227,22 +237,27 @@ async fn tag(
 /// * `value` - The value of the tag to delete
 /// * `params` - The url query params to use
 /// * `state` - Shared Thorium objects
-// TODO_UTOIPA: WIDLCARD
-// #[utoipa::path(
-//     delete,
-//     path = "/api/repos/tags/*repo_path",
-//     params(
-//         ("path" = Vec<String>, Path, description = "The path containing this urls args"),
-//         ("tags" = TagDeleteRequest<Repo>, description = "The tags to delete"),
-//     ),
-//     responses(
-//         (status = 204, description = "Tags deleted"),
-//         (status = 401, description = "This user is not authorized to access this route"),
-//     ),
-//     security(
-//         ("basic" = []),
-//     )
-// )]
+#[utoipa::path(
+    delete,
+    path = "/api/repos/tags/{repo_path}",
+    params(
+        ("repo_path" = String, Path, description = "The repo's path (for example `github.com/org/repo`), which contains slashes"),
+    ),
+    request_body = TagDeleteRequest<Repo>,
+    responses(
+        (status = 204, description = "Tags deleted"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation"),
+        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "The repo does not exist"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
 #[instrument(name = "routes::repos::delete_tags", skip_all, err(Debug))]
 async fn delete_tags(
     user: AuthedUser,
@@ -266,23 +281,26 @@ async fn delete_tags(
 /// * `params` - The query params to use for this request
 /// * `repo_path` - The repo to list associations for
 /// * `state` - Shared Thorium objects
-// TODO_UTOIPA: WIDLCARD
-// #[utoipa::path(
-//     get,
-//     path = "/api/repos/associations/*repo_path",
-//     params(
-//         ("path" = Vec<String>, Path, description = "The path containing this urls args"),
-//         ("params" = AssociationListParams, description = "Query params to use for this association list request"),
-//     ),
-//     responses(
-//         (status = 200, description = "JSON-formatted cursor response containing the associations for a repo", body = ApiCursor<Association>),
-//         (status = 401, description = "This user is not authorized to access this route"),
-//         (status = 404, description = "The repo does not exist"),
-//     ),
-//     security(
-//         ("basic" = []),
-//     )
-// )]
+#[utoipa::path(
+    get,
+    path = "/api/repos/associations/{repo_path}",
+    params(
+        ("repo_path" = String, Path, description = "The repo's path (for example `github.com/org/repo`), which contains slashes"),
+        AssociationListParams,
+    ),
+    responses(
+        (status = 200, description = "JSON-formatted cursor response containing the associations for a repo", body = ApiCursor<Association>),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
+        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "The repo does not exist"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
 #[instrument(name = "routes::repos::list_associations", skip_all, err(Debug))]
 async fn list_associations(
     user: AuthedUser,
@@ -299,7 +317,7 @@ async fn list_associations(
     Ok(Json(cursor))
 }
 
-/// List the commitshes for a repo
+/// List the commitishes for a repo
 ///
 /// # Arguments
 ///
@@ -307,32 +325,37 @@ async fn list_associations(
 /// * `params` - The params to use when listing commits for this repo
 /// * `repo` - The repo to list commits from
 /// * `shared` - Shared Thorium objects
-// TODO_UTOIPA: WIDLCARD
-// #[utoipa::path(
-//     get,
-//     path = "/api/repos/commitishes/:data/*repo_path",
-//     params(
-//         ("path" = Vec<String>, Path, description = "The path containing this urls args"),
-//         ("params" = CommitishListParams, description = "The params to use when listing commits for this repo"),
-//     ),
-//     responses(
-//         (status = 200, description = "Commits for repo", body = ApiCursor<Commitish>),
-//         (status = 401, description = "This user is not authorized to access this route"),
-//     ),
-//     security(
-//         ("basic" = []),
-//     )
-// )]
+#[utoipa::path(
+    get,
+    path = "/api/repos/commitishes/{data}/{repo_path}",
+    params(
+        ("data" = String, Path, description = "The first segment of the repo's path, which the router splits from the rest"),
+        ("repo_path" = String, Path, description = "The rest of the repo's path, which contains slashes"),
+        CommitishListParams,
+    ),
+    responses(
+        (status = 200, description = "A page of the repo's commitishes", body = ApiCursor<Commitish>),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
+        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "The repo does not exist"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
 #[instrument(name = "routes::repos::commitshes", skip_all, err(Debug))]
 async fn commitishes(
     user: AuthedUser,
     params: CommitishListParams,
-    Path(path): Path<Vec<String>>,
+    Path((data, rest)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<Json<ApiCursor<Commitish>>, ApiError> {
-    // build our repo path, joining the `:data`
-    // param with the `*repo_path` wildcard
-    let repo_path = path.join("/");
+    // build our repo path, joining the `{data}`
+    // param with the `{*repo_path}` wildcard
+    let repo_path = format!("{data}/{rest}");
     // get this repos info
     let repo = Repo::get(&user, &repo_path, &state.shared).await?;
     // list the commits for this repo
@@ -350,22 +373,26 @@ async fn commitishes(
 /// * `params` - The params to use when listing commit details for this repo
 /// * `repo` - The repo to list commit details from
 /// * `shared` - Shared Thorium objects
-// TODO_UTOIPA: WIDLCARD
-// #[utoipa::path(
-//     get,
-//     path = "/api/repos/commitish-details/*repo_path",
-//     params(
-//         ("path" = Vec<String>, Path, description = "The path containing this urls args"),
-//         ("params" = CommitishListParams, description = "The params to use when listing commit details for this repo"),
-//     ),
-//     responses(
-//         (status = 200, description = "Commit details for repo", body = ApiCursor<CommitishDetails>),
-//         (status = 401, description = "This user is not authorized to access this route"),
-//     ),
-//     security(
-//         ("basic" = []),
-//     )
-// )]
+#[utoipa::path(
+    get,
+    path = "/api/repos/commitish-details/{repo_path}",
+    params(
+        ("repo_path" = String, Path, description = "The repo's path (for example `github.com/org/repo`), which contains slashes"),
+        CommitishListParams,
+    ),
+    responses(
+        (status = 200, description = "A page of the repo's commitishes with their details", body = ApiCursor<CommitishDetails>),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
+        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "The repo does not exist"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
 #[instrument(name = "routes::repos::commitsh_details", skip_all, err(Debug))]
 async fn commitish_details(
     user: AuthedUser,
@@ -389,22 +416,26 @@ async fn commitish_details(
 /// * `user` - The user that is uploading sample
 /// * `repo` - The repo to get info about
 /// * `shared` - Shared Thorium objects
-// TODO_UTOIPA: WIDLCARD
-// #[utoipa::path(
-//     get,
-//     path = "/api/repos/download/*repo_path",
-//     params(
-//         ("path" = Vec<String>, Path, description = "The path containing this urls args"),
-//         ("params" = RepoDownloadOpts, description = "The query params to use with this request"),
-//     ),
-//     responses(
-//         (status = 200, description = "Bytestrean for repo download", body = Vec<u8>),
-//         (status = 401, description = "This user is not authorized to access this route"),
-//     ),
-//     security(
-//         ("basic" = []),
-//     )
-// )]
+#[utoipa::path(
+    get,
+    path = "/api/repos/download/{repo_path}",
+    params(
+        ("repo_path" = String, Path, description = "The repo's path (for example `github.com/org/repo`), which contains slashes"),
+        RepoDownloadOpts,
+    ),
+    responses(
+        (status = 200, description = "The repo as a byte stream", body = Vec<u8>),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
+        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "The repo does not exist"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
 #[instrument(name = "routes::repos::download", skip_all, err(Debug))]
 async fn download(
     user: AuthedUser,
@@ -435,14 +466,19 @@ async fn download(
     get,
     path = "/api/repos/",
     params(
-        ("params" = RepoListParams, description = "The query params to use for this request"),
+        RepoListParams,
     ),
     responses(
         (status = 200, description = "List of repos by submission date", body = ApiCursor<RepoListLine>),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[axum_macros::debug_handler]
@@ -468,14 +504,19 @@ async fn list(
     get,
     path = "/api/repos/details/",
     params(
-        ("params" = RepoListParams, description = "The query params to use for this request"),
+        RepoListParams,
     ),
     responses(
         (status = 200, description = "List of repo data by submission date with details", body = ApiCursor<Repo>),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::repos::list_details", skip_all, err(Debug))]
@@ -499,22 +540,30 @@ async fn list_details(
 /// * `path` - The repo path derived from the URL path
 /// * `state` - Shared Thorium objects
 /// * `upload` - The results being submitted
-// TODO_UTOIPA: WIDLCARD
-// #[utoipa::path(
-//     post,
-//     path = "/api/repos/results/*repo_path",
-//     params(
-//         ("path" = Vec<String>, Path, description = "The repo path derived from the URL path"),
-//         ("upload" = Multipart, description = "The query params to use with this request"),
-//     ),
-//     responses(
-//         (status = 200, description = "Results uploaded", body = OutputResponse),
-//         (status = 401, description = "This user is not authorized to access this route"),
-//     ),
-//     security(
-//         ("basic" = []),
-//     )
-// )]
+#[utoipa::path(
+    post,
+    path = "/api/repos/results/{repo_path}",
+    params(
+        ("repo_path" = String, Path, description = "The repo's path (for example `github.com/org/repo`), which contains slashes"),
+    ),
+    request_body(
+        content = Vec<u8>,
+        content_type = "multipart/form-data",
+        description = "The multipart form containing the results and any result files",
+    ),
+    responses(
+        (status = 200, description = "The results were uploaded", body = OutputResponse),
+        (status = 400, description = "The request is invalid: the multipart form is malformed or fails validation"),
+        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "The repo does not exist"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
 #[instrument(name = "routes::repos::upload_results", skip_all, err(Debug))]
 async fn upload_results(
     user: AuthedUser,
@@ -541,22 +590,26 @@ async fn upload_results(
 /// * `path` - The repo path derived from the URL path
 /// * `params` - The query params to use with this request
 /// * `state` - Shared Thorium objects
-// TODO_UTOIPA: WIDLCARD
-// #[utoipa::path(
-//     get,
-//     path = "/api/repos/results/*repo_path",
-//     params(
-//         ("path" = Vec<String>, Path, description = "The repo path derived from the URL path"),
-//         ("params" = ResultGetParams, description = "The query params to use with this request"),
-//     ),
-//     responses(
-//         (status = 200, description = "Repo results", body = OutputMap),
-//         (status = 401, description = "This user is not authorized to access this route"),
-//     ),
-//     security(
-//         ("basic" = []),
-//     )
-// )]
+#[utoipa::path(
+    get,
+    path = "/api/repos/results/{repo_path}",
+    params(
+        ("repo_path" = String, Path, description = "The repo's path (for example `github.com/org/repo`), which contains slashes"),
+        ResultGetParams,
+    ),
+    responses(
+        (status = 200, description = "The repo's results by tool", body = OutputMap),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
+        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "The repo does not exist"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
 #[instrument(name = "routes::repos::get_results", skip_all, err(Debug))]
 async fn get_results(
     user: AuthedUser,
@@ -573,29 +626,33 @@ async fn get_results(
     Ok(Json(outputs))
 }
 
-/// Downloads a files results file from s3
+/// Downloads a repo's results file from s3
 ///
 /// # Arguments
 ///
-/// * `user` - The user submitting these results
+/// * `user` - The user downloading this results file
 /// * `path_params` - All params in this url path
 /// * `state` - Shared Thorium objects
-// TODO_UTOIPA: WIDLCARD
-// #[utoipa::path(
-//     get,
-//     path = "/api/repos/result-files/:tool/:result_id/*repo_path",
-//     params(
-//         ("path_params" = Vec<String>, Path, description = "All params in this url path"),
-//     ),
-//     responses(
-//         (status = 200, description = "Result file bytestream", body = Vec<u8>),
-//         (status = 401, description = "This user is not authorized to access this route"),
-//         (status = 404, description = "Result file now found"),
-//     ),
-//     security(
-//         ("basic" = []),
-//     )
-// )]
+#[utoipa::path(
+    get,
+    path = "/api/repos/result-files/{repo_path}",
+    params(
+        ("repo_path" = String, Path, description = "The repo path, the tool, and the result id joined by slashes: `<repo path>/<tool>/<result id>`"),
+        ResultFileDownloadParams,
+    ),
+    responses(
+        (status = 200, description = "The result file as a byte stream", body = Vec<u8>),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
+        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "The path has too few segments, or the result file does not exist"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
 #[instrument(name = "routes::repos::download_result_file", skip_all, err(Debug))]
 async fn download_result_file(
     user: AuthedUser,
@@ -638,11 +695,9 @@ async fn download_result_file(
 /// The struct containing our openapi docs
 #[derive(OpenApi)]
 #[openapi(
-    // TODO_UTOIPA: WILDCARD add these back in once all the wildcard issues are resolved
-    // paths(list, create, list_details, get_repo, upload, commitshes, update_commitishes, commitsh_details, download, tag, delete_tags, get_results, upload_results, download_result_file, bundle_results),
-    paths(list, create, list_details),
+    paths(list, create, list_details, get_repo, upload, commitishes, update_commitishes, commitish_details, download, tag, delete_tags, list_associations, get_results, upload_results, download_result_file),
     components(schemas(ApiCursor<Repo>, ApiCursor<RepoListLine>, Branch, BranchDetails, BranchRequest, Commit, CommitDetails, Commitish, CommitishDetails, CommitishKinds, CommitishMapRequest, CommitishRequest, CommitRequest, GitTag, GitTagDetails, GitTagRequest, OutputMap, OutputResponse, Repo, RepoCheckout, RepoCreateResponse, RepoDownloadOpts, RepoListParams, RepoDataUploadResponse, RepoRequest, RepoScheme, RepoSubmissionChunk, ResultGetParams, TagDeleteRequest<Repo>, TagRequest<Repo>)),
-    modifiers(&OpenApiSecurity),
+    modifiers(&OpenApiSecurity, &OpenApiParameterExamples),
 )]
 pub struct RepoApiDocs;
 

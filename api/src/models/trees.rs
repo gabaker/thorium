@@ -50,6 +50,8 @@ const fn default_gather_tag_children() -> bool {
 /// The parameters for building a tree in Thorium
 #[derive(Deserialize, Debug)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 pub struct TreeParams {
     /// The depth to build this tree out too
     #[serde(default = "default_tree_depth")]
