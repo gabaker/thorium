@@ -81,7 +81,7 @@ pub(super) const ENTRY: CatalogEntry = CatalogEntry {
     id: "2026-10-v03",
     released_with: "1.8.1",
     description: "Schema apply runs before any step that changes data",
-    schema: Some("f9f605025a1d9dca23c939a5dec4b9699f7e525877b8439e214de03bdd6bd346"),
+    schema: Some("86722e9607083db0e1f7d2b527ce3c4937c78b34fdc5cdb3ef5691eb70fbbdfd"),
     prerelease: false,
     sibling: false,
     steps: STEPS,

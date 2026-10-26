@@ -238,7 +238,7 @@ mod tests {
             .map(CatalogEntry::revision)
             .collect::<Vec<_>>();
         assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
-        assert_eq!(latest(), rev("2026-10-v03"));
+        assert_eq!(latest(), rev("2026-10-v04"));
     }
 
     /// Planning covers every unfinished step between the two revisions

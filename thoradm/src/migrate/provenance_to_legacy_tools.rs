@@ -33,8 +33,7 @@ const TRANSFORM: &str = "provenance-to-legacy-tools";
 pub const PROVENANCE_TO_LEGACY_TOOLS: MigrationDef = MigrationDef {
     id: TRANSFORM,
     backend: Backend::Scylla,
-    // checked only until the release's catalog step runs it; flips to `Support::Yes` with that step
-    support: Support::CheckOnly,
+    support: Support::Yes,
     runner: &ProvenanceToLegacyTools,
     pass: TRANSFORM,
     chain: &[TRANSFORM],

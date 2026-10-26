@@ -2764,3 +2764,233 @@ mod reingest_tests;
 /// Tests of a step's approval, check, and issues across repeated runs and several edges
 #[path = "rerun_tests.rs"]
 mod rerun_tests;
+
+/// Build a catalog of the production drain and image conversion steps, from the first revision to
+/// the second
+fn agentic_catalog() -> Catalog {
+    // copy the production steps, which are plain values, into a catalog that lives for the test
+    let steps = ["drain-reactions", "images-to-tools"]
+        .into_iter()
+        .map(|id| {
+            *thorium::models::upgrades::step(id)
+                .expect("a production step")
+                .1
+        })
+        .collect::<Vec<_>>();
+    let steps: &'static [StepDef] = Box::leak(steps.into_boxed_slice());
+    let edges = vec![
+        edge(None, "2026-10-v01", &[]),
+        edge(Some("2026-10-v01"), "2026-10-v02", steps),
+    ];
+    Catalog {
+        edges: Box::leak(edges.into_boxed_slice()),
+        floors: &[],
+    }
+}
+
+/// Run reconciles, ending each check Job with the report its step's migration leaves
+///
+/// # Arguments
+///
+/// * `scene` - The scene
+/// * `drain` - The report the drain's check leaves
+/// * `images` - The report the image conversion's check leaves
+/// * `rounds` - How many reconciles to run
+async fn settle_agentic(scene: &Scene, drain: &Value, images: &Value, rounds: usize) {
+    // a reconcile creates or reads a Job, and the test ends the Jobs between them
+    for _ in 0..rounds {
+        scene.reconcile().await;
+        for job in scene.sim.active("migration-check") {
+            let report = if job.contains("drain-reactions") {
+                drain
+            } else {
+                images
+            };
+            scene.sim.leave_result(&job, report.clone());
+            scene.sim.finish(
+                &job,
+                &Finish::Complete(json!({"outcome": "done", "result_id": format!("uid-{job}")})),
+            );
+        }
+    }
+    scene.reconcile().await;
+}
+
+/// The drain only checks: while its check waits the step is `Waiting` with the reason, no approval
+/// is asked, no migration Job runs, and no component is paused; once nothing is in flight the step
+/// is skipped with no migration Job and no pause
+#[tokio::test]
+async fn the_drain_waits_before_anything_is_paused_and_skips_when_nothing_is_in_flight() {
+    // a cluster with every component the conversions pause
+    let start = Utc::now();
+    set_now(start);
+    let components = [
+        ("api", 3),
+        ("scaler", 1),
+        ("baremetal-scaler", 1),
+        ("event-handler", 1),
+        ("search-streamer", 1),
+    ];
+    let scene = Scene::new(agentic_catalog(), &json!([]), &components);
+    // the drain's check asks to wait and names a count, and the images have nothing to convert
+    let mut waiting = check_report("drain-reactions", 0, &[], Some(15));
+    waiting["wait"]["reason"] = json!("2 reaction(s) are still Created or Started");
+    let images = check_report("images-to-tools", 0, &[], None);
+    settle_agentic(&scene, &waiting, &images, 3).await;
+    // the check is a read-only check Job of the drain
+    let checks = scene.sim.created_of("migration-check");
+    let drain_check = checks
+        .iter()
+        .find(|job| Scene::args(job).get(3).map(String::as_str) == Some("drain-reactions"))
+        .expect("a check Job for the drain");
+    assert_eq!(&Scene::args(drain_check)[..3], ["migrate", "check", "--id"]);
+    // the step waits with the reason and asks for no approval
+    let step = scene.step("drain-reactions");
+    assert_eq!(step.state, StepState::Waiting, "{step:?}");
+    assert_eq!(
+        step.message.as_deref(),
+        Some("2 reaction(s) are still Created or Started")
+    );
+    // no migration Job ran and every component keeps its replicas
+    assert_eq!(migrations(&scene).len(), 0);
+    for (name, replicas) in components {
+        assert_eq!(scene.sim.replicas(name), Some(replicas), "{name}");
+    }
+    assert_eq!(scene.sim.scaled(), Vec::<(String, i32)>::new());
+    // the wait ends once nothing is in flight: the step is skipped, with nothing paused or run
+    set_now(start + Duration::seconds(60));
+    let clear = check_report("drain-reactions", 0, &[], None);
+    settle_agentic(&scene, &clear, &images, 4).await;
+    let entries = scene.history("drain-reactions");
+    assert_eq!(
+        entries.last().map(|entry| entry.outcome),
+        Some(StepState::Skipped),
+        "{entries:?}"
+    );
+    // the skip says the check found nothing for the step, not that objects were converted
+    let why = entries.last().and_then(|entry| entry.message.clone());
+    assert!(
+        why.as_deref()
+            .is_some_and(|why| why.contains("the check read needs this step")),
+        "{why:?}"
+    );
+    assert_eq!(migrations(&scene).len(), 0);
+    assert_eq!(scene.sim.scaled(), Vec::<(String, i32)>::new());
+}
+
+/// A check Job expires an hour after it ends and is deleted in the foreground once its report is
+/// read, while run Jobs keep their week; a failed check Job is left for its hour; and the run Jobs'
+/// attempt numbers and names count only run Jobs, so the deleted check Jobs change neither
+#[tokio::test]
+async fn a_read_check_job_is_deleted_and_expires_within_an_hour() {
+    // a gated step whose check is read
+    let mut scene = Scene::new(ONE, &json!([]), &[]);
+    let report = check_report("users-v2", 3, &[], None);
+    scene.settle_checks(&report, 3).await;
+    let checks = scene.sim.created_of("migration-check");
+    assert_eq!(checks.len(), 1, "{checks:#?}");
+    assert_eq!(checks[0]["spec"]["ttlSecondsAfterFinished"], 3600);
+    // the check Job was deleted in the foreground once its report was cached
+    let check = checks[0]["metadata"]["name"]
+        .as_str()
+        .expect("a name")
+        .to_owned();
+    let gone = scene.sim.jobs("migration-check");
+    assert!(gone.is_empty(), "{gone:?}");
+    let deletes = scene
+        .sim
+        .fake()
+        .writes()
+        .into_iter()
+        .filter(|request| request.method == "DELETE" && request.path.ends_with(&check))
+        .collect::<Vec<_>>();
+    assert_eq!(deletes.len(), 1, "{deletes:?}");
+    assert_eq!(deletes[0].body["propagationPolicy"], "Foreground");
+    // the cached report still holds the step, and no check runs again for the missing Job
+    scene.rounds(5).await;
+    assert_eq!(scene.sim.created_of("migration-check").len(), 1);
+    let step = scene.step("users-v2");
+    assert_eq!(step.state, StepState::Blocked, "{step:?}");
+    assert!(
+        step.message
+            .as_deref()
+            .is_some_and(|message| message.contains("3 of 10 objects")),
+        "{step:?}"
+    );
+    // the first run is attempt 0 with the week-long TTL, and breaks no lease
+    scene.approve(&approved());
+    scene.rounds(2).await;
+    let created = migrations(&scene);
+    assert_eq!(created.len(), 1, "{created:#?}");
+    assert_eq!(
+        created[0]["metadata"]["annotations"]["thorium.sandia.gov/attempt"],
+        "0"
+    );
+    assert_eq!(created[0]["spec"]["ttlSecondsAfterFinished"], 7 * 86_400);
+    assert!(!Scene::args(&created[0]).contains(&"--force-break-lease".to_owned()));
+    // a failed run counts once for the next run, which breaks the lease the failed pod left
+    let first = scene.sim.jobs("migration").remove(0);
+    scene.sim.finish(
+        &first,
+        &Finish::Failed {
+            reason: "BackoffLimitExceeded".to_owned(),
+            summary: None,
+            log_lines: 1,
+        },
+    );
+    scene.rounds(3).await;
+    scene.approve(&json!([{"step": "users-v2", "backup": "snap-2"}]));
+    scene.rounds(3).await;
+    let created = migrations(&scene);
+    assert_eq!(created.len(), 2, "{created:#?}");
+    assert_eq!(
+        created[1]["metadata"]["annotations"]["thorium.sandia.gov/attempt"],
+        "1"
+    );
+    assert!(Scene::args(&created[1]).contains(&"--force-break-lease".to_owned()));
+}
+
+/// A failed check Job is left for its hour, so the step keeps naming why it failed, and a check run
+/// again once it is gone gets a name of its own
+#[tokio::test]
+async fn a_failed_check_job_is_kept_and_a_new_check_gets_its_own_name() {
+    // a gated step whose check fails
+    let scene = Scene::new(ONE, &json!([]), &[]);
+    scene.rounds(2).await;
+    let check = scene.sim.active("migration-check").remove(0);
+    scene.sim.finish(
+        &check,
+        &Finish::Failed {
+            reason: "BackoffLimitExceeded".to_owned(),
+            summary: None,
+            log_lines: 2,
+        },
+    );
+    scene.rounds(3).await;
+    // the failed Job stays and the step says it failed
+    assert_eq!(
+        scene.sim.jobs("migration-check"),
+        std::slice::from_ref(&check)
+    );
+    let step = scene.step("users-v2");
+    assert!(
+        step.message
+            .as_deref()
+            .is_some_and(|message| message.contains("failed")),
+        "{step:?}"
+    );
+    // once its TTL removes it, the next check gets a new name and is deleted once read
+    scene.sim.reap(&check);
+    scene.rounds(2).await;
+    let created = scene.sim.created_of("migration-check");
+    assert_eq!(created.len(), 2, "{created:#?}");
+    assert_ne!(
+        created[1]["metadata"]["name"],
+        created[0]["metadata"]["name"]
+    );
+    scene
+        .settle_checks(&check_report("users-v2", 3, &[], None), 3)
+        .await;
+    assert_eq!(scene.sim.jobs("migration-check"), Vec::<String>::new());
+    assert_eq!(scene.step("users-v2").state, StepState::Blocked);
+}

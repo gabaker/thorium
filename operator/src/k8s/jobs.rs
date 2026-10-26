@@ -630,6 +630,25 @@ pub async fn active_writers(meta: &ClusterMeta) -> Result<Vec<String>, Error> {
     Ok(active)
 }
 
+/// Whether a Job has a terminal condition (`Complete` or `Failed`) that holds, even while it is
+/// being deleted, so its pods have finished
+///
+/// # Arguments
+///
+/// * `job` - The Job
+#[must_use]
+pub fn ended(job: &Job) -> bool {
+    // a holding terminal condition means its pods are done, whatever its deletion stands at
+    job.status
+        .as_ref()
+        .and_then(|status| status.conditions.as_ref())
+        .into_iter()
+        .flatten()
+        .any(|condition| {
+            condition.status == "True" && matches!(condition.type_.as_str(), "Complete" | "Failed")
+        })
+}
+
 /// Find where a Job is from its status
 ///
 /// A Job being deleted is still active, since its pods may still be running.

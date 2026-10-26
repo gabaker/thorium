@@ -206,10 +206,12 @@ mod tests {
         let expected = "Plan (dry run: nothing is dropped; pass --execute to drop)
   scylla:events  (table, 18204 rows)
     statement: DROP TABLE IF EXISTS ks.events
+    downgrade to 2026-10-v04: recreated (it does not use this object)
     downgrade to 2026-10-v03: recreated (it does not use this object)
     downgrade to 2026-10-v02: recreated (it does not use this object)
     downgrade to 2026-10-v01: recreated (it does not use this object)
   scylla:entities_by_name  (view, not present: nothing to drop)
+    downgrade to 2026-10-v04: recreated (it does not use this object)
     downgrade to 2026-10-v03: recreated (it does not use this object)
     downgrade to 2026-10-v02: recreated (it does not use this object)
     downgrade to 2026-10-v01: recreated (it does not use this object)

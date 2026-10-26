@@ -200,8 +200,8 @@ the latest revision, it then reconciles the deployment as usual and deploys the 
 | `Config`, `Infra` | Automatically once a target is set |
 | `Data`, `Manual` | Only with an approval (see [Approvals](#approvals)), and only when the step has work to do; a step with nothing to do is recorded as `Skipped` without one |
 
-A step that only checks or waits and changes no data (such as `scylla-role` and
-`elastic-identity`) counts as finished only within the attempt that ran it. Clearing the target,
+A step that only checks or waits and changes no data (`scylla-role`, `elastic-identity`, and
+`drain-reactions`) counts as finished only within the attempt that ran it. Clearing the target,
 or setting it back to the deployment's revision, before the upgrade reaches it stops the attempt:
 the operator records an `upgrade-stopped` entry in the history, and the next attempt runs those
 checks again before the steps that rely on them. Steps that changed data stay finished.
@@ -296,8 +296,13 @@ token, with the config Secret read-only. The step goes through these stages.
    recorded revision, or the image), when the approvals set for the step changed, when a check
    that asked to wait comes due, and when you set the `thorium.sandia.gov/refresh-check`
    annotation on the `ThoriumCluster` to a value it didn't hold before. Checks run one at a time.
-   To see every group and sample keys, run `thoradm migrate check --id <migration> --all
-   --samples` yourself.
+   The operator deletes a check Job, with its pod, once it has read the report; a check Job it
+   doesn't read, such as a failed one, is deleted an hour after it ends, and a failed check runs
+   again then. A check Job made by an older operator keeps the retention it was made with, up to
+   seven days, so a failed one from before an operator upgrade holds its check until it expires or
+   you set the refresh annotation. Migration, schema-apply, and record Jobs are kept for seven days
+   after they end. To see every group and sample keys, run
+   `thoradm migrate check --id <migration> --all --samples` yourself.
 2. **Approval.** The message names the backup to take first: take it with `thoradm backup new`,
    and read the backup limitations in [Taking Backups](../thoradm/taking_backups.md) first. Then
    approve the step with `{step, backup}`. A step whose check finds nothing to change is skipped
@@ -768,7 +773,7 @@ its revision when it is converted (see [Converting a Pre-Helm Deployment](./conv
 <!-- upgrade-paths:begin (generated from the catalog's support floors) -->
 | Thorium version | Revision | Oldest revision it upgrades from | From an older revision |
 |-----------------|----------|----------------------------------|------------------------|
-| 1.8.1 | `2026-10-v03` | `2026-10-v01` | — |
+| 1.8.1 | `2026-10-v04` | `2026-10-v01` | — |
 | Pre-Helm, any version | `2026-10-v01` once converted | — | Convert with the `convert-to-helm.sh` of Thorium 1.8.1, then upgrade from `2026-10-v01` |
 <!-- upgrade-paths:end -->
 

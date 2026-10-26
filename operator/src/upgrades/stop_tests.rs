@@ -575,3 +575,162 @@ fn the_hold_note_points_a_reverse_step_down() {
     );
     assert!(!down.contains("later"), "{down}");
 }
+
+/// Clearing the target while `images-to-tools` runs stops its Job and keeps all five components it
+/// paused at zero, naming each with its count; the stop ends the attempt's drain, so setting the
+/// target again drains again before the conversion resumes under its first Job name with no new
+/// pause and one start entry
+#[tokio::test]
+// the stop and the resume are one story, which reads best in one place
+#[allow(clippy::too_many_lines)]
+async fn clearing_the_target_mid_conversion_stops_images_to_tools_and_keeps_every_pause() {
+    // a cluster with every component the conversion pauses, and the conversion approved
+    let components = [
+        ("api", 3),
+        ("scaler", 1),
+        ("baremetal-scaler", 1),
+        ("event-handler", 1),
+        ("search-streamer", 1),
+    ];
+    let approvals = json!([{"step": "images-to-tools", "backup": "snap-1"}]);
+    let mut scene = Scene::new(agentic_catalog(), &approvals, &components);
+    scene.sim.slow_delete();
+    // nothing is in flight, so the drain is skipped and the conversion starts its Job
+    let drain = check_report("drain-reactions", 0, &[], None);
+    let images = check_report("images-to-tools", 3, &[], None);
+    settle_agentic(&scene, &drain, &images, 4).await;
+    let jobs = scene.sim.active("migration");
+    assert_eq!(jobs.len(), 1, "{jobs:?}");
+    let job = jobs[0].clone();
+    assert!(job.contains("images-to-tools"), "{job}");
+    for (name, _) in components {
+        assert_eq!(scene.sim.replicas(name), Some(0), "{name}");
+    }
+    let scaled = scene.sim.scaled().len();
+    let drain_checks = scene.sim.created_of("migration-check").len();
+    // the target is cleared while the conversion runs
+    scene.retarget(None);
+    assert_eq!(secs(scene.reconcile().await), Some(STOPPING_SECS));
+    // the Job is deleted once in the foreground, and every component stays at zero
+    let deletes = deletes_of(&scene, &job);
+    assert_eq!(deletes.len(), 1, "{deletes:?}");
+    assert_eq!(deletes[0].body["propagationPolicy"], "Foreground");
+    for (name, _) in components {
+        assert_eq!(scene.sim.replicas(name), Some(0), "{name}");
+    }
+    // the status names the step, its Job, all five components with their counts, and the ways on
+    let status = scene.sim.status_value();
+    assert_eq!(status["phase"], "UpgradeRequired");
+    let message = status["message"].as_str().unwrap_or_default();
+    for part in [
+        "images-to-tools",
+        job.as_str(),
+        "api (3)",
+        "scaler (1)",
+        "baremetal-scaler (1)",
+        "event-handler (1)",
+        "search-streamer (1)",
+        "snap-1",
+        "set spec.upgrade.target_revision",
+        "by hand",
+    ] {
+        assert!(message.contains(part), "{part}: {message}");
+    }
+    // the stop ends the attempt's drain and is audited as a block of the conversion
+    let state = scene.sim.state().expect("state");
+    assert!(
+        state
+            .applied
+            .iter()
+            .any(|entry| entry.step == thorium::models::upgrades::UPGRADE_STOPPED_STEP),
+        "{:?}",
+        state.applied
+    );
+    assert_eq!(
+        scene
+            .history("images-to-tools")
+            .last()
+            .map(|entry| entry.outcome),
+        Some(StepState::Blocked)
+    );
+    // once the Job is gone and the target is set again, the drain is checked again first
+    scene.sim.reap(&job);
+    scene.retarget(Some("2026-10-v02"));
+    scene.reconcile().await;
+    let checks = scene.sim.created_of("migration-check");
+    assert!(
+        checks[drain_checks..]
+            .iter()
+            .any(|check| Scene::args(check).get(3).map(String::as_str) == Some("drain-reactions")),
+        "{checks:#?}"
+    );
+    assert_eq!(migrations(&scene).len(), 1);
+    // with nothing in flight the conversion resumes under its first Job name, without a new pause
+    settle_agentic(&scene, &drain, &images, 4).await;
+    let created = migrations(&scene);
+    assert_eq!(created.len(), 2, "{created:#?}");
+    assert_eq!(created[1]["metadata"]["name"], job.as_str());
+    assert_eq!(scene.sim.scaled().len(), scaled);
+    let running = scene
+        .history("images-to-tools")
+        .into_iter()
+        .filter(|entry| entry.outcome == StepState::Running)
+        .collect::<Vec<_>>();
+    assert_eq!(running.len(), 1, "{running:?}");
+    assert_eq!(running[0].paused.len(), components.len());
+}
+
+/// A downgrade below the recorded revision of a cluster whose conversion stopped partway is
+/// refused before anything runs, naming the conversion, and the hold stops the conversion's Job
+#[tokio::test]
+async fn a_downgrade_below_a_stopped_conversion_is_refused_and_stops_its_job() {
+    // a cluster recorded at the revision before the conversions, whose conversion run is open
+    let mut state =
+        thorium::models::upgrades::Catalog::PRODUCTION.reached(&rev("2026-10-v03"), "1.8.1");
+    for (step, outcome) in [
+        ("drain-reactions", StepState::Skipped),
+        ("images-to-tools", StepState::Running),
+    ] {
+        state.record(AppliedStep {
+            revision: "2026-10-v04".to_owned(),
+            step: step.to_owned(),
+            outcome,
+            job: (outcome == StepState::Running)
+                .then(|| "migration-images-to-tools-000000000000".to_owned()),
+            backup: Some("snap-1".to_owned()),
+            paused: if outcome == StepState::Running {
+                BTreeMap::from([("api".to_owned(), 3)])
+            } else {
+                BTreeMap::new()
+            },
+            ..AppliedStep::default()
+        });
+    }
+    // the admin targets the first Helm revision
+    let cluster = chart_cluster(json!({"target_revision": "2026-10-v02"}));
+    let fake = super::super::tests::fake_with_status(&cluster).route(
+        "GET",
+        super::super::tests::STATE_PATH,
+        200,
+        super::super::tests::state_config_map(&state),
+    );
+    let tracker = tracked(&cluster);
+    let gated = gate(&fake.client(), &tracker).await.expect("gate");
+    // the downgrade is refused naming the conversion, and the hold stops the conversion's Job
+    assert!(matches!(gated, Gate::Stop { .. }));
+    let status = tracker.current();
+    assert_eq!(
+        status.phase,
+        Some(crate::k8s::crds::ClusterPhase::Error),
+        "{status:?}"
+    );
+    let message = status.message.unwrap_or_default();
+    for part in [
+        "images-to-tools",
+        "2026-10-v04",
+        "can't be undone",
+        "api (3)",
+    ] {
+        assert!(message.contains(part), "{part}: {message}");
+    }
+}

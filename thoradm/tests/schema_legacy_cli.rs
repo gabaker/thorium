@@ -6,6 +6,8 @@ use scylla::client::session::Session;
 use serde_json::Value;
 use std::process::{Command, Output};
 use thorium::Conf;
+use thorium::models::schema::support_window;
+use thorium::models::upgrades::Catalog;
 
 #[path = "common/base_namespace.rs"]
 mod base_namespace;
@@ -245,9 +247,11 @@ async fn the_listing_shows_both_objects_as_text_and_json() {
     assert_eq!(json["objects"][0]["rows"], 2);
     assert_eq!(json["objects"][1]["id"], "scylla:entities_by_name");
     assert_eq!(json["objects"][1]["rows"], 3);
+    // one downgrade line for each revision of the production catalog's support window
+    let window = support_window(&Catalog::PRODUCTION);
     assert_eq!(
         json["objects"][0]["downgrades"].as_array().map(Vec::len),
-        Some(3)
+        Some(window.len())
     );
     // a keyspace this release created lists both as not present
     exec(&session, &format!("DROP KEYSPACE IF EXISTS {ns}")).await;

@@ -874,7 +874,8 @@ fn every_step(from: &str, to: &RevisionId) -> Vec<String> {
 /// A whole backup without a record, restored into a deployment that records a newer revision,
 /// records the first Helm revision its data is at: the target's history is archived and replaced
 /// by a Restored entry saying so, the target's fingerprints stay, the operator's next plan holds
-/// every step after the baseline (the users conversion included), `migrate plan` from the
+/// every step after the baseline (the users conversion, and the conversions of images, pipelines,
+/// and provenance to tools), `migrate plan` from the
 /// recorded revision lists them, and the summary says what was recorded and what runs next
 #[tokio::test]
 async fn a_backup_without_a_record_records_the_baseline_under_a_newer_revision() {
@@ -928,10 +929,14 @@ async fn a_backup_without_a_record_records_the_baseline_under_a_newer_revision()
     let mut plan = planned(&after, &latest);
     plan.sort();
     assert_eq!(plan, every_step(BASELINE, &latest));
-    assert!(
-        plan.contains(&"2026-10-v03 users-settings-theme".to_owned()),
-        "{plan:?}"
-    );
+    for step in [
+        "2026-10-v03 users-settings-theme",
+        "2026-10-v04 images-to-tools",
+        "2026-10-v04 pipelines-to-tool-stages",
+        "2026-10-v04 provenance-to-legacy-tools",
+    ] {
+        assert!(plan.contains(&step.to_owned()), "{step} missing: {plan:?}");
+    }
     // and so does `migrate plan` from the recorded revision
     let listed = harness
         .thoradm()
@@ -940,7 +945,13 @@ async fn a_backup_without_a_record_records_the_baseline_under_a_newer_revision()
         .expect("failed to run thoradm");
     assert_eq!(listed.status.code(), Some(0), "{}", describe(&listed));
     let listed = String::from_utf8_lossy(&listed.stdout);
-    assert!(listed.contains("users-settings-theme"), "{listed}");
+    for step in [
+        "users-settings-theme",
+        "images-to-tools",
+        "pipelines-to-tool-stages",
+    ] {
+        assert!(listed.contains(step), "{step} missing: {listed}");
+    }
     // the summary says what was recorded and what the operator runs next
     let summary: serde_json::Value =
         serde_json::from_slice(&std::fs::read(report.join("summary.json")).unwrap()).unwrap();
