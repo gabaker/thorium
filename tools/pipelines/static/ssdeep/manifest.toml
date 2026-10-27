@@ -3,5 +3,6 @@ type = "pipeline"
 version = "latest"
 config_from = "ssdeep.json"
 
-[images.ssdeep]
+[stage_tools.ssdeep]
+tool = "ssdeep"
 version = "latest"

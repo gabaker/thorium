@@ -1,6 +1,8 @@
 name = "email-parser"
-type = "image"
-config_from = "email-parser.json"
+type = "tool"
+kind = "image"
+groups = ["static"]
+spec_from = "email-parser.json"
 build_path = "./"
 image_name = "tools/sandia.gov/emails/email-parser"
 version = "latest"

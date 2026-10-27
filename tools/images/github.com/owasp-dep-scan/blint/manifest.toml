@@ -1,6 +1,8 @@
 name = "blint"
-type = "image"
-config_from = "blint.json"
+type = "tool"
+kind = "image"
+groups = ["static"]
+spec_from = "blint.json"
 build_path = "./"
 image_name = "tools/github.com/owasp-dep-scan/blint"
 version = "latest"

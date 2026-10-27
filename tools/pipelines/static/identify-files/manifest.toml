@@ -3,26 +3,34 @@ type = "pipeline"
 version = "latest"
 config_from = "identify-files.json"
 
-[images.detect-it-easy]
+[stage_tools.detect-it-easy]
+tool = "detect-it-easy"
 version = "latest"
 
-[images.exiftool]
+[stage_tools.exiftool]
+tool = "exiftool"
 version = "latest"
 
-[images.file-linux]
+[stage_tools.file-linux]
+tool = "file-linux"
 version = "latest"
 
-[images.magika]
+[stage_tools.magika]
+tool = "magika"
 version = "latest"
 
-[images.mimetype]
+[stage_tools.mimetype]
+tool = "mimetype"
 version = "latest"
 
-[images.peid]
+[stage_tools.peid]
+tool = "peid"
 version = "latest"
 
-[images.polyfile]
+[stage_tools.polyfile]
+tool = "polyfile"
 version = "latest"
 
-[images.trid]
+[stage_tools.trid]
+tool = "trid"
 version = "latest"

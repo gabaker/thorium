@@ -1,1 +1,1 @@
-null
+Find leaked credentials and secrets in files and repositories

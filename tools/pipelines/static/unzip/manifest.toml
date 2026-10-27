@@ -3,5 +3,6 @@ type = "pipeline"
 version = "latest"
 config_from = "unzip.json"
 
-[images.unzip]
+[stage_tools.unzip]
+tool = "unzip"
 version = "latest"

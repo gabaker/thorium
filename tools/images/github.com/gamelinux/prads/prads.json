@@ -1,116 +1,126 @@
 {
-  "name": "prads",
-  "group": "static",
-  "scaler": "K8s",
-  "image": "",
-  "timeout": 1200,
-  "display_type": "Table",
-  "spawn_limit": "Unlimited",
-  "collect_logs": true,
-  "generator": false,
-  "resources": {
-    "amd_gpu": 0,
-    "burstable": {
-      "cpu": 0,
-      "memory": "0Gi"
-    },
-    "cpu": 1,
-    "ephemeral_storage": "0Gi",
-    "memory": "8Gi",
-    "nvidia_gpu": 0
-  },
-  "args": {
-    "command": null,
-    "commit": null,
-    "entrypoint": null,
-    "output": "None",
-    "output_files": "None",
-    "reaction": null,
-    "repo": null
-  },
-  "output_collection": {
-    "as_filesystem": false,
-    "auto_tag": {},
-    "children": "/tmp/thorium/children",
-    "files": {
-      "entities": "/tmp/thorium/entities.json",
-      "names": [],
-      "result_files": "/tmp/thorium/result-files",
-      "results": "/tmp/thorium/results",
-      "tags": "/tmp/thorium/tags"
-    },
-    "groups": [],
-    "handler": "Files"
-  },
-  "child_filters": {
-    "file_extension": [],
-    "file_name": [],
-    "mime": [],
-    "submit_non_matches": false
-  },
-  "dependencies": {
-    "cache": {
-      "enabled": true,
-      "generic": {
-        "kwarg": null,
-        "strategy": "Disabled"
+  "Image": {
+    "data": {
+      "child_filters": {
+        "file_extension": [],
+        "file_name": [],
+        "mime": [],
+        "submit_non_matches": false
       },
-      "location": "/tmp/thorium/cache",
-      "use_parent_cache": false
+      "dependencies": {
+        "cache": {
+          "enabled": true,
+          "generic": {
+            "kwarg": null,
+            "strategy": "Disabled"
+          },
+          "location": "/tmp/thorium/cache",
+          "use_parent_cache": false
+        },
+        "children": {
+          "enabled": false,
+          "kwarg": null,
+          "location": "/tmp/thorium/prior-children",
+          "strategy": "Paths",
+          "tools": []
+        },
+        "ephemeral": {
+          "kwarg": null,
+          "location": "/tmp/thorium/ephemeral",
+          "names": [],
+          "strategy": "Paths"
+        },
+        "filesystems": {
+          "enabled": false,
+          "kwarg": null,
+          "location": "/tmp/thorium/prior-filesystems",
+          "strategy": "Paths",
+          "tools": []
+        },
+        "repos": {
+          "kwarg": null,
+          "location": "/tmp/thorium/repos",
+          "strategy": "Paths"
+        },
+        "results": {
+          "kwarg": "None",
+          "location": "/tmp/thorium/prior-results",
+          "names": [],
+          "strategy": "Paths",
+          "tools": []
+        },
+        "samples": {
+          "kwarg": null,
+          "location": "/tmp/thorium/samples",
+          "naming": "Sha256",
+          "strategy": "Paths"
+        },
+        "tags": {
+          "enabled": false,
+          "kwarg": null,
+          "location": "/tmp/thorium/prior-tags",
+          "strategy": "Paths"
+        }
+      },
+      "display_type": "Table",
+      "output_collection": {
+        "as_filesystem": false,
+        "auto_tag": {},
+        "children": "/tmp/thorium/children",
+        "files": {
+          "entities": "/tmp/thorium/entities.json",
+          "names": [],
+          "result_files": "/tmp/thorium/result-files",
+          "results": "/tmp/thorium/results",
+          "tags": "/tmp/thorium/tags"
+        },
+        "groups": [],
+        "handler": "Files"
+      }
     },
-    "children": {
-      "enabled": false,
-      "images": [],
-      "kwarg": null,
-      "location": "/tmp/thorium/prior-children",
-      "strategy": "Paths"
+    "environment": {
+      "K8s": {
+        "env": {},
+        "image": "ghcr.io/cisagov/thorium/tools/github.com/gamelinux/prads:latest",
+        "network_policies": [],
+        "scheduling": {
+          "lifetime": null,
+          "resources": {
+            "amd_gpu": 0,
+            "burstable": {
+              "cpu": 0,
+              "memory": 0
+            },
+            "cpu": 1000,
+            "ephemeral_storage": 0,
+            "memory": 8192,
+            "nvidia_gpu": 0,
+            "worker_slots": 1
+          },
+          "spawn_limit": "Unlimited"
+        },
+        "security_context": {
+          "allow_privilege_escalation": false,
+          "group": null,
+          "user": null
+        },
+        "volumes": []
+      }
     },
-    "ephemeral": {
-      "kwarg": null,
-      "location": "/tmp/thorium/ephemeral",
-      "names": [],
-      "strategy": "Paths"
-    },
-    "filesystems": {
-      "enabled": false,
-      "images": [],
-      "kwarg": null,
-      "location": "/tmp/thorium/prior-filesystems",
-      "strategy": "Paths"
-    },
-    "repos": {
-      "kwarg": null,
-      "location": "/tmp/thorium/repos",
-      "strategy": "Paths"
-    },
-    "results": {
-      "images": [],
-      "kwarg": "None",
-      "location": "/tmp/thorium/prior-results",
-      "names": [],
-      "strategy": "Paths"
-    },
-    "samples": {
-      "kwarg": null,
-      "location": "/tmp/thorium/samples",
-      "naming": "Sha256",
-      "strategy": "Paths"
-    },
-    "tags": {
-      "enabled": false,
-      "kwarg": null,
-      "location": "/tmp/thorium/prior-tags",
-      "strategy": "Paths"
+    "execution": {
+      "args": {
+        "command": null,
+        "commit": null,
+        "entrypoint": null,
+        "output": "None",
+        "output_files": "None",
+        "reaction": null,
+        "repo": null
+      },
+      "collect_logs": true,
+      "generator": false,
+      "modifiers": null,
+      "timeout": 1200
     }
-  },
-  "env": {},
-  "volumes": [],
-  "network_policies": [],
-  "clean_up": null,
-  "kvm": null,
-  "security_context": {
-    "allow_privilege_escalation": false,
-    "group": null,
-    "user": null
   }
 }

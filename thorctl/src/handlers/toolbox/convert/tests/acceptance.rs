@@ -12,7 +12,7 @@ use crate::handlers::toolbox::v2::validate::{Severity, validate_manifest};
 
 /// Read the real toolbox's legacy document
 fn legacy_document() -> Value {
-    // the file is the one CI builds from
+    // the file is the legacy toolbox kept from before the manifests became tools
     serde_json::from_str(REAL_TOOLBOX).expect("the real toolbox parses")
 }
 
@@ -135,14 +135,15 @@ async fn real_specs_hash_like_the_live_migration() {
     }
 }
 
-/// The committed v2 toolbox is exactly what converting the legacy toolbox writes
+/// The committed toolbox, built from the tool manifests, is exactly what converting the kept
+/// legacy toolbox writes: rewriting the manifests to tools changed nothing a conversion would not
 #[tokio::test]
 async fn the_committed_v2_toolbox_is_reproducible() {
     let converted = convert_default(&legacy_document()).await;
     let text = render_manifest(&converted.manifest).unwrap();
     assert!(
         text == REAL_TOOLBOX_V2,
-        "tools/toolbox.v2.json is out of date: run `thorctl toolbox convert tools/toolbox.json`"
+        "converting tools/toolbox.v1.json no longer gives tools/toolbox.json"
     );
     // converting the committed file changes nothing
     let again = convert_document(

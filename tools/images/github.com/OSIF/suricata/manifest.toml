@@ -1,6 +1,8 @@
 name = "suricata"
-type = "image"
-config_from = "suricata.json"
+type = "tool"
+kind = "image"
+groups = ["static"]
+spec_from = "suricata.json"
 build_path = "./"
 image_name = "tools/github.com/osif/suricata"
 version = "latest"

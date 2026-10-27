@@ -3,8 +3,10 @@ type = "pipeline"
 version = "latest"
 config_from = "pdf-analyze.json"
 
-[images.pdf-preview]
+[stage_tools.pdf-preview]
+tool = "pdf-preview"
 version = "latest"
 
-[images.pdf2text]
+[stage_tools.pdf2text]
+tool = "pdf2text"
 version = "latest"

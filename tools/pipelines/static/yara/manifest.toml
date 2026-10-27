@@ -3,5 +3,6 @@ type = "pipeline"
 version = "latest"
 config_from = "yara.json"
 
-[images.yara]
+[stage_tools.yara]
+tool = "yara"
 version = "latest"

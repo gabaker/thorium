@@ -18,8 +18,8 @@ mod refs;
 mod types;
 mod validate;
 
-/// The real toolbox this repository ships, in the legacy format
-pub(super) const REAL_TOOLBOX: &str = include_str!("../../../../../../tools/toolbox.json");
+/// The repository's toolbox in the legacy format, kept from before its manifests became tools
+pub(super) const REAL_TOOLBOX: &str = include_str!("../../../../../../tools/toolbox.v1.json");
 
 /// A small valid v2 toolbox holding one of each kind of item
 pub(super) const CLEAN_V2: &str =

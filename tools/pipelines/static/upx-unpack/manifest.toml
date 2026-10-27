@@ -3,5 +3,6 @@ type = "pipeline"
 version = "latest"
 config_from = "upx-unpack.json"
 
-[images.upx-unpack]
+[stage_tools.upx-unpack]
+tool = "upx-unpack"
 version = "latest"
