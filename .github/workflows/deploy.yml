@@ -1,9 +1,12 @@
 name: Build Thorium Release
 
 on:
+  # Dependabot branches are built by their pull requests instead, so each
+  # update runs once
   push:
     branches:
       - '**'
+      - '!dependabot/**'
     tags:
       - '[0-9]+.[0-9]+.[0-9]+*'
   # pull requests build everything but never publish, so reviewers see whether the image builds

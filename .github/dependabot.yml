@@ -29,6 +29,15 @@ updates:
       interval: "weekly"
     cooldown:
       default-days: 7
+    # only Ubuntu LTS releases (YY.04 of even years) are proposed; the ranges
+    # skip every interim release between one LTS and the next. Add the next
+    # range when a new LTS ships
+    ignore:
+      - dependency-name: "ubuntu"
+        versions:
+          - ">24.04, <26.04"
+          - ">26.04, <28.04"
+          - ">28.04, <30.04"
     groups:
       docker-base-images:
         patterns:
@@ -48,6 +57,11 @@ updates:
         update-types:
           - "minor"
           - "patch"
+      # security fixes skip the PR limit, so they are grouped into one PR too
+      cargo-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
     commit-message:
       prefix: "fix(deps)"
 
@@ -62,6 +76,11 @@ updates:
     open-pull-requests-limit: 1
     groups:
       npm:
+        patterns:
+          - "*"
+      # security fixes skip the PR limit, so they are grouped into one PR too
+      npm-security:
+        applies-to: security-updates
         patterns:
           - "*"
     commit-message:
@@ -79,6 +98,11 @@ updates:
       cargo-other-components:
         patterns:
           - "*"
+      # security fixes skip the PR limit, so they are grouped into one PR too
+      cargo-other-components-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
     commit-message:
       prefix: "fix(deps)"
 
@@ -92,6 +116,11 @@ updates:
     open-pull-requests-limit: 1
     groups:
       pip-other-components:
+        patterns:
+          - "*"
+      # security fixes skip the PR limit, so they are grouped into one PR too
+      pip-other-components-security:
+        applies-to: security-updates
         patterns:
           - "*"
     commit-message:
