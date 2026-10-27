@@ -117,8 +117,8 @@ let client = Thorium::build("http://localhost:8080")
     .from_keys("/path/to/keys.yml")?
     .build().await?;
 
-// From a thorctl config (CtlConf):
-let ctl_conf = thorium::CtlConf::new("~/.thorium/config.yml")?;
+// From a thorctl config (CtlConf; the path is not tilde-expanded):
+let ctl_conf = thorium::CtlConf::from_path("/home/me/.thorium/config.yml")?;
 let client = Thorium::build(&ctl_conf.keys.api)
     .from_ctl_conf(ctl_conf)?
     .build().await?;
@@ -149,14 +149,15 @@ All API routes are under `/api/`.
 
 ### Domain Routes
 
-See Swagger UI for complete endpoint details including request/response schemas.
+See Swagger UI (`{THORIUM_URL}/api/docs/swagger-ui/`) for complete endpoint details including request/response schemas. Each area is also served as an OpenAPI document at `/api/<area>/openapi.json` (for example `/api/entities/openapi.json`); see `{THORIUM_URL}/api/docs/user/architecture/api.html#rest-api-reference` for the area names.
 
 | Area | Route Prefix | Key Operations |
 |------|-------------|----------------|
 | Files | `/api/files/` | Upload, download (CaRT or encrypted ZIP), list, count, update, delete, tag, comment, list associations, view/upload results |
 | Groups | `/api/groups/` | Create, list, update, delete groups; LDAP sync; group stats |
-| Images (Tools) | `/api/images/` | Create, list, update, delete analysis tools; manage notifications and bans |
-| Pipelines | `/api/pipelines/` | Create, list, update, delete tool chains; manage notifications and bans |
+| Images | `/api/images/` | List, get, delete images; manage image notifications. Create, update, and image bans return `410 Gone`: Thorium runs Tools instead |
+| Tool and workflow runs | `/api/tools/instances/{id}/runs`, `/api/workflows/instances/{id}/runs` | Run a tool instance or a Ready workflow instance on files/repos; retry a failed workflow run (`.../runs/{reaction}/retry`) |
+| Pipelines | `/api/pipelines/` | Create, list, update, delete tool chains (every stage needs a tool in `stage_tools`); manage notifications and bans |
 | Reactions | `/api/reactions/` | Create, list, get, update, delete reactions; view/set logs; handle lifecycle (proceed/fail); manage cache and sub-reactions |
 | Results | `/api/files/results/:sha256` | Get and upload tool results and result files for a sample |
 | Repos | `/api/repos/` | Ingest, list, download, tag repos; list commitishes; list associations; view/upload results |
@@ -165,7 +166,7 @@ See Swagger UI for complete endpoint details including request/response schemas.
 | Users | `/api/users/` | Create, list, update, delete users; authenticate; email verification; LDAP sync |
 | System | `/api/system/` | System init, settings, stats, backup/restore, cache reset, node/worker management |
 | Trees | `/api/trees/` | Build and retrieve relationship trees from samples, repos, or entities |
-| Entities | `/api/entities/` | Create, list, update, delete entities; manage entity tags and images; list associations |
+| Entities | `/api/entities/` | Create, list, update, delete entities (including Tools, Tool Instances, Agents, ToolSets, Workflows, and model endpoints, profiles, and credentials); manage entity tags and images; list associations; `/api/entities/tools/{id}/instances` lists a tool's versions |
 | Associations | `/api/associations/` | Create and delete associations between files, repos, and entities |
 | Binaries | `/api/binaries/` | Download thorctl and other Thorium binaries |
 | Events | `/api/events/` | Internal event queue operations (pop, clear, reset) |
@@ -183,11 +184,19 @@ The MCP server at `/api/mcp` exposes these tools (requires `Authorization` heade
 - `list_images` — List the images (analysis tools) in a group
 - `list_pipelines` — List the pipelines in a group
 - `start_tree` — Find data related to a sample, repo, tag, or entity by crawling data in a tree structure
+- `run_tool` — Start a tool run of a tool instance (returns the reaction id and group at once)
+- `get_tool_run` — Get a tool run's status, with a `retry_after_secs` polling hint
+- `get_tool_run_results` — Get a finished tool run's results on each of its inputs
+
+The server only answers requests whose `Host` header is loopback, an in-cluster `thorium-api` or
+`thorium-mcp` service name, an API url host from the config, or listed in
+`thorium.mcp.allowed_hosts`; any other host gets `403` (see
+`{THORIUM_URL}/api/docs/user/admins/agentic/mcp.html`).
 
 ## Step 5: thorctl CLI (User/Developer Tool)
 
 `thorctl` is the command-line tool for large-scale Thorium operations (file/repo upload and
-download, image/pipeline/toolbox management, running reactions, tagging, search, and more). It
+download, tool/workflow/run/model/pipeline/toolbox management, running reactions, tagging, search, and more). It
 talks to the same REST API as the Web UI and works against any reachable instance — local
 (minithor) or remote.
 
@@ -230,28 +239,32 @@ See `{THORIUM_URL}/api/docs/user/getting_started/thorctl.html` for per-OS instal
 | `thorctl login <url>` | Authenticate with a Thorium instance (see Setup above) |
 | `thorctl clusters status` / `workers` | View cluster node resource status and per-worker info |
 | `thorctl groups` | List and describe groups you belong to |
-| `thorctl files` | Upload, download, get, count, describe, and delete files |
-| `thorctl images` | Get, describe, edit, import/export images; manage image bans and notifications |
-| `thorctl pipelines` | Get, describe, import/export pipelines; manage pipeline bans and notifications |
-| `thorctl reactions` | Create, get, describe, delete reactions; retrieve reaction logs |
-| `thorctl results` | Download results for files/repos and upload new results |
+| `thorctl files` | Upload, download, get, count, describe, and delete files; `files upload -g <group> <paths> [-p <group>/<pipeline>] [--workflows <name>] [--tools <name>] [--batch <name>] [--wait\|--watch]` starts pipelines (one bulk request per 100 reactions), workflow runs, and tool runs on each newly uploaded file and follows them (exit 0 all good, 1 any upload or run failed, 3 timed out; `-o json` prints a line per file and per run; `--dry-run` previews) |
+| `thorctl images` | Get, describe, export, and delete images (images are read-only: `edit`, `import`, and image bans are refused with a pointer to tools); image notifications |
+| `thorctl pipelines` | Get, describe, create, update, edit, run, delete, import/export pipelines; set a stage's tool (`stage-tool`); manage pipeline bans and notifications |
+| `thorctl tools` | List, describe, create, publish, edit, update, spec, snapshot, deprecate, and delete tools; `versions` lists a tool's versions and `harness-env`/`harness-models` change a harness's model settings; `tools run` (or `run tool`) runs a tool instance (`<tool>@<version>`) and prints one JSON object; `tools runs status/results/logs` |
+| `thorctl instances` | List, describe, and diff tool, toolset, and workflow instances; `request` asks for a new toolset or workflow instance now |
+| `thorctl agents` / `toolsets` / `workflows` | Build AI agents, toolsets, and workflows; `workflows run` (or `run workflow`) runs a workflow instance (`<workflow>#r<revision>`) |
+| `thorctl runs` | List runs (`get --kind tool\|workflow\|pipeline --batch --status`), describe any run (models, plan, provenance), read its logs, retry a failed workflow run, cancel a run or a whole batch (`cancel --batch`, with `--dry-run`) |
+| `thorctl models` | Model endpoints, catalogs, profiles, credentials, bans, refresh, and your own model settings |
+| `thorctl reactions` | Create, get, describe, delete reactions; retrieve reaction logs; `update` adds or removes a reaction's tags and `fail` fails one that hasn't finished |
+| `thorctl results` | Download results for files/repos and upload new results; `results show <reaction>` shows a run's results |
 | `thorctl tags` | Get, add, and delete tags on files and repos |
 | `thorctl associations` | Create, delete, and list associations between files, repos, and entities |
 | `thorctl trees` | Delete the descendant entities under a set of initial tree nodes |
 | `thorctl repos` | Ingest, update, get, describe, download, compile repos; list commits and contributors |
 | `thorctl network-policies` | Get, describe, create, update, delete, and verify network policies; view group defaults |
-| `thorctl ai` | Chat with AI and summarize files/repos |
 | `thorctl cart` | Cart (encrypt/neuter) files locally |
 | `thorctl uncart` | Uncart files locally |
-| `thorctl run` | Create a reaction, monitor it, and download results in one step |
-| `thorctl toolbox` | Scaffold (`init`), `build`, `build-images`, `import`, `export`, `diff`, and `remove` toolboxes — portable tool/pipeline collections (see Step 10 and `{THORIUM_URL}/api/docs/user/developers/toolbox.html`) |
+| `thorctl run` | `run tool\|workflow\|pipeline <NAME>` starts a run; `--one-per-input --batch <NAME> --workers N` fans a list (`--sample-list -` reads stdin) into one run per input and `--wait` follows the batch (exit 0 all completed, 1 any failed, 3 timed out; `-o json` prints JSON lines); `--dry-run` previews. The legacy `run <PIPELINE> <SHA256>` still creates one reaction and shows its output |
+| `thorctl toolbox` | `validate`, `list`, `convert`, `import`, `update`, `diff`, `export`, `remove`, `init`, `build`, and `build-images` for toolboxes: portable collections of tools, toolsets, agents, workflows, and pipelines (see Step 10 and `{THORIUM_URL}/api/docs/user/developers/toolbox.html`) |
 | `thorctl config` | Modify thorctl configuration settings |
 | `thorctl update` | Update thorctl binary |
 
 Use `thorctl -h` or `thorctl <subcommand> -h` for detailed help on any command.
 
 > Building, integrating, or distributing your own tools? See **Step 10** for the developer
-> workflow (image/pipeline `import`/`export` vs the `toolbox` subcommands, with tradeoffs).
+> workflow (`tools` commands for one tool, `toolbox` for collections).
 
 ## Step 6: thoradm CLI (Admin Tool)
 
@@ -588,7 +601,7 @@ docker-registry.thorium.svc.cluster.local:5000/path/to/image:tag
 
 The `thorpy` Python client library (in the source repo at `python/thorpy/`) is a synchronous Python wrapper around the Rust client built with PyO3. Type stubs are in the source repo at `python/thorpy/thorium.pyi` for IDE support.
 
-Currently implemented features are limited to: health, identify, and reaction create/create_bulk. See the source repo at `python/thorpy/README.md` for building and usage details.
+Currently implemented features are limited to: health, identify, reaction create/create_bulk, listing files and reading their results, job checkpoint and sleep, and `tool_portability(spec)` (the portability report of a JSON agentic tool spec). See the source repo at `python/thorpy/README.md` for building and usage details.
 
 ## Step 9: Key Concepts
 
@@ -605,6 +618,8 @@ Groups are the primary access control mechanism. Files, images, pipelines, and r
 
 ### Images vs Pipelines vs Reactions
 
+Images are the older form of tools: read-only now, converted to tools by the upgrade (see Tools below).
+
 - **Images** are individual analysis tools (container-based) that run against files
 - **Pipelines** are ordered chains of images that define a multi-step analysis workflow
 - **Reactions** are instances of a pipeline running against one or more resources. A reaction can target:
@@ -614,6 +629,19 @@ Groups are the primary access control mechanism. Files, images, pipelines, and r
   - **None** — passing no resources creates a generic job (useful for data generation or maintenance tasks)
   
   Reactions track status, logs, and results for each stage in the pipeline.
+
+### Tools, Workflows, and Runs
+
+- **Tools** replace images for adding analysis tools. A Tool is published as immutable **Tool
+  Instances** (`<tool>@<version>`) of kind Image (a workload), Agentic (a function a model calls),
+  or Harness (the program that runs an AI agent). Pipelines name a tool for every stage.
+- **AI agents**, **toolsets**, and **workflows** wire agents together; the event handler builds
+  constant **workflow instances** (`<workflow>#r<revision>`) and only Ready ones run.
+- A **run** is a reaction that runs one tool instance or one workflow instance directly on
+  files/repos, with its own run-scoped token. A workflow run's results are stored under its result
+  key (the instance name, a `~`, and the instance id).
+- User docs: `{THORIUM_URL}/api/docs/user/developers/tools.html` and
+  `{THORIUM_URL}/api/docs/user/users/runs.html`.
 
 ### Entities, Associations, and Trees
 
@@ -633,171 +661,92 @@ Entities support tags, images, and group-based access control.
 
 ## Step 10: Building, Integrating & Testing Tools (Developer Workflow)
 
-This section is for developers **building, integrating, and testing their own tools (images) and pipelines** in Thorium — packaging them as Thorium images, wiring them into pipelines, and distributing them as reusable toolboxes. It builds on the container registry (Step 7) and the images-vs-pipelines model (Step 9); see those rather than re-reading them here.
+> **Images are read-only in this release.** Creating or updating an image returns `410 Gone`, so
+> `thorctl images import` and `images edit` can't add tools. Add tools with `thorctl tools create
+> --spec <spec>` or a toolbox, and set pipeline stages with `thorctl pipelines stage-tool` (see
+> `{THORIUM_URL}/api/docs/user/developers/tools.html`).
 
-> **Full toolbox reference (deep links).** The authoritative toolbox docs are the *Toolboxes*
-> page of the User Docs. Jump straight to a section (anchors follow the headings):
-> - Overview & command table — `{THORIUM_URL}/api/docs/user/developers/toolbox.html#what-is-a-toolbox`
-> - Which command/flag for which task — `…/toolbox.html#which-commandflag-for-which-task`
-> - Toolbox layout — `…/toolbox.html#toolbox-layout`
-> - Tool docs (`description.md`) — `…/toolbox.html#tool-docs-descriptionmd`
-> - Toolbox config (`config.toml`) — `…/toolbox.html#toolbox-config-configtoml`
-> - Image manifest (`manifest.toml`) — `…/toolbox.html#image-manifest-manifesttoml`
-> - Reusing another image's container (`image_from`) — `…/toolbox.html#reusing-another-images-container-image_from`
-> - Pipeline manifest (`manifest.toml`) — `…/toolbox.html#pipeline-manifest-manifesttoml`
-> - How container image tags are built — `…/toolbox.html#how-container-image-tags-are-built`
-> - Creating a toolbox from scratch — `…/toolbox.html#creating-a-toolbox-from-scratch`
-> - Building images locally — `…/toolbox.html#building-images-locally`
-> - Base images (`[base_image]`) — `…/toolbox.html#base-images-base_image`
-> - Exporting from a running instance — `…/toolbox.html#exporting-from-a-running-instance`
-> - Importing into an instance — `…/toolbox.html#importing-into-an-instance`
-> - Diffing a toolbox against an instance — `…/toolbox.html#diffing-a-toolbox-against-an-instance`
-> - Network policies — `…/toolbox.html#network-policies`
-> - Removing a toolbox — `…/toolbox.html#removing-a-toolbox`
-> - Offline transfer with bundled images — `…/toolbox.html#offline-transfer-with-bundled-images`
->
-> (If the API is offline, the same page is mirrored under `https://cisagov.github.io/thorium/`.)
+This section is for developers **building, integrating, and testing their own tools** in Thorium:
+packaging them as container images, publishing them as tool versions, wiring them into pipelines or
+workflows, and distributing them as toolboxes. It builds on the container registry (Step 7) and the
+tools model (Step 9).
+
+> **Toolbox reference.** The toolbox docs are the *Toolboxes* pages of the User Docs
+> (`{THORIUM_URL}/api/docs/user/developers/toolbox.html` for the format, validating, converting,
+> importing, updating, exporting, diffing, removing, network policies, and offline transfer;
+> `{THORIUM_URL}/api/docs/user/developers/toolbox_directories.html` for the directory layout,
+> manifests, `init`, `build`, `build-images`, and image tags). If the API is offline, the same pages
+> are mirrored under `https://cisagov.github.io/thorium/`.
 
 ### When to use which
 
-- **`thorctl images` / `thorctl pipelines` `import`/`export`** — round-trip a **single** image or pipeline that is **already integrated** into Thorium. Pull one existing tool's config (and its container image) out to disk, move it, and push it back. These operate on what already exists; they do **not** scaffold a new tool's config.
-- **`thorctl toolbox` (`init` + `build` + `build-images` + `import`/`export`)** — **integrate brand-new tools** (toolbox `init` is the only command that *scaffolds* image/pipeline config files from scratch) and **curate, version, and distribute larger collections** of tools as a single unit (`toolbox.json`).
-- **Both support offline bundling** for moving tools between segmented/air-gapped networks (via different mechanisms — see Tradeoffs).
+- **`thorctl tools` (`create`, `publish`, `edit`, `update`, `spec`, `snapshot`, `delete`)** manage **one**
+  tool and its versions from a spec file. Use them to publish a new version of a tool that exists.
+- **`thorctl toolbox`** integrates **new tools** (`init tool` scaffolds a manifest and spec) and
+  curates, versions, and distributes **collections** of tools, toolsets, agents, workflows, and
+  pipelines as one `toolbox.json` (format 2). A legacy image toolbox is converted as it is read
+  (`toolbox convert` writes the converted file).
+- **`thorctl pipelines export`/`import`** copy pipelines (stage tools by name and version);
+  `images export` only reads images.
 
-### Working inside a toolbox — the build/test loop
-
-A toolbox is a directory of tool folders rolled into one `toolbox.json`. It is **anchored on its
-`config.toml`**: that file defines the toolbox identity (name, registry) and is what `build`,
-`export`, and `init` resolve against.
-
-```
-my-toolbox/
-├── config.toml              # toolbox-wide: name, registry, registries, image_path_prefix,
-│                            #   export_image_path, export_pipeline_path, bundled_images, [base_image]
-├── toolbox.json             # generated by `build` (and `export`)
-├── images/<tool>/           # per image: manifest.toml + <name>.json + description.md + Dockerfile
-│                            #   (+ <name>.tar.gz only in --with-images bundles)
-└── pipelines/<tool>/        # per pipeline: manifest.toml + <name>.json + description.md
-```
-
-`build` discovers `manifest.toml` files at **any depth**, so the layout is flexible;
-`export_image_path` / `export_pipeline_path` only control where `export` *places* dirs (default
-`images`/`pipelines`).
-
-**End-to-end loop to build out and test a new tool:**
+### The build/test loop
 
 ```sh
-# 1. Scaffold a toolbox: one or more image build dirs + a pipeline binding images.
-#    config.toml lands in --toolbox-dir (default: cwd). Add -n for non-interactive defaults.
-thorctl toolbox init toolbox -i images/clamav,images/yara -p pipelines/av:clamav,yara -g <group> \
-    [--registry <reg>] [--image-path images --pipeline-path pipelines]
-
-# 2. Edit the tool: write its Dockerfile and tune images/<tool>/<name>.json + manifest.toml
-#    (description.md becomes the tool's description on build).
-
-# 3. Build the manifest. --path (crawl root) and --output (toolbox.json) both DEFAULT to the
-#    config.toml's directory; override independently. -c points at a non-cwd config.toml.
-thorctl toolbox build                       # reads ./config.toml, writes ./toolbox.json
-thorctl toolbox build -c sub/config.toml    # builds the toolbox in sub/, writes sub/toolbox.json
-
-# 4. Build & push the container images straight from toolbox.json (forks without CI).
-thorctl toolbox build-images ./toolbox.json --push      # everything buildable
-thorctl toolbox build-images ./toolbox.json -i clamav   # just one image
-#   useful: --no-cache, --pull, --tag-suffix -mybranch, --base-image ARG=IMAGE
-
-# 5. Import into an instance to test (local path, directory, or URL).
-thorctl toolbox import ./toolbox.json [--group-override <group>]
-
-# 6. Run it (Step 9), inspect results, iterate, then re-build + re-import.
-thorctl run ...   # or thorctl reactions create
+# 1. Scaffold a tool (kind image|agentic|harness) or toolset|agent|workflow; -n skips prompts.
+thorctl toolbox init tool --kind image -n -g <group> tools/strings
+# 2. Edit tools/strings/strings.json (the spec), manifest.toml, and description.md; keep the tool under
+#    a toolbox root that has a config.toml (see the directory docs).
+# 3. Check it offline, then roll the manifests into toolbox.json.
+thorctl toolbox build && thorctl toolbox validate toolbox.json --strict
+# 4. Build and push the container images straight from toolbox.json (forks without CI).
+thorctl toolbox build-images ./toolbox.json --push
+# 5. See the plan, then import into an instance to test.
+thorctl toolbox import ./toolbox.json --dry-run
+thorctl toolbox import ./toolbox.json [--group-override <group>] [--create-groups]
+# 6. Run it (Step 9), inspect results, iterate: edit, rebuild, import again.
+thorctl run tool strings --sample <SHA256> --group <group> --wait
 ```
 
-**Appending into an existing toolbox** (add more tools in later runs — fully interoperable
-because `build` re-walks the whole tree):
-
-```sh
-# add one image stub; --image-name overrides the registry tag leaf (default: dir name)
-thorctl toolbox init image images/peid -g <group> [--image-name path/peid] [-c config.toml]
-# add one pipeline stub; --order references images that must be in --images
-thorctl toolbox init pipeline pipelines/triage -i clamav,yara -g <group> [-c config.toml]
-thorctl toolbox build   # re-roll toolbox.json with the new tools
-```
-
-`init image`/`init pipeline` take an optional **`-c <config.toml>`** as a *resolution/validation*
-source (NOT placement — the positional path is always the destination). With `-c`, `init pipeline`
-requires every referenced image to already exist in that toolbox (it never creates image stubs) and
-version-pins each from the toolbox; `init image -c` errors on a duplicate name+version unless
-`--overwrite`. `init pipeline` also errors if `--order` names an image absent from `--images`, and
-requires `--images` in `-n` mode.
-
-**Tag derivation:** buildable images derive `<registry>/[<image_path_prefix>/]<name>:<version>`.
-`thorctl toolbox build --use-image-path` swaps the tool `name` leaf for the manifest's path-style
-`image_name`. (There is no `--flatten-image-paths` flag.)
+Importing the same toolbox twice changes nothing: versions are told apart by the hash of their spec.
+`import --skip-conflicts` never changes what exists (the CI-safe choice), `--overwrite` publishes
+changed specs as new versions, `--rollback-on-failure` undoes a partial apply, and `update` refreshes
+only what an earlier import created.
 
 ### Distribute, diff, and apply a toolbox
 
 ```sh
-thorctl toolbox export -g <group> -o ./tb [--with-images]    # pull a collection from an instance
-thorctl toolbox export -p <grp>/<pipe> -i <grp>/<img> -o ./tb # specific pipelines + images
-thorctl toolbox import ./tb/toolbox.json \                    # or a directory / URL
-    [--group-override <group>] [--image-path-prefix <reg/base>] [--overwrite|--skip-conflicts] \
-    [--rollback-on-failure] [--update-network-policy]
-thorctl toolbox diff ./tb [--group-override <g>] [--exit-code]  # preview an import (CI drift gate)
-thorctl toolbox remove ./tb [--group-override <g>]             # delete a toolbox's pipelines/images
+# pull a collection (and with --all-kinds its toolsets, agents, and workflows) from an instance
+thorctl toolbox export -g <group> -o ./tb [--all-kinds] [--with-images]
+thorctl toolbox export -p <grp>/<pipe> -t <grp>/<tool> -o ./tb    # specific items; their dependencies come along
+thorctl toolbox diff ./tb [--group-override <g>] [--exit-code]     # preview an import (CI drift gate)
+thorctl toolbox import ./tb/toolbox.json [--image-path-prefix <reg/base>] [--update-network-policy]
+thorctl toolbox remove ./tb --dry-run                              # then without --dry-run to delete what it created
 ```
 
-**`export` is append-safe.** Exporting into a directory that already has a `config.toml` **reuses
-and preserves it** (no `--config` needed); `--overwrite-config` replaces it. Settings-source
-priority: `--config` (seed a *new* toolbox from another's settings) > existing `<output>/config.toml`
-> `--name`/`--registry`. A `-p`/`-i` entry can carry a **`=dest`** suffix
-(`-i group/name=tools/clamav`) to place that resource's files in a chosen subdir — placement only,
-never affecting selection/membership/order; auto-pulled pipeline images use the default layout unless
-named with their own `=dest`.
+Exporting into a directory that already has a `config.toml` reuses it (`--overwrite-config`
+replaces it). **Offline / air-gapped transfer:** `export --with-images` bundles each image's tarball
+(recorded in `toolbox.json`), and `import --image-path-prefix <reg>` loads, retags, and pushes them
+into the offline registry. For registry addresses (`localhost:5000` vs
+`docker-registry.thorium.svc.cluster.local:5000`), see Step 7.
 
-**Overwrite scopes are distinct flags:** `--overwrite` = per-tool files (and, in `import`, the
-resource conflict mode — apply incoming); `--overwrite-config` = `config.toml` (export + init
-toolbox); `--update-network-policy` = cluster network policies (import). `import`'s conflict modes
-are interactive editor (default), `--overwrite`, or `--skip-conflicts` (skip differing resources,
-the CI/agent-safe choice); `--rollback-on-failure` undoes a partial apply in non-interactive runs.
-
-**Offline / air-gapped transfer:** `export --with-images` bundles each image's tarball into its
-tool dir (recorded in `toolbox.json` so import finds it); `import --image-path-prefix <reg>`
-loads, retags, and pushes them into the offline registry. You don't need to know the offline
-registry at export time.
-
-For registry addresses (e.g. `localhost:5000` vs `docker-registry.thorium.svc.cluster.local:5000`), see Step 7.
-
-### Single tools as code — `images`/`pipelines import`/`export`
-
-For a one-off (a single already-integrated tool, no toolbox overhead):
+### Single tools and pipelines
 
 ```sh
-thorctl images export -g <group> -o ./exports                 # all images in the group
-thorctl images export -g <group> -o ./exports --config-only   # configs only, no docker images
-thorctl pipelines export -g <group> -o ./exports
-thorctl images import -g <group> -i ./exports \
-    --registry localhost:5000 [--registry-override <url>] [--skip-push]
-thorctl pipelines import -g <group> -i ./exports
+thorctl tools create --spec strings.yaml --name strings --group <group> --version 1.0.0
+thorctl tools publish strings --version 1.1.0 --spec strings.yaml       # a new immutable version
+thorctl tools edit strings                                              # edit the latest spec in your editor
+thorctl pipelines create static --group <group> --stage strings --stage-tool strings=strings
+thorctl pipelines run static --sample <SHA256> --wait --logs
 ```
-
-`import` opens an interactive editor to resolve differences by default; use `--overwrite` (apply
-incoming) or `--skip-conflicts` (skip differing resources, CI-safe), and `--rollback-on-failure` to
-undo a partial apply. `--migrate-registry` only updates the registry path.
-
-### Tradeoffs
-
-- **Scaffolding:** only `toolbox init` creates a *new* tool's config; `images`/`pipelines export` can only extract something already in Thorium (and `import` needs a hand-written config). New tool → toolbox; existing tool → image/pipeline.
-- **Scope & structure:** image/pipeline import/export is a flat, low-overhead per-resource round-trip; toolbox adds `config.toml`/`manifest.toml` and a build step — more setup, but you get shared registry config, collection-level versioning, `build-images`, `diff`, `--group-override`, and a single distributable `toolbox.json`.
-- **Offline bundling (both, opposite defaults):** `images export` bundles the container image **by default** (opt out with `--config-only`), and `import` repoints it via `--registry`/`--registry-override`. `toolbox export` is **config-only by default** and bundles image tarballs only with `--with-images`, which `toolbox import` then pushes using `--image-path-prefix`. Mind this default-polarity difference when moving tools across networks.
 
 ### Typical dev loop
 
 1. Write your tool and its Dockerfile.
-2. Scaffold its Thorium config — `toolbox init image` (or `init pipeline`) for a new tool.
-3. `toolbox build` → `toolbox.json`, then `toolbox build-images --push` to build/push its container (or build/push manually per Step 7).
-4. Apply it — `toolbox import`, or `images`/`pipelines import` for a one-off.
-5. Run it — `thorctl run` or `thorctl reactions create` against a sample/repo.
-6. Iterate — edit configs, re-`build`, re-`import` (or `thorctl images edit` for a quick tweak).
+2. Scaffold its Thorium config with `toolbox init tool` and fill in the spec.
+3. `toolbox build` and `toolbox validate`, then `toolbox build-images --push` (or build/push manually per Step 7).
+4. Apply it with `toolbox import`, or `tools create`/`tools publish` for one tool.
+5. Run it with `thorctl tools run`, `pipelines run`, or `workflows run` against a sample or repo.
+6. Iterate: edit the spec, rebuild, import again, or `thorctl tools edit` for a quick tweak.
 
 ## Where to Go Next
 

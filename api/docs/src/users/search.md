@@ -1,8 +1,9 @@
 # Search
 
 Thorium also allows users to search through tool results and file tags to find
-interesting files. This is currently only available in the Web UI and can be accessed on
-the home page. Thorium uses the [Lucene syntax](https://www.elastic.co/guide/en/kibana/current/lucene-query.html)
+interesting files. Thorctl has no search command yet; search is available through the
+API route `GET /api/search/`, and
+Thorium uses the [Lucene syntax](https://www.elastic.co/guide/en/kibana/current/lucene-query.html)
 for search queries.
 
 It's important to note that documents are indexed **per group**. This means that
@@ -10,30 +11,32 @@ for a document to be returned, **all** search parametes must be met by at least
 one group (see the below [FAQ](#what-do-groups-have-to-do-with-searching-in-thorium)
 for more details).
 
-<p align="center">
-    <img width="800" src="./../static_resources/search.png">
-</p>
+If a search is made before the search streamer has created the search indexes (for example right
+after a new deployment, before any file or result was indexed), the API answers `503 Service
+Unavailable` with a message that the search index does not exist yet. Ask an admin to check that the
+search streamer is running; the search works once it has created the indexes.
 
-### Indexes
+### API
+---
+
+```bash
+curl -G -H "Authorization: Bearer $TOKEN_B64" https://<URL>/api/search/ \
+  --data-urlencode 'query=pe32 AND rust' --data-urlencode 'groups=examples' --data-urlencode 'limit=50'
+```
+
+| Query parameter | Meaning |
+| --------------- | ------- |
+| `query` | The Lucene query |
+| `indexes` | The indexes to search, repeated for several: `SampleResults`, `RepoResults`, `SampleTags`, `RepoTags`. Only `SampleResults` and `SampleTags` are searched by default |
+| `groups` | The groups to search, repeated for several; with none, all of your groups are searched |
+| `start`, `end` | The time range, by when the data was last modified (RFC 3339 datetimes) |
+| `cursor` | The cursor from the previous response, to read the next page |
+| `limit` | The most documents to return in this response (50 by default) |
 
 Data is stored in Elasticsearch in various indexes based on the data type (i.e. results are
-stored separately from tags). You can select the index to search on by selecting the dropdown
-on the right of the search bar. Searches are performed on all indexes by default.
-
-<p align="center">
-    <img width="800" src="./../static_resources/search-dropdown.png">
-</p>
-
-### Search Parameters
-
-You can specify various parameters for your search by clicking the funnel icon below the search bar.
-Parameters include the sample's group(s), the date the sample was last modified, and the number of search
-results to display per page. By default, no groups are selected and searches are performed on all
-of the user's groups.
-
-<p align="center">
-    <img width="800" src="./../static_resources/search-parameters.png">
-</p>
+stored separately from tags). Errors: `400` for an invalid parameter, `401` when you aren't
+authorized, `404` for a group you can't see, and `503` when the indexes don't exist yet or a
+backing service is unavailable.
 
 ### Examples
 

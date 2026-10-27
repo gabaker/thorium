@@ -135,7 +135,9 @@ a stop, so run `expose` again afterwards.
 
 `deploy` installs the `infra-operators` chart (once per cluster, skipping operators that already
 run), installs or upgrades the `thorium` chart, waits for Thorium to be ready, installs `thorctl`
-and logs it in, and imports the default toolbox.
+and logs it in, and imports the default toolbox (see [Importing a
+toolbox](./deploy-helm.md#importing-a-toolbox) for how the import Job works and how to read its
+log).
 
 ```bash
 minithor [--namespace-prefix <prefix>] deploy [options]
@@ -154,7 +156,7 @@ minithor [--namespace-prefix <prefix>] deploy [options]
 | `--local-image <name:tag>` | A Thorium image built on this host, loaded into every node of the profile and deployed with pull policy `IfNotPresent`; can't be combined with `--image` |
 | `--registry` | Deploy a container registry at `docker-registry.<thorium namespace>.svc.cluster.local:5000` (see [Registry](#registry)) |
 | `--registry-user <name>` | Enable registry basic auth for this user (implies `--registry`; the password is in `credentials --all`) |
-| `--toolbox <path\|url>` | Toolbox to import (default: `tools/toolbox.json` on GitHub main), fetched on this host |
+| `--toolbox <path\|url>` | Toolbox to import, a legacy or format 2 toolbox file (default: `tools/toolbox.json` on GitHub main; `thorctl` reads either format and converts a legacy toolbox as it imports), fetched on this host. Read the import report with `kubectl logs job/<toolbox-import-...>` |
 | `--no-toolbox` | Don't import a toolbox |
 | `--banner <file>` | Login banner text |
 | `--docker-config <file>` | A `.dockerconfigjson` for pulling the Thorium image (see [Private images](#private-images)) |

@@ -8,10 +8,15 @@ portion will be trying to fairly executing everyones jobs evenly. This allows
 for users to spawn large groups of reactions/jobs without fear of abusing
 the cluster and preventing others from accomplishing tasks.
 
-The scaler currently support 3 scheduling targets:
+The scaler schedules tool instances: jobs are queued per tool instance, fair share is ranked over
+tool instances, and each tool run or workflow run gets its own workers. See
+[Scheduling Tools and Runs](../admins/agentic/scheduling.md).
+
+The scaler currently supports 4 scheduling targets:
   - Kubernetes
   - Bare metal
   - Windows
+  - KVM
 
 # Scheduling Algorithms
 ---

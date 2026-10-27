@@ -444,7 +444,7 @@ namespace instead of granted cluster-wide. Turn it off only if the operator must
 | Value | Effect |
 |-------|--------|
 | `type` | `none` (default), `nginx` (a `networking.k8s.io` Ingress), or `traefik` (an `IngressRoute` on the `websecure` entrypoint plus a `TLSOption` limiting TLS to 1.2 and 1.3) |
-| `host` | The hostname to route; empty routes every host |
+| `host` | The hostname to route; empty routes every host. The chart also renders it as `thorium.mcp.allowed_hosts`, because the MCP server at `/api/mcp` refuses requests addressed to a host it doesn't know. With an empty `host`, list the hostnames MCP clients use in `operator.cluster.config.thorium.mcp.allowed_hosts` (which replaces the rendered list) |
 | `className` | The Ingress class (nginx only, default `nginx`) |
 | `annotations` | Extra Ingress annotations (nginx only), merged over the chart's `nginx.ingress.kubernetes.io/proxy-body-size: "0"` (and `ssl-redirect: "false"` without TLS) |
 | `tls.secretName` | An existing `kubernetes.io/tls` Secret in the thorium namespace. With nginx and no Secret, the Ingress serves plain HTTP |

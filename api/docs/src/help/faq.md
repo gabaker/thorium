@@ -53,7 +53,7 @@ for adding tools and pipelines in the [developer docs](../developers/developers.
 All data is uploaded to a group and only people within that group can see that group's data. If you want to share data
 with someone, you can add that person to the group or reupload that data to one of their groups. You can read about how
 Thorium manages data access with groups and how group and system roles affect the ability of users to work with Thorium
-resources in the [Roles and Permissions](../getting_started/roles_permissions.md#group-ownership) section of the
+resources in the [Roles and Permissions](../getting_started/roles_permissions.md#resource-ownership-and-access) section of the
 [Getting Started](../getting_started/getting_started.md) chapter.
 
 #### What is Traffic Light Protocol (TLP) and does Thorium support TLP levels for files?

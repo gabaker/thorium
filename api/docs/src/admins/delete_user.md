@@ -1,19 +1,16 @@
 # Delete a User
 
-Only admins can delete the Thorium accounts of users. To delete a user's account, navigate to the users page in the Web UI using the left hand navigation bar (`https://<URL>/users`).
+Only admins can delete the Thorium accounts of users. Neither Thorctl nor `thoradm` has a command for it, so an admin
+deletes an account with the API:
 
-<p align="left">
-    <img width="200" src="./../static_resources/nav-bar-users-selected.png"
-</p>
+```bash
+curl -X DELETE -H "Authorization: Bearer $TOKEN_B64" https://<URL>/api/users/delete/<USERNAME>
+```
 
-Scroll to the Thorium user you want to delete. You will see a delete button to the right side of the users name, role, and group membership. Click the delete button.
+The route answers `204` on success, `404` when the user doesn't exist, and `401` unless you use a full admin token (a
+scoped token, including a run token, is refused). Deleting an account doesn't delete the files and other resources
+the user uploaded: groups own those (see [Delete a Group](./delete_group.md)).
 
-<p align="center">
-    <img width="800" src="./../static_resources/select-a-user-to-delete.png"
-</p>
-
-You will see a confirmation modal appear after clicking delete. Confirm that you selected the correct user to delete.
-
-<p align="center">
-    <img width="600" src="./../static_resources/confirm-user-deletion.png"
-</p>
+To lock an account out without deleting it, give it the `Disabled` system role instead (see [Roles, Permissions, and
+Ownership](../getting_started/roles_permissions.md#system-roles)). To make a user's current token stop working, log
+them out with `GET /api/users/logout/<USERNAME>`.

@@ -105,8 +105,8 @@ When the operator knows a newer revision than the deployment's and no target is 
 `ThoriumCluster` goes to `UpgradeRequired` with a message like:
 
 ```
-This cluster is at revision 2026-10-v01 and this operator deploys revision 2026-10-v02. Nothing
-is changed until spec.upgrade.target_revision is set to 2026-10-v02 (Helm value
+This cluster is at revision 2026-10-v01 and this operator deploys revision 2026-10-v04. Nothing
+is changed until spec.upgrade.target_revision is set to 2026-10-v04 (Helm value
 operator.cluster.upgrade.targetRevision); the steps that will run are listed in
 status.upgrade.steps
 ```
@@ -132,14 +132,14 @@ kubectl -n thorium get thoriumcluster thorium \
 
 ```bash
 helm upgrade thorium oci://ghcr.io/cisagov/thorium/charts/thorium --version $VERSION \
-  -n thorium -f site.yaml --set operator.cluster.upgrade.targetRevision=2026-10-v02
+  -n thorium -f site.yaml --set operator.cluster.upgrade.targetRevision=2026-10-v04
 ```
 
 or, for a `ThoriumCluster` that isn't managed by Helm:
 
 ```bash
 kubectl -n thorium patch thoriumcluster thorium --type merge \
-  -p '{"spec":{"upgrade":{"target_revision":"2026-10-v02"}}}'
+  -p '{"spec":{"upgrade":{"target_revision":"2026-10-v04"}}}'
 ```
 
 Development clusters also label their Thorium namespace `thorium.sandia.gov/dev: "true"`, which
@@ -157,7 +157,7 @@ kubectl label namespace thorium thorium.sandia.gov/dev-
 
 Put the target in your values file so later upgrades keep it, and raise it on every upgrade that
 brings a new revision: a deployment that reaches a target older than the operator's latest
-revision waits in `UpgradeRequired` again ("set spec.upgrade.target_revision to <latest> to
+revision waits in `UpgradeRequired` again ("set spec.upgrade.target_revision to `<latest>` to
 continue").
 
 A target that can't be used sets the phase to `Error`:
@@ -228,7 +228,7 @@ loss](#accepting-loss)):
 operator:
   cluster:
     upgrade:
-      targetRevision: 2026-10-v02
+      targetRevision: 2026-10-v04
       approvals:
         - step: elastic-reindex-keyword-mappings
           backup: thoradm backup 2026-10-08 on /mnt/backups
@@ -308,7 +308,7 @@ finishes the step and sets the `MigrationIssues` condition in `status.upgrade.co
 condition lists every step of the running upgrade that ended with issues, separated by ` | `, this
 run's step first and the others newest first, each as `<step>: <n> objects in <m> groups; thoradm migrate issues
 --id <migration>`; this run's step also names its largest groups' reason codes. It lists at most
-five steps and ends with "and <n> more steps with issues" when there are more, and it clears once
+five steps and ends with "and `<n>` more steps with issues" when there are more, and it clears once
 no step of the upgrade has issues left, so a later step that ended clean doesn't hide an earlier
 one's. To fix a group by hand, correct its objects and run `thoradm migrate run --id <migration>
 --reason <code>`; when that ends the pass, the operator continues without a new approval.
@@ -382,11 +382,12 @@ thoradm migrate plan --from 2026-10-v01 --to 2026-10-v02
 The other `thoradm migrate` commands (`check`, `run`, `verify`, `issues`, `report`, `record`,
 `revert`, and `reset-state`) read the cluster, so they need the thoradm config and reach Scylla,
 Redis, and S3. [Migrate](../thoradm/thoradm.md#migrate) describes each one, its flags, and its exit
-codes. Every migration this release registers can be checked, run, and verified by thoradm,
-including `elastic-rebuild`, the migration behind the Elasticsearch reindex step. A migration
-thoradm can't perform prints its manual procedure and exits with code 3 on `check`, `run`, and
-`verify`, and one thoradm can only check does so on `run` and `verify`; no migration of this
-release is either.
+codes. Every migration this release registers but `drain-reactions` can be checked, run, and
+verified by thoradm, including `elastic-rebuild`, the migration behind the Elasticsearch reindex
+step. A migration thoradm can't perform prints its manual procedure and exits with code 3 on
+`check`, `run`, and `verify`, and one thoradm can only check does so on `run` and `verify`;
+`drain-reactions` is the one of the second kind, and no migration of this release is of the
+first.
 
 ## Schema drift
 
@@ -594,12 +595,18 @@ with which image (see the messages in [Setting a target](#setting-a-target)).
   migration Job (see [Data migrations](#data-migrations)). The Elasticsearch reindex of
   `2026-10-v02` is the exception: after its approval the operator waits for you to do it by hand,
   which `thoradm migrate run --id elastic-rebuild` does (see [Reindexing
-  Elasticsearch](#reindexing-elasticsearch)).
+  Elasticsearch](#reindexing-elasticsearch)). `drain-reactions` of `2026-10-v04` runs no migration
+  Job either: the operator reruns its check Job until no reaction is in flight (see [Upgrading to
+  Agentic Workflows](../agentic/upgrading.md#the-drain)).
 - After `thoradm migrate reset-state` or a `thoradm backup restore` moves the recorded revision,
   the operator keeps the revision its `thorium-upgrade-state` ConfigMap holds until it next reads
   the record, when its hourly drift read is due at a reconcile (at least daily on a `Ready`
   cluster), and then rebuilds the ConfigMap from the record (see [Resetting the Recorded
   State](../thoradm/thoradm.md#resetting-the-recorded-state)).
+- The charts pin ScyllaDB 6.2.3, and an upgrade doesn't change it. Newer Scylla releases (2025.1
+  and later) create new keyspaces with tablets, which refuse materialized views that Thorium's
+  schema uses, so don't upgrade Scylla independently of a Thorium release that says it supports it
+  (see [Bring Your Own Infrastructure](./infrastructure.md)).
 - Revisions released as `one-way` (see `thoradm migrate list`) can't be downgraded: restore from a
   backup instead (see [Rolling back](#rolling-back)).
 - Rolling the operator image back also rolls the cluster-wide `ThoriumCluster` CRD back; downgrade
@@ -696,7 +703,64 @@ without an approval. A user it can't read is an issue group with the step's limi
 the step it reverses. The schema this revision applies is not undone: `2026-10-v02` ignores the
 columns it doesn't read.
 
-<!-- PLACEHOLDER: the section of the next released revision goes here, after 2026-10-v03 and
+### 2026-10-v04
+
+Converts the data of earlier releases for tools, tool instances, and workflows: images, pipeline
+stages, and provenance. It holds no schema step of its own: the operator applies the schema of the
+image it deploys before it rolls anything out, and this revision's schema differs from
+`2026-10-v03` only in how pipelines are stored in Redis. Deployments at `2026-10-v03` run these
+steps when a target is set, and a deployment at `2026-10-v02` runs them after the steps of
+`2026-10-v03`:
+
+| Step | Kind | What it does |
+|------|------|--------------|
+| `drain-reactions` | Data | Waits, with Thorium running normally, until no reaction is `Created` or `Started` and no worker of the previous release is registered; it only checks and deletes nothing, and is skipped when nothing is in flight |
+| `images-to-tools` | Data | Creates a tool and its first tool instance for every image; needs an approval when an image exists |
+| `pipelines-to-tool-stages` | Data | Pins each image stage of every pipeline to the first tool instance created from its image; needs an approval when a stage needs converting |
+| `provenance-to-legacy-tools` | Data | Moves the tool names stored in file system, decompiled function, and process tree provenance into their legacy tools field; needs an approval when a row holds names |
+| `finalize-tool-only` | Config | Records the revision once every step is done or skipped |
+
+A deployment can reach `2026-10-v04` in two stops or in one. A deployment first deployed with an
+image that only knows `2026-10-v03` (it applies the schema and moves each user's theme, and
+records the revision) runs the five steps above later, when it is upgraded to an image that knows
+`2026-10-v04`: nothing of the conversion is skipped because `2026-10-v03` is already recorded. A
+deployment at `2026-10-v02` can go straight to `2026-10-v04` with the newest image: the plan is
+`schema-apply`, `drain-reactions`, `users-settings-theme`, then the three conversions and the
+record. The drain comes before `users-settings-theme` because that step pauses the API, and
+`drain-reactions` has to wait with the API and the scalers running. The planner moves a step that
+needs components running ahead of the steps that pause them, so the order holds whichever way the
+deployment gets there.
+
+`drain-reactions` never deletes a reaction. While it waits, stop submitting reactions and let the
+unfinished ones finish, or delete a stuck one with `thorctl reactions delete` while the previous
+API is still running, and do not restart or delete API pods meanwhile. The three conversion steps
+pause the API, the scalers, the event handler, and the search streamer while they run, and those
+components stay at zero until the new release's Deployments are applied.
+
+An image the conversion can't convert (one missing a field it needs, whose name another tool
+already uses, or whose dependency lists name no migrated image) is left unconverted, and a pipeline
+that has a stage using it is left untouched as a whole, stages that would have converted included.
+Each step's check Job log holds only its JSON result; read the full report, with its notes and
+warnings, by running `thoradm migrate check --id <step> --all --samples` with the cluster config,
+or `thoradm migrate report --id <step>` after a run. To make such a pipeline run, a developer
+creates the replacement tool with `thorctl tools create` and then sets every stage of the pipeline
+with `thorctl pipelines stage-tool <pipeline> <stage> <tool>`, including the stages that would have
+converted. The migration only accepts the first instance it created, so rerunning it doesn't set
+those stages and isn't needed.
+
+[Upgrading to Agentic Workflows](../agentic/upgrading.md) covers these steps in full: what each
+converts, the drain wait and how to end it, approvals, the outage, issue codes and how to read the
+check reports, the pipelines left unconverted, and rolling back.
+
+Downgrading from `2026-10-v04` to `2026-10-v03` is refused once `images-to-tools`,
+`pipelines-to-tool-stages`, or `provenance-to-legacy-tools` finished or was `Skipped`: those steps
+are irreversible, and the refusal names the first of them before anything runs (see
+[Rolling back](../agentic/upgrading.md#rolling-back)). A deployment that only drained goes back
+with nothing to undo. Downgrading to `2026-10-v02` from `2026-10-v04` takes the same refusal, and
+once past it runs `users-settings-theme-reverse` as described for `2026-10-v03`. The schema the
+image applies is not undone: the previous release ignores the columns it doesn't read.
+
+<!-- PLACEHOLDER: the section of the next released revision goes here, after 2026-10-v04 and
 before this heading; add its step table and, if a step waits on running API pods, its warning to
 "How steps run". -->
 

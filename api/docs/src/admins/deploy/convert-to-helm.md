@@ -96,6 +96,9 @@ dev, which Helm doesn't manage. ..."), and minithor and megathor refuse to deplo
    a target is set. Set `operator.cluster.upgrade.targetRevision` (minithor sets `autoTargetDev`)
    and approve the reindex step if the deployment needs it (see
    [Upgrading Thorium](./upgrades.md) and [Reindexing Elasticsearch](./upgrades.md#reindexing-elasticsearch)).
+   The target `2026-10-v04` also converts every image to a tool, which needs an approval naming a
+   backup and can't be undone, and waits for in-flight reactions first (see
+   [Upgrading to Agentic Workflows](../agentic/upgrading.md)).
    The operator then checks the backends and deploys the new components.
 
 5. **Clean up** once the `ThoriumCluster` reports `Ready`: remove the RBAC kept for the old
@@ -225,7 +228,7 @@ playbook with:
 - `thorium_deployment_name: dev` (the old `ThoriumCluster` name);
 - `infra_operators_enabled: false` (the old operators keep running);
 - the converted values file last in `thorium_values_files`;
-- `thorium_upgrade_target_revision: 2026-10-v03`, and `thorium_upgrade_approvals` if the reindex
+- `thorium_upgrade_target_revision: 2026-10-v04`, and `thorium_upgrade_approvals` if the reindex
   step needs it.
 
 The converted values are applied after megathor's own, so their admin bootstrap setting wins.

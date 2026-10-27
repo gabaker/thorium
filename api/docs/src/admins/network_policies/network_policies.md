@@ -167,7 +167,9 @@ added to an image.
 ### Default Network Policies
 
 A default network policy is a policy that is added to newly-created images in its group(s) when no other policy is provided by the user. Unlike forced network policies, default policies are directly
-added to images and will appear in an image's info.
+added to images and will appear in an image's info. Only image creation applies default policies, and
+images can no longer be created (the API answers `410 Gone`), so a default policy is not added to
+anything new. A tool instance names its network policies itself.
 
 If a network policy is set to no longer be default, it will *not* be automatically removed from the
 images it was added to.
@@ -176,7 +178,7 @@ images it was added to.
 
 Creating, updating, and managing network policies in Thorium requires an understanding of their
 components. Below are a list of fields that make up a network policy, their descriptions, accepted
-values, and whether or not the field is required. Use this info to write [rules files](#the-rules-file)
+values, and whether or not the field is required. Use this info to write [rules files](./configure_network_policies.md#the-rules-file)
 when creating network policies as well as set the base network policy to apply to all tools in a
 Thorium instance.
 

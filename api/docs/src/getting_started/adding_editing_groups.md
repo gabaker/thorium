@@ -2,20 +2,29 @@
 
 All resources within Thorium including files, analysis pipelines, and tools are owned by a user and uploaded to a
 group. Access to modify group resources is granted by your role within the group. If you want to learn more about
-Thorium's roles and permissions system, you can read [this](./adding_editing_groups.md) page. The ability to manage
-group membership and create new groups is only available in Thorium's Web UI.
+Thorium's roles and permissions system, you can read [this](./roles_permissions.md) page. You can create a group with
+Thorctl; managing group membership uses the API (see [API](#api)).
 
-## WebUI
+## Thorctl
 ---
-To create a new group follow the steps in the following video:
+Create a group that you own with `thorctl groups create`:
 
-<video autoplay loop controls>
-  <source src="../static_resources/create-group.mp4", type="video/mp4">
-</video>
+```bash
+thorctl groups create analysts -d "Malware analysts"
+thorctl groups create reversers --owner alice --owner bob
+```
 
-You may have noticed that you can add users to different group roles. As we described in the previous chapter, group roles
+The name takes lowercase letters, numbers, and dashes. `-d/--description` says what the group is for,
+and each `--owner <USER>` makes another user a direct owner; you are always an owner, because the
+server adds the caller. Use `thorctl groups get` and `thorctl groups describe <GROUP>` to see groups
+you can access.
+
+## Group Roles
+---
+
+You can add users to different group roles. As we described in the previous chapter, group roles
 are how you define the abilities a group member has within the group. Roles and their abilities are defined in the table
-below. Group resources can include images, pipelines, repos, files, tags, comments, and tool results.
+below. Group resources can include tools, pipelines, repos, files, tags, comments, and tool results.
 
 | Ability | Owners | Managers | Users | Monitors |
 | ---- | ---- | ---- | ---- | ---- |
@@ -34,6 +43,24 @@ an external group membership system (ie LDAP/IDM) to grant access to Thorium res
 | direct user | A single user in Thorium |
 | metagroups | A group of users that is defined in LDAP |
 
-By default, metagroup info is updated every 10 minutes or when a Thorium group is updated. This means that when a user
-is added or removed from a metagroup it may take up to 10 minutes for that change to be visible in Thorium via the Web
-UI.
+By default, metagroup info is updated every 10 minutes or when a Thorium group is updated. This means that
+when a user is added or removed from a metagroup it may take up to 10 minutes for that change to be visible in Thorium.
+
+## API
+---
+
+Thorctl creates, lists, and describes groups; changing a group's membership has no Thorctl command yet and uses the API.
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| `POST` | `/api/groups/` | Create a group (JSON: `name`, `description`, and `owners`, `managers`, `users`, `monitors` each with `direct` users and `metagroups`) |
+| `PATCH` | `/api/groups/<GROUP>` | Add or remove members (JSON: each role has `direct_add`, `direct_remove`, `metagroups_add`, `metagroups_remove`), change the description |
+| `GET` | `/api/groups/<GROUP>/details` | One group's details |
+| `DELETE` | `/api/groups/<GROUP>` | Delete a group (see [Delete a Group](../admins/delete_group.md)) |
+
+```bash
+curl -X PATCH -H "Authorization: Bearer $TOKEN_B64" -H 'Content-Type: application/json' \
+  https://<URL>/api/groups/analysts -d '{"users": {"direct_add": ["alice"]}}'
+```
+
+Owners and managers can change membership (managers can't change owners).

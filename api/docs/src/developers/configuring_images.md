@@ -1,5 +1,9 @@
 # Configuring Images
 
+These are the settings of an image, which an Image tool's workload holds in its versions (see [Legacy Images and
+Pipelines](./images.md#old-and-new-terms)). In a tool spec they are written under `environment`, `execution`, and
+`data`, as in the [Image tool](./tools.md#an-image-tool) example.
+
 This section explains each configurable image field. This information is critical to getting your image to run
 in Thorium. so please read each field description before attempting to add a new image. Images with incorrect
 configurations may fail when run or never be run at all.
@@ -17,8 +21,9 @@ characters and dashes.
 
 (*Required*)
 
-Assign your image to a group. An image may only be in a single group, although you can easily copy your image to
-different groups using the Web UI. Images are just a configuration so there is no waste in having duplicates.
+Assign your image to a group. An image may only be in a single group. Images are just a configuration so there
+is no waste in having duplicates, but images can't be created or copied in this release: create a tool in each
+group you need with `thorctl tools create --group`.
 
 ---
 #### Description
@@ -123,10 +128,6 @@ tools/developers will ignore.
 The resources section tells Thorium what compute, memory, and storage resources your tool needs to successfully run.
 Values for CPUs, memory, ephemeral storage, and GPUs may all be set.
 
-<p align="center">
-    <img width="800" src="./../static_resources/images/image-resources.png">
-</p>
-
 You should set these values to the largest expected value your tool will need to run. If your tool's peak memory usage
 is 16GB, select at least that amount for the image's memory resource configuration. If you set a value that is too low
 for memory or CPU usage, your tool may run slowly and/or be killed for using more resources than this configuration
@@ -142,16 +143,12 @@ to meet the requested resource values for that image.
 Arguments define how Thorium will trigger the execution of your tool. Command line arguments for a tool are built based
 on this configuration.
 
-<p align="center">
-    <img width="800" src="./../static_resources/images/image-arguments.png">
-</p>
-
 The following table explains what each optional argument does and when to specify it.
 
 | Argument | Description | Example|
 | --- | ---------- | ---------- |
 | Entrypoint | The initial executable to run. | `/path/to/python3` |
-| Command | List of parameters to pass to the Entrypoint executable, one value per form field. | `/path/to/script.py`, `--flag`, `some_value` |
+| Command | List of parameters to pass to the Entrypoint executable, one list entry per value. | `/path/to/script.py`, `--flag`, `some_value` |
 | Reaction | Flag to pass in UUID of the running Thorium reaction. Only specify if the tool needs a unique identifier. | `--reaction` |
 | Repo | Flag to pass in repo name if a repo is being analyzed. | `--repo` |
 | Commit | Flag to pass in commit hash if a repo is being analyzed. | `--commit` |
@@ -165,10 +162,6 @@ The following table explains what each optional argument does and when to specif
 After a tool has run, the Thorium agent will collect tool results, children files, and metadata tags. The Thorium
 agent, will then upload these artifacts to the API so they are accessible within the Web UI or using Thorctl. The
 output collection settings tell the agent how to handle these artifacts.
-
-<p align="center">
-    <img width="800" src="./../static_resources/images/image-output-collection.png">
-</p>
 
 The following table explains how to configure the agent to handle your tools outputs.
 
@@ -235,16 +228,18 @@ Any samples, repos, tool results, or ephemeral files that your tool needs to run
 configuration options help Thorium tell your tool where to find the tool's dependencies that are automatically
 downloaded by the Agent before your tool is executed.
 
+In a tool spec these settings are under `data.dependencies`. The settings that name other tools (the
+`results`, `children`, and `filesystems` settings) hold a `tools` list of tool ids, such as
+`[<TOOL_ID>]`, in place of the `images` list an image holds, and a spec with an `images` list is
+refused. Publishing a spec with an id that doesn't exist, isn't a tool, or isn't visible to you is
+refused with `400`. An empty list applies to every tool.
+
 ##### Samples
 
 The `Samples` settings are relevant for tools used to analyze Thorium files. Since all files in Thorium are stored
 in a CaRTed format, the agent handles the download and unCaRTing of those files before executing your tool. You may
 use the sample dependency settings to change the default download path and how Thorium tells your tool where to find
 the downloaded file(s).
-
-<p align="center">
-    <img width="800" src="./../static_resources/images/image-dependencies-samples.png">
-</p>
 
 | Field | Description | Default |
 | --- | ---------- | ---------- |
@@ -257,10 +252,6 @@ the downloaded file(s).
 If a tool takes a Git repository as an input, this section can be configured to change the default location the Agent
 will download that repo into. Since all repos in Thorium are CaRTed upon upload, the agent will download and
 automatically unCaRT downloaded repos.
-
-<p align="center">
-    <img width="800" src="./../static_resources/images/image-dependencies-repos.png">
-</p>
 
 | Field | Description | Default |
 | --- | ---------- | ---------- |
@@ -279,10 +270,6 @@ where to download those inputs into before running the tool runs.
 Ephemeral files are discarded at the end of a pipeline run. You might call these files intermediate artifacts of
 the pipeline. They can be passed between the images that run within a pipeline using the following configurations.
 
-<p align="center">
-    <img width="800" src="./../static_resources/images/image-dependencies-ephemeral.png">
-</p>
-
 | Field | Description | Default |
 | --- | ---------- | ---------- |
 | Location | Directory path to download ephemeral files into. | `/tmp/thorium/ephemeral` |
@@ -295,17 +282,13 @@ Results are files that will be saved in Thorium after a tool runs. Unlike epheme
 longer than the pipeline that generated it. You can view and download results in the Web UI or Thorctl any time after a
 tool runs.
 
-<p align="center">
-    <img width="800" src="./../static_resources/images/image-dependencies-results.png">
-</p>
-
 | Field | Description | Default |
 | --- | ---------- | ---------- |
 | Location | Directory path to download input results into. | `/tmp/thorium/prior-results` |
 | Kwarg | Flag used to pass in name or path of each input result file. | `None` |
 | Strategy | Whether to pass in path or name to the kwarg. Options are `Path`, `Names` or `Disabled` when no argument should be passed. | `Path` |
 | File Names | Names of result files to download from the dependent tool results. | `Empty`  |
-| Images | Names of other tools that this image need results from to run. | `Empty` |
+| Tools | In a tool spec, the ids of other tools that this tool needs results from to run (`tools`). An image names images in an `images` list instead. | `Empty` |
 
 *What are tag dependencies?*
 
@@ -316,10 +299,6 @@ that is more effective at analyzing a sample if it knows the original language i
 earlier in the pipeline that attempts to tag the image with its language of origin (e.g. `Language=Rust`). Then, after enabling
 tag dependencies for the analysis image, you can refer to the sample's tags in your image to see which language was inferred
 and analyze accordingly.
-
-<p align="center">
-    <img width="800" src="./../static_resources/images/image-dependencies-tags.png">
-</p>
 
 | Field | Description | Default |
 | --- | ---------- | ---------- |
@@ -357,10 +336,6 @@ in the correct execution environment before an image runs. If your tool reads va
 will be able to grab the key/value pair. A unique key is required when adding an environment variable. However,
 the value of that key can be empty/blank.
 
-<p align="center">
-    <img width="800" src="./../static_resources/images/image-environment-vars.png">
-</p>
-
 You can view the value of an environment variable on a Linux system using the following command:
 
 ```bash
@@ -382,10 +357,6 @@ form of configuration files, secret files, host paths, or NFS shares. You can re
 If you think you need to map a volume into your K8s image you will need to reach out to an admin to have that volume
 setup within Thorium's K8s instance.
 
-<p align="center">
-    <img width="800" src="./../static_resources/images/image-volumes.png">
-</p>
-
 ---
 #### Security Context
 
@@ -397,6 +368,3 @@ account. This helps to bound the abilities of tools that run in Thorium's differ
 security context values can be changed by admins to hard coded values that differ from these defaults. Note that
 the privilege escalation boolean setting is only relevant for images that run in K8s.
 
-<p align="center">
-    <img width="800" src="./../static_resources/images/image-security-context.png">
-</p>

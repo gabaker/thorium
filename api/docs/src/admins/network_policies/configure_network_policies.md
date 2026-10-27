@@ -4,6 +4,21 @@ Thorctl provides helpful commands to create, delete, and update network policies
 You can find a list of those commands by running `thorctl network-policies --help` (or, alternatively,
 `thorctl netpols --help`).
 
+## Deleting a Network Policy
+
+`thorctl netpols delete <NAME>` deletes a network policy (pass `--id <ID>` when more than one policy has the same
+name). A network policy is shared by every group it is in, so deleting it removes it for all of them. Thorctl
+therefore reads the policy first and asks about it by name, naming the groups that hold it:
+
+```
+$ thorctl netpols delete allow-dns
+Delete network policy 'allow-dns' (groups: corn, wheat, id: 6e1c...) for all of its groups? [y/N]
+```
+
+The default answer is no; answering no prints `Cancelled; nothing was changed.` and exits `0`. Pass
+`--skip-confirm` (alias `--yes`) to delete without asking. Without a terminal and without the flag the command
+exits `1`, naming the flag, and deletes nothing.
+
 ## Creating a Network Policy
 
 To create a network policy, use the `thorctl netpols create` command:

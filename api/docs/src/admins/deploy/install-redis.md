@@ -177,3 +177,4 @@ helm template thorium oci://ghcr.io/cisagov/thorium/charts/thorium --version $VE
 |---------|-------|
 | `redis.host` / `redis.port` | `redis.redis.svc.cluster.local` and `6379` (Helm: `operator.backends.redis.host` / `.port`) |
 | `redis.password` | `$REDIS_PASSWORD` (Helm: `global.credentials.redisPassword`, required with an external Redis) |
+| `redis.db` | Optional: the numbered Redis database Thorium selects (default `0`, the highest allowed is 2147483646; Redis Cluster only has `0`). It separates only Redis keys, so two deployments sharing a Scylla cluster still need their own `thorium.namespace`. Helm: `operator.cluster.config.redis.db` |
