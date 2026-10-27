@@ -28,8 +28,10 @@
 name: Dockerfile Lint
 
 on:
+  # Dependabot branches are checked by their pull requests instead, so each
+  # update runs once
   push:
-    branches: ['**']
+    branches: ['**', '!dependabot/**']
   pull_request:
   schedule:
     # weekly, to surface findings from newly added checks and new upstream releases

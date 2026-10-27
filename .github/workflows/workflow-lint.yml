@@ -25,8 +25,10 @@
 name: Workflow Lint
 
 on:
+  # Dependabot branches are checked by their pull requests instead, so each
+  # update runs once
   push:
-    branches: ['**']
+    branches: ['**', '!dependabot/**']
   pull_request:
   schedule:
     # weekly, to surface newly disclosed action vulnerabilities and new releases
