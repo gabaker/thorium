@@ -36,18 +36,18 @@ def k8s_spec(image):
 
 
 class RealToolboxTests(unittest.TestCase):
-    """The repository's two toolboxes give the same matrix."""
+    """The repository's toolbox and its kept legacy form give the same matrix."""
 
     def test_both_formats_give_identical_output(self):
         for extra in ([], ["--registry-prefix", "ghcr.io/owner/repo"]):
-            legacy = run_script(os.path.join(TOOLS, "toolbox.json"), *extra)
-            converted = run_script(os.path.join(TOOLS, "toolbox.v2.json"), *extra)
+            legacy = run_script(os.path.join(TOOLS, "toolbox.v1.json"), *extra)
+            converted = run_script(os.path.join(TOOLS, "toolbox.json"), *extra)
             self.assertEqual(legacy.returncode, 0, legacy.stderr)
             self.assertEqual(converted.returncode, 0, converted.stderr)
             self.assertEqual(legacy.stdout, converted.stdout)
 
     def test_the_four_ghidra_base_builds_are_in_the_matrix(self):
-        with open(os.path.join(TOOLS, "toolbox.v2.json"), encoding="utf-8") as manifest:
+        with open(os.path.join(TOOLS, "toolbox.json"), encoding="utf-8") as manifest:
             entries = matrix_script.build_matrix(json.load(manifest))
         versions = sorted(
             entry["version"] for entry in entries if entry["name"] == "ghidra-base"

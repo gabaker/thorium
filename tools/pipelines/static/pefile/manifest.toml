@@ -3,5 +3,6 @@ type = "pipeline"
 version = "latest"
 config_from = "pefile.json"
 
-[images.pefile]
+[stage_tools.pefile]
+tool = "pefile"
 version = "latest"

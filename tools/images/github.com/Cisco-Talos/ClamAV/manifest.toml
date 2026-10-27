@@ -1,6 +1,8 @@
 name = "clamav"
-type = "image"
-config_from = "clamav.json"
+type = "tool"
+kind = "image"
+groups = ["static"]
+spec_from = "clamav.json"
 build_path = "./"
 image_name = "tools/github.com/cisco-talos/clamav"
 version = "latest"

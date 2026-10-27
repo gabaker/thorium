@@ -15,11 +15,11 @@ use thorium::test_utilities::{self, generators};
 use thorium::{Error, Thorium};
 use tokio::process::Command;
 
-/// The real toolbox this repository ships, in the legacy format
-const REAL_TOOLBOX: &str = "../tools/toolbox.json";
+/// The repository's toolbox in the legacy format, kept from before its manifests became tools
+const REAL_TOOLBOX: &str = "../tools/toolbox.v1.json";
 
-/// The real toolbox, converted
-const REAL_TOOLBOX_V2: &str = "../tools/toolbox.v2.json";
+/// The real toolbox this repository ships, built from its tool manifests
+const REAL_TOOLBOX_V2: &str = "../tools/toolbox.json";
 
 /// Write a manifest into a new temp directory and return its path
 ///

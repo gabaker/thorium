@@ -3,5 +3,6 @@ type = "pipeline"
 version = "latest"
 config_from = "foremost.json"
 
-[images.foremost]
+[stage_tools.foremost]
+tool = "foremost"
 version = "latest"

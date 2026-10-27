@@ -1,6 +1,8 @@
 name = "peid"
-type = "image"
-config_from = "peid.json"
+type = "tool"
+kind = "image"
+groups = ["static"]
+spec_from = "peid.json"
 build_path = "./"
 image_name = "tools/github.com/packing-box/peid"
 version = "latest"

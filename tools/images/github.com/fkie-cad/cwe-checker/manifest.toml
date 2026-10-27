@@ -1,6 +1,8 @@
 name = "cwe-checker"
-type = "image"
-config_from = "cwe-checker.json"
+type = "tool"
+kind = "image"
+groups = ["static"]
+spec_from = "cwe-checker.json"
 build_path = "./"
 image_name = "tools/github.com/fkie-cad/cwe-checker"
 version = "latest"

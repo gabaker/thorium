@@ -9,12 +9,11 @@ on:
       - main
   # rebuilds the tool images on demand; runs started from any other branch build nothing
   workflow_dispatch:
-  # checks that the converted toolbox is current when the toolbox or its sources change; a pull
-  # request run builds and pushes nothing
+  # checks that the toolbox is current when the toolbox or its sources change; a pull request run
+  # builds and pushes nothing
   pull_request:
     paths:
       - 'tools/toolbox.json'
-      - 'tools/toolbox.v2.json'
       - 'tools/config.toml'
       - 'tools/images/**'
       - 'tools/pipelines/**'
@@ -31,10 +30,10 @@ concurrency:
 permissions: {}
 
 jobs:
-  # the legacy tools/toolbox.json is what the images are built from, and tools/toolbox.v2.json is
-  # its conversion for thorctl; this fails when the two drift apart
+  # tools/toolbox.json is built from the manifests in tools/ and is what the images are built
+  # from; this fails when it drifts from them
   check-toolbox:
-    name: Check the converted toolbox
+    name: Check the toolbox
     # the nightly schedule only rebuilds images
     if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
@@ -50,7 +49,8 @@ jobs:
         with:
           persist-credentials: false
 
-      # the matrix script must read both toolbox formats and give the same matrix
+      # the matrix script must read both toolbox formats and give the same matrix for the toolbox
+      # and its legacy form, tools/toolbox.v1.json
       - name: Test the build matrix script
         run: python3 -m unittest discover -s tools/scripts -p 'test_*.py'
 
@@ -62,16 +62,9 @@ jobs:
       - name: Install nightly toolchain
         run: rustup toolchain install nightly --profile minimal
 
-      # converting is offline, so no instance or login is needed; --check writes nothing and exits
-      # 1 with a diff when tools/toolbox.v2.json is not what the conversion produces
-      - name: Check tools/toolbox.v2.json is current
-        run: >
-          cargo +nightly run --locked -p thorctl --
-          toolbox convert tools/toolbox.json --check -o tools/toolbox.v2.json
-
-      # rebuilding a copy of tools/ must give tools/toolbox.json back, and rewriting its manifests
-      # to tools and building again must give tools/toolbox.v2.json
-      - name: Check the toolboxes are reproducible from tools/
+      # building a copy of tools/ is offline and must give tools/toolbox.json back byte for byte,
+      # and rewriting its manifests to tools again must change nothing
+      - name: Check the toolbox is reproducible from tools/
         run: >
           cargo +nightly test --locked -p thorctl --test toolbox_build
           real_tools_reproduce_the_committed_toolboxes

@@ -3,5 +3,6 @@ type = "pipeline"
 version = "latest"
 config_from = "trivy.json"
 
-[images.trivy]
+[stage_tools.trivy]
+tool = "trivy"
 version = "latest"

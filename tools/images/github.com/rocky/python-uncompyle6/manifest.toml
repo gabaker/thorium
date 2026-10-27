@@ -1,6 +1,8 @@
 name = "python-uncompyle6"
-type = "image"
-config_from = "python-uncompyle6.json"
+type = "tool"
+kind = "image"
+groups = ["static"]
+spec_from = "python-uncompyle6.json"
 build_path = "./"
 image_name = "tools/github.com/rocky/python-uncompyle6"
 version = "latest"

@@ -3,5 +3,6 @@ type = "pipeline"
 version = "latest"
 config_from = "unblob.json"
 
-[images.unblob]
+[stage_tools.unblob]
+tool = "unblob"
 version = "latest"

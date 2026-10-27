@@ -3,5 +3,6 @@ type = "pipeline"
 version = "latest"
 config_from = "balbuzard.json"
 
-[images.balbuzard]
+[stage_tools.balbuzard]
+tool = "balbuzard"
 version = "latest"

@@ -1,6 +1,8 @@
 name = "byte-frequency"
-type = "image"
-config_from = "byte-frequency.json"
+type = "tool"
+kind = "image"
+groups = ["static"]
+spec_from = "byte-frequency.json"
 build_path = "./"
 image_name = "tools/sandia.gov/byte-frequency"
 version = "latest"

@@ -3,5 +3,6 @@ type = "pipeline"
 version = "latest"
 config_from = "sqlitedump.json"
 
-[images.sqlitedump]
+[stage_tools.sqlitedump]
+tool = "sqlitedump"
 version = "latest"
