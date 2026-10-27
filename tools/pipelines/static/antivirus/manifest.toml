@@ -3,5 +3,6 @@ type = "pipeline"
 version = "latest"
 config_from = "antivirus.json"
 
-[images.clamav]
+[stage_tools.clamav]
+tool = "clamav"
 version = "latest"

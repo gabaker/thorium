@@ -8,7 +8,7 @@ Welcome to the Thorium toolbox (curated on behalf of CISA by Sandia National Lab
 
 The `build-actions-matrix.py` script is used by our gitlab actions pipeline to dynamically generate a set of parallel actions that builds tool container images. These images are stored in the target container registry based on the toolbox configuration contained in `config.toml`. When forking this repository to modify/add your own tools, you will want to update the `config.toml` so that tools get pushed to your forked repository's container registry.
 
-The script reads either toolbox format and prints the same matrix for both. For a legacy `toolbox.json` it reads the `images` section. For a current-format toolbox (`toolbox.v2.json`) it reads the `build` section of every tool version (`tools.<name>.versions.<label>.build`) and the `builds` section, which holds build contexts that no tool owns, such as the `ghidra-base` images other builds start from. `test_build_actions_matrix.py` holds its tests:
+The script reads either toolbox format and prints the same matrix for both. For a legacy toolbox (such as `toolbox.v1.json`) it reads the `images` section. For a current-format toolbox (`toolbox.json`) it reads the `build` section of every tool version (`tools.<name>.versions.<label>.build`) and the `builds` section, which holds build contexts that no tool owns, such as the `ghidra-base` images other builds start from. `test_build_actions_matrix.py` holds its tests:
 
 ```bash
 python3 -m unittest discover -s tools/scripts -p 'test_*.py'
@@ -16,19 +16,17 @@ python3 -m unittest discover -s tools/scripts -p 'test_*.py'
 
 #### Build A Toolbox Manifest 
 
-To update the `toolbox.json` file before committing changes, run the `toolbox build` in this directory. `--use-image-path` tags each image with its manifest's `image_name` (`ghcr.io/cisagov/thorium/tools/<path>`), the tags CI pushes the images to:
+`toolbox.json` is built from the manifests in this directory, in the current toolbox format (format version 2): `thorctl` imports, diffs, and exports it, and CI builds the tool images from the build entries it holds. To update it before committing changes, run `toolbox build` in this directory. `--use-image-path` tags each image with its manifest's `image_name` (`ghcr.io/cisagov/thorium/tools/<path>`), the tags CI pushes the images to:
 
 ```bash
 thorctl toolbox build -c config.toml --use-image-path -o toolbox.json
 ```
 
-The image tags in `toolbox.json` are what the CI builds the tool images from, so it stays in the legacy format. `toolbox.v2.json` is its conversion to the current format, which `thorctl` imports, diffs, and exports. Regenerate it whenever `toolbox.json` changes:
+CI runs the thorctl test `real_tools_reproduce_the_committed_toolboxes`, which fails when building this directory with the command above does not give `toolbox.json` back byte for byte, or when `toolbox build --rewrite-manifests` would still rewrite a manifest.
 
-```bash
-thorctl toolbox convert toolbox.json -o toolbox.v2.json
-```
+#### Older thorctl versions and `toolbox.v1.json`
 
-CI runs `thorctl toolbox convert tools/toolbox.json --check -o tools/toolbox.v2.json`, which fails when `toolbox.v2.json` is not what the conversion produces, and the thorctl test `real_tools_reproduce_the_committed_toolboxes`, which fails when rebuilding this directory with the command above does not give `toolbox.json` back, or when rewriting the manifests (`toolbox build --rewrite-manifests`) and building again does not give `toolbox.v2.json`.
+A `thorctl` older than tool support reads only the legacy format and cannot read `toolbox.json`. `toolbox.v1.json` is the legacy toolbox as it was when this directory's image and pipeline manifests became tool and stage-tool manifests; it is kept for those versions and is not updated, so tools added since are not in it. Converting it (`thorctl toolbox convert toolbox.v1.json`) gives `toolbox.json` as it was at that point.
 
 ### Toolbox Config (`config.toml`)
 
@@ -43,47 +41,65 @@ registry = "ghcr.io"
 
 ### Manifests
 
-Images and pipelines contained within the tool box must each have a dedicated `manifest.toml` file. The manifest helps with building the `toolbox.json` file used for building tool images and importing pipelines/images to your Thorium instance.
-
-##### Images
-
-```toml
-name = "clamav"
-type = "image"
-config_from = "clamav.json"
-build_path = "./"
-image_name = "tools/github.com/cisco-talos/clamav"
-version = "latest"
-```
+Tools, base builds, and pipelines contained within the tool box must each have a dedicated `manifest.toml` file. The manifest helps with building the `toolbox.json` file used for building tool images and importing tools and pipelines to your Thorium instance.
 
 ##### Tools
 
-A manifest of `type = "tool"` describes a tool by a spec file instead of an image config. `toolbox build` writes a toolbox in the current format when it finds one (or when given `--format-version 2`), and `thorctl toolbox init tool` scaffolds one. The same layout describes toolsets, agents, and workflows (`type = "toolset"`, `"agent"`, `"workflow"`).
+A manifest of `type = "tool"` describes a tool by its spec, a JSON file beside the manifest named by `spec_from` (`<name>.json`). `toolbox build` writes a toolbox in the current format when it finds one, and `thorctl toolbox init tool` scaffolds one. The same layout describes toolsets, agents, and workflows (`type = "toolset"`, `"agent"`, `"workflow"`).
 
 ```toml
 name = "clamav"
 type = "tool"
 kind = "image"
-version = "latest"
 groups = ["static"]
-spec_from = "clamav.spec.yaml"
+spec_from = "clamav.json"
 build_path = "./"
 image_name = "tools/github.com/cisco-talos/clamav"
+version = "latest"
 ```
 
-`thorctl toolbox build --rewrite-manifests` converts the image manifests of a directory to tool manifests in place, keeping each old `manifest.toml` as `manifest.toml.bak`.
+A tool can run another tool's image with its own spec and build nothing itself: its manifest names the tool in an `[image_from]` table, and its spec leaves the image empty for `toolbox build` to fill in. The `strings-*` tools run the `strings` image this way, each with its own `strings` arguments:
+
+```toml
+name = "strings-16le"
+type = "tool"
+kind = "image"
+groups = ["static"]
+spec_from = "strings-16le.json"
+version = "latest"
+
+[image_from]
+name = "strings"
+version = "latest"
+```
+
+##### Base builds
+
+A manifest of `type = "build"` describes an image that other builds start from but that no tool runs, such as the `ghidra-base` images. It becomes an entry of the toolbox's `builds` section, which is built before the tools:
+
+```toml
+name = "ghidra-base"
+type = "build"
+build_path = "./"
+image_name = "tools/ghidra-base"
+version = "12.1"
+```
 
 ##### Pipelines
+
+A pipeline names the tool behind each stage in `[stage_tools.<stage>]` (with `tool` and an optional `version`), and its JSON config is the Thorium pipeline config:
 
 ```toml
 name = "antivirus"
 type = "pipeline"
-description = "Antivirus scanners (licenses may be required)"
 version = "latest"
 config_from = "antivirus.json"
 
-[images.clamav]
+[stage_tools.clamav]
+tool = "clamav"
 version = "latest"
 ```
 
-A pipeline of the current format names a tool for each stage in `[stage_tools.<stage>]` (with `tool` and an optional `version`) in place of `[images.<stage>]`.
+##### Legacy image manifests
+
+The directory's tools were `type = "image"` manifests whose `config_from` named a JSON image config, and its pipelines named images in `[images.<stage>]` tables. `toolbox build` still reads those, and `thorctl toolbox build --rewrite-manifests` rewrote them in place: each image manifest became a tool manifest whose `spec_from` names the same JSON file, which now holds the converted spec; the build-only `ghidra-base` images became `type = "build"` manifests; and each pipeline's `[images.<stage>]` tables became `[stage_tools.<stage>]` tables.

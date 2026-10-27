@@ -1,1 +1,1 @@
-null
+Parse UEFI firmware images and extract their volumes, files, and sections

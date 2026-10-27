@@ -1,7 +1,9 @@
 
 name = "strings-16le"
-type = "image"
-config_from = "strings-16le.json"
+type = "tool"
+kind = "image"
+groups = ["static"]
+spec_from = "strings-16le.json"
 version = "latest"
 
 [image_from]

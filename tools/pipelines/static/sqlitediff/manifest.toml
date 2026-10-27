@@ -3,5 +3,6 @@ type = "pipeline"
 version = "latest"
 config_from = "sqlitediff.json"
 
-[images.sqlitediff]
+[stage_tools.sqlitediff]
+tool = "sqlitediff"
 version = "latest"

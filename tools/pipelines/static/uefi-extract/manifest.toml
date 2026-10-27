@@ -3,5 +3,6 @@ type = "pipeline"
 version = "latest"
 config_from = "uefi-extract.json"
 
-[images.uefi-firmware-parser]
+[stage_tools.uefi-firmware-parser]
+tool = "uefi-firmware-parser"
 version = "latest"

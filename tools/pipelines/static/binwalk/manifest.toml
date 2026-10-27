@@ -3,5 +3,6 @@ type = "pipeline"
 version = "latest"
 config_from = "binwalk.json"
 
-[images.binwalk]
+[stage_tools.binwalk]
+tool = "binwalk"
 version = "latest"

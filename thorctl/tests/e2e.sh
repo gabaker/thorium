@@ -90,23 +90,25 @@ run 0 group-two groups create "$G2"
 run 0 group-none groups create "$G3" -d "thorctl end to end"
 
 echo "== convert and validate the real toolbox"
-run 0 convert-check toolbox convert "$TOOLS/toolbox.json" --check -o "$TOOLS/toolbox.v2.json"
-run 0 convert-write toolbox convert "$TOOLS/toolbox.json" -o "$WORK/converted.json"
-cmp -s "$WORK/converted.json" "$TOOLS/toolbox.v2.json" || fail "the converted toolbox differs from the committed one"
-run 0 validate-legacy toolbox validate "$TOOLS/toolbox.json"
-run 0 validate-v2 toolbox validate "$TOOLS/toolbox.v2.json"
+# toolbox.v1.json is the legacy toolbox kept from before the manifests became tools, and
+# converting it gives the committed toolbox.json
+run 0 convert-check toolbox convert "$TOOLS/toolbox.v1.json" --check -o "$TOOLS/toolbox.json"
+run 0 convert-write toolbox convert "$TOOLS/toolbox.v1.json" -o "$WORK/converted.json"
+cmp -s "$WORK/converted.json" "$TOOLS/toolbox.json" || fail "the converted toolbox differs from the committed one"
+run 0 validate-legacy toolbox validate "$TOOLS/toolbox.v1.json"
+run 0 validate-v2 toolbox validate "$TOOLS/toolbox.json"
 
 echo "== import, diff, and the no-op re-import"
-run 0 import-dry-run toolbox import "$TOOLS/toolbox.v2.json" --group-override "$G1" --dry-run
-run 0 import toolbox import "$TOOLS/toolbox.v2.json" --group-override "$G1" -o json
+run 0 import-dry-run toolbox import "$TOOLS/toolbox.json" --group-override "$G1" --dry-run
+run 0 import toolbox import "$TOOLS/toolbox.json" --group-override "$G1" -o json
 saw '"outcome": *"applied"'
-run 0 import-again toolbox import "$TOOLS/toolbox.v2.json" --group-override "$G1" -o json
+run 0 import-again toolbox import "$TOOLS/toolbox.json" --group-override "$G1" -o json
 saw '"outcome": *"nothing_to_do"'
-run 0 import-legacy-again toolbox import "$TOOLS/toolbox.json" --group-override "$G1" -o json
+run 0 import-legacy-again toolbox import "$TOOLS/toolbox.v1.json" --group-override "$G1" -o json
 saw '"outcome": *"nothing_to_do"'
-run 0 diff-clean toolbox diff "$TOOLS/toolbox.v2.json" --group-override "$G1" --exit-code
-run 0 diff-clean-legacy toolbox diff "$TOOLS/toolbox.json" --group-override "$G1" --exit-code
-run 1 diff-drift toolbox diff "$TOOLS/toolbox.v2.json" --group-override "$G3" --exit-code
+run 0 diff-clean toolbox diff "$TOOLS/toolbox.json" --group-override "$G1" --exit-code
+run 0 diff-clean-legacy toolbox diff "$TOOLS/toolbox.v1.json" --group-override "$G1" --exit-code
+run 1 diff-drift toolbox diff "$TOOLS/toolbox.json" --group-override "$G3" --exit-code
 
 echo "== export, import the export into a second group, and compare"
 run 0 export toolbox export -g "$G1" --all-kinds --group-override "$G2" -o "$WORK/export-one"
@@ -225,9 +227,9 @@ run 0 toolset-delete toolsets delete e2e-kit --yes
 run 0 pipeline-delete pipelines delete e2e-pipe -g "$G1" --skip-confirm
 run 0 tools-delete tools delete e2e-scratch --all-versions --yes
 run 0 native-delete tools delete e2e-native --all-versions --yes
-run 1 remove-needs-confirmation toolbox remove "$TOOLS/toolbox.v2.json" --group-override "$G1"
-run 0 remove-dry-run toolbox remove "$TOOLS/toolbox.v2.json" --group-override "$G1" --dry-run
-run 0 remove-one toolbox remove "$TOOLS/toolbox.v2.json" --group-override "$G1" --skip-confirm
+run 1 remove-needs-confirmation toolbox remove "$TOOLS/toolbox.json" --group-override "$G1"
+run 0 remove-dry-run toolbox remove "$TOOLS/toolbox.json" --group-override "$G1" --dry-run
+run 0 remove-one toolbox remove "$TOOLS/toolbox.json" --group-override "$G1" --skip-confirm
 run 0 remove-two toolbox remove "$WORK/export-one" --yes
 run 0 remove-again toolbox remove "$WORK/export-one" --yes
 

@@ -3,5 +3,6 @@ type = "pipeline"
 version = "latest"
 config_from = "trufflehog.json"
 
-[images.trufflehog]
+[stage_tools.trufflehog]
+tool = "trufflehog"
 version = "latest"

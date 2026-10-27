@@ -1,6 +1,8 @@
 name = "pharos-fn2hash"
-type = "image"
-config_from = "pharos-fn2hash.json"
+type = "tool"
+kind = "image"
+groups = ["static"]
+spec_from = "pharos-fn2hash.json"
 build_path = "./"
 image_name = "tools/github.com/cmu-sei/pharos-fn2hash"
 version = "latest"

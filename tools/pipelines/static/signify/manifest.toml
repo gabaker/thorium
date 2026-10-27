@@ -3,5 +3,6 @@ type = "pipeline"
 version = "latest"
 config_from = "signify.json"
 
-[images.signify]
+[stage_tools.signify]
+tool = "signify"
 version = "latest"

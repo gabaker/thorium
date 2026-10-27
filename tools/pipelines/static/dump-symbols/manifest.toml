@@ -3,5 +3,6 @@ type = "pipeline"
 version = "latest"
 config_from = "dump-symbols.json"
 
-[images.dump-symbols]
+[stage_tools.dump-symbols]
+tool = "dump-symbols"
 version = "latest"

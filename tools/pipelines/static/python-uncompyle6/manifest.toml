@@ -3,5 +3,6 @@ type = "pipeline"
 version = "latest"
 config_from = "python-uncompyle6.json"
 
-[images.python-uncompyle6]
+[stage_tools.python-uncompyle6]
+tool = "python-uncompyle6"
 version = "latest"

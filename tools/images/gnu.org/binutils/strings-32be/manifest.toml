@@ -1,7 +1,9 @@
 
 name = "strings-32be"
-type = "image"
-config_from = "strings-32be.json"
+type = "tool"
+kind = "image"
+groups = ["static"]
+spec_from = "strings-32be.json"
 version = "latest"
 
 [image_from]

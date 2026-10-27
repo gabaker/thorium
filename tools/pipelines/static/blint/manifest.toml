@@ -3,5 +3,6 @@ type = "pipeline"
 version = "latest"
 config_from = "blint.json"
 
-[images.blint]
+[stage_tools.blint]
+tool = "blint"
 version = "latest"

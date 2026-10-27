@@ -3,5 +3,6 @@ type = "pipeline"
 version = "latest"
 config_from = "capa.json"
 
-[images.capa]
+[stage_tools.capa]
+tool = "capa"
 version = "latest"

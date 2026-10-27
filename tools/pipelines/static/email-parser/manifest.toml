@@ -3,5 +3,6 @@ type = "pipeline"
 version = "latest"
 config_from = "email-parser.json"
 
-[images.email-parser]
+[stage_tools.email-parser]
+tool = "email-parser"
 version = "latest"

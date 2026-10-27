@@ -3,5 +3,6 @@ type = "pipeline"
 version = "latest"
 config_from = "surfactant.json"
 
-[images.surfactant]
+[stage_tools.surfactant]
+tool = "surfactant"
 version = "latest"

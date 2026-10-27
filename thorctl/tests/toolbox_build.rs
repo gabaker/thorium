@@ -92,6 +92,25 @@ fn copy_dir(from: &Path, to: &Path) {
     }
 }
 
+/// List every file under a directory
+///
+/// # Arguments
+///
+/// * `dir` - The directory to list
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    // descend into each directory and collect the files
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir).expect("read dir") {
+        let path = entry.expect("a dir entry").path();
+        if path.is_dir() {
+            files.extend(walk(&path));
+        } else {
+            files.push(path);
+        }
+    }
+    files
+}
+
 /// Run `thorctl toolbox` with no config and no network
 ///
 /// # Arguments
@@ -965,10 +984,10 @@ fn legacy_build_writes_legacy_pipeline_configs() {
     assert_eq!(pipeline["description"], "Scans files");
 }
 
-/// The repository's `tools/` reproduces its committed toolboxes: a legacy build with the
-/// settings the tool images are tagged with (`--use-image-path`) writes `tools/toolbox.json`, and
-/// converting that file, rewriting the directory's manifests, and building the rewritten
-/// directory again each write `tools/toolbox.v2.json`
+/// The repository's `tools/` reproduces its committed toolbox: building the directory with the
+/// settings the tool images are tagged with (`--use-image-path`) writes `tools/toolbox.json` byte
+/// for byte, and rewriting the manifests again changes nothing because every manifest that can be
+/// a tool already is one
 #[test]
 fn real_tools_reproduce_the_committed_toolboxes() {
     // a copy of tools/, so the rewrite never touches the repository
@@ -976,38 +995,27 @@ fn real_tools_reproduce_the_committed_toolboxes() {
     let scratch = Scratch::new();
     copy_dir(&tools, &scratch.path("tools"));
     let dir = scratch.path("tools");
-    let committed = |name: &str| -> Value {
-        serde_json::from_str(&std::fs::read_to_string(tools.join(name)).expect("read toolbox"))
-            .expect("valid json")
-    };
-    let written = |name: &str| scratch.json(&format!("tools/{name}"));
+    let committed = std::fs::read(tools.join("toolbox.json")).expect("read toolbox.json");
+    let written = |name: &str| std::fs::read(dir.join(name)).expect("read written toolbox");
     let run = |args: &[&str]| {
         let output = toolbox(&scratch.0, &dir, args);
         assert!(output.status.success(), "{args:?}: {}", stderr(&output));
     };
-    // the legacy build writes the committed legacy toolbox
+    // building the directory writes the committed toolbox
     run(&[
         "build",
         "-c",
         "config.toml",
         "--use-image-path",
         "-o",
-        "legacy.json",
+        "rebuilt.json",
     ]);
-    let same = written("legacy.json") == committed("toolbox.json");
     assert!(
-        same,
+        written("rebuilt.json") == committed,
         "tools/toolbox.json is stale: rebuild it with `thorctl toolbox build -c config.toml \
          --use-image-path -o toolbox.json` in tools/"
     );
-    // converting it writes the committed current toolbox
-    run(&["convert", "legacy.json", "-o", "converted.json"]);
-    let same = written("converted.json") == committed("toolbox.v2.json");
-    assert!(
-        same,
-        "tools/toolbox.v2.json is stale: run `thorctl toolbox convert toolbox.json` in tools/"
-    );
-    // rewriting the manifests writes it too, and so does building the rewritten directory
+    // rewriting the manifests again writes the same toolbox and keeps no backups
     run(&[
         "build",
         "-c",
@@ -1017,21 +1025,18 @@ fn real_tools_reproduce_the_committed_toolboxes() {
         "-o",
         "rewritten.json",
     ]);
-    let same = written("rewritten.json") == committed("toolbox.v2.json");
-    assert!(same, "the rewrite differs from tools/toolbox.v2.json");
-    run(&[
-        "build",
-        "-c",
-        "config.toml",
-        "--use-image-path",
-        "-o",
-        "rebuilt.json",
-    ]);
-    let same = written("rebuilt.json") == committed("toolbox.v2.json");
     assert!(
-        same,
-        "the rewritten directory does not build to tools/toolbox.v2.json"
+        written("rewritten.json") == committed,
+        "rewriting the manifests of tools/ changes the toolbox it builds"
     );
+    let backups: Vec<PathBuf> = walk(&dir)
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name == "manifest.toml.bak")
+        })
+        .collect();
+    assert!(backups.is_empty(), "manifests left to rewrite: {backups:?}");
 }
 
 /// `--rewrite-manifests` refuses to replace an existing backup
@@ -1437,7 +1442,7 @@ fn build_images_needs_something_to_build() {
 }
 
 /// The repository's toolboxes plan the same builds in both formats, with the four base
-/// contexts first in the converted one
+/// contexts first in the current one
 #[test]
 fn the_repository_toolboxes_plan_the_same_builds() {
     let docker = FakeDocker::new();
@@ -1456,9 +1461,9 @@ fn the_repository_toolboxes_plan_the_same_builds() {
             .map(str::to_owned)
             .collect::<Vec<String>>()
     };
-    let legacy = plan("toolbox.json");
-    let converted = plan("toolbox.v2.json");
-    // the converted toolbox builds its four ghidra-base contexts before any tool
+    let legacy = plan("toolbox.v1.json");
+    let converted = plan("toolbox.json");
+    // the current toolbox builds its four ghidra-base contexts before any tool
     for line in &converted[..4] {
         assert!(line.contains("ghidra-base@"), "{line}");
     }

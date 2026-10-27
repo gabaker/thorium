@@ -3,5 +3,6 @@ type = "pipeline"
 version = "latest"
 config_from = "auto-volatility3-worker.json"
 
-[images.auto-volatility3-worker]
+[stage_tools.auto-volatility3-worker]
+tool = "auto-volatility3-worker"
 version = "latest"

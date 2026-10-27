@@ -3,14 +3,18 @@ type = "pipeline"
 version = "latest"
 config_from = "pharos.json"
 
-[images.pharos-apianalyzer]
+[stage_tools.pharos-apianalyzer]
+tool = "pharos-apianalyzer"
 version = "latest"
 
-[images.pharos-callanalyzer]
+[stage_tools.pharos-callanalyzer]
+tool = "pharos-callanalyzer"
 version = "latest"
 
-[images.pharos-fn2hash]
+[stage_tools.pharos-fn2hash]
+tool = "pharos-fn2hash"
 version = "latest"
 
-[images.pharos-ooanalyzer]
+[stage_tools.pharos-ooanalyzer]
+tool = "pharos-ooanalyzer"
 version = "latest"

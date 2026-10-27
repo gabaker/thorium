@@ -3,14 +3,18 @@ type = "pipeline"
 version = "latest"
 config_from = "pcap-analyze.json"
 
-[images.prads]
+[stage_tools.prads]
+tool = "prads"
 version = "latest"
 
-[images.suricata]
+[stage_tools.suricata]
+tool = "suricata"
 version = "latest"
 
-[images.tshark]
+[stage_tools.tshark]
+tool = "tshark"
 version = "latest"
 
-[images.zeek-dump]
+[stage_tools.zeek-dump]
+tool = "zeek-dump"
 version = "latest"

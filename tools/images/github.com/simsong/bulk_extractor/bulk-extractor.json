@@ -1,117 +1,126 @@
 {
-  "name": "bulk-extractor",
-  "group": "static",
-  "description": "---\n`bulk-extractor` is a digital forensics tool used for file extraction (file carving) and evidence collection.\n\n---\n##### Usage\n\nUse `bulk-extractor` on any sample with suspected embedded or encoded content. Valid target samples may include disk images, archive files, or PCAPs. This tool will not work on samples that have been encrypted.\n\n---\n##### Status\n\n`bulk_extractor` is actively maintained and the project receives monthly updates.\n\n---\n##### Documentation\n\n[https://github.com/simsong/bulk_extractor](https://github.com/simsong/bulk_extractor)\n\n---\n##### License\n\nGovernment developed (public domain), MIT License Copyright (C) 2020-2024, Simson L. Garfinkel, various others for components.\n\n&nbsp;\n\n[Full License info](https://github.com/simsong/bulk_extractor/blob/main/LICENSE.md)\n\n---",
-  "scaler": "K8s",
-  "image": "",
-  "timeout": 3600,
-  "display_type": "XML",
-  "spawn_limit": "Unlimited",
-  "collect_logs": true,
-  "generator": false,
-  "resources": {
-    "amd_gpu": 0,
-    "burstable": {
-      "cpu": 0,
-      "memory": "0Gi"
-    },
-    "cpu": 1,
-    "ephemeral_storage": "0Gi",
-    "memory": "4Gi",
-    "nvidia_gpu": 0
-  },
-  "args": {
-    "command": null,
-    "commit": null,
-    "entrypoint": null,
-    "output": "None",
-    "output_files": "None",
-    "reaction": null,
-    "repo": null
-  },
-  "output_collection": {
-    "as_filesystem": true,
-    "auto_tag": {},
-    "children": "/tmp/thorium/children",
-    "files": {
-      "entities": "/tmp/thorium/entities.json",
-      "names": [],
-      "result_files": "/tmp/thorium/result-files",
-      "results": "/tmp/thorium/results",
-      "tags": "/tmp/thorium/tags"
-    },
-    "groups": [],
-    "handler": "Files"
-  },
-  "child_filters": {
-    "file_extension": [],
-    "file_name": [],
-    "mime": [],
-    "submit_non_matches": false
-  },
-  "dependencies": {
-    "cache": {
-      "enabled": true,
-      "generic": {
-        "kwarg": null,
-        "strategy": "Disabled"
+  "Image": {
+    "data": {
+      "child_filters": {
+        "file_extension": [],
+        "file_name": [],
+        "mime": [],
+        "submit_non_matches": false
       },
-      "location": "/tmp/thorium/cache",
-      "use_parent_cache": false
+      "dependencies": {
+        "cache": {
+          "enabled": true,
+          "generic": {
+            "kwarg": null,
+            "strategy": "Disabled"
+          },
+          "location": "/tmp/thorium/cache",
+          "use_parent_cache": false
+        },
+        "children": {
+          "enabled": false,
+          "kwarg": null,
+          "location": "/tmp/thorium/prior-children",
+          "strategy": "Paths",
+          "tools": []
+        },
+        "ephemeral": {
+          "kwarg": null,
+          "location": "/tmp/thorium/ephemeral",
+          "names": [],
+          "strategy": "Paths"
+        },
+        "filesystems": {
+          "enabled": false,
+          "kwarg": null,
+          "location": "/tmp/thorium/prior-filesystems",
+          "strategy": "Paths",
+          "tools": []
+        },
+        "repos": {
+          "kwarg": null,
+          "location": "/tmp/thorium/repos",
+          "strategy": "Paths"
+        },
+        "results": {
+          "kwarg": "None",
+          "location": "/tmp/thorium/prior-results",
+          "names": [],
+          "strategy": "Paths",
+          "tools": []
+        },
+        "samples": {
+          "kwarg": null,
+          "location": "/tmp/thorium/samples",
+          "naming": "Sha256",
+          "strategy": "Paths"
+        },
+        "tags": {
+          "enabled": false,
+          "kwarg": null,
+          "location": "/tmp/thorium/prior-tags",
+          "strategy": "Paths"
+        }
+      },
+      "display_type": "XML",
+      "output_collection": {
+        "as_filesystem": true,
+        "auto_tag": {},
+        "children": "/tmp/thorium/children",
+        "files": {
+          "entities": "/tmp/thorium/entities.json",
+          "names": [],
+          "result_files": "/tmp/thorium/result-files",
+          "results": "/tmp/thorium/results",
+          "tags": "/tmp/thorium/tags"
+        },
+        "groups": [],
+        "handler": "Files"
+      }
     },
-    "children": {
-      "enabled": false,
-      "images": [],
-      "kwarg": null,
-      "location": "/tmp/thorium/prior-children",
-      "strategy": "Paths"
+    "environment": {
+      "K8s": {
+        "env": {},
+        "image": "ghcr.io/cisagov/thorium/tools/github.com/simsong/bulk-extractor:latest",
+        "network_policies": [],
+        "scheduling": {
+          "lifetime": null,
+          "resources": {
+            "amd_gpu": 0,
+            "burstable": {
+              "cpu": 0,
+              "memory": 0
+            },
+            "cpu": 1000,
+            "ephemeral_storage": 0,
+            "memory": 4096,
+            "nvidia_gpu": 0,
+            "worker_slots": 1
+          },
+          "spawn_limit": "Unlimited"
+        },
+        "security_context": {
+          "allow_privilege_escalation": false,
+          "group": null,
+          "user": null
+        },
+        "volumes": []
+      }
     },
-    "ephemeral": {
-      "kwarg": null,
-      "location": "/tmp/thorium/ephemeral",
-      "names": [],
-      "strategy": "Paths"
-    },
-    "filesystems": {
-      "enabled": false,
-      "images": [],
-      "kwarg": null,
-      "location": "/tmp/thorium/prior-filesystems",
-      "strategy": "Paths"
-    },
-    "repos": {
-      "kwarg": null,
-      "location": "/tmp/thorium/repos",
-      "strategy": "Paths"
-    },
-    "results": {
-      "images": [],
-      "kwarg": "None",
-      "location": "/tmp/thorium/prior-results",
-      "names": [],
-      "strategy": "Paths"
-    },
-    "samples": {
-      "kwarg": null,
-      "location": "/tmp/thorium/samples",
-      "naming": "Sha256",
-      "strategy": "Paths"
-    },
-    "tags": {
-      "enabled": false,
-      "kwarg": null,
-      "location": "/tmp/thorium/prior-tags",
-      "strategy": "Paths"
+    "execution": {
+      "args": {
+        "command": null,
+        "commit": null,
+        "entrypoint": null,
+        "output": "None",
+        "output_files": "None",
+        "reaction": null,
+        "repo": null
+      },
+      "collect_logs": true,
+      "generator": false,
+      "modifiers": null,
+      "timeout": 3600
     }
-  },
-  "env": {},
-  "volumes": [],
-  "network_policies": [],
-  "clean_up": null,
-  "kvm": null,
-  "security_context": {
-    "allow_privilege_escalation": false,
-    "group": null,
-    "user": null
   }
 }

@@ -13,11 +13,11 @@ mod acceptance;
 mod command;
 mod mapping;
 
-/// The real toolbox this repository ships, in the legacy format
-pub(super) const REAL_TOOLBOX: &str = include_str!("../../../../../../tools/toolbox.json");
+/// The repository's toolbox in the legacy format, kept from before its manifests became tools
+pub(super) const REAL_TOOLBOX: &str = include_str!("../../../../../../tools/toolbox.v1.json");
 
-/// The real toolbox as converted, committed beside it
-pub(super) const REAL_TOOLBOX_V2: &str = include_str!("../../../../../../tools/toolbox.v2.json");
+/// The real toolbox this repository ships, built from its tool manifests
+pub(super) const REAL_TOOLBOX_V2: &str = include_str!("../../../../../../tools/toolbox.json");
 
 /// A small legacy toolbox with an image that can't convert and a pipeline that depends on it
 pub(super) const SMALL_LEGACY: &str =

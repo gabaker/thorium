@@ -8,14 +8,14 @@ use std::process::{Command, Output};
 
 /// The repository's legacy toolbox
 fn legacy_toolbox() -> PathBuf {
-    // the file CI builds the tool images from
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../tools/toolbox.json")
+    // kept from before the repository's manifests became tools
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../tools/toolbox.v1.json")
 }
 
-/// The repository's converted toolbox
+/// The repository's current toolbox, which converting the legacy one reproduces
 fn converted_toolbox() -> PathBuf {
-    // committed beside the legacy one
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../tools/toolbox.v2.json")
+    // built from the repository's tool manifests
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../tools/toolbox.json")
 }
 
 /// A small legacy toolbox with an image that cannot convert

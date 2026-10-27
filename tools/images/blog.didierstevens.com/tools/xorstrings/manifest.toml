@@ -1,6 +1,8 @@
 name = "xorstrings"
-type = "image"
-config_from = "xorstrings.json"
+type = "tool"
+kind = "image"
+groups = ["static"]
+spec_from = "xorstrings.json"
 build_path = "./"
 image_name = "tools/blog.didierstevens.com/tools/xorstrings"
 version = "latest"
