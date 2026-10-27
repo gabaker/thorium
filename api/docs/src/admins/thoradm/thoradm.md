@@ -57,6 +57,12 @@ upgrading Thorium or approving an upgrade step that changes data, so you can ret
 previous version or restore it if you need to. Also keep a copy of the `thorium-credentials`
 Secret and your values files (see [Backups](../deploy/operate.md#backups)).
 
+A backup holds secrets in plaintext, so store it as carefully as the `thorium-credentials` Secret.
+Each user account is backed up with its API token and its model settings, including the secrets
+of the user's model credentials, and model credential entities are backed up with their secrets.
+Anyone who can read a backup can act as any user and call the model providers those credentials
+reach.
+
 ```Bash
 thoradm backup -h
 Backup a Thorium cluster
@@ -85,9 +91,9 @@ flags such as `--workers` go before `backup`.
 A backup holds every resource that can't be rebuilt from other data: every Scylla table of samples,
 S3 ids, comments, results, tags, repos, commitishes, network policies, entities, associations,
 notifications, and nodes (the materialized views are rebuilt from them); the users and their scoped
-tokens, groups, network-policy sets, images, pipelines, and system settings held in Redis; and the
-objects in the `files`, `repos`, `attachments`, `results`, and `graphics` buckets. It also holds the
-deployment's schema record, every row of the `schema_migrations` and `schema_migration_issues`
+tokens (run-scoped tokens excepted, see below), groups, network-policy sets, images, pipelines,
+system settings, and the average runtime of each tool instance held in Redis; and the objects in
+the `files`, `repos`, `attachments`, `results`, and `graphics` buckets. It also holds the deployment's schema record, every row of the `schema_migrations` and `schema_migration_issues`
 Scylla tables except the Job results, as `schema.json` beside the archives (see [The Schema
 Record](#the-schema-record)). The Taking Backups guide lists every resource and the component that
 backs it up, generated from thoradm's coverage registry, in [What Is Backed
@@ -101,6 +107,7 @@ A backup doesn't hold runtime state, which is invalid after a restore, or data a
 |---|---|
 | The `logs` and `events` Scylla tables | Stage logs of reactions, which expire by TTL, and a table of trigger events that nothing reads or writes, which only keyspaces older releases created hold |
 | The `job_result` rows of the `schema_migrations` Scylla table | The results of upgrade Jobs, which expire after seven days; a restore would make them permanent |
+| Run-scoped tokens | Each belongs to a run whose reaction and jobs aren't backed up, and expires with the run; a backup leaves them out, and a restore skips any that a backup holds |
 | The Redis keys of reactions, jobs, workers, and services: `reactions:*`, `reactions_group:*`, `reaction_data:*`, `reaction_jobs:*`, `reaction_tags:*`, `reaction_cache:*`, `sub_reactions:*`, `generators:*`, `stage_logs:*`, `logs:*`, `job_queue:*`, `job_data:*`, `workers:*`, `worker_data:*`, `streams:*`, `event-handler:*`, `search-streamer:*`, `cursors:*`, `schema-writer`, `rebucket:*`, `image_ttc:*`, `run_queue:*`, `workload_queue:*`, `workload_ttc:*`, `workloads:*`, and `entities:instance_lock:*` | Runtime state, invalid after a restore |
 | The OAuth keys `oauth:context:*`, `oauth:registration_sessions:*`, and `oauth:link_token:*` | Login contexts, registration sessions, and account-link tokens, which expire |
 | `netpol_used_by:*` | Rebuilt by the Redis restore from the restored images' network policies |
@@ -419,7 +426,7 @@ The restore runs in this order:
    [The Schema Record](#the-schema-record)).
 4. **Redis.** The API restores Redis in steps: wipe (every key of the namespace, or with
    `--redis-flush-all` a `FLUSHDB ASYNC` of the database), init, settings, users, scoped tokens,
-   groups, images, pipelines, and network-policy sets.
+   groups, images, pipelines, network-policy sets, and tool instance runtimes.
 5. **The tables.** Restore drops each table's materialized views just before loading the table.
    Each node is written as registered, with no heartbeat: its workers were Redis state, so each
    node must check in again before the scheduler counts it.
@@ -730,7 +737,10 @@ The output will look similar to the following:
   "fairshare_memory": 102400,
   "fairshare_storage": 102400,
   "host_path_whitelist": [],
-  "allow_unrestricted_host_paths": false
+  "allow_unrestricted_host_paths": false,
+  "models": {
+    "allowed_endpoints": []
+  }
 }
 ```
 
@@ -871,27 +881,47 @@ changes data, the component it `scales down`, and the `migration` it runs:
   - users-settings-theme [Data, needs approval + backup, scales down api, migration users-settings-theme]: Move each user's theme from its own field into the user's settings
 2026-10-v02 (released with Thorium 1.8.1; from 2026-10-v03; revert): Revert the revision that applies the schema first
   - users-settings-theme-reverse [Data, needs approval + backup, scales down api, migration users-settings-theme-reverse]: Move the theme of any user stored in its own field into the user's settings, the layout the first Helm revision reads; users already there are skipped
+2026-10-v04 (released with Thorium 1.8.1; from 2026-10-v03): Images, pipeline stages, and provenance are converted for tools
+  - drain-reactions [Data, needs approval + backup, migration drain-reactions (check only; manual procedure)]: Wait until no reaction is Created or Started and no stage-path worker is registered, with Thorium running normally; the step only checks and deletes nothing, and is skipped when nothing is in flight
+  - images-to-tools [Data, needs approval + backup, scales down api, scaler, baremetal-scaler, event-handler, search-streamer, migration images-to-tools]: Create a tool and its first tool instance for every image, tagged as migrated from that image
+  - pipelines-to-tool-stages [Data, needs approval + backup, scales down api, scaler, baremetal-scaler, event-handler, search-streamer, migration pipelines-to-tool-stages]: Pin each image stage of every pipeline to the first tool instance created from its image
+  - provenance-to-legacy-tools [Data, needs approval + backup, scales down api, scaler, baremetal-scaler, event-handler, search-streamer, migration provenance-to-legacy-tools]: Move the tool names stored in file system, decompiled function, and process tree provenance into their legacy tools field
+  - finalize-tool-only [Config]: Record the revision once every conversion step is done or skipped
+2026-10-v03 (released with Thorium 1.8.1; from 2026-10-v04; revert): Revert the revision that converts images, pipelines, and provenance
+  - finalize-tool-only-reverse [Config]: Undo the record of the end of the revision that converts images, pipelines, and provenance; a revert that gets this far has no conversion to undo
 ```
+
+The `needs approval + backup` note comes from a step's kind: every `Data` step carries it, though
+a step is approved only when it has work to do (see [Approvals](../deploy/upgrades.md#approvals)).
+`drain-reactions` is `check only`: `thoradm migrate check --id drain-reactions` reports the
+reactions in flight, the step never asks for an approval, deletes nothing, and finishes once none
+is left, and `run` and `verify` refuse it.
 
 `plan` prints the steps from one revision to another (the latest by default), for example
 `thoradm migrate plan --from 2026-10-v01`. Find a cluster's revision in the `Revision` column of
 `kubectl -n thorium get thoriumcluster`, or with `thoradm schema status`. A target the catalog has
-no path to exits 1.
+no path to exits 1. A plan across several revisions puts a step that needs components running
+before the first earlier step that pauses them, so `thoradm migrate plan --from 2026-10-v02` lists
+`drain-reactions` before `users-settings-theme`, which pauses the API, though the drain belongs to
+the later revision `2026-10-v04`.
 
 **The migrations.** `--id` names a migration, which a step's `migration` in `list` names. The
 migrations built into this release are `elastic-rebuild`; the users migrations, which move a user's
 theme between its own field and the user's `settings` (`users-settings-theme` on the way up to
 `2026-10-v03`, `users-settings-theme-reverse` on the way back from it to `2026-10-v02`, which skips
-every user already in the layout `2026-10-v02` reads); and the six
+every user already in the layout `2026-10-v02` reads); `drain-reactions`, `images-to-tools`,
+`pipelines-to-tool-stages`, and `provenance-to-legacy-tools`, which wait for the reactions in flight and
+convert the images, pipelines, and provenance of earlier releases (see [Upgrading to Agentic
+Workflows](../agentic/upgrading.md)); and the six
 `rebucket-<data type>` migrations (`rebucket-files`, `rebucket-repos`, `rebucket-results`,
 `rebucket-entities`, `rebucket-associations`, `rebucket-tags`) that the operator plans when a
 partition size changes (see [Changing a partition size](../deploy/upgrades.md#changing-a-partition-size)).
-Thoradm can check, run, and verify every one of them, `elastic-rebuild` included, which the operator
+Thoradm can check, run, and verify every one of them but `drain-reactions`, `elastic-rebuild` included, which the operator
 runs as the migration Job of the Elasticsearch reindex step (see [Reindexing
 Elasticsearch](../deploy/upgrades.md#reindexing-elasticsearch)). An unknown id exits 1. A
 migration thoradm can't perform prints its manual procedure and exits 3 on `check`, `run`, and
-`verify`, and one it can only check does so on `run` and `verify`; this release registers neither
-kind.
+`verify`, and one it can only check does so on `run` and `verify`; this release registers none of
+the first kind, and `drain-reactions` is the one of the second kind.
 
 | Subcommand | What it does |
 |---|---|
@@ -909,6 +939,21 @@ kind.
 | `revert` | Moves a cluster back to an older revision: it reads the recorded revision and history, plans the reverse path, and runs each step's migration in turn. `--dry-run` prints the steps, what each loses, and the confirmation code of each lossy one, and changes nothing. `--dry-run` also shows whether `thoradm backup` covers each lost field, and names the components a step expects to be stopped while it runs; the revert stops none of them, so scale them to zero first. A step that loses data runs only with `--confirm <its code>` (and `--backup`), one lossy step per run: the next code exists once this step's entries are recorded. A step that loses a field no `thoradm backup` covers, which a backup can't restore, is refused unless `--accept-backup-gaps` is also given, the way the operator's approval needs `acceptBackupGaps`. A step thoradm doesn't run stops the revert with that step's manual procedure. An interrupted step exits 4; run the revert again to resume it. An interrupted lossy step's code changed when its run was recorded, so run `--dry-run` again for its new code and rerun with that code. When every step has run it records the older revision |
 | `reset-state` | Rewrites the recorded revision after data was restored or wiped other than by `backup restore`, when the record names a revision the data isn't at; refuses with exit 2 without `--i-restored-data` (see below) |
 | `record` | Run by the operator to copy its entries into the record and move the recorded revision once every step is recorded; `--seed` records the revision and history of the `--state` ConfigMap when the keyspace holds none |
+
+`images-to-tools` creates a tool and its first instance for every image. It creates each tool through
+the same code the API runs when a user creates a tool, so a migrated tool has the rows, tags,
+`PublishedFrom` edge, workload runtime, and queued `ToolUpdated` event of any other. The tool's id,
+its first instance's id, and the time it is created at all derive from the image, so a run that
+stops partway, or a second run, writes the rows it already wrote again instead of adding to them.
+An image counts as migrated once its tool, the tool's first instance, and the edge between them
+exist. Images that don't convert, or that the tool creation refuses, are issues, and the images
+around them still migrate. Run it with the API and the event handler stopped; the `ToolUpdated`
+events wait in Redis for the event handler to start.
+
+`pipelines-to-tool-stages` pins every stage of the pipelines whose images all have one to the first
+instance of that tool, and `provenance-to-legacy-tools` moves the tool names stored on filesystems,
+decompiled functions, and process trees to `legacy_tools`. The upgrade runs the three as steps; see
+[Upgrading to Agentic Workflows](../agentic/upgrading.md).
 
 Exit codes of the `migrate` and `schema` subcommands:
 
@@ -1081,6 +1126,7 @@ Legacy objects
     rows:        18204
     created by:  2026-10-v01, 2026-10-v02
     used by:     none
+    downgrade to 2026-10-v04: recreated (it does not use this object)
     downgrade to 2026-10-v03: recreated (it does not use this object)
     downgrade to 2026-10-v02: recreated (it does not use this object)
     downgrade to 2026-10-v01: recreated (it does not use this object)

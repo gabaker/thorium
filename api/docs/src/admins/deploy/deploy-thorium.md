@@ -548,8 +548,19 @@ spec:
 
 ## Toolbox
 
-Import a [toolbox](../../developers/toolbox.md) with Thorctl once the deployment is `Ready` (see
-`thorctl toolbox import --help`).
+Import a [toolbox](../../developers/toolbox.md) with Thorctl once the deployment is `Ready`, logged in
+as an admin (the repository's toolbox has tools that run as root, which only an admin can publish):
+
+```bash
+thorctl toolbox import tools/toolbox.json --dry-run
+thorctl toolbox import tools/toolbox.json --skip-conflicts --create-groups
+```
+
+The toolbox can be a legacy image toolbox, which is converted to tools as it is read, or a format 2
+toolbox. `--dry-run` prints the plan without writing, and `--skip-conflicts` makes a repeated import
+change nothing. See [Importing](../../developers/toolbox.md#importing) for the options and exit codes.
+The Helm chart runs the same command in a Job; see [Importing a
+toolbox](./deploy-helm.md#importing-a-toolbox).
 
 ## Verifying
 
@@ -696,17 +707,20 @@ deployment with a namespace prefix.
      -o jsonpath='{.metadata.labels.thorium\.sandia\.gov/state-revision}'; echo
    ```
 
-9. **Upgrade.** Set the target revision; the operator runs the steps up to `2026-10-v03` and then
+9. **Upgrade.** Set the target revision; the operator runs the steps up to `2026-10-v04` and then
    rolls out the new components of the version set in step 7:
 
    ```bash
    kubectl -n thorium patch thoriumcluster dev --type merge \
-     -p '{"spec":{"upgrade":{"target_revision":"2026-10-v03"}}}'
+     -p '{"spec":{"upgrade":{"target_revision":"2026-10-v04"}}}'
    ```
 
    If the `elastic-reindex-keyword-mappings` step blocks, approve it in `spec.upgrade.approvals`
    with a reference to your backup; the operator then rebuilds the indexes (see [Reindexing
-   Elasticsearch](./upgrades.md#reindexing-elasticsearch)). Wait for `Ready`.
+   Elasticsearch](./upgrades.md#reindexing-elasticsearch)). The steps of `2026-10-v04` that convert
+   images, pipeline stages, and provenance to tools block the same way when the deployment has any,
+   and `drain-reactions` waits for in-flight reactions to finish (see [Upgrading to Agentic
+   Workflows](../agentic/upgrading.md)). Wait for `Ready`.
 
 10. **Move the credentials into a config Secret** (recommended once the revision is
     recorded). Create a Secret with the credentials from `spec.config` in the

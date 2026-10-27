@@ -121,15 +121,48 @@ helm upgrade thorium oci://ghcr.io/cisagov/thorium/charts/thorium --version $VER
   -n thorium --reuse-values --set-file operator.toolbox.json=./toolbox.json
 ```
 
-The import Job logs in as the admin from `operator.cluster.bootstrap.admin.secret`, creates the
-groups and network policies the toolbox references first (`operator.toolbox.groups` and
-`operator.toolbox.networkPolicies`), and then imports with `operator.toolbox.mode`
-(`skip-conflicts` or `overwrite`); `operator.toolbox.groupOverride` puts every tool in one group.
-The Job is named after a hash of its whole spec, so changing any of these settings, or anything
-else the Job uses (the Thorium image, pull settings, the admin secret, scheduling), runs a new
-import; with `skip-conflicts` a repeated import changes nothing. Set `operator.toolbox.enabled:
-false` to never import a toolbox, even with `url` or `json` set. See
-[Chart Values Reference](./chart-values.md) for the remaining `operator.toolbox` values.
+The toolbox can be in either format: the repository's `tools/toolbox.json` (format 2, built from the
+tool manifests in `tools/`), a legacy image toolbox (which `thorctl` converts to tools as it reads it),
+or a converted or hand-written format 2 toolbox. The
+import Job waits for the API and for the admin login, then logs in as the admin from
+`operator.cluster.bootstrap.admin.secret` (importing the repository's toolbox needs an admin, because
+its tools run as root), creates the groups and network policies the toolbox references first
+(`operator.toolbox.groups` and `operator.toolbox.networkPolicies`), and runs
+`thorctl toolbox import` with these flags, in this order:
+
+```text
+thorctl toolbox import "$TOOLBOX" --<mode> [--create-groups] [--strict] [--group-override <group>]
+```
+
+| Value | Default | Effect |
+| ----- | ------- | ------ |
+| `operator.toolbox.mode` | `skip-conflicts` | `skip-conflicts` creates what is missing and changes nothing that exists; `overwrite` publishes changed tool specs as new versions and updates the rest |
+| `operator.toolbox.createGroups` | `false` | Adds `--create-groups`: create the groups the toolbox names that don't exist, owned by the admin, on top of `operator.toolbox.groups` |
+| `operator.toolbox.strict` | `false` | Adds `--strict`: fail before any change when converting an older toolbox raised an issue or the manifest has a warning, instead of importing what converts |
+| `operator.toolbox.groupOverride` | empty | Adds `--group-override`: put every tool in one group (created if missing) |
+| `operator.toolbox.backoffLimit` | `6` | How many times Kubernetes retries the Job before it is failed |
+| `operator.toolbox.enabled` | `true` | `false` never imports a toolbox, even with `url` or `json` set |
+
+**Exit codes and retries.** The Job passes `thorctl`'s exit code through: `0` when the import applied or
+had nothing to change, `1` when it failed (a conflict, a refusal, a rollback, or `--strict`). On failure
+it prints `The toolbox import failed (thorctl exit code N); see its report above` and the pod is
+retried, with `restartPolicy: Never` and up to `backoffLimit` retries. An import is idempotent, so a
+retry only applies what is still missing, which also covers the API still starting; a deterministic
+refusal simply fails the same way until the limit is reached.
+
+**Reading the result.** `thorctl`'s report is the Job's log:
+
+```bash
+kubectl -n thorium get jobs
+kubectl -n thorium logs job/toolbox-import-<hash>
+```
+
+The log shows the conversion report for a legacy toolbox, then the import report (what was created,
+published, updated, skipped, or not attempted, and any rollback), and ends with `The toolbox import
+finished (skip-conflicts)` on success. The Job is named after a hash of its whole spec, so changing any
+of these settings, or anything else the Job uses (the Thorium image, pull settings, the admin secret,
+scheduling), runs a new import; with `skip-conflicts` a repeated import changes nothing. See [Chart
+Values Reference](./chart-values.md) for the remaining `operator.toolbox` values.
 
 ## Offline installs
 

@@ -4,6 +4,21 @@ Thorctl provides helpful commands to create, delete, and update network policies
 You can find a list of those commands by running `thorctl network-policies --help` (or, alternatively,
 `thorctl netpols --help`).
 
+## Deleting a Network Policy
+
+`thorctl netpols delete <NAME>` deletes a network policy (pass `--id <ID>` when more than one policy has the same
+name). A network policy is shared by every group it is in, so deleting it removes it for all of them. Thorctl
+therefore reads the policy first and asks about it by name, naming the groups that hold it:
+
+```
+$ thorctl netpols delete allow-dns
+Delete network policy 'allow-dns' (groups: corn, wheat, id: 6e1c...) for all of its groups? [y/N]
+```
+
+The default answer is no; answering no prints `Cancelled; nothing was changed.` and exits `0`. Pass
+`--skip-confirm` (alias `--yes`) to delete without asking. Without a terminal and without the flag the command
+exits `1`, naming the flag, and deletes nothing.
+
 ## Creating a Network Policy
 
 To create a network policy, use the `thorctl netpols create` command:
@@ -38,6 +53,9 @@ thorctl netpols create --name my-policy --groups crabs,corn ...
 The actual content of the network policy is defined in a "rules file", a YAML or JSON-formatted list
 of rules the network policy should have. You can use the template network policy files below
 for reference. For more information on accepted values for each field in the rules file, see the [Network Policy Rules Schema](./network_policies.md#rules)
+An `allowed_tools` entry is a tool's id, a tool instance's id, or a tool's exact name. A name selects
+whatever tool in the group holds that name, so use ids for security boundaries (see
+[Tool Entries](./network_policies.md#tool-entries)).
 
 rules-file.yaml:
 

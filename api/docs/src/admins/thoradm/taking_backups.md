@@ -28,7 +28,7 @@ Thoradm reads two configs:
   [Config](./thoradm.md#config) for how to build it from the `ThoriumCluster` resource.
 - **The Thorctl config** (`--ctl-conf`, default `~/.thorium/config.yml`): the API URL and a token.
   Log in as a Thorium **admin** with `thorctl login` first; the Redis data (users, groups, images,
-  pipelines, and system settings) is only served to admins.
+  pipelines, system settings, and tool instance runtimes) is only served to admins.
 
 ### Run thoradm at the API's version
 
@@ -99,7 +99,7 @@ The positional argument is a comma-separated list of components; it defaults to 
 |---|---|
 | `all` | Every component below |
 | `no-s3` | Every component except the four S3 components (`s3-ids-objects`, `comment-attachments`, `result-files`, `graphics`); an S3 component listed beside it is still backed up |
-| `redis` | Users and their scoped tokens, groups and the network policies each holds, images, pipelines, and system settings, fetched through the API into `redis.json` |
+| `redis` | Users and their scoped tokens (run-scoped tokens excepted), groups and the network policies each holds, images, pipelines, system settings, and the average runtime of each tool instance, fetched through the API into `redis.json` |
 | `samples-list` | The `samples_list` table |
 | `s3-ids` | The `s3_ids` table, which names the objects of samples and repos |
 | `s3-ids-objects` | The objects of samples and repos in the `files` and `repos` buckets |
@@ -879,9 +879,9 @@ database, whichever namespace they belong to (about 14 minutes for 570 million s
   When another namespace or application shares the database, leave the flag off.
 - **What stays the same.** The backup is validated first, and a backup the API refuses leaves
   Redis untouched; the records are rebuilt in the same order (init, settings, users, scoped tokens,
-  groups, images, pipelines, network-policy sets), and the census is rebuilt after the tables. It
-  needs an admin in the Thorctl config and thoradm at the API's version, as every Redis restore
-  does, and it has no effect on a backup without `redis.json`.
+  groups, images, pipelines, network-policy sets, tool instance runtimes), and the census is
+  rebuilt after the tables. It needs an admin in the Thorctl config and thoradm at the API's
+  version, as every Redis restore does, and it has no effect on a backup without `redis.json`.
 - **The confirmation** names the Redis host and namespace and says that every key in the database
   will be deleted, other namespaces' keys included; the summary's `warnings` says the database was
   flushed.

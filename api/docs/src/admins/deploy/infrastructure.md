@@ -58,7 +58,7 @@ work, but these are the ones a chart release deploys.
 | ECK operator | 2.16.0 |
 | Elasticsearch and Kibana | 8.19.2 |
 | Scylla operator | 1.21.1 |
-| ScyllaDB | 6.2.3 |
+| ScyllaDB | 6.2.3 (see the note below) |
 | Scylla Manager agent | 3.4.2 |
 | Redis | 7.4.11 |
 | SeaweedFS | 4.48 |
@@ -68,6 +68,10 @@ work, but these are the ones a chart release deploys.
 | Postgres | 17 |
 | Rook (installed by megathor) | Helm charts v1.18.1 |
 | Traefik (installed by megathor) | Helm chart 37.1.0 |
+
+**Scylla stays on 6.2.3.** The charts pin ScyllaDB 6.2.3 and Thorium is not tested on newer releases. From Scylla 2025.1 new
+keyspaces default to tablets, and a keyspace that uses tablets refuses materialized views, which Thorium's schema uses, so
+don't move a deployment to a newer ScyllaDB on your own. This is an accepted known limitation.
 
 To list the exact images a chart release deploys, run `deploy/charts/scripts/list-images.sh`
 from the Thorium source repository at that release, passing the values files you deploy with.

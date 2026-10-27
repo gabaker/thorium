@@ -1,8 +1,9 @@
 # Search
 
 Thorium also allows users to search through tool results and file tags to find
-interesting files. This is currently only available in the Web UI and can be accessed on
-the home page. Thorium uses the [Lucene syntax](https://www.elastic.co/guide/en/kibana/current/lucene-query.html)
+interesting files. Thorctl has no search command yet; search is available through the
+API route `GET /api/search/`, and
+Thorium uses the [Lucene syntax](https://www.elastic.co/guide/en/kibana/current/lucene-query.html)
 for search queries.
 
 It's important to note that documents are indexed **per group**. This means that
@@ -10,30 +11,32 @@ for a document to be returned, **all** search parametes must be met by at least
 one group (see the below [FAQ](#what-do-groups-have-to-do-with-searching-in-thorium)
 for more details).
 
-<p align="center">
-    <img width="800" src="./../static_resources/search.png">
-</p>
+If a search is made before the search streamer has created the search indexes (for example right
+after a new deployment, before any file or result was indexed), the API answers `503 Service
+Unavailable` with a message that the search index does not exist yet. Ask an admin to check that the
+search streamer is running; the search works once it has created the indexes.
 
-### Indexes
+### API
+---
+
+```bash
+curl -G -H "Authorization: Bearer $TOKEN_B64" https://<URL>/api/search/ \
+  --data-urlencode 'query=pe32 AND rust' --data-urlencode 'groups=examples' --data-urlencode 'limit=50'
+```
+
+| Query parameter | Meaning |
+| --------------- | ------- |
+| `query` | The Lucene query |
+| `indexes` | The indexes to search, repeated for several: `SampleResults`, `RepoResults`, `SampleTags`, `RepoTags`. Only `SampleResults` and `SampleTags` are searched by default |
+| `groups` | The groups to search, repeated for several; with none, all of your groups are searched |
+| `start`, `end` | The time range, by when the data was last modified (RFC 3339 datetimes) |
+| `cursor` | The cursor from the previous response, to read the next page |
+| `limit` | The most documents to return in this response (50 by default) |
 
 Data is stored in Elasticsearch in various indexes based on the data type (i.e. results are
-stored separately from tags). You can select the index to search on by selecting the dropdown
-on the right of the search bar. Searches are performed on all indexes by default.
-
-<p align="center">
-    <img width="800" src="./../static_resources/search-dropdown.png">
-</p>
-
-### Search Parameters
-
-You can specify various parameters for your search by clicking the funnel icon below the search bar.
-Parameters include the sample's group(s), the date the sample was last modified, and the number of search
-results to display per page. By default, no groups are selected and searches are performed on all
-of the user's groups.
-
-<p align="center">
-    <img width="800" src="./../static_resources/search-parameters.png">
-</p>
+stored separately from tags). Errors: `400` for an invalid parameter, `401` when you aren't
+authorized, `404` for a group you can't see, and `503` when the indexes don't exist yet or a
+backing service is unavailable.
 
 ### Examples
 
@@ -143,6 +146,31 @@ Grep searches are always sent as `POST` requests. The scoping and paging options
 the query string using the same forms as the list routes (`limit=10`, `groups[]=plants`),
 while the regex itself is sent in a JSON body since regexes do not survive being crammed
 into a query string.
+
+### What grep searches
+
+Each corpus has its own sources, and `sources[]` picks among them (see
+[Limiting what is searched](#limiting-what-is-searched)):
+
+| Corpus | Sources searched |
+|---|---|
+| Files | Results, result files, submissions (name, description, and origin), comments, and tags |
+| Repos | Results, result files, submissions (creator and scheme), and tags |
+| Entities | Metadata and tags |
+
+Entity metadata is the entity's name and description for every kind. A few kinds add their own
+text: the rule of a sigma rule, the content of a decompiled function, the reasoning and content of a
+flag, the image path and command of a Windows process, and the cover term of an incident. Every
+other kind, including tools, tool instances, agents, toolsets, workflows, and models, is searched
+by name, description, and tags only. The secrets of model credentials and endpoints are never
+searched; their name, description, and tags are. Entities have no results or result files, so
+those sources match nothing for them. Tools, agents, and the other catalog entities are part of the
+entities corpus (`thorctl grep --entities`).
+
+Grep searches only what you can see. Every page checks your groups again, so a search that is
+paging when you lose access to a group stops returning that group's data, and a cursor whose
+groups you no longer belong to at all answers `404`, as if it didn't exist. A scoped token
+searches only the groups it is scoped to, for a new search and for a cursor you resume with it.
 
 ### Searching a single item
 
@@ -385,9 +413,9 @@ Grepping a single item works the same way but skips the cursor entirely:
     { loop: true, autoPlay: true, cols: 120, rows: 28, idleTimeLimit: 2 });
 </script>
 
-When stdout is piped the output automatically switches to one self contained
-`key:source:...:line:snippet` row per match, and `--format json` emits each item as one
-JSON object per line (NDJSON) for tools like `jq`:
+When stdout is piped, or `NO_COLOR` is set or `TERM=dumb`, the output automatically switches to
+one self contained `key:source:...:line:snippet` row per match without color, and `--format json`
+emits each item as one JSON object per line (NDJSON) for tools like `jq`:
 
 ```bash
 # collect the keys of everything that matched
@@ -434,7 +462,7 @@ are remembered server side so only per page knobs like `--limit` can change.
 | `--scan-time` / `--scan-idle` | cluster max | Per request scan budgets in milliseconds |
 | `--with-truncated` | off | Also list documents that were truncated or errored without any matches |
 | `--cursor` | none | Resume an earlier corpus search |
-| `--format` | auto | `heading` on a terminal, `flat` when piped, or `json` to force NDJSON |
+| `--format` | auto | `heading` on a terminal, `flat` when piped or when `NO_COLOR` or `TERM=dumb` asks for plain text, or `json` to force NDJSON |
 
 > Note: Thorctl replaces control characters in snippets and provenance paths with `�`
 > before printing so malicious file contents cannot inject terminal escape codes; hit the

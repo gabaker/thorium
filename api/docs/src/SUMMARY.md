@@ -1,35 +1,74 @@
 # Summary
 
 - [Intro](./intro.md)
+# Getting Started
+
 - [Getting Started](./getting_started/getting_started.md)
     - [Registration](./getting_started/registration.md)
     - [Login](./getting_started/login.md)
     - [Roles and Permissions](./getting_started/roles_permissions.md)
     - [Adding/Editing Groups](./getting_started/adding_editing_groups.md)
     - [Command Line Tool](./getting_started/thorctl.md)
+- [Concepts](./concepts/concepts.md)
+
+# Tools, Toolsets, and Agents
+
+- [Tool Developers](./developers/developers.md)
+    - [Tools and Tool Instances](./developers/tools.md)
+    - [AI Agents, Toolsets, and Workflows](./developers/agents_workflows.md)
+    - [Harnesses](./developers/harnesses.md)
+    - [Editing Resources](./developers/editing_resources.md)
+    - [Generators](./developers/generators.md)
+
+# Running
+
+- [Running Tools and Workflows](./users/runs.md)
+    - [Spawning Reactions](./users/spawning_reactions.md)
+    - [Reaction Status](./developers/reaction_status.md)
+    - [Viewing Reaction Status and Logs](./developers/viewing_reaction_logs.md)
+
+# Models and Bans
+
+- [Models](./users/models.md)
+- [Bans](./developers/bans.md)
+- [Notifications](./developers/notifications.md)
+
+# Results and Data
+
 - [Users](./users/users.md)
+    - [Results and Provenance](./users/viewing_results.md)
     - [Uploading Files](./users/uploading_files.md)
     - [Viewing Files](./users/viewing_files.md)
     - [Tagging Files](./users/tagging_files.md)
     - [Associating Data](./users/associations.md)
-    - [Spawning Reactions](./users/spawning_reactions.md)
     - [Search](./users/search.md)
-    - [Viewing Tool Results](./users/viewing_results.md)
     - [Downloading Files](./users/downloading.md)
     - [Commenting on Files](./users/commenting.md)
     - [Revoking Your Token](./users/revoking_token.md)
-- [Tool Developers](./developers/developers.md)
-    - [Working With Tools](./developers/images.md)
-        - [Adding Images](./developers/add_images.md)
-        - [Configuring Images](./developers/configuring_images.md)
-        - [More on Children (Samples)](./developers/children.md)
+    - [More on Children (Samples)](./developers/children.md)
+
+# Legacy Images and Pipelines
+
+- [Legacy Images and Pipelines](./developers/images.md)
+    - [Creating a Tool from Image Settings](./developers/add_images.md)
+    - [Configuring Images](./developers/configuring_images.md)
     - [Building Pipelines](./developers/build_pipelines.md)
-    - [Toolboxes](./developers/toolbox.md)
-    - [Reaction Status](./developers/reaction_status.md)
-    - [Viewing Reaction Logs](./developers/viewing_reaction_logs.md)
-    - [Generators](./developers/generators.md)
-    - [Bans](./developers/bans.md)
-    - [Notifications](./developers/notifications.md)
+    - [Importing, Exporting, and Editing Images and Pipelines](./developers/import_export.md)
+
+# Toolboxes
+
+- [Toolboxes](./developers/toolbox.md)
+    - [Toolbox Directories and Image Builds](./developers/toolbox_directories.md)
+
+# Upgrading
+
+- [Upgrading: Changes to Tool Commands](./developers/tool_cli_changes.md)
+- [Upgrading to Agentic Workflows](./admins/agentic/upgrading.md)
+- [Release Notes](./release_notes/release_notes.md)
+    - [Agentic Workflow Support](./release_notes/agentic_workflows.md)
+
+# Administration
+
 - [Admins](./admins/admins.md)
     - [Architecture](./architecture/architecture.md)
         - [API](./architecture/api.md)
@@ -39,6 +78,7 @@
         - [Tracing/Logging](./architecture/tracing.md)
         - [Event Handler](./architecture/event-handler.md)
         - [Operator](./architecture/operator.md)
+        - [Thorctl Edit Framework](./architecture/thorctl-edit.md)
         - [Testing Upgrades and Schema Changes](./architecture/testing-upgrades.md)
     - [Deploying Thorium](./admins/deploy/deploy.md)
         - [Deployment Concepts](./admins/deploy/concepts.md)
@@ -68,12 +108,16 @@
                 - [Offline Mirror](./admins/deploy/example-offline.md)
         - [Troubleshooting Deployments](./admins/deploy/troubleshooting.md)
     - [Operations](./admins/operations.md)
-        - [Troubleshoot WebUI Issues](./admins/troubleshoot_user_issues.md)
+        - [Troubleshoot User Issues](./admins/troubleshoot_user_issues.md)
         - [Delete A Group](./admins/delete_group.md)
         - [Delete A User](./admins/delete_user.md)
         - [Ban Things in Thorium](./admins/bans_admins.md)
         - [Create Notifications](./admins/notifications_admins.md)
         - [Setting Up KVM VMs for Reactor](./admins/reactor_kvm_setup.md)
+    - [Tools, Runs, and Models](./admins/agentic/agentic.md)
+        - [The Thorium MCP Server](./admins/agentic/mcp.md)
+        - [Model Endpoints for Admins](./admins/agentic/models.md)
+        - [Scheduling Tools and Runs](./admins/agentic/scheduling.md)
     - [Admin Command Line Tool](./admins/thoradm/thoradm.md)
         - [Taking Backups](./admins/thoradm/taking_backups.md)
     - [Common Issues](./admins/common_issues.md)

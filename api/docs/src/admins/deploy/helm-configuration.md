@@ -201,6 +201,41 @@ operator:
           - { name: NO_PROXY, value: "localhost,127.0.0.1,.svc,.svc.cluster.local,cluster.local,10.96.0.0/12,10.244.0.0/16" }
 ```
 
+## Grep settings
+
+The `thorium.grep` settings bound [grep searches](../../users/search.md#grep-search), which read
+result files and other data straight out of Scylla and S3. The keys are optional; each takes its
+default when unset. They are set in the Thorium config file (`thorium.yml`), and like every other
+key each can be overridden with an environment variable whose path segments are joined by double
+underscores, for example `THORIUM__THORIUM__GREP__MAX_SCAN_TIME`. On a Helm deployment, set them
+under `operator.cluster.config.thorium.grep`; the chart deep-merges them into the rendered config:
+
+```yaml
+operator:
+  cluster:
+    config:
+      thorium:
+        grep:
+          max_scan_time: 30000
+          max_document_size: 128 MiB
+```
+
+| Key | Default | Unit | Meaning |
+| --- | ------- | ---- | ------- |
+| `thorium.grep.max_matches` | `1000` | matches | The most matches one grep query returns before it halts. A request's `max_matches` is capped by this. At least 1 |
+| `thorium.grep.max_document_size` | `64 MiB` | bytes (`KB`, `KiB`, `MB`, `MiB`, `GB`, and `GiB` suffixes accepted) | The most bytes grep searches in one document. A larger document is searched up to this size and reported `truncated` as `MaxDocumentSize`. A `multi_line` search buffers the whole document up to this size |
+| `thorium.grep.max_line_size` | `1 MiB` | bytes (suffixes accepted) | The longest line grep searches. A longer line makes its document `truncated` as `Error` |
+| `thorium.grep.concurrency` | `10` | documents | How many documents one grep request searches at once |
+| `thorium.grep.regex_size_limit` | `10 MiB` | bytes (suffixes accepted) | The largest a compiled pattern may be. A pattern over it is refused with `400` |
+| `thorium.grep.dfa_size_limit` | `10 MiB` | bytes (suffixes accepted) | The most memory the pattern's DFA cache may use. A pattern that can't compile inside it is refused with `400` |
+| `thorium.grep.max_snippet_size` | `512` | bytes | The most bytes of one match's snippet returned |
+| `thorium.grep.max_items` | `100` | items | The largest `limit` of a corpus page: the most samples, repos, or entities with matches one page returns. Between 1 and 10000 |
+| `thorium.grep.max_scan_time` | `50000` | milliseconds | The longest one corpus page scans. A request's `scan_time` is capped by this |
+| `thorium.grep.max_scan_idle` | `3000` | milliseconds | How long a corpus page keeps scanning after its last new match. A request's `scan_idle` is capped by this |
+
+`max_scan_time` is also the longest a grep request holds a connection open: a reverse proxy in front
+of the API needs a read timeout above it (see [Traefik](./install-traefik.md)).
+
 ## External services
 
 Every backing service can run outside the chart, such as a cloud service or one you already
@@ -448,7 +483,7 @@ namespace instead of granted cluster-wide. Turn it off only if the operator must
 | Value | Effect |
 |-------|--------|
 | `type` | `none` (default), `nginx` (a `networking.k8s.io` Ingress), or `traefik` (an `IngressRoute` on the `websecure` entrypoint plus a `TLSOption` limiting TLS to 1.2 and 1.3) |
-| `host` | The hostname to route; empty routes every host |
+| `host` | The hostname to route; empty routes every host. The chart also renders it as `thorium.mcp.allowed_hosts`, because the MCP server at `/api/mcp` refuses requests addressed to a host it doesn't know. With an empty `host`, list the hostnames MCP clients use in `operator.cluster.config.thorium.mcp.allowed_hosts` (which replaces the rendered list) |
 | `className` | The Ingress class (nginx only, default `nginx`) |
 | `annotations` | Extra Ingress annotations (nginx only), merged over the chart's `nginx.ingress.kubernetes.io/proxy-body-size: "0"` (and `ssl-redirect: "false"` without TLS) |
 | `tls.secretName` | An existing `kubernetes.io/tls` Secret in the thorium namespace. With nginx and no Secret, the Ingress serves plain HTTP |

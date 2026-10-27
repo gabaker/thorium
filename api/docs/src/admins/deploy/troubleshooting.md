@@ -164,7 +164,7 @@ drift](./upgrades.md#schema-drift).
 ### A lossy downgrade step stays blocked
 
 > Step `<step>` loses data: ... To accept the loss, take a backup and add the approval {step:
-> `<step>`, backup: <where your backup is>, acceptLoss: true, confirm: `<code>`} ...
+> `<step>`, backup: `<where your backup is>`, acceptLoss: true, confirm: `<code>`} ...
 
 > The approval for `<step>` was refused: ... Repeat the current code `<code>` as confirm
 
@@ -240,6 +240,23 @@ running in the cluster always uses `kubernetes-admin@cluster.local`.
 
 A new image pushed under the same tag doesn't roll anything out; restart the components with
 `kubectl -n thorium rollout restart deployment`. See [Rollouts](./helm-configuration.md#rollouts).
+
+## The toolbox import Job
+
+`operator.toolbox` runs `thorctl toolbox import` in a Job named `toolbox-import-<hash>` (see
+[Importing a toolbox](./deploy-helm.md#importing-a-toolbox)). Read what it did with
+`kubectl -n thorium logs job/toolbox-import-<hash>`; it prints `thorctl`'s report and, on failure,
+`The toolbox import failed (thorctl exit code N); see its report above`.
+
+| Log line or symptom | Cause and fix |
+|---------------------|---------------|
+| `Waiting for the Thorium API (N/90)...` or `Waiting for the admin user ... to log in` | Normal while the API starts and the operator creates the admin. The Job gives up after about 15 minutes for the API and 5 for the login; check the API pod and the `thorium-admin` Secret |
+| `tool NAME@LABEL: only an admin can publish a workload with a non-default security context` | The import logs in as the `operator.cluster.bootstrap.admin.secret` user. A non-default `security_context` (the repository's tools run as root) needs that user to be an admin |
+| `group X doesn't exist; use --create-groups to create it` | Add the group to `operator.toolbox.groups`, or set `operator.toolbox.createGroups: true` |
+| `you can't create tools, toolsets, agents, workflows, or pipelines in group X` | The admin's role or the group's settings don't allow writes there; fix the group or use `groupOverride` |
+| Conflicts listed and nothing applied | With `mode: overwrite` conflicts are applied; with `skip-conflicts` existing items that differ are left alone and listed, which is not a failure |
+| Conversion issues and `--strict` | `operator.toolbox.strict: true` fails the import when converting a legacy toolbox skipped or dropped something; fix the toolbox (see `thorctl toolbox convert`) or unset `strict` |
+| The Job fails again and again | Each pod retry repeats the import, which only applies what is missing; the Job fails after `operator.toolbox.backoffLimit` (6) retries. Fix the cause shown in the log; changing any toolbox value creates a new Job |
 
 ## Helm render failures
 

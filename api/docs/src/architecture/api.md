@@ -17,6 +17,25 @@ drastically reduces latency and the required memory footprint of the API. The sa
 also true for downloads, but instead of 5 MiB chunks, data is streamed to the client as
 quickly as possible with no buffering in the API.
 
+### REST API Reference
+
+The API describes every REST route in OpenAPI documents, one for each area of the API (for example
+pipelines, reactions, repos, search, and users), and serves them in a Swagger UI at
+`/api/docs/swagger-ui/` on your Thorium instance. Pick an area from the UI's document list to see
+its routes with their methods, parameters, request bodies, and the routes a run-scoped token is
+refused. Each document is also served as JSON at `/api/<area>/openapi.json`, such as
+`/api/pipelines/openapi.json`; the basic routes (`/api`, `/api/health`, and the like) are at
+`/api/openapi.json`. An area is named for its document, not always for its route prefix: the
+`stream` document describes `/api/streams/...`, the `networkpolicies` document describes
+`/api/network-policies/...`, and the `reactions` document also describes the tool and workflow run
+routes (`/api/tools/instances/{id}/runs` and `/api/workflows/instances/{id}/runs/...`). The two search event documents are the exceptions to the file name:
+they are served at `/api/search/events/results` and `/api/search/events/tags`. The MCP endpoint
+isn't a REST route and isn't in these documents (see
+[The Thorium MCP Server](../admins/agentic/mcp.md)).
+
+This user guide is served at `/api/docs/user`, and the developer documentation of the Rust code starts
+at `/api/docs/dev/thorium/index.html` (rustdoc writes no page at `/api/docs/dev` itself).
+
 ### FAQS
 ---
 
