@@ -1,9 +1,9 @@
-# Viewing Results
+# Results and Provenance
 
 Tool results are created when a `pipeline` is run on a target `file`. The running `pipeline` instance is called a
-`reaction` and may involve running several tools (called `images`) on the target `file`. The analysis artifacts created
+`reaction` and may involve running several tools on the target `file`. The analysis artifacts created
 by each tool are then automatically stored in Thorium after each `pipeline` stage has completed. We organize tool
-results based on the name of the tool/image rather than the name of the pipeline where that tool was run.
+results based on the name of the tool rather than the name of the pipeline where that tool was run.
 
 Tools may generate several types of result output, including renderable and downloadable formats. These artifacts
 include:
@@ -12,84 +12,31 @@ include:
 - result-files: downloadable files produced by the tool and any tool results larger than 1MB
 - children: unpacked or transformed files that Thorium treats like sample files due to potential maliciousness.
 
-You can view or download results and child files from both the Web UI and Thorctl.
-
-## Web UI
----
-
-### Results and Result Files
-
-You can navigate to the details page for a file using the `sha256` hash of that file, or by browsing and searching
-through Thorium's data. If you are already on the file details page and see your reaction's have completed, refresh the
-page to get the latest tool results!
-
-<script>
-  let base = window.location.origin;
-  document.write("<pre>");
-  document.write("<a href=" + base + "/file/SHA256" + ">");
-  document.write(base + "/file/[SHA256]");
-  document.write("</a>");
-  document.write("</pre>");
-</script>
-
-Once you load the file details page, click the `Results` tab that's displayed after the submission info section. You
-should see tool results that you can scroll through as shown in the video below.
-
-<video autoplay loop controls>
-  <source src="../static_resources/results/results-view.mp4", type="video/mp4">
-</video>
-
-You can also jump to results by clicking on the tools corresponding tag for a particular tool result.
-
-<video autoplay loop controls>
-  <source src="../static_resources/results/results-jump-by-tag.mp4", type="video/mp4">
-</video>
-
-Tools can create renderable results as well as result files. If a tool produces a result files, those files can be
-downloaded using the links at the bottom of the result section for that tool.
-
-<video autoplay loop controls>
-  <source src="../static_resources/results/results-files-download.mp4", type="video/mp4">
-</video>
-
-The number of result files that a tool produced will be displayed on the header of the results section. That file
-count badge can be clicked to jump to the result files links.
-
-<video autoplay loop controls>
-  <source src="../static_resources/results/results-files-view.mp4", type="video/mp4">
-</video>
-
-### Children Files
-
-Many tools will produce entirely new samples called `children files` that are saved in Thorium after the tool exits.
-For example, an unpacking tool might remove protective/obfuscating layers of a given malware sample in order to unpack
-the core payload and save it as a new sample in Thorium for further analysis. The sample that a tool was run on to
-produce a child file its `parent file`. The origin information on a child file's details page contains a convenient link
-to the child's parent. Clicking the link will take you to the sample details of the parent file.
-
-<p align="center">
-    <img width="800" src="./../static_resources/results/children-files-parent-link.png">
-</p>
+You can view or download results and child files with Thorctl or the API. Results are shown by tool name (or by
+result key for tool and workflow runs, see [Results of a run](./runs.md#results-of-a-run)).
 
 ## Thorctl
 ---
 
-You can download results for specific samples using Thorctl with the following command:
+You can download results for specific samples using Thorctl with the following command (results are written under
+`./results` by default; change that with `-o/--output`):
 
 ```bash
-thorctl results get <SHA256>
+thorctl results get --files <SHA256>
 ```
 
-Download results for multiple samples by passing multable file SHA's:
+Download results for multiple samples by repeating `--files` or by passing a file of SHA256s, one per line, with
+`--file-list`:
 
 ```bash
-thorctl results get <SHA256-1> <SHA256-2> <SHA256-3>
+thorctl results get --files <SHA256-1> --files <SHA256-2>
+thorctl results get --file-list ./sha256s.txt
 ```
 
 If you want to download results for specific tools then you can use the following command:
 
 ```bash
-thorctl results get --tools <TOOL> --tools <TOOL> <SHA256>
+thorctl results get --tools <TOOL> --tools <TOOL> --files <SHA256>
 ```
 
 You can also get results for any samples with a certain tag with the following command:
@@ -105,9 +52,51 @@ characteristic:
 thorctl results get --tools analyzer --tags Packed=True
 ```
 
+`--results-only` skips the result files, `--filter` and `--skip` take regular expressions that choose which result files
+download, `-G/--results-groups` limits the groups the results come from, and `--post-processing` (`strip`, `split`, or
+`full`) says what happens to the results' metadata. `-r/--repos` and `--include-repos` get the results of repos too.
+
+The results of tool runs and workflow runs are listed by their result key, such as
+`malware-triage#r3~<WORKFLOW INSTANCE ID>` for a workflow run; see
+[Results of a run](./runs.md#results-of-a-run). `thorctl results show <REACTION>` prints the results of one run.
+`thorctl results upload` uploads results you produced yourself (see `thorctl results upload --help` for the
+directory layouts it accepts).
+
 The number of results from which Thorctl downloads files is limited to prevent inadvertent massive download requests.
 To change the limit, use the `--limit`/`-l` flag:
 
 ```bash
 thorctl results get --tags Incident=10001234 --limit 100
 ```
+
+### Children Files
+
+Many tools will produce entirely new samples called `children files` that are saved in Thorium after the tool exits.
+For example, an unpacking tool might remove protective/obfuscating layers of a given malware sample in order to unpack
+the core payload and save it as a new sample in Thorium for further analysis. The sample that a tool was run on to
+produce a child file its `parent file`. A child file's origin names its parent: `thorctl files describe <CHILD-SHA256>`
+shows the origin and the parent's SHA256 (see [File Origins](./uploading_files.md#file-origins)).
+
+## Provenance
+---
+
+Every reaction records, when it is created, where it came from and what it ran: its source (the workflow
+instance, tool instance, or pipeline), its plan (each stage and the exact tool instance it runs), and for
+workflow runs each agent's config hash and toolset digest and every tool instance the run used, with its version,
+spec hash, and image. Read it with `thorctl runs describe <REACTION>` (see [Following runs](./runs.md#following-runs)).
+A result stores the `tool` and `tool_version` that produced it, so a result can be traced to the version that wrote
+it even after the tool changes. Provenance that Thorium keeps on entities, such as the tools that produced a
+filesystem or a decompiled function, names tool instances by id; names stored before the upgrade to tools read back
+as `legacy_tools` (see [Upgrading to Agentic Workflows](../admins/agentic/upgrading.md#what-changes-for-existing-data)).
+
+## API
+---
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| `GET` | `/api/files/results/<SHA256>` | A file's results (query: `tools`, `groups`, `hidden`) |
+| `GET` | `/api/files/result-files/<SHA256>/<TOOL>/<RESULT ID>` | Download a result file |
+| `GET` | `/api/repos/results/<URL>` | A repo's results |
+| `GET` | `/api/repos/result-files/<URL>` | Download a repo's result file |
+
+You can only read results in groups you belong to; a file or group you can't see is answered with `404`.

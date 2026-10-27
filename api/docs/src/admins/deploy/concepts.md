@@ -91,7 +91,7 @@ Helm installs across namespaces.
 | Chart | Installed | Contents |
 |-------|-----------|----------|
 | `infra-operators` | Once per cluster, into `infra-operators` | The Scylla operator, the Elastic Cloud on Kubernetes (ECK) operator, and Kubegres (Postgres) |
-| `thorium` | Once per cluster, into the thorium namespace | An umbrella over four subcharts: `secrets` (namespaces and credentials), `infra` (the backing services), `quickwit` (trace storage), and `operator` (the operator, its RBAC, the `ThoriumCluster`, ingress, and a toolbox import) |
+| `thorium` | Once per cluster, into the thorium namespace | An umbrella over four subcharts: `secrets` (namespaces and credentials), `infra` (the backing services), `quickwit` (trace storage), and `operator` (the operator, its RBAC, the `ThoriumCluster`, ingress, and a Job that imports a [toolbox](../../developers/toolbox.md) of tools and pipelines) |
 
 The `global.managed.<service>` values (`scylla`, `elastic`, `redis`, `s3`, `postgres`) choose
 which backing services the thorium chart deploys, and `global.quickwit.enabled` turns tracing
@@ -154,7 +154,8 @@ deployment is at in the `thorium-upgrade-state` ConfigMap in the thorium namespa
 |----------|---------|
 | `2026-10-v01` | A deployment made by the minithor or megathor scripts before the Helm charts; the baseline every converted deployment starts from |
 | `2026-10-v02` | A deployment made by the Helm charts with the chart-managed operator |
-| `2026-10-v03` | Adds the step that applies the schema before any step that changes data |
+| `2026-10-v03` | Adds the step that applies the schema before any step that changes data, and the step that moves each user's theme into the user's settings |
+| `2026-10-v04` | Adds the steps that convert images, pipeline stages, and provenance to tools (see [Upgrading to Agentic Workflows](../agentic/upgrading.md)) |
 
 When an operator knows a newer revision than the deployment's, it waits in `UpgradeRequired`
 until an admin sets a target revision, then runs the steps in order. The Thorium version a

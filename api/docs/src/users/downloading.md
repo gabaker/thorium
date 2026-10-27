@@ -1,6 +1,6 @@
 # Downloading Files
 
-If you need to download a file to carry out further manual analysis steps, you can do so via the Web UI or Thorctl.
+If you need to download a file to carry out further manual analysis steps, you can do so with Thorctl or the API.
 Because samples stored in Thorium are often malicious, they are downloaded from Thorium in a non-executable state,
 either in a safe
 [CaRTed](../help/faq.html#what-is-cart-and-how-can-i-uncart-malware-samples-that-i-download-from-thorium) format
@@ -27,29 +27,18 @@ At a high level encrypted zips are more user friendly but are less performant
 and cause a high load on the API. When peforming actions at scale or working
 with large files using CaRT is highly recommended.
 
-### Web UI Sample File Download
----
-
-You can choose between [CaRTed](../help/faq.html#what-is-cart-and-how-can-i-uncart-malware-samples-that-i-download-from-thorium)
-and encrypted ZIP format when downloading files using the Thorium Web UI. If the file is in the CaRTed format You will need to use
-a tool such as Thorctl to unCaRT the file after it has been downloaded and moved into a sandboxed environment.
-
-<video autoplay loop controls>
-  <source src="../static_resources/files/file-download.mp4", type="video/mp4">
-</video>
-
 ### Thorctl File Download
 ---
 
-Alternatively, you may use Thorctl to download the file on the command line in either a CaRTed or unCaRTed format.
+Use Thorctl to download the file on the command line in either a CaRTed or unCaRTed format.
 You can download a single file by its sha256 hash using the following Thorctl command:
 
 ```bash
 thorctl files download <sha256>
 ```
 
-Thorctl's current behavior is to download the file in a CaRTed format by default. Downloading files as encrypted ZIP's is not
-currently supported in Thorctl. If you want to immediately unCaRT the file, you can use the `-u` or `--uncarted` flag.
+Thorctl's current behavior is to download the file in a CaRTed format by default (with a `.cart` extension; `--no-extension` leaves it off). Downloading files as encrypted ZIP's is not
+currently supported in Thorctl; use the API route below for that. If you want to immediately unCaRT the file, you can use the `-u` or `--uncarted` flag.
 
 ```bash
 thorctl files download --uncarted <sha256>
@@ -66,10 +55,22 @@ You can also download multiple files by specifying a metadata tag that the downl
 to specify how many files you would like to download.
 
 ```bash
-thorctl files download --carted --limit 100 --tags Incident=10001234
+thorctl files download --limit 100 --tags Incident=10001234
 ```
 
-If you do not specify a limit count when you provide a key/value tag, Thorctl will default to downloading a maximum of 10 files.
+If you do not specify a limit when you provide a key/value tag, Thorctl searches at most 200 submissions. Because one file
+may have several submissions (for example the same file uploaded to different groups), the number of files downloaded
+may be less than the limit.
+
+### API Download
+---
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| `GET` | `/api/files/sample/<SHA256>/download` | Download the file in CaRT format (streamed) |
+| `GET` | `/api/files/sample/<SHA256>/download/zip` | Download the file as an encrypted ZIP |
+
+A file you can't see is answered with `404`.
 
 ### CaRTing/UnCaRTing Files
 ---
@@ -147,19 +148,19 @@ inclusively or exclusively filter with regular expressions using the `--filter` 
 For example, to CaRT only files with the `.exe` extension within a directory, you could run the following command:
 
 ```bash
-thorctl files cart --filter .*\.exe ./my-dir
+thorctl cart --filter .*\.exe ./my-dir
 ```
 
 Or to CaRT everything within a directory except for files starting with `temp-`, you could run this command:
 
 ```bash
-thorctl files cart --skip temp-.* ./my-dir
+thorctl cart --skip temp-.* ./my-dir
 ```
 
 Supply multiple filters by specifying filter flags multiple times:
 
 ```bash
-thorctl files cart --filter .*\.exe --filter .*evil.* --skip temp-.* ./my-dir
+thorctl cart --filter .*\.exe --filter .*evil.* --skip temp-.* ./my-dir
 ```
 
 The filter and skip regular expressions must adhere to the format used by the Rust

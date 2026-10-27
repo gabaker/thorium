@@ -12,8 +12,13 @@ You can create a ban with Thorctl by using the entity's respective subcommand an
 `bans create` function.
 
 ```Bash
-thorctl <images/pipelines> bans create <group> <image/pipeline> --msg <MESSAGE>
+thorctl pipelines bans create <group> <pipeline> <MESSAGE>
 ```
+
+For example, `thorctl pipelines bans create corn harvest "This pipeline is under review"`. Images
+are read-only, so `thorctl images bans create` and `delete` stop with a message that points at tools
+(the API answers `410 Gone`, like every other image write). To ban a model endpoint, profile, or credential, use `thorctl models bans add
+<ENTITY> --message <MESSAGE>` (see [Model Endpoints for Admins](./agentic/models.md#bans)).
 
 This will create a `Generic`-type ban containing the given message. This also generates an `Error`
 level notification associated with the entity that users can view to see the reason for the ban.
@@ -26,10 +31,11 @@ need the ban's ID if you want to remove a ban. You can view an entity's bans and
 with other metadata by using the Thorctl `describe` command:
 
 ```Bash
-thorctl <ENTITY-TYPE> describe <ENTITY-NAME>
+thorctl pipelines describe <group>/<pipeline> --format json
 ```
 
-This will output the entity's data in JSON format, including its bans:
+This will output the entity's data in JSON format, including its bans (without `--format json`,
+`describe` prints a human-readable summary instead):
 
 ```JSON
 {
@@ -51,7 +57,7 @@ This will output the entity's data in JSON format, including its bans:
 Take note of the ban's ID and provide it to the `bans delete` command to remove it:
 
 ```Bash
-thorctl <ENTITY-TYPE> bans delete <BAN-ID>
+thorctl pipelines bans delete <group> <pipeline> <BAN-ID>
 ```
 
 > Note that removing automatically generated bans is not generally advised, as Thorium will

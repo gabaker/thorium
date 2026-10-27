@@ -29,8 +29,9 @@ only `Group` roles.
 A Thorium account will only have one `System` role at a time: `User`, `Analyst`, `Developer`, `Admin`, or `Disabled`. When you first register
 for an account, you are granted the `User` system role by default. This will allow you to conduct analysis within
 Thorium, but does not allow you to create new analysis pipelines or give you any privileged access to data outside of
-your groups. If your interactions with Thorium require you to add or modify existing pipelines or tools (called
-images), you will need a Thorium `Admin` to give you the `Developer` role. The `Developer` role is considered a
+your groups. If your interactions with Thorium require you to add or modify existing pipelines or to publish tools (see
+[Tools and Tool Instances](../developers/tools.md); images can no longer be created or edited), you will need a
+Thorium `Admin` to give you the `Developer` role. The `Developer` role is considered a
 privileged role because it effectively allows an account holder to execute arbitrary binaries/commands within
 Thorium's sandboxed analysis environments.
 
@@ -50,22 +51,23 @@ apply to those granted abilities:
 
 | System Role | Abilities | Limited By |
 | --- | ---------- | ---- |
-| User | Can create groups and run existing pipelines, but cannot create or modify pipelines or images. | Must have sufficient group role and group membership |
-| Analyst | Can create groups, and can add, modify, and run analysis pipelines and images.  Has global view into all data in Thorium. | None |
-| Developer | Can create groups, and can add, modify, and run analysis pipelines and images. | Must have sufficient group role and group membership |
+| User | Can create groups and run existing pipelines, but cannot create or modify pipelines or tools. | Must have sufficient group role and group membership |
+| Analyst | Can create groups, and can add, modify, and run analysis pipelines and tools.  Has global view into all data in Thorium. | None |
+| Developer | Can create groups, and can add, modify, and run analysis pipelines and tools. | Must have sufficient group role and group membership |
 | Admin | Can access, view, and modify all resources, change group membership and update System and Group roles. | None |
 | Disabled | None. A disabled account receives a `401 Unauthorized` on every request, including login. | Cannot access Thorium at all until an `Admin` assigns another role |
 
-You can view your `System` role on the profile page, as shown below.
+You can view your `System` role with `GET /api/users/whoami` (the `role` field of the response). Admins change roles
+and group membership
 
-<video autoplay loop controls>
-  <source src="../static_resources/profile-role.mp4", type="video/mp4">
-</video>
+```bash
+curl -H "Authorization: Bearer $TOKEN_B64" https://<URL>/api/users/whoami
+```
 
 ### Group Roles
 
 `Group` roles control your ability to conduct certain operations on the group's resources. Group resources can include
-images, pipelines, repos, files, tags, comments, and analysis tool results.
+tools, pipelines, repos, files, tags, comments, and analysis tool results.
 
 There are four group roles: `Owner`, `Manager`, `User`, and `Monitor`. Anyone with a Thorium account can create their
 own groups. When you create a new group, you are automatically added as an `Owner` of the group. When you are added to
@@ -82,7 +84,7 @@ defined in the following table.
 | Group Membership | add/remove any member | add/remove non-owner members | read only | read only |
 | Delete Group | yes | no | no | no |
 
- [^1]: For pipelines and images this ability also requires a `Developer` or `Admin` `System` level role. Without the correct
-`System` role, you will not be able to modify or create pipelines or images even if you have the correct group role
+ [^1]: For pipelines and tools this ability also requires a `Developer` or `Admin` `System` level role. Without the correct
+`System` role, you will not be able to modify or create pipelines or tools even if you have the correct group role
 (`Owner`, `Manager`, or `User`). However, you will still be able to run existing pipelines that other `Developers`
 have added so long as you are not a `Monitor`.

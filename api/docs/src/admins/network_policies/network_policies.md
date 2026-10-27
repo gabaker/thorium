@@ -167,7 +167,9 @@ added to an image.
 ### Default Network Policies
 
 A default network policy is a policy that is added to newly-created images in its group(s) when no other policy is provided by the user. Unlike forced network policies, default policies are directly
-added to images and will appear in an image's info.
+added to images and will appear in an image's info. Only image creation applies default policies, and
+images can no longer be created (the API answers `410 Gone`), so a default policy is not added to
+anything new. A tool instance names its network policies itself.
 
 If a network policy is set to no longer be default, it will *not* be automatically removed from the
 images it was added to.
@@ -176,7 +178,7 @@ images it was added to.
 
 Creating, updating, and managing network policies in Thorium requires an understanding of their
 components. Below are a list of fields that make up a network policy, their descriptions, accepted
-values, and whether or not the field is required. Use this info to write [rules files](#the-rules-file)
+values, and whether or not the field is required. Use this info to write [rules files](./configure_network_policies.md#the-rules-file)
 when creating network policies as well as set the base network policy to apply to all tools in a
 Thorium instance.
 
@@ -204,12 +206,41 @@ This also means policy rules are never incompatible with each other.
 | ----- | ----------- | --------------- | -------- |
 | allowed_ips | A list of IP's to allow | See [IP Blocks](#ip-blocks) | no |
 | allowed_groups | A list of groups to allow | A name of any group existing in the Thorium instance | no |
-| tools | A list of tools to allow | Any valid tool name | no |
+| allowed_tools | A list of tools in the restricted tool's own group to allow; see [Tool Entries](#tool-entries) | A tool's id, a tool instance's id, or a tool's exact name | no |
 | allowed_local | Allows all IP addresses in the local IP address space access | true/false (default: false) | no |
 | allowed_internet | Allows all IP addresses in the public IP address space access | true/false (default: false) | no |
 | allowed_all | Allows from all entities | true/false (default: false) | no |
 | ports | A list of ports this rule applies to; if not provided, the rule will apply on all ports | See [Ports](#ports) | no |
 | allowed_custom | A list of custom rules allowing access to peers on K8's matched by namespace and/or pod label(s) | See [K8's Custom Rules](#k8s-custom-rules) | no |
+
+### Tool Entries
+
+Each `allowed_tools` entry selects workers of tools in the group the policy is rendered in (the
+namespace the workers run in), never another group's tools. Every worker pod carries the labels
+`thorium-tool=<tool id>` and `thorium-tool-instance=<tool instance id>`, and entries select workers
+by those labels:
+
+- **A tool id** selects the workers of every version of that tool, and **a tool instance id**
+  selects the workers of that one version. An id names exactly one tool or tool instance, so
+  creating or renaming other tools never changes what it selects.
+- **A tool name** selects the workers of the tools in the group whose name is exactly that name,
+  case and punctuation included. The scaler resolves each name to the ids of the tools holding it
+  when it renders the policy, checks at every cache reload (every 10 minutes by default,
+  `thorium.scaler.cache_lifetime`) whether that changed, and renders the policy again when it did. A
+  name that no tool in the group holds selects no worker (its peer selects `thorium-tool: none`).
+  Renaming a tool away from a name, or moving it out of the group, keeps the access that name grants
+  until the next cache reload (10 minutes by default).
+
+> **Warning:** a name entry follows whatever tool holds that name. Tool names are not unique in a
+> group, so any group member who can create or rename tools can give a tool the same name and gain
+> the network access the policy grants, from the next cache reload on. Use tool ids for security
+> boundaries. Names in a policy's rules may only hold lowercase letters, digits, and `-`, so a tool
+> whose name has uppercase letters, spaces, or other punctuation can only be named by id.
+
+Worker pods also carry a `stage` label holding a Kubernetes-safe form of the tool's name (lowercased,
+every other character replaced with `-`, at most 63 characters). Many tool names share one `stage`
+value, so tool entries never select workers by it. An `allowed_custom` rule's pod labels can still
+match `stage`, so don't use it in a custom rule that guards a security boundary.
 
 ### IP Blocks
 

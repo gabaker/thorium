@@ -20,7 +20,7 @@ There are some cases, however, where the Agent cannot infer origin metadata beyo
 
 Thorium can save a lot of useful metadata about files carved from a PCAP (packet capture) sample beyond custom tags
 (see [PCAP Origin](../users/uploading_files.md#pcap) for what kind of metadata can be saved). When manually uploading samples, it's
-easy to add this information in the Web UI or Thorctl. When the Thorium Agent uploads children files, though, it needs a place
+easy to add this information through the API (see [Uploading Files](../users/uploading_files.md#api)). When the Thorium Agent uploads children files, though, it needs a place
 to look to grab this information your tool may have extracted.
 
 The special place the Thorium Agent looks is in the `thorium_pcap_metadata.json` file in the `CarvedPCAP` origin sub-directory

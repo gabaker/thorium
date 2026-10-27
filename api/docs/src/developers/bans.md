@@ -3,7 +3,7 @@
 > If you're a Thorium admin looking for instructions on adding/removing bans, see [Ban Things in Thorium](../admins/bans_admins.md).
 
 "Bans" in Thorium are applied to entities that are misconfigured or noncompliant such that they cannot "function"
-(e.g. an image cannot be scheduled, a pipeline cannot be run). As entities can have multiple bans, entities are effectively
+(e.g. a model cannot be chosen for a run, a pipeline cannot be run, a legacy image cannot be scheduled). As entities can have multiple bans, entities are effectively
 "banned" when they have one or more bans and are "unbanned" when all their bans are resolved/removed.
 
 Bans work hand-in-hand with [Notifications](./notifications.md) to inform developers why their tools cannot be
@@ -61,8 +61,13 @@ human-readable summary that lists any bans. To get the full raw data, including 
 records, pass `--format json`. For images, you would run:
 
 ```Bash
-thorctl images describe <IMAGE> --format json
+thorctl images describe <GROUP>/<IMAGE> --format json
 ```
+
+The group can be left off (`thorctl images describe <IMAGE>`) when no other group you belong to has an
+image with the same name; the older `<IMAGE>:<GROUP>` form also works. Pipelines work the same way with
+`thorctl pipelines describe <GROUP>/<PIPELINE>`. In our example above, that would be
+`thorctl images describe corn/sow --format json`.
 
 This will output the image's data in JSON format, including the image's bans:
 
@@ -97,6 +102,12 @@ do to lift the ban.
 
 Image bans are applied when an image is misconfigured in some way. The image will not be scaled until the issue
 is resolved.
+
+> Images are read-only in this release: the image update route answers `410 Gone` to every update,
+> including one that only adds or removes a ban. `thorctl images bans create` and `thorctl images
+> bans delete` therefore stop with a message that points at tools, and an image can't be reconfigured
+> to lift its ban. Pipeline and model bans are unchanged. Tools have no bans: deprecate a tool version
+> to stop it being newly pinned.
 
 The types of image bans are described below.
 
@@ -157,3 +168,16 @@ ban manually for any arbitrary reason.
 
 Generic bans must contain a description detailing the reason for the ban which can be found in the ban's
 associated notification. Generic bans must be manually removed by a Thorium admin.
+
+### Model Bans
+
+Model endpoints, catalog models, profiles, and credentials are banned when a problem would make a run's
+model calls fail, and a banned item is skipped when a run picks its models. Most model bans are applied
+automatically when an endpoint refresh finds the problem (a model removed, a credential rejected or
+expired, an endpoint unreachable, a broken reference, or an endpoint no longer allowed by the deployment),
+and they clear when the problem is fixed. Owners and managers of the item's groups can also ban an item
+by hand with `thorctl models bans add` and lift a ban with `thorctl models bans clear` (see
+[Bans and notifications](../users/models.md#bans-and-notifications)). Each ban sends a notification to the
+people it affects, readable with `GET /api/users/notifications/`; the notifications of one model entity are
+at `GET /api/entities/{id}/notifications`. A workflow run that can't get a model for an agent is refused with
+`400`, and the message gives the reason for each model it considered.

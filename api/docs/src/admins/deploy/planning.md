@@ -108,7 +108,8 @@ Every image the charts deploy can come from a mirror registry (`global.imageRegi
 charts). The script `deploy/charts/scripts/list-images.sh` in the Thorium source repository prints
 every image for the values you pass it, with its path in the mirror, and megathor's
 `offline-stage.yml` stages the charts and image list for an offline megathor run. Tool images
-referenced by a toolbox must be mirrored separately. See
+referenced by a toolbox must be mirrored separately (`thorctl toolbox import --image-path-prefix`
+rewrites a bundled toolbox's images to a mirror path, but import never pushes images). See
 [Offline installs](./deploy-helm.md#offline-installs).
 
 ## Choosing a version

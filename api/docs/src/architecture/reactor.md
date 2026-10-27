@@ -33,3 +33,10 @@ The Windows reactor manages Windows containers on Windows host systems.
 2. **Worker Management**: It compares the desired state with the current state and spawns/shuts down workers accordingly
 3. **Lifecycle Management**: For each worker, the reactor handles the complete lifecycle from creation to cleanup
 4. **Resource Tracking**: It monitors resource usage and reports status back to the Thorium API
+
+Each worker is registered for one tool instance; the launcher fetches its workload and refuses it
+unless it runs in the launcher's environment. Workers of a tool or workflow run get a keys file
+holding only that run's token. See [Scheduling Tools and Runs](../admins/agentic/scheduling.md).
+
+> **Warning:** the BareMetal, Windows, and Kvm launchers have not been tested on live nodes with
+> tool instances and may be broken.

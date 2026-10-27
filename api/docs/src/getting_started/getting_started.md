@@ -4,15 +4,35 @@
     <img src="./../static_resources/rocket.png"/>
 </p>
 
-This guide will cover how to start using Thorium to analyze data at scale.
+This guide covers how to start using Thorium to analyze data at scale.
 
-Most tasks in Thorium can be accomplished in both the Web UI and our command line tool called Thorctl (pronounced
-Thor-cuddle). The interface you choose to use will depend on the number of samples or repositories you are working with
-and whether a browser client is accessible within your own analysis environment. If you need to analyze hundreds or
-thousands of samples, you can utilize Thorctl to upload the data, run analysis jobs, and download then results of those
-jobs. Thorctl is also useful when working on a "headless" analysis environment where only a command line interface is
-at your disposal. Alternatively, the Web UI provides an easy way to upload, analyze, and view a smaller number of
-samples and repos for those with access to a browser client. The Web UI also provides the ability create groups and
-modify group membership.
+Thorium is driven with Thorctl (pronounced Thor-cuddle), our command line tool, and with its REST API for
+scripts and integrations. Thorctl scales from one file to thousands: it uploads data, runs tools, workflows,
+and pipelines, and downloads the results, and it works in a "headless" analysis environment where only a command
+line is available. The guides in this book use Thorctl for their examples and name the API route behind each
+command. The Web UI is being rebuilt; its instructions will be added with the new interface.
 
-If you have already registered for a Thorium account you can skip to the [Login](./login.md) section of this chapter.
+### First steps
+---
+
+1. [Register](./registration.md) for an account (or ask your admins to create one), then
+   [install Thorctl and log in](./login.md).
+2. Learn how [roles and permissions](./roles_permissions.md) and [groups](./adding_editing_groups.md) control
+   what you can see and do.
+3. Upload something and run something on it. Group, file, and tool names here are examples:
+
+```bash
+# create a group, upload a file to it, and note the SHA256 it prints
+thorctl groups create analysts -d "Malware analysts"
+thorctl files upload -g analysts ./sample.exe
+# run a tool on the file and wait for it
+thorctl run tool strings --sample <SHA256> --group analysts --wait
+# download what it produced
+thorctl results get --files <SHA256> --tools strings
+```
+
+4. Read [Concepts](../concepts/concepts.md) for how tools, workflows, runs, and models fit together, then
+   [Running Tools and Workflows](../users/runs.md).
+
+If you have already registered for a Thorium account you can skip to the [Login](./login.md) section of this
+chapter.

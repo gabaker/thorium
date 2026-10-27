@@ -1,7 +1,7 @@
  # Thorium
 
 <p align="center">
-    <img src="./static_resources/mascot.png"
+    <img src="./static_resources/mascot.png" />
 </p>
 
 Thorium is a highly scalable, distributed malware analysis and data generation framework. Thorium is designed to make

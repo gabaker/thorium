@@ -6,6 +6,10 @@ This guide explains how to properly configure KVM virtual machines for the Thori
 
 The Thorium reactor manages KVM-based virtual machines for running analysis jobs. To use this functionality, administrators must pre-configure VMs that the reactor can discover and manage.
 
+Thorium runs tools instead of images, so `<IMAGE>` and `image` below mean the name of the tool
+whose instance runs in the VM, and `<GROUP>` is the group the run is in (see
+[Scheduling Tools and Runs](./agentic/scheduling.md#the-reactor)).
+
 ## Prerequisites
 
 - Libvirt/KVM installed and running

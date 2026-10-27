@@ -55,6 +55,8 @@ thorctl pipelines notifications get <GROUP> <PIPELINE>
 
 This will provide a list of the pipeline's notifications color-coded to their level (blue for `Info`, yellow for `Warn`, and red for `Error`).
 
-### Web UI
+### API
 
-Notifications are currently not viewable in the Web UI, but this feature is planned for a future release of Thorium!
+Notifications are also returned by the API: `GET /api/images/notifications/{group}/{image}` and
+`GET /api/pipelines/notifications/{group}/{pipeline}` list them, and `GET /api/users/notifications/` lists yours.
+Notifications are not shown in the Web UI yet.
