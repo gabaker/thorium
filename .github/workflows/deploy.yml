@@ -89,21 +89,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # only the server binaries the image runs; it takes thorctl, the agent, and the reactor
+      # from the musl and Windows builds
       - name: Build binaries
         run: |
           rustup default nightly
           rustup install nightly
           lscpu
-          cargo build --release --features vendored-openssl
+          cargo build --release --features vendored-openssl -p thorium-api -p thorium-operator \
+            -p thoradm -p thorium-scaler -p thorium-search-streamer -p thorium-event-handler
           cargo doc --no-deps
           # gather the binaries the container build needs into one artifact
           mkdir glibc
           mv target/release/thoradm glibc/.
-          mv target/release/thorctl glibc/.
           mv target/release/thorium-api glibc/.
-          mv target/release/thorium-agent glibc/.
           mv target/release/thorium-scaler glibc/.
-          mv target/release/thorium-reactor glibc/.
           mv target/release/thorium-event-handler glibc/.
           mv target/release/thorium-search-streamer glibc/.
           mv target/release/thorium-operator glibc/.
@@ -131,14 +131,6 @@ jobs:
           #- os-name: Linux-aarch64
           #  runs-on: ubuntu-24.04
           #  target: aarch64-unknown-linux-musl
-          - os-name: macOS-x86_64
-            runs-on: macOS-latest
-            target: x86_64-apple-darwin
-            flags: "-C target-feature=+aes,+sse2"
-          - os-name: macOS-aarch64
-            runs-on: macOS-latest
-            target: aarch64-apple-darwin
-            flags: ""
     runs-on: ${{ matrix.platform.runs-on }}
     timeout-minutes: 180
     permissions:
@@ -147,13 +139,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install bindgen-cli
-        env:
-          TARGET: ${{ matrix.platform.target }}
+      # musl-tools (musl-gcc) is the one package the musl build needs beyond the runner image's own
+      # tools. Each apt-get is bounded and the whole install retried, and the step timeout stops a
+      # stalled mirror from holding the job
+      - name: Install musl-tools
+        timeout-minutes: 10
         run: |
-          grep -q "Ubuntu" /etc/os-release && sudo apt update && sudo apt install gcc build-essential libssl-dev pkg-config libclang-dev clang-15 musl-tools cmake libvirt-dev jq memstat sysstat -y
-          rustup target add "$TARGET"
-          cargo install --target="$TARGET" --force --locked --version 0.72.1 bindgen-cli
+          for attempt in 1 2 3; do
+            if sudo timeout 120 apt-get -o Acquire::Retries=3 update &&
+              sudo timeout 120 apt-get -o Acquire::Retries=3 install -y --no-install-recommends musl-tools; then
+              exit 0
+            fi
+            echo "::warning::installing musl-tools failed (attempt ${attempt} of 3)"
+            sleep 10
+          done
+          exit 1
+      # only the binaries the image serves for this target
       - name: Build binary
         uses: houseabsolute/actions-rust-cross@21b0f18dc621b25bfae556ff2791fca4173121e8 # v1.0.8
         env:
@@ -162,7 +163,7 @@ jobs:
           command: build
           target: ${{ matrix.platform.target }}
           toolchain: nightly
-          args: "--features vendored-openssl --release"
+          args: "--features vendored-openssl --release -p thorctl -p thorium-agent -p thorium-reactor -p thoradm -p thorium-operator"
           strip: true
           # these binaries are published, so never restore caches another workflow run could have written
           use-rust-cache: false
@@ -171,19 +172,56 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.platform.target }}-binaries
-          path: target/${{ matrix.platform.target }}/release
+          path: |
+            target/${{ matrix.platform.target }}/release/thorctl
+            target/${{ matrix.platform.target }}/release/thorium-agent
+            target/${{ matrix.platform.target }}/release/thorium-reactor
+            target/${{ matrix.platform.target }}/release/thoradm
+            target/${{ matrix.platform.target }}/release/thorium-operator
+          if-no-files-found: error
 
+  # Both macOS targets build in one cargo invocation on one runner, so a run needs only one macOS
+  # runner (the pool GitHub most often fails to assign) and build scripts and proc macros compile
+  # once. The image serves only thorctl for macOS. Cargo runs directly, as actions-rust-cross does
+  # on macOS, since that action takes a single target.
+  build-macos-binaries:
+    name: Build Thorium Cross - macOS
+    runs-on: macOS-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust nightly
+        run: rustup toolchain install nightly --profile minimal --target aarch64-apple-darwin --target x86_64-apple-darwin
+      # gxhash needs AES, which aarch64-apple-darwin enables by default and x86_64 needs named.
+      # Target-specific flags keep each target's own; RUSTFLAGS would apply to both
+      - name: Build thorctl
+        env:
+          CARGO_TARGET_X86_64_APPLE_DARWIN_RUSTFLAGS: "-C target-feature=+aes,+sse2"
+        run: |
+          cargo +nightly build --release --features vendored-openssl -p thorctl \
+            --target aarch64-apple-darwin --target x86_64-apple-darwin
+          strip target/aarch64-apple-darwin/release/thorctl target/x86_64-apple-darwin/release/thorctl
+      - name: Upload aarch64-apple-darwin binary artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: aarch64-apple-darwin-binaries
+          path: target/aarch64-apple-darwin/release/thorctl
+          if-no-files-found: error
+      - name: Upload x86_64-apple-darwin binary artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: x86_64-apple-darwin-binaries
+          path: target/x86_64-apple-darwin/release/thorctl
+          if-no-files-found: error
+
+  # The three Windows binaries build in one job. actions-rust-cross builds this target through
+  # cross, whose image carries the MinGW toolchain, so the runner installs no packages
   build-windows-cross-binaries:
-    name: Build Thorium Cross - Windows ${{ matrix.build-target.name }}
-    strategy:
-      matrix:
-        build-target:
-          - path: "./agent"
-            name: agent
-          - path: "./thorctl"
-            name: thorctl
-          - path: "./reactor"
-            name: reactor
+    name: Build Thorium Cross - Windows
     # This needs to run on Ubuntu or agent builds fail
     runs-on: ubuntu-24.04
     timeout-minutes: 180
@@ -195,28 +233,47 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install bindgen-cli
-        run: |
-          sudo apt update && sudo apt install gcc gcc-mingw-w64-x86-64 build-essential libssl-dev pkg-config libclang-dev clang-15 musl-tools cmake libvirt-dev jq memstat sysstat -y
-          rustup target add x86_64-pc-windows-gnu
-          cargo install --target=x86_64-pc-windows-gnu --force --locked --version 0.72.1 bindgen-cli
-      - name: Build Windows Cross ${{ matrix.build-target.name }} Binary
+      - name: Build Windows Cross agent and thorctl Binaries
         uses: houseabsolute/actions-rust-cross@21b0f18dc621b25bfae556ff2791fca4173121e8 # v1.0.8
         with:
           command: build
           target: x86_64-pc-windows-gnu
           toolchain: nightly
-          args: "--features vendored-openssl --release"
+          args: "--features vendored-openssl --release -p thorium-agent -p thorctl"
           strip: true
           # these binaries are published, so never restore caches another workflow run could have written
           use-rust-cache: false
           cache-cross-binary: false
-          working-directory: ${{ matrix.build-target.path }}
-      - name: Upload ${{ matrix.build-target.name }} x86_64-pc-windows-gnu binary artifact
+      # the reactor builds on its own and without default features, as GitLab builds it
+      - name: Build Windows Cross reactor Binary
+        uses: houseabsolute/actions-rust-cross@21b0f18dc621b25bfae556ff2791fca4173121e8 # v1.0.8
+        with:
+          command: build
+          target: x86_64-pc-windows-gnu
+          toolchain: nightly
+          args: "--features vendored-openssl --release --no-default-features -p thorium-reactor"
+          strip: true
+          # these binaries are published, so never restore caches another workflow run could have written
+          use-rust-cache: false
+          cache-cross-binary: false
+      - name: Upload agent x86_64-pc-windows-gnu binary artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: x86_64-pc-windows-gnu-${{ matrix.build-target.name }}
-          path: target/x86_64-pc-windows-gnu/release
+          name: x86_64-pc-windows-gnu-agent
+          path: target/x86_64-pc-windows-gnu/release/thorium-agent.exe
+          if-no-files-found: error
+      - name: Upload thorctl x86_64-pc-windows-gnu binary artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: x86_64-pc-windows-gnu-thorctl
+          path: target/x86_64-pc-windows-gnu/release/thorctl.exe
+          if-no-files-found: error
+      - name: Upload reactor x86_64-pc-windows-gnu binary artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: x86_64-pc-windows-gnu-reactor
+          path: target/x86_64-pc-windows-gnu/release/thorium-reactor.exe
+          if-no-files-found: error
 
   build-core-container:
     name: Build Thorium Core Container
@@ -225,6 +282,7 @@ jobs:
       - build-ui-bundle
       - build-glibc-binaries
       - build-cross-binaries
+      - build-macos-binaries
       - build-windows-cross-binaries
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -424,7 +482,7 @@ jobs:
         continue-on-error: true
         timeout-minutes: 15
         env:
-          TRIVY_IMAGE: ghcr.io/aquasecurity/trivy@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
+          TRIVY_IMAGE: ghcr.io/aquasecurity/trivy@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
         run: |
           # Trivy spills large files to TMPDIR while analyzing, so it is on disk under the cache
           # rather than in the small /tmp tmpfs
@@ -443,7 +501,7 @@ jobs:
         continue-on-error: true
         timeout-minutes: 5
         env:
-          TRIVY_IMAGE: ghcr.io/aquasecurity/trivy@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
+          TRIVY_IMAGE: ghcr.io/aquasecurity/trivy@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
         run: |
           docker run --rm --network none --read-only --cap-drop ALL \
             --security-opt no-new-privileges --user "$(id -u):$(id -g)" \
@@ -512,7 +570,7 @@ jobs:
       # the filtered SARIF leaves out findings ignored by .github/lint-ignore.toml
       - name: Upload Thorium Container Image Scan SARIF
         if: steps.sarif.outputs.found == 'true'
-        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           sarif_file: ${{ runner.temp }}/trivy-image/trivy-image-filtered.sarif
           category: trivy-image-build
