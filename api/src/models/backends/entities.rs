@@ -4084,8 +4084,20 @@ impl CursorCore for EntityListLine {
         std::mem::take(&mut params.groups)
     }
 
+    /// Get the entity kinds to list, without repeats
+    ///
+    /// Every kind multiplies the statements a listing runs, so a kind sent twice is listed once.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - The params to take the entity kinds from
     fn get_extra_filters(params: &mut Self::Params) -> Self::ExtraFilters {
-        std::mem::take(&mut params.kinds)
+        // take the kinds the user asked for
+        let mut kinds = std::mem::take(&mut params.kinds);
+        // drop any repeated kinds while keeping the order they were first given in
+        let mut seen = HashSet::with_capacity(kinds.len());
+        kinds.retain(|kind| seen.insert(*kind));
+        kinds
     }
 
     fn get_tag_filters(
@@ -4449,5 +4461,23 @@ mod tests {
             assert_eq!(stored[field], serde_json::json!([]), "{field}");
         }
         assert!(!stored.to_string().contains("test-entity"), "{stored}");
+    }
+
+    /// A listing's kinds keep only the first of any repeated kind, in the order given
+    #[test]
+    fn extra_filters_drop_repeated_kinds() {
+        // ask for the filesystem kind three times around one device kind
+        let mut params = EntityListParams {
+            kinds: vec![
+                EntityKinds::FileSystem,
+                EntityKinds::FileSystem,
+                EntityKinds::Device,
+                EntityKinds::FileSystem,
+            ],
+            ..EntityListParams::default()
+        };
+        // the extra filters list each kind once, in first-seen order
+        let kinds = EntityListLine::get_extra_filters(&mut params);
+        assert_eq!(kinds, vec![EntityKinds::FileSystem, EntityKinds::Device]);
     }
 }

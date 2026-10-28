@@ -1974,3 +1974,41 @@ async fn downloads_have_a_content_type_and_missing_files_are_not_found()
     is!(resp.status().as_u16(), 404);
     Ok(())
 }
+
+/// A sample in 101 groups lists each of its comments once, with all of its groups
+#[tokio::test]
+async fn comments_in_more_than_100_groups() -> Result<(), thorium::Error> {
+    // get admin client and 101 groups
+    let client = test_utilities::admin_client().await?;
+    let groups: Vec<String> = generators::groups(101, &client)
+        .await?
+        .into_iter()
+        .map(|group| group.name)
+        .collect();
+    // upload a sample to every group
+    let content = format!("comments in many groups {}", generators::gen_string(16));
+    let file_req = SampleRequest::new_buffer(Buffer::new(content), groups.clone());
+    let hashes = client.files.create(file_req).await?;
+    // add two comments, one after the other, visible to every group
+    let mut ids = Vec::with_capacity(2);
+    for text in ["first comment", "second comment"] {
+        let resp = client
+            .files
+            .comment(CommentRequest::new(&hashes.sha256, text))
+            .await?;
+        ids.push(resp.id);
+    }
+    // the sample lists each comment exactly once
+    let sample = client.files.get(&hashes.sha256).await?;
+    let mut listed: Vec<_> = sample.comments.iter().map(|comment| comment.id).collect();
+    listed.sort_unstable();
+    ids.sort_unstable();
+    is!(listed, ids);
+    // each comment lists every group it is visible to
+    let expected: HashSet<&String> = groups.iter().collect();
+    for comment in &sample.comments {
+        let seen: HashSet<&String> = comment.groups.iter().collect();
+        is!(seen, expected);
+    }
+    Ok(())
+}
