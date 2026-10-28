@@ -522,6 +522,10 @@ impl RepoBuild {
     }
 
     /// Convert this repo build to a reaction request
+    #[allow(
+        clippy::wrong_self_convention,
+        reason = "the method consumes the build on purpose; renaming it changes the method's name for its callers"
+    )]
     pub fn to_request(self, batch: &Option<String>) -> ReactionRequest {
         // build the args for the builder job
         let build_args = GenericJobArgs::default();
@@ -678,10 +682,7 @@ async fn tag_contributors(
     contributors: &HashMap<String, u64>,
 ) -> Result<(), Error> {
     // build a vec of all the contributors names
-    let names = contributors
-        .iter()
-        .map(|(name, _)| name.to_owned())
-        .collect();
+    let names = contributors.keys().map(|name| name.to_owned()).collect();
     // build our tag request
     let tag_req = TagRequest::default().add_values("Contributor", names);
     // add our contributor tags to our repo

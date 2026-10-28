@@ -7,7 +7,6 @@ use crate::models::{Country, CriticalSector};
 cfg_if::cfg_if! {
     if #[cfg(feature = "api")] {
         use crate::models::EntityMetadataForm;
-        use crate::{multipart_list, multipart_set};
     }
 }
 

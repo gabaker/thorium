@@ -284,6 +284,10 @@ impl Event {
 
     /// Clear some events from a specific queue
     #[instrument(name = "Event::clear", skip(user, ids, shared), fields(count = ids.len()), err(Debug))]
+    #[allow(
+        clippy::ptr_arg,
+        reason = "public thorium API; changing the parameter type to a slice is an API change"
+    )]
     pub async fn clear(
         user: &User,
         kind: EventType,

@@ -35,14 +35,10 @@ impl HostPath {
     pub fn is_valid<T: AsRef<Path>>(path: T) -> bool {
         let path: &Path = path.as_ref();
         // the host path is invalid if it's relative or has any relative-like components (".", "..", "...", etc.)
-        if path.is_relative()
+        !(path.is_relative()
             || path
                 .components()
-                .any(|comp| RELATIVE_DIR_REGEX.is_match(comp.as_os_str().as_bytes()))
-        {
-            return false;
-        }
-        true
+                .any(|comp| RELATIVE_DIR_REGEX.is_match(comp.as_os_str().as_bytes())))
     }
 }
 

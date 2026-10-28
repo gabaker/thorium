@@ -1585,10 +1585,7 @@ impl Node {
             // if we have nodes specified then just get info on those
             let rows = db::system::get_node_rows(&params.clusters, &params.nodes, shared).await?;
             // turn our rows into node list lines
-            let nodes = rows
-                .into_iter()
-                .map(|row| NodeListLine::from(row))
-                .collect();
+            let nodes = rows.into_iter().map(NodeListLine::from).collect();
             // turn our nodes into a cursor object
             let cursor = ApiCursor {
                 cursor: None,

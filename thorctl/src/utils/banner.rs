@@ -3,6 +3,7 @@
 use thorium::Error;
 use tui_banner::{Align, Banner, Fill, Gradient, Palette};
 
+#[allow(dead_code, reason = "banner helper not yet wired to a command")]
 pub fn wave(text: &str) -> Result<(), Error> {
     let banner = Banner::new(text)
         .unwrap()

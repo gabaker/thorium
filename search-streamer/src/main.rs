@@ -1,5 +1,3 @@
-#![feature(round_char_boundary)]
-
 use clap::Parser;
 use std::sync::Arc;
 use thorium::{Conf, Error, Thorium};

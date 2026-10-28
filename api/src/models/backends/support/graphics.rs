@@ -6,7 +6,6 @@ use mime::Mime;
 use std::path::PathBuf;
 
 use crate::models::graphics::graphic_extension;
-use crate::utils::s3::S3Client;
 use crate::utils::{ApiError, Shared};
 use crate::{bad, internal_err_unwrapped};
 

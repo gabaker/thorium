@@ -60,7 +60,7 @@ impl Elastic {
         Ok(Elastic {
             elastic,
             elastic_conf: conf.elastic.clone(),
-            max_request_size: conf.thorium.search_streamer.max_request_size.into(),
+            max_request_size: conf.thorium.search_streamer.max_request_size,
         })
     }
 }
@@ -225,15 +225,14 @@ impl SearchStore for Elastic {
             if resp.status_code().is_success() {
                 // check if any errors occurred
                 let resp: ElasticBulkFilteredResponse = resp.json().await?;
-                // TODO: make a let chain when upgrading to 2024
-                if let Some(errors) = &resp.errors {
-                    if !errors.is_empty() {
-                        // return an error if we got any back
-                        return Err(Error::new(format!(
-                            "Failed to create documents in elastic: {}",
-                            serde_json::to_string(&resp).unwrap()
-                        )));
-                    }
+                if let Some(errors) = &resp.errors
+                    && !errors.is_empty()
+                {
+                    // return an error if we got any back
+                    return Err(Error::new(format!(
+                        "Failed to create documents in elastic: {}",
+                        serde_json::to_string(&resp).unwrap()
+                    )));
                 }
             } else {
                 // get the error message to return

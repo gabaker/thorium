@@ -165,6 +165,13 @@ impl From<KvmArgs> for Kvm {
 
 /// The resolved KVM args with computed paths to avoid unwrapping options
 /// over and over
+#[cfg_attr(
+    not(feature = "kvm"),
+    allow(
+        dead_code,
+        reason = "only constructed by the KVM launcher, which the kvm feature enables"
+    )
+)]
 pub struct Kvm {
     /// Base directory for KVM storage
     pub base_dir: PathBuf,

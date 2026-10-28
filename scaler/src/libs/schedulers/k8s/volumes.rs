@@ -191,7 +191,7 @@ impl Volumes {
         let mut vol = Self::base(&name);
         // create config map source
         let config = ConfigMapVolumeSource {
-            name: name,
+            name,
             // set the rest of the fields to default
             ..Default::default()
         };

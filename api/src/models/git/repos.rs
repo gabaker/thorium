@@ -571,10 +571,10 @@ impl OutputSupport for Repo {
     /// # Arguments
     ///
     /// * `key` - The root part of this key
-    /// * `extra` - Any extra info required to build this key
+    /// * `_extra` - Any extra info required to build this key
     fn build_output_key(
         key: <Self as KeySupport>::Key,
-        extra: &<Self as KeySupport>::ExtraKey,
+        _extra: &<Self as KeySupport>::ExtraKey,
     ) -> OutputKey {
         OutputKey::Repo(key)
     }
@@ -1413,11 +1413,11 @@ impl From<RepoListOpts> for RepoListParams {
     fn from(opts: RepoListOpts) -> Self {
         RepoListParams {
             groups: opts.groups,
-            start: opts.start.unwrap_or_else(|| Utc::now()),
+            start: opts.start.unwrap_or_else(Utc::now),
             end: opts.end,
             tags: opts.tags,
             cursor: opts.cursor,
-            limit: opts.limit.unwrap_or_else(|| default_list_limit()),
+            limit: opts.limit.unwrap_or_else(default_list_limit),
             tags_case_insensitive: opts.tags_case_insensitive,
         }
     }
@@ -1428,6 +1428,7 @@ impl From<RepoListOpts> for RepoListParams {
 #[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
 #[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[derive(Default)]
 pub struct RepoDownloadOpts {
     /// The specific branch, tag, or commit to download
     pub commitish: Option<String>,
@@ -1438,17 +1439,6 @@ pub struct RepoDownloadOpts {
     #[serde(skip_deserializing)]
     #[cfg_attr(feature = "api", param(ignore))]
     pub progress: Option<ProgressBar>,
-}
-
-impl Default for RepoDownloadOpts {
-    // Build a default repo download params object
-    fn default() -> Self {
-        RepoDownloadOpts {
-            commitish: None,
-            kinds: Vec::default(),
-            progress: None,
-        }
-    }
 }
 
 impl RepoDownloadOpts {

@@ -1,7 +1,6 @@
 use futures::Stream;
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use rand::Rng;
-use regex::Regex;
 use thorium::Error;
 
 /// Serialize a value to a string

@@ -127,7 +127,7 @@ impl<R: Restore> RestoreWorker<R> {
         let worker = RestoreWorker {
             scylla: scylla.clone(),
             prepared,
-            phantom: PhantomData::default(),
+            phantom: PhantomData,
             updates,
             progress,
             rows_restored: 0,

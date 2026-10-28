@@ -261,7 +261,7 @@ pub async fn backup(shared: &Shared) -> Result<(Vec<User>, Vec<BackupProblem>), 
 /// * `pipe` - The redis pipeline to add onto
 /// * `user` - The user to restore
 /// * `shared` - Shared Thorium objects
-fn restore_groups<'a>(pipe: &'a mut redis::Pipeline, user: &User, shared: &Shared) {
+fn restore_groups(pipe: &mut redis::Pipeline, user: &User, shared: &Shared) {
     // Build the key to the groups this user is in
     let groups_key = UserKeys::groups(&user.username, shared);
     // add the sadd commands for this users group

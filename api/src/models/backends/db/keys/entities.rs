@@ -23,7 +23,7 @@ pub fn census_keys(
     groups: &[String],
     year: i32,
     bucket: i32,
-    grouping: i32,
+    _grouping: i32,
     shared: &Shared,
 ) {
     // for each group build our key

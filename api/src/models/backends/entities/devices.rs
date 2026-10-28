@@ -1,11 +1,9 @@
 use uuid::Uuid;
 
-use crate::models::backends::db;
 use crate::models::{DeviceEntity, EntityMetadataUpdateForm};
 use crate::utils::{ApiError, Shared};
 use crate::{
-    bad, internal_err, update_add_rem_ordered_owned, update_add_rem_set_owned, update_clear_opt,
-    update_opt,
+    bad, update_add_rem_ordered_owned, update_add_rem_set_owned, update_clear_opt, update_opt,
 };
 
 impl DeviceEntity {
@@ -14,15 +12,15 @@ impl DeviceEntity {
     /// # Arguments
     ///
     /// * `form` -  The update form
-    /// * `id` - The device's entity id
-    /// * `groups` - The groups the entity is in (used to check for vendor)
-    /// * `shared` - Shared Thorium objects
+    /// * `_id` - The device's entity id
+    /// * `_groups` - The groups the entity is in (used to check for vendor)
+    /// * `_shared` - Shared Thorium objects
     pub async fn update(
         &mut self,
         mut form: EntityMetadataUpdateForm,
-        id: Uuid,
-        groups: &[String],
-        shared: &Shared,
+        _id: Uuid,
+        _groups: &[String],
+        _shared: &Shared,
     ) -> Result<(), ApiError> {
         // update urls
         update_add_rem_ordered_owned!(

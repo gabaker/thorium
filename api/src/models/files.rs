@@ -1167,6 +1167,10 @@ impl OriginRequest {
     /// * `dest_port` - The destination port this file was sent to
     /// * `proto` - The protocol over which this file was sent
     /// * `url` - The URL this file was sent to/from
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "public thorium client API; grouping the arguments into a struct changes the signature"
+    )]
     pub fn carved_pcap<P: Into<String>>(
         parent: P,
         tool: Option<String>,
@@ -2552,10 +2556,10 @@ impl OutputSupport for Sample {
     /// # Arguments
     ///
     /// * `key` - The root part of this key
-    /// * `extra` - Any extra info required to build this key
+    /// * `_extra` - Any extra info required to build this key
     fn build_output_key(
         key: <Self as KeySupport>::Key,
-        extra: &<Self as KeySupport>::ExtraKey,
+        _extra: &<Self as KeySupport>::ExtraKey,
     ) -> OutputKey {
         OutputKey::Sample(key)
     }

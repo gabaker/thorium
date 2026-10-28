@@ -30,6 +30,10 @@ use crate::libs::stats::EventWorkerStatChannels;
 /// The different kind of cache info that workers may subscribe too
 #[derive(Clone, strum::EnumDiscriminants)]
 #[strum_discriminants(name(WorkerCacheUpdateKinds))]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "boxing a variant changes how every worker builds and matches cache updates"
+)]
 pub enum WorkerCacheUpdates {
     /// An updated reaction trigger cache
     ReactionTriggers(TriggerCache),

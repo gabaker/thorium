@@ -126,7 +126,7 @@ pub async fn list_details(
     // get pipeline data
     let raw: Vec<HashMap<String, String>> = names.iter()
         .fold(redis::pipe().atomic(), |pipe, name|
-            pipe.cmd("hgetall").arg(&PipelineKeys::data(group, name, shared)))
+            pipe.cmd("hgetall").arg(PipelineKeys::data(group, name, shared)))
         .query_async(conn!(shared)).await?;
     // cast to pipeline structs
     let pipelines = cast!(raw, Pipeline::try_from);
@@ -315,8 +315,8 @@ pub async fn delete(
     pipeline.delete_all_notifications(&key, shared).await?;
     // delete pipeline data
     let mut pipe = redis::pipe();
-    pipe.cmd("del").arg(&PipelineKeys::data(&pipeline.group, &pipeline.name, shared))
-        .cmd("srem").arg(&PipelineKeys::set(&pipeline.group, shared))
+    pipe.cmd("del").arg(PipelineKeys::data(&pipeline.group, &pipeline.name, shared))
+        .cmd("srem").arg(PipelineKeys::set(&pipeline.group, shared))
             .arg(&pipeline.name);
     // remove this pipeline from its images used_by lists
     pipeline.order.iter().flatten()
@@ -368,8 +368,8 @@ pub async fn delete_all(
         pipelines.details.iter()
             .fold(redis::pipe().atomic(), |pipe, data| {
                 pipe.cmd("del")
-                        .arg(&PipelineKeys::data(&data.group, &data.name, shared))
-                    .cmd("srem").arg(&PipelineKeys::set(&data.group, shared))
+                        .arg(PipelineKeys::data(&data.group, &data.name, shared))
+                    .cmd("srem").arg(PipelineKeys::set(&data.group, shared))
                         .arg(&data.name)
             })
             .exec_async(conn!(shared))

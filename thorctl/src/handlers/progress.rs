@@ -635,6 +635,10 @@ impl Bar {
     /// # Arguments
     ///
     /// * `style` - The style to set
+    #[allow(
+        dead_code,
+        reason = "part of the progress bar wrapper's API with no caller in this build"
+    )]
     pub fn set_style(&self, style: ProgressStyle) {
         // check if we are in quiet mode or not
         if let Some(bar) = self.pb() {
@@ -648,6 +652,10 @@ impl Bar {
     /// # Arguments
     ///
     /// * `tick` - The tick duration to set
+    #[allow(
+        dead_code,
+        reason = "part of the progress bar wrapper's API with no caller in this build"
+    )]
     pub fn enable_steady_tick(&self, tick: Duration) {
         // check if we are in quiet mode or not
         if let Some(bar) = self.pb() {

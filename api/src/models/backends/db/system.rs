@@ -573,6 +573,10 @@ pub async fn get_node(
 /// * `nodes` - The names of the nodes to get info on
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "db::system::get_node_rows", skip_all, err(Debug))]
+#[allow(
+    clippy::ptr_arg,
+    reason = "public thorium API; changing the parameter types to slices is an API change"
+)]
 pub async fn get_node_rows(
     clusters: &Vec<String>,
     nodes: &Vec<String>,

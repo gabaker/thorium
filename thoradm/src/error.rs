@@ -295,7 +295,8 @@ impl From<config::ConfigError> for Error {
 
 impl From<std::convert::Infallible> for Error {
     fn from(error: std::convert::Infallible) -> Self {
-        Error::Conversion(error)
+        // an infallible conversion error can never exist, so there is nothing to convert
+        match error {}
     }
 }
 

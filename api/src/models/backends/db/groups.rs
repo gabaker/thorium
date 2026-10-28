@@ -354,12 +354,12 @@ pub async fn restore(groups: &[Group], shared: &Shared, span: &Span) -> Result<(
 ///
 /// * `names` - The names of the groups to check the existence of
 /// * `shared` - Shared Thorium objects
-pub async fn exists<'a>(names: &[String], shared: &Shared) -> Result<bool, ApiError> {
+pub async fn exists(names: &[String], shared: &Shared) -> Result<bool, ApiError> {
     helpers::exists_all(names, &GroupKeys::set(shared), shared).await
 }
 
 /// update the users for a role in a group
-fn update_role<'a>(pipe: &'a mut redis::Pipeline, users: &HashSet<String>, key: &str) {
+fn update_role(pipe: &mut redis::Pipeline, users: &HashSet<String>, key: &str) {
     // clear this key first
     pipe.cmd("del").arg(key);
     // add each of our users to this set

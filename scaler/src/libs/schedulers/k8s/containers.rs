@@ -298,7 +298,7 @@ impl Containers {
             env.push(Self::build_env_var("USER", &Some(spawn.req.user.clone())));
             env.push(Self::build_env_var(
                 "HOME",
-                &Some(format!("/home/{}", &spawn.req.user)),
+                &Some(format!("/home/{}", spawn.req.user)),
             ));
         }
         // inject the agent's NO_PROXY bypass so it can reach the API past any image/env proxy,

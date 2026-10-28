@@ -275,6 +275,10 @@ impl Stream {
     /// * `span` - The span to log traces under
     #[allow(clippy::too_many_arguments)]
     #[async_recursion]
+    #[allow(
+        clippy::only_used_in_recursion,
+        reason = "removing the span parameter changes the helper's signature and every call site"
+    )]
     async fn mapper(
         group: &Group,
         namespace: &str,

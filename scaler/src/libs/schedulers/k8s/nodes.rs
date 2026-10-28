@@ -129,13 +129,13 @@ impl Nodes {
             None => return Err(Error::new("node does not have a name")),
         };
         // check the nodes taints and see if this node can be scheduled on
-        if let Some(spec) = &node.spec {
-            if let Some(taints) = &spec.taints {
-                // return 0 resources because this node cannot be schedule on
-                if taints.iter().any(|taint| taint.effect == "NoSchedule") {
-                    event!(Level::WARN, node = &name, taint = "NoSchedule");
-                    return Ok(None);
-                }
+        if let Some(spec) = &node.spec
+            && let Some(taints) = &spec.taints
+        {
+            // return 0 resources because this node cannot be schedule on
+            if taints.iter().any(|taint| taint.effect == "NoSchedule") {
+                event!(Level::WARN, node = &name, taint = "NoSchedule");
+                return Ok(None);
             }
         }
         // get the total available resources for this node
@@ -151,7 +151,7 @@ impl Nodes {
             total_worker_slots = total.worker_slots
         );
         // clone our total resources to calculate whats actually allocatable
-        let mut available = total.clone();
+        let mut available = total;
         // get list of all pods on this node
         let pods = self.pods.list_all(Some(name.clone())).await?;
         // build a list of currently active workers
@@ -312,11 +312,11 @@ impl Nodes {
         // patch node labels
         let patched = self.api.patch(node, &params, &patch).await?;
         // make sure out patch was succesful
-        if let Some(labels) = patched.metadata.labels {
-            if labels.get(label) != Some(&value.to_owned()) {
-                let msg = format!("Failed to label node {node} with {label}:{value}");
-                return Err(Error::new(msg));
-            }
+        if let Some(labels) = patched.metadata.labels
+            && labels.get(label) != Some(&value.to_owned())
+        {
+            let msg = format!("Failed to label node {node} with {label}:{value}");
+            return Err(Error::new(msg));
         }
         Ok(node)
     }

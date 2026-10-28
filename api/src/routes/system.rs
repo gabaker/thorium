@@ -346,11 +346,9 @@ async fn consistency_scan(
     settings
         .consistency_scan(&user, &state.shared)
         .await
-        .map_err(|err| {
+        .inspect_err(|_| {
             // log that an error occurred while scanning
             event!(Level::ERROR, msg = "An error occurred while scanning");
-            // propagate the original error so internal info stays hidden
-            err
         })?;
     // reset the scaler's cache after the scan
     SystemInfo::reset_cache(&user, &state.shared).await?;

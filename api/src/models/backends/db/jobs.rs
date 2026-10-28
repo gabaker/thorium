@@ -1224,12 +1224,14 @@ pub async fn proceed(
         // execute our query and get the response based on if the job is a generator or not
         let progress = if job.generator {
             // execute the query with our job generator srem
+            #[allow(clippy::type_complexity, reason = "the tuple mirrors the Redis pipeline's reply, one element per command")]
             let full: Option<(u64, u64, u64, u64, bool, u64, u64, u64, u64, u64, u64)> =
                 helpers::exec_if(&pipe, &data_key, &["status"], still_expected, shared).await?;
             // downselect to just the first two values
             full.map(|full| (full.0, full.1))
         } else {
             // execute the query without the job generator srem
+            #[allow(clippy::type_complexity, reason = "the tuple mirrors the Redis pipeline's reply, one element per command")]
             let full: Option<(u64, u64, u64, u64, bool, u64, u64, u64, u64, u64)> =
                 helpers::exec_if(&pipe, &data_key, &["status"], still_expected, shared).await?;
             // downselect to just the first two values

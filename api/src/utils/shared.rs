@@ -100,10 +100,9 @@ impl EmailClient {
                         .credentials(creds)
                         .build();
                 // get the address to send emails from
-                let from = email_conf.addr.parse().expect(&format!(
-                    "Failed to parse email address: {}",
-                    email_conf.addr
-                ));
+                let from = email_conf.addr.parse().unwrap_or_else(|_| {
+                    panic!("Failed to parse email address: {}", email_conf.addr)
+                });
                 // compile our approved email regex if we have any approved emails
                 let approved = if !email_conf.approved_emails.is_empty() {
                     // compile our approved emails regex set
@@ -196,6 +195,10 @@ pub struct OAuthClient {
     /// The http client to use to drive this client
     pub http_client: reqwest::Client,
     /// The client to this provider
+    #[allow(
+        clippy::type_complexity,
+        reason = "public field; the openidconnect client type is spelled out by its typestate parameters and an alias adds a new public item"
+    )]
     pub client: openidconnect::Client<
         EmptyAdditionalClaims,
         CoreAuthDisplay,

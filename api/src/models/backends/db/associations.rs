@@ -320,7 +320,7 @@ async fn delete_helper(
     group_chunk: &[String],
     year: i32,
     bucket: i32,
-    source_serialized: &String,
+    source_serialized: &str,
     association: &ListableAssociation,
     shared: &Shared,
 ) -> Result<(), QueryError> {

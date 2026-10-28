@@ -47,8 +47,6 @@ pub fn census_keys(
     bucket: i32,
     shared: &crate::utils::Shared,
 ) {
-    // calculate our census grouping
-    let grouping = bucket / 10_000;
     // for each group build our key
     for group in groups {
         // build the stream key for this row

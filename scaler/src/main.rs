@@ -1,6 +1,3 @@
-#![feature(hash_set_entry)]
-#![feature(btree_extract_if)]
-
 use clap::Parser;
 
 mod args;

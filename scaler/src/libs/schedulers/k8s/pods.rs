@@ -281,7 +281,7 @@ impl Pods {
     /// * `spawns` - The spawned objects to delete
     /// * `results` - The results of these and any other pending deletes
     #[instrument(name = "k8s::Pods::delete_many", skip(self, spawns, results))]
-    pub async fn delete_many<'a>(
+    pub async fn delete_many(
         &mut self,
         ns: &str,
         spawns: &Vec<Spawned>,
@@ -463,7 +463,7 @@ impl Pods {
         //let asserted = thorium::utils::helpers::assert_send_stream(names);
         // delete our pods 10 at a time
         let stream_iter = stream::iter(&names)
-            .map(|name| async move { self.delete(ns, &name).await })
+            .map(|name| async move { self.delete(ns, name).await })
             .buffered(10);
         // assert this stream is send to avoid FnOnce errors
         let attempts = thorium::utils::helpers::assert_send_stream(stream_iter)
@@ -616,7 +616,7 @@ impl Pods {
     /// * `req` - The Requisition to spawn
     /// * `scale` - The number of pods to scale up or down
     #[instrument(name = "k8s::Pods::deploy", skip(self, pods, errors))]
-    pub async fn deploy<'a>(&self, ns: &str, pods: Vec<Pod>, errors: &mut HashMap<String, Error>) {
+    pub async fn deploy(&self, ns: &str, pods: Vec<Pod>, errors: &mut HashMap<String, Error>) {
         // get a namespaced client for our pods target namespace
         let api: Api<Pod> = Api::namespaced(self.client.clone(), ns);
         // set the default params

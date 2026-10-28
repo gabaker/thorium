@@ -41,7 +41,7 @@ impl<S: Scrub> ScrubWorker<S> {
         log: &Arc<FailureLog>,
     ) -> Self {
         ScrubWorker {
-            phantom: PhantomData::default(),
+            phantom: PhantomData,
             updates,
             progress,
             component,

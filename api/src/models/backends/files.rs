@@ -138,7 +138,7 @@ impl SampleForm {
             // we found and consumed a valid form entry
             return Ok(None);
         }
-        bad!(format!("All form entries must have a name!"))
+        bad!("All form entries must have a name!".to_string())
     }
 }
 
@@ -161,7 +161,7 @@ impl CommentForm {
             // we found and consumed a valid form entry
             return Ok(None);
         }
-        bad!(format!("All form entries must have a name!"))
+        bad!("All form entries must have a name!".to_string())
     }
 }
 
@@ -814,7 +814,7 @@ impl CommentSupport for Sample {
                 // delete all our dangling comment attachments
                 for (_, s3_id) in form.attachments {
                     // build the path to delete this attachment at in s3
-                    let s3_path = format!("{}/{}/{}", &self.sha256, form.id, s3_id);
+                    let s3_path = format!("{}/{}/{}", self.sha256, form.id, s3_id);
                     // delete this attachment from s3
                     shared.s3.attachments.delete(&s3_path).await?;
                 }
@@ -861,7 +861,8 @@ impl CommentSupport for Sample {
             groups
         };
         db::files::delete_comment(&self.sha256, groups, comment, shared).await?;
-        db::files::prune_comment_attachments(&[comment.to_owned()], &self.sha256, shared).await
+        db::files::prune_comment_attachments(std::slice::from_ref(comment), &self.sha256, shared)
+            .await
     }
 
     /// Downloads an attachment from a specific comment

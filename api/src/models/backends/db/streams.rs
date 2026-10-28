@@ -83,6 +83,7 @@ pub fn depth_probes(start: i64, end: i64, split: NonZeroU64) -> Result<Vec<(i64,
 /// * `shared` - The shared objects in Thorium
 #[rustfmt::skip]
 #[instrument(name = "db::streams::read", skip(shared), err(Debug))]
+#[allow(clippy::too_many_arguments, reason = "public thorium API; grouping the arguments into a struct changes the signature")]
 pub async fn read(
     group: &str,
     namespace: &str,
@@ -293,10 +294,10 @@ pub async fn earliest(
     match DateTime::from_timestamp(raw.1, 0) {
         Some(datetime) => Ok(datetime),
         None => {
-            return internal_err!(format!(
+            internal_err!(format!(
                 "Earliest point in stream does not have a valid timestamp - {}",
                 raw.1
-            ));
+            ))
         }
     }
 }
@@ -327,10 +328,10 @@ pub async fn latest(
     match DateTime::from_timestamp(raw.1, 0) {
         Some(datetime) => Ok(datetime),
         None => {
-            return internal_err!(format!(
+            internal_err!(format!(
                 "Earliest point in stream does not have a valid timestamp - {}",
                 raw.1
-            ));
+            ))
         }
     }
 }

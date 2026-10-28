@@ -70,10 +70,10 @@ pub fn get_headers(output: &GetObjectOutput, path: &str) -> HeaderMap {
         }
     }
     // set the content length if we have it
-    if let Some(content_length) = output.content_length {
-        if let Ok(content_length_header) = HeaderValue::from_str(&content_length.to_string()) {
-            headers.insert(header::CONTENT_LENGTH, content_length_header);
-        }
+    if let Some(content_length) = output.content_length
+        && let Ok(content_length_header) = HeaderValue::from_str(&content_length.to_string())
+    {
+        headers.insert(header::CONTENT_LENGTH, content_length_header);
     }
     headers
 }

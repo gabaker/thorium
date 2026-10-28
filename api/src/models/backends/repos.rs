@@ -126,7 +126,7 @@ impl RepoDataForm {
             // we found and consumed a valid form entry
             return Ok(None);
         }
-        bad!(format!("All form entries must have a name!"))
+        bad!("All form entries must have a name!".to_string())
     }
 }
 
@@ -211,8 +211,8 @@ impl Repo {
     /// * `editable` - Make sure these groups are editable not just viewable
     /// * `shared` - Shared Thorium objects
     #[instrument(name = "Repo::validate_groups", skip(self, user, shared), err(Debug))]
-    pub async fn validate_groups<'a>(
-        &'a self,
+    pub async fn validate_groups(
+        &self,
         user: &User,
         groups: &mut Vec<String>,
         editable: bool,
@@ -227,7 +227,7 @@ impl Repo {
                 return unauthorized!(format!("{} is not in all specified groups", self.url));
             }
             // make sure we actually have access to all requested groups
-            let info = Group::authorize_all(user, &groups, shared).await?;
+            let info = Group::authorize_all(user, groups, shared).await?;
             // if we want to edit these repos then check for edit permissions
             if editable {
                 // make sure we have modification privleges in these groups
@@ -277,8 +277,8 @@ impl Repo {
         skip(self, user, shared),
         err(Debug)
     )]
-    pub async fn validate_check_allow_groups<'a>(
-        &'a self,
+    pub async fn validate_check_allow_groups(
+        &self,
         user: &User,
         groups: &mut Vec<String>,
         action: GroupAllowAction,
@@ -295,7 +295,7 @@ impl Repo {
             // make sure we have edit access in all requested groups
             let _ = Group::authorize_check_allow_all(
                 user,
-                &groups,
+                groups,
                 Group::editable,
                 "edit",
                 Some(action),
@@ -378,7 +378,7 @@ impl Repo {
         // return an error if we didn't get any data to hash
         let sha256 = match sha256_opt {
             Some(sha256) => sha256,
-            None => return bad!(format!("Data entry must be set!")),
+            None => return bad!("Data entry must be set!".to_string()),
         };
         // make sure we actually have edit access in all requested groups
         let _ = Group::authorize_check_allow_all(
@@ -492,7 +492,7 @@ impl Repo {
         // authorize the groups to list files from
         user.authorize_groups(&mut params.groups, shared).await?;
         // get a chunk of the files list scoped to the requesting user
-        let scylla_cursor = db::repos::commitishes(user, &self, params, dedupe, shared).await?;
+        let scylla_cursor = db::repos::commitishes(user, self, params, dedupe, shared).await?;
         // convert our scylla cursor to a user facing cursor
         Ok(ApiCursor::from(scylla_cursor))
     }
@@ -509,7 +509,7 @@ impl Repo {
         // get the groups we can see this repo is in
         let groups = self.groups();
         // get the latest commit for this repo scoped to the requesting user
-        db::repos::latest_commit(user, &groups, &self, shared).await
+        db::repos::latest_commit(user, &groups, self, shared).await
     }
 
     /// Get the correct repo data hash for a commit hash
@@ -826,7 +826,7 @@ impl CursorCore for Commitish {
     ///
     /// * `params` - The params to use to build this cursor
     fn get_id(params: &Self::Params) -> Option<Uuid> {
-        params.cursor.clone()
+        params.cursor
     }
 
     // Get our start and end timestamps
@@ -1076,7 +1076,7 @@ impl CursorCore for RepoListLine {
     ///
     /// * `params` - The params to use to build this cursor
     fn get_id(params: &Self::Params) -> Option<Uuid> {
-        params.cursor.clone()
+        params.cursor
     }
 
     // Get our start and end timestamps

@@ -173,7 +173,7 @@ impl S3Backup for Comment {
                 }
             };
             // crawl the attachments for this comment
-            for (_, id) in files.iter() {
+            for id in files.values() {
                 // get the bucket for comment attachments
                 let bucket = conf.thorium.attachments.bucket.clone();
                 // get the key for this attachment

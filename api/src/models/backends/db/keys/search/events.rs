@@ -7,10 +7,18 @@ use crate::utils::Shared;
 
 /// The keys related to search events in Redis
 #[derive(Debug)]
+#[allow(
+    private_bounds,
+    reason = "the keys are only usable with the crate's own search event backends; widening the trait or narrowing the struct changes visibility"
+)]
 pub struct SearchEventKeys<S: SearchEventBackend> {
     phantom: PhantomData<S>,
 }
 
+#[allow(
+    private_bounds,
+    reason = "the keys are only usable with the crate's own search event backends; widening the trait or narrowing the struct changes visibility"
+)]
 impl<S: SearchEventBackend> SearchEventKeys<S> {
     /// Derives the key for the search event queue for the given elastic index
     ///

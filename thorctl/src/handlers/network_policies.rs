@@ -182,7 +182,7 @@ async fn update(thorium: Thorium, conf: CtlConf, cmd: &UpdateNetworkPolicy) -> R
 /// * `path` - The path to the rules file
 /// * `format` - The format the rules file is in
 /// * `api_url` - The URL to the API to use to provide a link to formatting information
-///               on error
+///   on error
 fn parse_rules_file(
     path: &Path,
     format: &NetworkPolicyFileFormat,

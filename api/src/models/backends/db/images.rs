@@ -382,8 +382,8 @@ pub async fn list_details(
     // list image data
     let raw: Vec<RawUserData> = names.iter()
         .fold(redis::pipe().atomic(), |pipe, name|
-            pipe.cmd("hgetall").arg(&ImageKeys::data(group, name, shared))
-                .cmd("smembers").arg(&ImageKeys::used_by(group, name, shared))
+            pipe.cmd("hgetall").arg(ImageKeys::data(group, name, shared))
+                .cmd("smembers").arg(ImageKeys::used_by(group, name, shared))
             )
         .query_async(conn!(shared)).await?;
     // cast to image structs

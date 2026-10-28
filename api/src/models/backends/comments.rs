@@ -99,7 +99,7 @@ pub async fn create_comment_helper(
             // try to get the name for this file
             let file_name = data_field.file_name().map(|name| name.to_owned());
             // build the path to save this attachment at in s3
-            let s3_path = format!("{}/{}/{}", key, &comment_id, s3_id);
+            let s3_path = format!("{}/{}/{}", key, comment_id, s3_id);
             // cart and stream this file into s3
             shared.s3.attachments.stream(&s3_path, data_field).await?;
             // add this file name to our form

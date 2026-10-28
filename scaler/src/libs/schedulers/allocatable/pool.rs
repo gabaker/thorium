@@ -34,6 +34,10 @@ pub struct Pool {
     /// The currently available resources in this specific pool
     pub resources: Resources,
     /// The total amount of resources in this pool
+    #[allow(
+        dead_code,
+        reason = "records the pool's capacity when it is built but is not read yet"
+    )]
     total: Resources,
     /// How many spawn slots this pool has per cluster
     pub spawn_slots: HashMap<String, u64>,

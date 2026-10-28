@@ -17,6 +17,7 @@ pub struct Controller<W: Worker> {
     /// The channel to send monitor updates on
     pub monitor_tx: AsyncSender<MonitorMsg<W::Monitor>>,
     /// The recieve channel for this controller (used to ensure our channel doesn't close)
+    #[allow(dead_code, reason = "held only so the monitor channel never closes")]
     monitor_rx: AsyncReceiver<MonitorMsg<W::Monitor>>,
     /// The handle for our monitor
     pub monitor: JoinHandle<()>,
@@ -84,6 +85,10 @@ impl<W: Worker> Controller<W> {
     /// * `conf` - The config for Thorctl
     /// * `args` - The arguments that were passed to Thorctl
     /// * `cmd` - The specific args for this controllers workers
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "grouping the arguments into a struct changes the controller's signature and its callers"
+    )]
     async fn spawn_workers(
         &mut self,
         thorium: &Thorium,

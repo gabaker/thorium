@@ -1414,6 +1414,10 @@ impl Pools {
 }
 
 #[cfg(feature = "client")]
+#[allow(
+    clippy::try_from_instead_of_from_str,
+    reason = "public thorium API; replacing the TryFrom impl with FromStr changes which trait callers use"
+)]
 impl TryFrom<&str> for Pools {
     type Error = crate::client::Error;
 
@@ -1788,6 +1792,10 @@ impl WorkerDeleteMap {
     ///
     /// * `name` - The name of the worker to delete
     #[must_use]
+    #[allow(
+        clippy::should_implement_trait,
+        reason = "public builder method of the thorium client; renaming it or implementing Add is an API change"
+    )]
     pub fn add<W: Into<String>>(mut self, name: W) -> Self {
         // add our worker
         self.workers.push(name.into());

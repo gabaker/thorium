@@ -447,6 +447,10 @@ impl Agent {
 #[async_trait::async_trait]
 pub trait AgentExecutor {
     /// Get the paths to this executors current jobs results and result files
+    #[allow(
+        dead_code,
+        reason = "removing it changes the AgentExecutor trait and all of its implementations"
+    )]
     fn result_paths(&self, image: &Image) -> (String, String);
 
     /// Perform an initial setup for all jobs this agent executes

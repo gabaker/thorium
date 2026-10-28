@@ -258,7 +258,7 @@ impl Extractor {
     #[instrument(name = "tags::extract", skip_all, err(Debug))]
     fn extract(
         &mut self,
-        output: &String,
+        output: &str,
         settings: &OutputCollection,
         logs: &mut Sender<String>,
     ) -> Result<RawTags, Error> {

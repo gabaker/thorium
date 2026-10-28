@@ -107,17 +107,16 @@ impl DownloadWorker {
     async fn should_prune(&self, entry: &DirEntry) -> Result<bool, Error> {
         // only check files
         if entry.file_type().await?.is_file() {
-            // do 2 instead of 1 for # of entries otherwise we just get the entire string
-            if let Some(ext) = entry.file_name().to_string_lossy().rsplitn(2, '.').next() {
+            if let Some(ext) = entry.file_name().to_string_lossy().rsplit('.').next() {
                 // check if this extension is in our prune set
                 if self.cmd.prune_extensions.iter().any(|item| item == ext) {
                     return Ok(true);
                 }
                 // check if we have any extensions to retain
-                if !self.cmd.retain_extensions.is_empty() {
-                    if !self.cmd.retain_extensions.iter().any(|item| item == ext) {
-                        return Ok(true);
-                    }
+                if !self.cmd.retain_extensions.is_empty()
+                    && !self.cmd.retain_extensions.iter().any(|item| item == ext)
+                {
+                    return Ok(true);
                 }
             }
             // check this files size if we have min/max size settings
@@ -220,9 +219,9 @@ impl DownloadWorker {
     ///
     /// * `repo` - The repo url to download
     /// * `output` - The directory this repo might have been downloaded too
-    pub async fn exists(&self, repo: &str, output: &PathBuf) -> bool {
+    pub async fn exists(&self, repo: &str, output: &Path) -> bool {
         // clone our output path
-        let mut output = output.clone();
+        let mut output = output.to_path_buf();
         // get the name of our repo
         let repo_path = Path::new(repo);
         let repo_name = match repo_path.file_name() {

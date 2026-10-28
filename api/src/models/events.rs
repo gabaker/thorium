@@ -281,6 +281,10 @@ impl Event {
     ///
     /// Unlike `check_tag_trigger`, this returns a plain yes or no instead of a trigger potential
     #[must_use]
+    #[allow(
+        clippy::ptr_arg,
+        reason = "public thorium API used by the event handler; changing the parameter type is an API change"
+    )]
     pub fn check_all_tag_trigger(
         visible: &Vec<String>,
         tags: &HashMap<String, HashMap<String, HashSet<String>>>,
@@ -331,7 +335,7 @@ impl Event {
     fn check_tag_trigger(
         new_type: &TagType,
         new_tags: &HashMap<String, HashSet<String>>,
-        trigger_types: &Vec<TagType>,
+        trigger_types: &[TagType],
         required: &HashMap<String, Vec<String>>,
         not: &HashMap<String, Vec<String>>,
     ) -> TriggerPotential {

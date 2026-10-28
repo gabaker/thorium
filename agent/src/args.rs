@@ -109,12 +109,10 @@ impl Args {
                 // get our hostname since our args don't specify it
                 match gethostname::gethostname().into_string() {
                     Ok(hostname) => Ok(hostname),
-                    Err(err) => {
-                        return Err(Error::new(format!(
-                            "Failed to get hostname with {:#?}",
-                            err
-                        )));
-                    }
+                    Err(err) => Err(Error::new(format!(
+                        "Failed to get hostname with {:#?}",
+                        err
+                    ))),
                 }
             }
         }
