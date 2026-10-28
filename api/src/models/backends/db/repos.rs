@@ -356,6 +356,8 @@ async fn get_updated_repo(
 
 /// Authorizes that a user has access to a list of repos
 ///
+/// Returns unauthorized unless every repo in the list is visible to at least one of the groups.
+///
 /// # Arguments
 ///
 /// * `groups` - The groups the user is in
@@ -387,8 +389,10 @@ pub async fn authorize(
             return unauthorized!();
         }
     } else {
+        // get the unique repos to authorize, since a repo listed twice is only returned once
+        let unique: HashSet<&String> = repos.iter().collect();
         // track the repos we have authed
-        let mut authed = HashSet::with_capacity(repos.len());
+        let mut authed = HashSet::with_capacity(unique.len());
         // build an iter over the cartesian product of our groups and repos
         // doing this in a buffered_unordered closure would probably be faster
         // but that runs into lifetime errors currently :(
@@ -411,11 +415,13 @@ pub async fn authorize(
                 authed.insert(row.url);
             }
             // if we have authed all of our repos then return early
-            if authed.len() == repos.len() {
+            if authed.len() == unique.len() {
                 // we have authed all of the repos we wanted to auth against
                 return Ok(());
             }
         }
+        // no chunk authed every repo, so at least one repo is not visible to these groups
+        return unauthorized!();
     }
     // we have access to this repo
     Ok(())
@@ -769,6 +775,21 @@ pub async fn add_commitishes(
     Ok(())
 }
 
+/// Get the default oldest bound for listing a repo's commitishes
+///
+/// A listing never includes commitishes made exactly at its end, so this is one second before
+/// the repo's earliest commit to keep the commitishes made at that moment.
+///
+/// # Arguments
+///
+/// * `earliest` - The timestamp of the repo's earliest commit
+fn listing_end(earliest: DateTime<Utc>) -> DateTime<Utc> {
+    // step back one second, keeping the earliest timestamp if that would overflow
+    earliest
+        .checked_sub_signed(chrono::TimeDelta::seconds(1))
+        .unwrap_or(earliest)
+}
+
 //// List commitishes for a specific repo
 ///
 /// # Arguments
@@ -793,9 +814,9 @@ pub async fn commitishes(
 ) -> Result<ScyllaCursor<Commitish>, ApiError> {
     // take our kinds from our params
     let kinds = std::mem::take(&mut params.kinds);
-    // default our end date with this repos earliest commit timestamp if we have one
+    // default our end date to just before this repos earliest commit timestamp if we have one
     if let Some(earliest) = repo.earliest {
-        params.end.get_or_insert(earliest);
+        params.end.get_or_insert(listing_end(earliest));
     }
     // get our target repos url
     let url = repo.url.clone();
@@ -849,12 +870,12 @@ async fn commitish_details_helper(
     let kind = commitish.kind();
     let key = commitish.key();
     let groups = commitish.groups();
-    // query scylla for this comittishes data in one statement over all of its groups
+    // query scylla for this comittishes data, checking its groups in chunks until one has it
     let row = shared
         .scylla
         .queries
         .commitishes
-        .get_data_chunk(&shared.scylla.session, &kind, groups, repo, key)
+        .get_data(&shared.scylla.session, &kind, groups, repo, key)
         .await?;
     // get this commitishes data or return an error
     match row {
@@ -922,8 +943,8 @@ pub async fn latest_commit(
         .iter()
         .map(|item| item.to_string())
         .collect::<Vec<String>>();
-    // build the params for listing this repos commits
-    let params = CommitishListParams::new(groups, repo.earliest, 1);
+    // build the params for listing this repos commits back to its earliest commit
+    let params = CommitishListParams::new(groups, repo.earliest.map(listing_end), 1);
     // build our extra filters to only search commits for this repo
     let extra = (vec![CommitishKinds::Commit], repo.url.to_owned());
     // get our cursor scoped to the creating user
@@ -1027,6 +1048,7 @@ async fn is_ambiguous(
 ///
 /// * `groups` - The groups to search for this repos data
 /// * `repo` - The repo to get the repo data hash for
+/// * `kinds` - The kinds of commitish to search for
 /// * `commitish` - The commitish we are searching for
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "db::repos::repo_data_hash", skip(shared), err(Debug))]
@@ -1044,43 +1066,16 @@ pub async fn repo_data_hash(
         .iter()
         .map(|name| (*name).clone())
         .collect::<Vec<String>>();
-    // if we have more then 32 groups then break them into chunks of 32
-    if groups.len() > 32 {
-        // track the last repo_data hash
-        let mut last_repo_data_hash = None;
-        // chunk gour groups up into chunks of 32
-        for group_chunk in groups.chunks(32) {
-            // retrieve submissions from scylla
-            let query = shared
-                .scylla
-                .queries
-                .commitishes
-                .get_repo_data_chunk(&shared.scylla.session, kinds, group_chunk, repo, commitish)
-                .await;
-            // check if this commitish is ambiguous or not
-            let repo_data = is_ambiguous(repo, commitish, &mut previous, query).await?;
-            // set our repo data hash
-            last_repo_data_hash = Some(repo_data);
-        }
-        // if we have a repo data hash then return it
-        if let Some(repo_data) = last_repo_data_hash {
-            return Ok(repo_data);
-        }
-    } else {
-        // retrieve submissions from scylla
-        let query = shared
-            .scylla
-            .queries
-            .commitishes
-            .get_repo_data_chunk(&shared.scylla.session, kinds, &groups, repo, commitish)
-            .await;
-        // check if this commitish is ambiguous or not
-        return is_ambiguous(repo, commitish, &mut previous, query).await;
-    }
-    not_found!(format!(
-        "Commitish {} does not exist for {}",
-        commitish, repo
-    ))
+    // retrieve this commitish's rows from every chunk of groups, keeping kinds times groups
+    // under 100 in each chunk
+    let query = shared
+        .scylla
+        .queries
+        .commitishes
+        .get_repo_data(&shared.scylla.session, kinds, &groups, repo, commitish)
+        .await;
+    // check if this commitish is ambiguous across the rows of every group
+    is_ambiguous(repo, commitish, &mut previous, query).await
 }
 
 /// List repos for specific groups

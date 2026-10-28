@@ -350,7 +350,10 @@ async fn get_comments(
     list: &mut Vec<Comment>,
     shared: &Shared,
 ) -> Result<(), ApiError> {
-    // get the comments in chunks of 100 groups, merging each chunk's rows on their own
+    // build one btreemap for every chunk, so a comment visible to groups in several chunks
+    // is merged into one comment and all comments are sorted together
+    let mut map: BTreeMap<DateTime<Utc>, HashMap<Uuid, Comment>> = BTreeMap::default();
+    // get the comments in chunks of 100 groups, merging the rows of every chunk into one map
     for chunk in groups.chunks(100) {
         // get this chunks data
         let rows = shared
@@ -359,8 +362,6 @@ async fn get_comments(
             .comments
             .get_chunk(&shared.scylla.session, chunk, sha256)
             .await?;
-        // build a btreemap to collect all comments and then sort them
-        let mut map: BTreeMap<DateTime<Utc>, HashMap<Uuid, Comment>> = BTreeMap::default();
         // crawl over rows and add them to our tag map while logging any errors
         rows.into_iter()
             .filter_map(|res| log_scylla_err!(res))
@@ -381,9 +382,9 @@ async fn get_comments(
                     }
                 }
             });
-        // flatten our map of comments and append it to our list of comments
-        list.extend(map.into_values().flat_map(|map| map.into_values()));
     }
+    // flatten our map of comments and append it to our list of comments
+    list.extend(map.into_values().flat_map(HashMap::into_values));
     Ok(())
 }
 

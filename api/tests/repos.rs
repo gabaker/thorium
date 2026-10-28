@@ -4,8 +4,9 @@ use chrono::{DateTime, Duration, Utc};
 use std::collections::{HashMap, HashSet};
 
 use thorium::models::{
-    CommitRequest, CommitishMapRequest, CommitishRequest, GroupUpdate, GroupUsersUpdate,
-    RepoCheckout, RepoListLine, RepoListOpts, RepoRequest, TarredRepo,
+    BranchRequest, CommitListOpts, CommitRequest, CommitishMapRequest, CommitishRequest,
+    GroupUpdate, GroupUsersUpdate, RepoCheckout, RepoDownloadOpts, RepoListLine, RepoListOpts,
+    RepoRequest, TarredRepo,
 };
 use thorium::test_utilities::{self, generators};
 use thorium::{Error, contains, fail, is, is_desc};
@@ -417,5 +418,297 @@ async fn create_reuses_matching_submissions() -> Result<(), Error> {
     // they share a second submission, since they pull the repo without credentials
     let repo = client.repos.get(&path).await?;
     assert_eq!(repo.submissions.len(), 2, "plain creates");
+    Ok(())
+}
+
+/// Create a repo without a default checkout in some groups and upload a data blob to all of them
+///
+/// Returns the repo's url and the sha256 of its data blob.
+///
+/// # Arguments
+///
+/// * `client` - The client to create the repo with
+/// * `groups` - The groups to create the repo and its data in
+async fn repo_with_data(
+    client: &thorium::Thorium,
+    groups: &[String],
+) -> Result<(String, String), Error> {
+    // create the repo with no default checkout, so downloads fall back to its latest commit
+    let url = format!("github.com/thorium-tests/{}", generators::gen_string(12));
+    let req = RepoRequest::new(&url, groups.to_vec(), None);
+    client.repos.create(&req).await?;
+    // write a data blob to a file of its own
+    let path =
+        std::env::temp_dir().join(format!("thorium-repo-data-{}", generators::gen_string(16)));
+    tokio::fs::write(&path, "repo data").await?;
+    // upload this file as the repo's data for every group
+    let tar = TarredRepo {
+        name: "data".to_owned(),
+        repo: path.clone(),
+    };
+    let resp = client.repos.upload(&url, tar, groups.to_vec()).await;
+    // remove our file before checking the upload
+    tokio::fs::remove_file(&path).await?;
+    Ok((url, resp?.sha256))
+}
+
+/// Build a commit request at a timestamp
+///
+/// # Arguments
+///
+/// * `timestamp` - When this commit was made
+fn commit_at(timestamp: DateTime<Utc>) -> CommitishRequest {
+    CommitishRequest::Commit(CommitRequest {
+        author: "io".to_owned(),
+        timestamp,
+        topic: None,
+        description: None,
+        truncated: false,
+    })
+}
+
+/// List the keys of every commitish of a repo in some groups with default options
+///
+/// # Arguments
+///
+/// * `client` - The client to list with
+/// * `repo` - The repo to list commitishes for
+/// * `groups` - The groups to list commitishes from
+async fn list_commitish_keys(
+    client: &thorium::Thorium,
+    repo: &str,
+    groups: &[String],
+) -> Result<HashSet<String>, Error> {
+    // list with default options in just these groups
+    let opts = CommitListOpts {
+        groups: groups.to_vec(),
+        ..CommitListOpts::default()
+    };
+    let mut cursor = client.repos.list_commitishes(repo, &opts).await?;
+    // collect the keys on every page until the cursor is exhausted
+    let mut keys: HashSet<String> = cursor.data.drain(..).map(|c| c.key().clone()).collect();
+    while !cursor.exhausted() {
+        cursor.refill().await?;
+        keys.extend(cursor.data.drain(..).map(|c| c.key().clone()));
+    }
+    Ok(keys)
+}
+
+/// Get a timestamp a few hours ago in whole seconds, so it is stored exactly
+fn whole_seconds_ago() -> DateTime<Utc> {
+    // drop the sub-second part of a timestamp from two hours ago
+    let then = Utc::now() - Duration::hours(2);
+    DateTime::from_timestamp(then.timestamp(), 0).expect("a valid timestamp")
+}
+
+/// A default commitish listing includes the commit made at the repo's earliest timestamp
+#[tokio::test]
+async fn commitishes_list_the_earliest_commit() -> Result<(), Error> {
+    // get admin client, a group, and a repo with data in it
+    let client = test_utilities::admin_client().await?;
+    let groups = vec![generators::groups(1, &client).await?.remove(0).name];
+    let (repo, data) = repo_with_data(&client, &groups).await?;
+    // add a first commit at the repo's earliest timestamp and a second an hour later
+    let earliest = whole_seconds_ago();
+    let map = CommitishMapRequest {
+        groups: groups.clone(),
+        earliest: Some(earliest),
+        end: true,
+        commitishes: HashMap::from([
+            ("first".to_owned(), commit_at(earliest)),
+            (
+                "second".to_owned(),
+                commit_at(earliest + Duration::hours(1)),
+            ),
+        ]),
+    };
+    client.repos.add_commits(&repo, &data, &map).await?;
+    // a default listing returns both commits
+    let keys = list_commitish_keys(&client, &repo, &groups).await?;
+    let expected: HashSet<String> = ["first", "second"].map(str::to_owned).into();
+    is!(keys, expected);
+    Ok(())
+}
+
+/// A repo whose commits were all made at its earliest timestamp lists them all and downloads
+/// its latest commit when no commitish is given
+#[tokio::test]
+async fn commits_at_the_earliest_timestamp_are_found() -> Result<(), Error> {
+    // get admin client, a group, and a repo with data in it
+    let client = test_utilities::admin_client().await?;
+    let groups = vec![generators::groups(1, &client).await?.remove(0).name];
+    let (repo, data) = repo_with_data(&client, &groups).await?;
+    // add two commits, both at the repo's earliest timestamp
+    let earliest = whole_seconds_ago();
+    let map = CommitishMapRequest {
+        groups: groups.clone(),
+        earliest: Some(earliest),
+        end: true,
+        commitishes: HashMap::from([
+            ("only-a".to_owned(), commit_at(earliest)),
+            ("only-b".to_owned(), commit_at(earliest)),
+        ]),
+    };
+    client.repos.add_commits(&repo, &data, &map).await?;
+    // a default listing returns both commits
+    let keys = list_commitish_keys(&client, &repo, &groups).await?;
+    let expected: HashSet<String> = ["only-a", "only-b"].map(str::to_owned).into();
+    is!(keys, expected);
+    // downloading without a commitish resolves the latest commit
+    let dir = std::env::temp_dir().join(format!("thorium-repo-dl-{}", generators::gen_string(12)));
+    tokio::fs::create_dir_all(&dir).await?;
+    let download = client
+        .repos
+        .download(&repo, &RepoDownloadOpts::default(), &dir)
+        .await;
+    tokio::fs::remove_dir_all(&dir).await?;
+    assert!(
+        download.is_ok(),
+        "download without a commitish: {download:?}"
+    );
+    Ok(())
+}
+
+/// A commit visible to only one of a repo's 40 groups still downloads, and a key that is a
+/// branch in one group and a commit in another is still ambiguous
+#[tokio::test]
+async fn download_finds_commits_in_some_of_many_groups() -> Result<(), Error> {
+    // get admin client, 40 groups, and a repo with data in all of them
+    let client = test_utilities::admin_client().await?;
+    let groups: Vec<String> = generators::groups(40, &client)
+        .await?
+        .into_iter()
+        .map(|group| group.name)
+        .collect();
+    let (repo, data) = repo_with_data(&client, &groups).await?;
+    let timestamp = whole_seconds_ago();
+    // add c_all to every group as the final batch
+    let map = CommitishMapRequest {
+        groups: groups.clone(),
+        earliest: Some(timestamp - Duration::hours(1)),
+        end: true,
+        commitishes: HashMap::from([("c_all".to_owned(), commit_at(timestamp))]),
+    };
+    client.repos.add_commits(&repo, &data, &map).await?;
+    // add c_one and a branch named amb to only the first group
+    let branch = CommitishRequest::Branch(BranchRequest {
+        commit: "c_all".to_owned(),
+        timestamp,
+    });
+    let map = CommitishMapRequest {
+        groups: vec![groups[0].clone()],
+        earliest: None,
+        end: false,
+        commitishes: HashMap::from([
+            ("c_one".to_owned(), commit_at(timestamp)),
+            ("amb".to_owned(), branch),
+        ]),
+    };
+    client.repos.add_commits(&repo, &data, &map).await?;
+    // add a commit named amb to only the last group
+    let map = CommitishMapRequest {
+        groups: vec![groups[39].clone()],
+        earliest: None,
+        end: false,
+        commitishes: HashMap::from([("amb".to_owned(), commit_at(timestamp))]),
+    };
+    client.repos.add_commits(&repo, &data, &map).await?;
+    // download into a directory of our own
+    let dir = std::env::temp_dir().join(format!("thorium-repo-dl-{}", generators::gen_string(12)));
+    tokio::fs::create_dir_all(&dir).await?;
+    let one = client
+        .repos
+        .download(&repo, &RepoDownloadOpts::default().commitish("c_one"), &dir)
+        .await;
+    let all = client
+        .repos
+        .download(&repo, &RepoDownloadOpts::default().commitish("c_all"), &dir)
+        .await;
+    let amb = client
+        .repos
+        .download(&repo, &RepoDownloadOpts::default().commitish("amb"), &dir)
+        .await;
+    tokio::fs::remove_dir_all(&dir).await?;
+    // commits in one group or in every group download
+    assert!(one.is_ok(), "download of c_one: {one:?}");
+    assert!(all.is_ok(), "download of c_all: {all:?}");
+    // a key that is a branch and a commit in different groups is ambiguous
+    match amb {
+        Ok(_) => panic!("download of the ambiguous key amb succeeded"),
+        Err(error) => is!(error.status().map(|code| code.as_u16()), Some(400)),
+    }
+    Ok(())
+}
+
+/// Commitish details list a commit saved to all of a repo's 101 groups
+#[tokio::test]
+async fn commitish_details_in_more_than_100_groups() -> Result<(), Error> {
+    // get admin client, 101 groups, and a repo with data in all of them
+    let client = test_utilities::admin_client().await?;
+    let groups: Vec<String> = generators::groups(101, &client)
+        .await?
+        .into_iter()
+        .map(|group| group.name)
+        .collect();
+    let (repo, data) = repo_with_data(&client, &groups).await?;
+    // add a commit to every group
+    let timestamp = whole_seconds_ago();
+    let map = CommitishMapRequest {
+        groups: groups.clone(),
+        earliest: Some(timestamp - Duration::hours(1)),
+        end: true,
+        commitishes: HashMap::from([("wide".to_owned(), commit_at(timestamp))]),
+    };
+    client.repos.add_commits(&repo, &data, &map).await?;
+    // list the repo's commitish details in all of those groups
+    let opts = CommitListOpts {
+        groups: groups.clone(),
+        ..CommitListOpts::default()
+    };
+    let cursor = client.repos.list_commitish_details(&repo, &opts).await?;
+    // the commit is listed with its details
+    let keys: Vec<&String> = cursor
+        .data
+        .iter()
+        .map(thorium::models::CommitishDetails::key)
+        .collect();
+    is!(keys, vec![&"wide".to_owned()]);
+    Ok(())
+}
+
+/// A non-admin's 100 or more groups that can't see a repo are refused, like fewer groups are
+#[tokio::test]
+async fn authorize_refuses_repos_hidden_from_many_groups() -> Result<(), Error> {
+    // get admin client, a group, and a repo in it
+    let client = test_utilities::admin_client().await?;
+    let owner = generators::groups(1, &client).await?.remove(0).name;
+    let repo = generators::repos(&owner, 1, &client).await?.remove(0).url;
+    // build the shared objects the backend authorizes with
+    let shared = Box::pin(thorium::utils::Shared::new(test_utilities::CONF.clone())).await;
+    // build groups that don't hold the repo
+    let others = |count: usize| -> Vec<String> {
+        (0..count)
+            .map(|_| format!("vesta-{}", generators::gen_string(10).to_lowercase()))
+            .collect()
+    };
+    let authorize = |groups: Vec<String>, repos: Vec<String>| {
+        let shared = &shared;
+        async move { thorium::models::backends::db::repos::authorize(&groups, &repos, shared).await }
+    };
+    // 99 and 100 groups without the repo are both refused
+    for count in [99, 100] {
+        let res = authorize(others(count), vec![repo.clone()]).await;
+        let code = res.err().map(|error| error.status().as_u16());
+        is!(code, Some(401));
+    }
+    // 100 groups including the repo's group are allowed
+    let mut groups = others(99);
+    groups.push(owner.clone());
+    assert!(authorize(groups, vec![repo.clone()]).await.is_ok());
+    // a repo listed twice with 50 groups including its own is allowed
+    let mut groups = others(49);
+    groups.push(owner.clone());
+    let res = authorize(groups, vec![repo.clone(), repo.clone()]).await;
+    assert!(res.is_ok(), "a repeated repo was refused: {res:?}");
     Ok(())
 }
