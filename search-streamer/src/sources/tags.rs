@@ -187,8 +187,9 @@ impl Tags {
                 .await
                 .map_err(|err| Error::new(format!("Error pulling tag init info: {err}")))?;
             while let Some(row) = typed_stream.next().await {
-                // make sure the row was successful
-                let row = row.unwrap();
+                // fail the batch if a row doesn't decode
+                let row =
+                    row.map_err(|err| Error::new(format!("Error decoding a tag row: {err}")))?;
                 // add the row to the map
                 let tags = tag_map
                     .entry((row.item.clone(), row.group.clone()))
@@ -231,8 +232,9 @@ impl Tags {
                 .await
                 .map_err(|err| Error::new(format!("Error pulling tag event info: {err}")))?;
             while let Some(row) = typed_stream.next().await {
-                // make sure the row was successful
-                let row = row.unwrap();
+                // fail the batch if a row doesn't decode
+                let row = row
+                    .map_err(|err| Error::new(format!("Error decoding a tag event row: {err}")))?;
                 // add row to our map
                 let tags = tag_map
                     .entry((compacted_event.item.clone(), row.group.clone()))

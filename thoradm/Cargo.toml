@@ -53,12 +53,12 @@ redis = { version = "0.32.1", default-features = false, features = ["tokio-comp"
 tracing = { workspace = true }
 rand = "0.9"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+libc = "0.2"
 
 [dev-dependencies]
 thoradm = { path = ".", features = ["test-support"] }
 thorium-api = { workspace = true, features = ["api", "client", "trace", "scylla-utils", "rkyv-support", "test-utilities"] }
 axum = "0.8"
-libc = "0.2"
 reqwest = { workspace = true }
 semver = "1"
 utoipa = "5"

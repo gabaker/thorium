@@ -42,6 +42,7 @@ use services::Services;
 use volumes::{MountGen, Volumes};
 
 use super::{Allocatable, AllocatableUpdate, Scheduler, Spawned, WorkerDeletion};
+use crate::libs::cache::ToolIdsByGroup;
 use crate::libs::scaler::ErrorOutKinds;
 use crate::libs::{BanSets, Cache, Tasks, helpers};
 use crate::{raw_entry_vec_extend, raw_entry_vec_push};
@@ -218,6 +219,35 @@ fn namespaces_to_validate(
         .map(|(namespace, _)| namespace);
     // validate both sets of namespaces
     scaled_down.chain(still_pending).cloned().collect()
+}
+
+/// Generate the Kubernetes network policy specs to deploy for Thorium network policies, by namespace
+///
+/// Every policy gets one spec in each of its groups' namespaces, and a namespace collects the
+/// specs of every policy in it.
+///
+/// # Arguments
+///
+/// * `policies` - The Thorium network policies to generate specs for
+/// * `tool_ids` - The ids of the tools each group's tool names resolve to
+fn policy_specs_by_namespace<'a>(
+    policies: impl IntoIterator<Item = &'a thorium::models::NetworkPolicy>,
+    tool_ids: &ToolIdsByGroup,
+) -> HashMap<String, Vec<(Uuid, NetworkPolicy)>> {
+    // create a map of policies to create by namespace
+    let mut policy_specs_by_ns: HashMap<String, Vec<(Uuid, NetworkPolicy)>> = HashMap::new();
+    for policy in policies {
+        // generate policy specs for all of the policy's groups
+        let policy_specs = NetworkPolicies::generate(policy, policy.groups.clone(), tool_ids);
+        // add each spec to its namespace's list, keeping the specs of earlier policies
+        for (ns, policy_spec) in policy_specs {
+            policy_specs_by_ns
+                .entry(ns)
+                .or_default()
+                .push((policy.id, policy_spec));
+        }
+    }
+    policy_specs_by_ns
 }
 
 /// A Kubernetes scheduler for Thorium
@@ -610,8 +640,8 @@ impl K8s {
             .drain()
             .collect();
         self.remove_network_policies(policies_to_remove).await;
-        // create a map of policies to create by namespace
-        let mut policy_specs_by_ns: HashMap<String, Vec<(Uuid, NetworkPolicy)>> = HashMap::new();
+        // get the cached info for each policy to create
+        let mut add_policies = Vec::new();
         for (id, add_policy) in self
             .network_policies
             .cache
@@ -620,21 +650,8 @@ impl K8s {
             .map(|id| (id, cache.network_policies.policies_by_id.get(&id)))
         {
             match add_policy {
-                // generate the spec(s) for this policy
-                Some(add_policy) => {
-                    // generate policy specs for all of the policy's groups
-                    let policy_specs = NetworkPolicies::generate(
-                        add_policy,
-                        add_policy.groups.clone(),
-                        &cache.network_policies.tool_ids,
-                    );
-                    // extend our map with those specs
-                    policy_specs_by_ns.extend(
-                        policy_specs
-                            .into_iter()
-                            .map(|(ns, policy_spec)| (ns, vec![(add_policy.id, policy_spec)])),
-                    );
-                }
+                // keep this policy so we can generate its spec(s)
+                Some(add_policy) => add_policies.push(add_policy),
                 // the policy is missing from the cache, so log a warning
                 None => {
                     let msg = format!(
@@ -644,6 +661,10 @@ impl K8s {
                 }
             }
         }
+        // generate the specs to create for those policies by namespace
+        let policy_specs_by_ns =
+            policy_specs_by_namespace(add_policies, &cache.network_policies.tool_ids);
+        // deploy the specs to each namespace
         self.add_network_policies(policy_specs_by_ns).await;
         // a policy's spec in a namespace selects the tools its tool-name entries resolve to there,
         // so reconcile every policy with K8s when those tools changed since the last reconcile
@@ -1213,6 +1234,51 @@ mod tests {
             to_validate.contains("b"),
             "a namespace with only pending deletes must still be validated, got {to_validate:?}"
         );
+    }
+
+    /// Build a Thorium network policy in the given groups
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the policy
+    /// * `groups` - The groups the policy is in
+    fn thorium_policy(name: &str, groups: &[&str]) -> thorium::models::NetworkPolicy {
+        // give the policy a unique id and a k8s name that includes it
+        let id = Uuid::new_v4();
+        thorium::models::NetworkPolicy {
+            name: name.to_owned(),
+            id,
+            k8s_name: format!("{name}-{id}"),
+            groups: groups.iter().map(ToString::to_string).collect(),
+            created: chrono::Utc::now(),
+            ingress: None,
+            egress: Some(Vec::new()),
+            forced_policy: false,
+            default_policy: false,
+            used_by: std::collections::HashMap::default(),
+        }
+    }
+
+    /// Two policies added to one group in the same tick both get a spec in that group's namespace.
+    #[test]
+    fn policies_sharing_a_group_all_get_specs() {
+        // a forced and a plain policy share the group minerva, and only the plain one is in mars
+        let mut forced = thorium_policy("forced", &["minerva"]);
+        forced.forced_policy = true;
+        let plain = thorium_policy("plain", &["minerva", "mars"]);
+        // generate the specs to deploy for both policies
+        let specs = policy_specs_by_namespace([&forced, &plain], &ToolIdsByGroup::new());
+        // minerva holds a spec for each policy
+        let minerva_ids: HashSet<Uuid> = specs["minerva"].iter().map(|(id, _)| *id).collect();
+        assert_eq!(
+            specs["minerva"].len(),
+            2,
+            "minerva must get both policies' specs"
+        );
+        assert_eq!(minerva_ids, HashSet::from([forced.id, plain.id]));
+        // mars holds only the plain policy's spec
+        let mars_ids: Vec<Uuid> = specs["mars"].iter().map(|(id, _)| *id).collect();
+        assert_eq!(mars_ids, vec![plain.id]);
     }
 
     /// A namespace with new scale downs is validated.
