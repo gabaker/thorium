@@ -66,10 +66,8 @@ impl Cluster {
                 match self.nodes.resources_available(node, config).await? {
                     Some(node_alloc_update) => {
                         // build our node update to send to the API
-                        let node_update = NodeUpdate::new(
-                            NodeHealth::Healthy,
-                            node_alloc_update.available.clone(),
-                        );
+                        let node_update =
+                            NodeUpdate::new(NodeHealth::Healthy, node_alloc_update.available);
                         // update this node in Thorium
                         thorium
                             .system

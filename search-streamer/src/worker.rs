@@ -200,12 +200,7 @@ where
         let now = Utc::now();
         let index = index_type.map_index()?;
         // serialize the bundles to JSON values to stream
-        let values = D::to_values(
-            bundles,
-            &index_type,
-            now,
-            self.conf.max_document_size.into(),
-        )?;
+        let values = D::to_values(bundles, &index_type, now, self.conf.max_document_size)?;
         // send this data to our search store
         self.store.create(index, values).await?;
         Ok(())

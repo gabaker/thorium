@@ -382,7 +382,7 @@ async fn get_comments(
                 }
             });
         // flatten our map of comments and append it to our list of comments
-        list.extend(map.into_iter().flat_map(|(_, map)| map.into_values()));
+        list.extend(map.into_values().flat_map(|map| map.into_values()));
     }
     Ok(())
 }
@@ -806,7 +806,7 @@ pub async fn list_details(
             // try to pop this submission
             if let Some(mut sample) = map.remove(&sha256) {
                 // get the tags for this sample
-                sample.get_tags(&groups, shared).await?;
+                sample.get_tags(groups, shared).await?;
                 // add this sample to our vec
                 details.push(sample);
             }
@@ -902,7 +902,7 @@ pub async fn update(
     skip(user, form, shared),
     err(Debug)
 )]
-pub async fn create_comment<'v>(
+pub async fn create_comment(
     user: &User,
     sha256: &str,
     form: &CommentForm,
@@ -963,7 +963,7 @@ pub async fn prune_comment_attachments(
         // delete all of this comments files
         for s3_id in comment.attachments.values() {
             // build the path to save this attachment at in s3
-            let s3_path = format!("{}/{}/{}", sha256, &comment.id, s3_id);
+            let s3_path = format!("{}/{}/{}", sha256, comment.id, s3_id);
             shared.s3.attachments.delete(&s3_path).await?;
         }
     }

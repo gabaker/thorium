@@ -26,6 +26,6 @@ pub fn data(kind: CursorKind, user: &str, id: &Uuid, shared: &Shared) -> String 
     format!(
         "{ns}:cursors:{kind}:v{LAYOUT_VERSION}:{user}:{id}",
         kind = kind.as_str(),
-        ns = &shared.config.thorium.namespace
+        ns = shared.config.thorium.namespace
     )
 }

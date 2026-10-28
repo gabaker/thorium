@@ -8,7 +8,6 @@ use super::{CompactEvent, EventCompactable};
 
 /// A compacted result event comprising one or more "like" events
 /// (same item/output kind)
-#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct CompactResultEvent {
     /// The id's of the events compacted
     pub ids: Vec<Uuid>,

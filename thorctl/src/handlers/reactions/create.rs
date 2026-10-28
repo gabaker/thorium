@@ -93,8 +93,8 @@ impl CreateLine {
     /// Print this log lines header
     pub fn header() {
         println!(
-            "{} | {:<25} | {:<64} | {:<36} | {:<32}",
-            "CODE", "PIPELINE", "SAMPLE/REPO", "ID", "MESSAGE"
+            "CODE | {:<25} | {:<64} | {:<36} | {:<32}",
+            "PIPELINE", "SAMPLE/REPO", "ID", "MESSAGE"
         );
         println!("{:-<5}+{:-<27}+{:-<66}+{:-<38}+{:-<34}", "", "", "", "", "");
     }

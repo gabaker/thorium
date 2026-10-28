@@ -176,11 +176,7 @@ fn should_refresh_client(expires: Option<DateTime<Utc>>, now: DateTime<Utc>) -> 
 /// * `thorium` - The Thorium client to refresh
 /// * `keys` - The keys to use when refreshing our client
 /// * `span` - The span to log traces under
-async fn refresh_client(
-    thorium: &mut Arc<Thorium>,
-    keys: &String,
-    span: &Span,
-) -> Result<(), Error> {
+async fn refresh_client(thorium: &mut Arc<Thorium>, keys: &str, span: &Span) -> Result<(), Error> {
     // check to see if our Thorium client token will expire in the next week and refresh it early
     // we refresh it a week early since the Thorium client is shared and we may not get a
     // mutable reference on the first try
@@ -774,7 +770,7 @@ impl Cache {
     /// # Arguments
     ///
     /// * `stale_cache` - The stale cache of network policy info we're comparing
-    ///                   the cache to
+    ///   the cache to
     fn diff_network_policies(&mut self, stale_cache: &NetworkPolicyInfoCache) {
         // check each policy in the new cache
         for (policy_id, policy) in &self.network_policies.policies_by_id {

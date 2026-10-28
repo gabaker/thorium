@@ -854,7 +854,7 @@ async fn get(thorium: &Thorium, cmd: &GetFiles) -> Result<(), Error> {
     loop {
         // crawl over each submission in this chunk and check if its a dup
         for sub in cursor.data.iter().flat_map(|sample| &sample.submission) {
-            if !ids.insert(sub.clone()) {
+            if !ids.insert(*sub) {
                 panic!("Duplicate on page {pages} - {sub}");
             }
         }

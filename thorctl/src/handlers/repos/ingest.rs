@@ -5,8 +5,6 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use git2::build::RepoBuilder;
 use git2::{Cred, FetchOptions, ProxyOptions, RemoteCallbacks};
 use gix::Id;
-use gix::bstr::ByteSlice;
-use gix::remote::Direction;
 use kanal::{AsyncSender, Receiver, Sender};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -108,7 +106,7 @@ fn parse_url(raw: &str, conf: &CtlConf) -> Result<(String, String, String), Erro
             // replace the first : with a /
             let thorium_url = raw[4..].replacen(':', "/", 1);
             // build our https clone url
-            let fixed = format!("https://{}", &thorium_url);
+            let fixed = format!("https://{}", thorium_url);
             // get our trimmed url
             let (url, trimmed) = trim_url(&fixed)?;
             (url, thorium_url, trimmed)
@@ -262,41 +260,36 @@ fn crawl_all(
     // track the reference ids
     let mut ref_ids = Vec::with_capacity(1);
     // crawl over these repos and get the non commit commitishes and reference ids
-    for refer in refs.all().unwrap() {
-        if let Ok(refer_ok) = refer {
-            // detect if this is a branch that peels to a commit
-            if let gix::refs::TargetRef::Object(_) = refer_ok.target() {
-                // get this commitish request
-                if let Some((name, commitish_req)) = CommitishRequest::new_gix(&refer_ok)? {
-                    // send this commitish to our ingestor
-                    tx.send((name, commitish_req))?;
-                    // get this references id
-                    if let Some(id) = refer_ok.try_id() {
-                        ref_ids.push(id);
-                    }
+    for refer_ok in refs.all().unwrap().flatten() {
+        // detect if this is a branch that peels to a commit
+        if let gix::refs::TargetRef::Object(_) = refer_ok.target() {
+            // get this commitish request
+            if let Some((name, commitish_req)) = CommitishRequest::new_gix(&refer_ok)? {
+                // send this commitish to our ingestor
+                tx.send((name, commitish_req))?;
+                // get this references id
+                if let Some(id) = refer_ok.try_id() {
+                    ref_ids.push(id);
                 }
             }
         }
     }
-    // build a revwalk over this repos commits
-    for info in repo.rev_walk(ref_ids).all().unwrap() {
-        // skip any infos that are not commits
-        if let Ok(info) = info {
-            // check if this has already been ingested
-            if !commits.contains(&info.id) {
-                // cast this info to a commit
-                let commit = info.object().unwrap();
-                // get this commits hash
-                let hash = info.id.to_string();
-                // convert our commit to a commit request
-                let commit_req = CommitRequest::new_gix(commit);
-                // send this commit to our ingestor
-                tx.send((hash, CommitishRequest::Commit(commit_req)))?;
-                // add this commit to our ingested commits
-                commits.insert(info.id);
-                // increment our bars length
-                bar.inc_length(1);
-            }
+    // build a revwalk over this repos commits, skipping any infos that are not commits
+    for info in repo.rev_walk(ref_ids).all().unwrap().flatten() {
+        // check if this has already been ingested
+        if !commits.contains(&info.id) {
+            // cast this info to a commit
+            let commit = info.object().unwrap();
+            // get this commits hash
+            let hash = info.id.to_string();
+            // convert our commit to a commit request
+            let commit_req = CommitRequest::new_gix(commit);
+            // send this commit to our ingestor
+            tx.send((hash, CommitishRequest::Commit(commit_req)))?;
+            // add this commit to our ingested commits
+            commits.insert(info.id);
+            // increment our bars length
+            bar.inc_length(1);
         }
     }
     Ok(())
@@ -553,7 +546,7 @@ impl IngestWorker {
         // update our bars message
         self.bar.set_message("Parsing URL");
         // try to parse our repos url
-        let (clone_url, thorium_url, name) = parse_url(&remote_url, &self.conf)?;
+        let (clone_url, thorium_url, name) = parse_url(remote_url, &self.conf)?;
         // set that we are trying to clone from Thorium
         self.bar.refresh("Cloning From Thorium", BarKind::Unbound);
         let dl_req = if self.no_cache {

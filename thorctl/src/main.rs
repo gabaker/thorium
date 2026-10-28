@@ -1,8 +1,6 @@
 //! A CLI tool for working with Thorium
 
-#![feature(path_file_prefix)]
 #![feature(os_str_slice)]
-#![feature(path_is_empty)]
 
 use clap::Parser;
 use thorium::{CtlConf, Error};

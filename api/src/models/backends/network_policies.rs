@@ -48,16 +48,12 @@ impl NetworkPolicy {
         // make sure the groups exist
         if !db::groups::exists(&req.groups, shared)
             .await
-            .map_err(|err| {
+            .inspect_err(|_| {
                 // log that we could not verify these groups exist
                 event!(Level::ERROR, msg = "Unable to verify that groups exist");
-                // propagate the original error so internal info stays hidden
-                err
             })?
         {
-            return not_found!(format!(
-                "One or more of the specified groups doesn't exist!"
-            ));
+            return not_found!("One or more of the specified groups doesn't exist!".to_string());
         }
         // check that a network policy with this name doesn't exist in any of the requested groups
         let exists_groups = db::network_policies::exists(&req.groups, &req.name, shared).await?;
@@ -184,11 +180,9 @@ impl NetworkPolicy {
         .into_iter()
         .collect::<Result<Vec<(String, bool)>, ApiError>>()
         // propagate any error
-        .map_err(|err: ApiError| {
+        .inspect_err(|_| {
             // log that we could not verify these network policies
             event!(Level::ERROR, msg = "Unable to verify network policies");
-            // propagate the original error so internal info stays hidden
-            err
         })?
         .into_iter()
         // return the policy if it doesn't exist
@@ -652,19 +646,17 @@ impl NetworkPolicyUpdate {
         // make sure all of the added groups exist
         if !db::groups::exists(&self.add_groups, shared)
             .await
-            .map_err(|err| {
+            .inspect_err(|_| {
                 // log that we could not verify these added groups exist
                 event!(
                     Level::ERROR,
                     msg = "Unable to verify that added groups exist"
                 );
-                // propagate the original error so internal info stays hidden
-                err
             })?
         {
-            return not_found!(format!(
-                "One or more of the specified groups to add doesn't exist!"
-            ));
+            return not_found!(
+                "One or more of the specified groups to add doesn't exist!".to_string()
+            );
         }
         for group in &self.add_groups {
             if groups_set.contains(group) {

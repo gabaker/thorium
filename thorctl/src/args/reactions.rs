@@ -310,6 +310,10 @@ impl ReactionTarget {
 }
 
 /// Parse a [`ReactionTarget`] from a &[`str`]
+#[allow(
+    clippy::try_from_instead_of_from_str,
+    reason = "targets are parsed through TryFrom; replacing it with FromStr changes which trait callers use"
+)]
 impl TryFrom<&str> for ReactionTarget {
     type Error = thorium::Error;
     fn try_from(raw: &str) -> Result<Self, Self::Error> {

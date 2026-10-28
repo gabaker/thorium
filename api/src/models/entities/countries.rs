@@ -18,6 +18,10 @@ impl Country {
     /// # Arguments
     ///
     /// * `code_str` - The code for this country as a str
+    #[allow(
+        clippy::ptr_arg,
+        reason = "public thorium API; changing the parameter type to a str is an API change"
+    )]
     pub fn new(code_str: &String) -> Result<Self, CountryCodeParseErr> {
         // get this countries code
         let code = CountryCode::for_alpha2(code_str)?;

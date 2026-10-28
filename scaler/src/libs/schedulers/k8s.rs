@@ -254,13 +254,17 @@ impl K8s {
     /// * `context_name` - The context name to use with service accounts
     /// * `schedulers` - The map of schedulers this scaler can use
     /// * `conf` - Thorium Config
+    #[allow(
+        clippy::new_ret_no_self,
+        reason = "registers one scheduler per cluster in the given map instead of returning one; renaming it changes its callers"
+    )]
     pub async fn new(
         context_name: &String,
         schedulers: &mut HashMap<String, Box<dyn Scheduler + Send>>,
         conf: &Conf,
     ) -> Result<(), Error> {
         // get the path to our kubeconfig if it exists
-        if let Some(config_path) = std::env::var("KUBECONFIG").ok() {
+        if let Ok(config_path) = std::env::var("KUBECONFIG") {
             // check if a kubeconfig exists or not
             if tokio::fs::try_exists(&config_path).await? {
                 // load our schedulers from our kubeconfig

@@ -1,6 +1,6 @@
 //! The Thorium API, client, and objects
 
-#![feature(proc_macro_hygiene, decl_macro, io_error_more, round_char_boundary)]
+#![feature(io_error_more)]
 #![recursion_limit = "256"]
 
 #[macro_use]
@@ -181,7 +181,7 @@ fn build_app(
     api_router = system::mount(api_router);
     api_router = users::mount(api_router);
     api_router = trees::mount(api_router);
-    api_router = mcp::mount(api_router, &conf);
+    api_router = mcp::mount(api_router, conf);
     // add our api routes
     app = app.nest(docs::API_PREFIX, api_router);
     // create a ui router and mount our ui routes then merge it

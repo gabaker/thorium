@@ -2,7 +2,6 @@
 
 use elasticsearch::Elasticsearch;
 use elasticsearch::auth::Credentials;
-use elasticsearch::cert::CertificateValidation;
 use elasticsearch::http::transport::{SingleNodeConnectionPool, TransportBuilder};
 use url::Url;
 

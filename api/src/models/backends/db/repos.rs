@@ -344,7 +344,7 @@ async fn get_updated_repo(
                     url,
                     tags: HashMap::default(),
                     default_checkout,
-                    earliest: submission.earliest.clone(),
+                    earliest: submission.earliest,
                     submissions: vec![submission],
                 })
             } else {
@@ -564,8 +564,7 @@ pub async fn list_details(
             // try to pop this submission
             if let Some(mut repo) = map.remove(&repo) {
                 // get the tags for this repo
-                super::tags::get(TagType::Repos, &groups, &repo.url, &mut repo.tags, shared)
-                    .await?;
+                super::tags::get(TagType::Repos, groups, &repo.url, &mut repo.tags, shared).await?;
                 // add this repo to our vec
                 details.push(repo);
             }
@@ -796,7 +795,7 @@ pub async fn commitishes(
     let kinds = std::mem::take(&mut params.kinds);
     // default our end date with this repos earliest commit timestamp if we have one
     if let Some(earliest) = repo.earliest {
-        params.end.get_or_insert_with(|| earliest);
+        params.end.get_or_insert(earliest);
     }
     // get our target repos url
     let url = repo.url.clone();
@@ -817,6 +816,10 @@ pub async fn commitishes(
 ///
 /// * `list` - the commits to create a map for
 #[instrument(name = "db::repos::commitish_group_map", skip_all)]
+#[allow(
+    dead_code,
+    reason = "repo backend helper with no caller in this build; removing it is outside a lint-only change"
+)]
 pub(super) fn commitish_group_map(
     list: Vec<Commitish>,
 ) -> HashMap<String, (CommitishKinds, Vec<String>)> {
@@ -865,7 +868,7 @@ async fn commitish_details_helper(
     }
 }
 
-//// Get details on a list of commitishes for a repo
+/// Get details on a list of commitishes for a repo
 ///
 /// # Arguments
 ///

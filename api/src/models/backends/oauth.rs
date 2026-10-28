@@ -93,6 +93,10 @@ pub enum RegistrationEmail<'a> {
 }
 
 /// A fully authenticated user or a registration session if this is a new user
+#[allow(
+    clippy::large_enum_variant,
+    reason = "public thorium API; boxing a variant changes the enum's variants"
+)]
 pub enum OAuthedMaybeUser {
     /// A fully authenticated user
     User(User),
@@ -424,8 +428,7 @@ impl OAuthUserCreate {
         // build the base url for linking accounts
         let base = format!("{}/oauth/{provider}/link", oauth.redirect_base);
         // build our link to new OAuth provider link to embed in the email
-        let link =
-            Url::parse_with_params(&base, &[("username", username), ("token", &link_token)])?;
+        let link = Url::parse_with_params(&base, [("username", username), ("token", &link_token)])?;
         // build the subject for email verification email
         let subject = format!("Link Thorium account to new OAuth provider: {provider}");
         // get the expiration of this link in a human readable format
@@ -502,14 +505,13 @@ impl OAuthUserCreate {
                 );
             }
             // the IdP provided this email so reject a user-supplied email that does not match it
-            if let Some(user_email) = &self.email {
-                if user_email != &session_email {
-                    // fail closed as the user tried to register with a different email than the IdP's
-                    return bad!(
-                        "The supplied email must match the email from the OAuth provider"
-                            .to_owned()
-                    );
-                }
+            if let Some(user_email) = &self.email
+                && user_email != &session_email
+            {
+                // fail closed as the user tried to register with a different email than the IdP's
+                return bad!(
+                    "The supplied email must match the email from the OAuth provider".to_owned()
+                );
             }
             // defensively re-validate the IdP email against this provider's approved regexes
             if !client.email_allowed(&session_email) {

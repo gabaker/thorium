@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use axum::extract::multipart::Field;
-use regex::Regex;
 use serde_json::Value;
 use tracing::instrument;
 use uuid::Uuid;

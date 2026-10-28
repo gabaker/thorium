@@ -1432,6 +1432,10 @@ pub trait S3Backup: Utils + std::fmt::Debug + 'static + Send + Archive {
     ///
     /// Returns each object with the record that names it, and the rows whose objects couldn't be
     /// listed.
+    #[allow(
+        clippy::ptr_arg,
+        reason = "every S3Backup implementor shares this signature; changing it is a trait API change"
+    )]
     async fn paths<'a>(
         conf: &'a Conf,
         root: &PathBuf,

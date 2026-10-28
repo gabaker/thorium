@@ -264,6 +264,10 @@ async fn create_association(thorium: &Thorium, assoc_req: AssociationRequest) ->
 }
 
 /// Track whether this entity should be created, updated, or already exists
+#[allow(
+    clippy::large_enum_variant,
+    reason = "boxing a variant changes how entities are built and matched throughout the sigma hunt"
+)]
 pub enum MaybeEntityCreate {
     /// This entity needs to be created
     Create(EntityRequest),
@@ -304,6 +308,10 @@ struct SigmaActionCache {
     /// The entities that we are creating
     entities: Vec<EntityRequest>,
     /// Any associations to create between two nodes in this cache (source, target, groups)
+    #[allow(
+        clippy::type_complexity,
+        reason = "the tuple follows the (source, target, groups) layout documented on the field"
+    )]
     associations: Vec<(AssociationKind, (MaybeEntity, MaybeEntity, Vec<String>))>,
 }
 

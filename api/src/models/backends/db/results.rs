@@ -188,9 +188,9 @@ pub async fn authorize(
 #[instrument(name = "db::results::get_ids", skip_all, err(Debug))]
 async fn get_ids(
     kind: OutputKind,
-    groups: &Vec<String>,
+    groups: &[String],
     key: &str,
-    tools: &Vec<String>,
+    tools: &[String],
     hidden: bool,
     shared: &Shared,
 ) -> Result<Vec<OutputId>, ApiError> {
@@ -314,6 +314,10 @@ async fn get_ids(
 /// * `tools` - The tools to optionally restrict results retrieved to
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "db::results::get", skip_all, err(Debug))]
+#[allow(
+    clippy::ptr_arg,
+    reason = "public thorium API; changing the parameter types to slices is an API change"
+)]
 pub async fn get(
     kind: OutputKind,
     groups: &Vec<String>,

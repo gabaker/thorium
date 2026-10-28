@@ -9,6 +9,10 @@ use crate::args::reactions::DeleteReactions;
 use crate::handlers::progress::{Bar, BarKind};
 use crate::handlers::{MonitorMsg, SimpleMonitor, Worker};
 
+#[allow(
+    unused_macros,
+    reason = "the same check helper the other workers define, with no caller in this worker yet"
+)]
 macro_rules! check {
     ($bar:expr, $func:expr) => {
         match $func {
@@ -29,6 +33,10 @@ pub struct ReactionsDeleteWorker {
     /// The progress bars to log progress with
     bar: Bar,
     /// The arguments for downloading repos
+    #[allow(
+        dead_code,
+        reason = "set when the worker is built, like the other workers' arguments, but not read yet"
+    )]
     pub cmd: DeleteReactions,
     /// The channel to send monitor updates on
     pub monitor_tx: AsyncSender<MonitorMsg<SimpleMonitor>>,

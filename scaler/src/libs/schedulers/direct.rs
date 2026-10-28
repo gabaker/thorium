@@ -95,7 +95,7 @@ impl Direct {
         conf: &Conf,
     ) {
         // crawl our kvm clusters
-        for (cluster, _) in conf.thorium.scaler.bare_metal.clusters.iter() {
+        for cluster in conf.thorium.scaler.bare_metal.clusters.keys() {
             // build this scheduler
             let direct = Direct {
                 cluster: cluster.to_owned(),
@@ -115,7 +115,7 @@ impl Direct {
     /// * `conf` - The config to use when building our kvm schedulers
     pub fn build_kvm(schedulers: &mut HashMap<String, Box<dyn Scheduler + Send>>, conf: &Conf) {
         // crawl our kvm clusters
-        for (cluster, _) in conf.thorium.scaler.kvm.clusters.iter() {
+        for cluster in conf.thorium.scaler.kvm.clusters.keys() {
             // build this scheduler
             let direct = Direct {
                 cluster: cluster.to_owned(),
@@ -152,7 +152,7 @@ impl Direct {
                 loop {
                     // classify the pending scale downs against the nodes on this page
                     Self::classify_page_deletes(
-                        cursor.data.drain(..).collect(),
+                        std::mem::take(&mut cursor.data),
                         &mut self.scaled_down,
                         &mut temp,
                         &mut deleted,
@@ -202,11 +202,7 @@ impl Direct {
         // crawl over all nodes on this page
         for node in nodes {
             // cast our list of workers into a hashset
-            let alive = node
-                .workers
-                .into_iter()
-                .map(|(name, _)| name)
-                .collect::<HashSet<String>>();
+            let alive = node.workers.into_keys().collect::<HashSet<String>>();
             // determine which workers on this node have died
             for worker in scaled_down.drain(..) {
                 // workers on other nodes or still listed on this node are not dead yet

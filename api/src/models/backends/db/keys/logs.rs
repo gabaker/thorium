@@ -12,7 +12,7 @@ pub fn queue_name(cast: &StatusUpdate, shared: &Shared) -> String {
     format!(
         "{ns}:logs:{group}:{reaction}",
         ns = shared.config.thorium.namespace,
-        group = &cast.group,
-        reaction = &cast.reaction
+        group = cast.group,
+        reaction = cast.reaction
     )
 }

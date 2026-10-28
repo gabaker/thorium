@@ -272,7 +272,7 @@ impl<T: TagSupport> Default for TagRequest<T> {
             groups: Vec::default(),
             tags: HashMap::with_capacity(1),
             trigger_depth: 0,
-            phantom: PhantomData::default(),
+            phantom: PhantomData,
         }
     }
 }
@@ -435,7 +435,7 @@ impl<T: TagSupport> Default for TagDeleteRequest<T> {
         TagDeleteRequest {
             groups: Vec::default(),
             tags: HashMap::with_capacity(1),
-            phantom: PhantomData::default(),
+            phantom: PhantomData,
         }
     }
 }

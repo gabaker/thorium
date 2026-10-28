@@ -10,7 +10,6 @@ use rmcp::model::{CallToolResult, ContentBlock, ResourceContents};
 use rmcp::{tool, tool_router};
 use schemars::JsonSchema;
 use tracing::instrument;
-use uuid::Uuid;
 
 use crate::client::ResultsClient;
 use crate::models::ResultGetParams;

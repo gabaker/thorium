@@ -24,6 +24,10 @@ pub trait ScyllaCrawlSupport: Sized + Send + 'static {
     fn monitor_bar_style() -> Result<ProgressStyle, Error>;
 
     /// Build a single worker for this controller
+    #[allow(
+        async_fn_in_trait,
+        reason = "public trait of the thoradm library; desugaring to an explicit future changes the signature every implementor sees"
+    )]
     async fn build_worker(
         scylla: &Arc<Session>,
         namespace: &str,

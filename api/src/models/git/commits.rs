@@ -77,7 +77,6 @@ impl CommitRequest {
     ///
     /// * `commit` - The commit to ingest into Thorium
     #[cfg(feature = "client")]
-    #[must_use]
     pub fn new_gix(commit: gix::Commit) -> Self {
         // decode our entire commit
         let decoded = commit.decode().unwrap();
@@ -98,10 +97,7 @@ impl CommitRequest {
             .take(80)
             .collect::<String>();
         // get our commit description if it exists
-        let description = match &message.body {
-            Some(body) => Some(body.to_string()),
-            None => None,
-        };
+        let description = message.body.as_ref().map(|body| body.to_string());
         // build our commit request
         let mut req = CommitRequest {
             author,
@@ -152,8 +148,7 @@ impl BranchRequest {
     ///
     /// * `commit` - The commit to ingest into Thorium
     #[cfg(feature = "client")]
-    #[must_use]
-    pub fn new_gix<'a>(commit: gix::Commit) -> Result<Self, crate::client::Error> {
+    pub fn new_gix(commit: gix::Commit) -> Result<Self, crate::client::Error> {
         // get the timestamp for this commit
         let time = commit.time()?;
         let timestamp = Utc
@@ -187,8 +182,7 @@ impl GitTagRequest {
     ///
     /// * `tag` - The tag to ingest into Thorium
     #[cfg(feature = "client")]
-    #[must_use]
-    pub fn new_gix<'a>(tag: gix::Tag) -> Result<Self, crate::client::Error> {
+    pub fn new_gix(tag: gix::Tag) -> Result<Self, crate::client::Error> {
         // get our tag targets id
         let target_id = tag.target_id()?;
         // get the signature for this tag if it exists
@@ -219,8 +213,7 @@ impl GitTagRequest {
     ///
     /// * `commit` - The tag to ingest into Thorium
     #[cfg(feature = "client")]
-    #[must_use]
-    pub fn from_commit<'a>(commit: gix::Commit) -> Result<Self, crate::client::Error> {
+    pub fn from_commit(commit: gix::Commit) -> Result<Self, crate::client::Error> {
         // get this commits hash
         let commit_hash = commit.id().to_string();
         // get this commits author
@@ -259,7 +252,6 @@ impl CommitishRequest {
     ///
     /// * `gix_ref` - The gix reference to cast
     #[cfg(feature = "client")]
-    #[must_use]
     pub fn new_gix<'a>(
         gix_ref: &gix::Reference<'a>,
     ) -> Result<Option<(String, Self)>, crate::client::Error> {

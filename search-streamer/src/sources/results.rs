@@ -223,9 +223,9 @@ impl ResultsData {
     /// Get a list of all result ID's we'll need when we're pulling the results
     fn all_ids(&self) -> Vec<&Uuid> {
         self.files
-            .iter()
-            .flat_map(|(_, info)| info.keys())
-            .chain(self.repos.iter().flat_map(|(_, info)| info.keys()))
+            .values()
+            .flat_map(|info| info.keys())
+            .chain(self.repos.values().flat_map(|info| info.keys()))
             .collect()
     }
 }

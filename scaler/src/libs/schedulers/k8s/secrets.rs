@@ -17,6 +17,7 @@ pub struct Secrets {
     /// The api url to set
     api_url: String,
     /// Thorium config
+    #[allow(dead_code, reason = "set when the wrapper is built but not read yet")]
     conf: Conf,
 }
 
@@ -224,7 +225,7 @@ impl Secrets {
     #[instrument(name = "k8s::Secrets::check_secret", skip(self, user), fields(user = user.username))]
     pub async fn check_secret(&self, ns: &str, user: &ScrubbedUser) -> Result<(), Error> {
         // build the right name for this secret
-        let secret_name = format!("thorium-{}-keys", &user.username);
+        let secret_name = format!("thorium-{}-keys", user.username);
         // try to get this users keys secret
         match self.get(ns, &secret_name).await {
             // this users secret exists validate it is correct
@@ -319,7 +320,7 @@ impl Secrets {
         // generate the auth data for this service accounts secret
         let data = build_keys_yaml(&self.api_url, user);
         // build the name for this users secret
-        let name = format!("thorium-{}-keys", &user.username);
+        let name = format!("thorium-{}-keys", user.username);
         // update the secret for this user
         self.update(ns, &name, "keys.yml", &data, secret, None)
             .await
@@ -335,7 +336,7 @@ impl Secrets {
         // generate the auth data for this service accounts secret
         let data = build_keys_yaml(&self.api_url, user);
         // build the name for this users secret
-        let name = format!("thorium-{}-keys", &user.username);
+        let name = format!("thorium-{}-keys", user.username);
         // update the secret for this user
         self.create(ns, &name, "keys.yml", &data, None).await
     }
@@ -349,7 +350,7 @@ impl Secrets {
 /// * `user` - The user whose credentials are being written into the pod secret
 fn build_keys_yaml(api_url: &str, user: &ScrubbedUser) -> String {
     // format the api url and the credential the tool will authenticate with
-    format!("api: \"{}\"\ntoken: \"{}\"", api_url, &user.token)
+    format!("api: \"{}\"\ntoken: \"{}\"", api_url, user.token)
 }
 
 impl std::fmt::Debug for Secrets {

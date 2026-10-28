@@ -1186,14 +1186,14 @@ impl WorkerRestrictions {
     #[must_use]
     pub fn check<'a>(&'a self, cluster: &str, image: &Image) -> IsRestricted<'a> {
         // try to get the restrictions for this image
-        if let Some(group_restrictions) = self.images.get(&image.group) {
-            if let Some(image_restrictions) = group_restrictions.get(&image.name) {
-                // this image has some restrictions
-                // if our cluster isn't in the restriction map then we can't schedule to this cluster
-                match image_restrictions.clusters.get(cluster) {
-                    Some(nodes) => return IsRestricted::Yes(nodes),
-                    None => return IsRestricted::WrongCluster,
-                }
+        if let Some(group_restrictions) = self.images.get(&image.group)
+            && let Some(image_restrictions) = group_restrictions.get(&image.name)
+        {
+            // this image has some restrictions
+            // if our cluster isn't in the restriction map then we can't schedule to this cluster
+            match image_restrictions.clusters.get(cluster) {
+                Some(nodes) => return IsRestricted::Yes(nodes),
+                None => return IsRestricted::WrongCluster,
             }
         }
         // if this cluster is restricted then return that it cannot be scheduled

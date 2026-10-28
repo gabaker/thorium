@@ -7,9 +7,7 @@ use uuid::Uuid;
 
 use crate::models::schema::ScyllaProjection;
 use crate::models::schema::scylla::AssociationsTable;
-use crate::models::{
-    Association, AssociationKind, AssociationTarget, Directionality, Entity, TreeSupport,
-};
+use crate::models::{Association, AssociationKind, AssociationTarget, Directionality};
 
 #[derive(Debug, Clone, Serialize, Deserialize, ScyllaStoreJson, Eq, PartialEq, Hash)]
 pub enum AssociationTargetColumn {
@@ -33,8 +31,7 @@ impl AssociationTargetColumn {
             AssociationTargetColumn::Repo(url) => hasher.write(url.as_bytes()),
         }
         // finalize our hasher
-        let hash = hasher.finish();
-        hash
+        hasher.finish()
     }
 }
 

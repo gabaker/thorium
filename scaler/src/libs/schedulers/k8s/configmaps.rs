@@ -158,7 +158,7 @@ impl ConfigMaps {
                 gid = unix.group
             );
             // build the name for this users secret
-            let name = format!("thorium-{}-passwd", &user.username);
+            let name = format!("thorium-{}-passwd", user.username);
             // update the secret for this user
             match self.create(ns, &name, "passwd", &passwd).await {
                 // log that we setup this users /etc/passwd

@@ -144,6 +144,10 @@ impl JobResets {
     ///
     /// * `job` - The job to be reset
     #[must_use]
+    #[allow(
+        clippy::should_implement_trait,
+        reason = "public builder method of the thorium client; renaming it or implementing Add is an API change"
+    )]
     pub fn add(mut self, job: Uuid) -> Self {
         self.jobs.push(job);
         self

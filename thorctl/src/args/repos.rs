@@ -787,6 +787,10 @@ impl RepoTarget {
     }
 }
 
+#[allow(
+    clippy::try_from_instead_of_from_str,
+    reason = "targets are parsed through TryFrom; replacing it with FromStr changes which trait callers use"
+)]
 impl TryFrom<&str> for RepoTarget {
     type Error = Error;
     /// Try to parse a repo target from a string

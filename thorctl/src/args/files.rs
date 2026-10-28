@@ -653,7 +653,7 @@ impl SearchParameterized for CountFiles {
     }
 }
 impl SearchSealed for CountFiles {
-    fn get_search_params(&self) -> SearchParams {
+    fn get_search_params(&self) -> SearchParams<'_> {
         SearchParams {
             groups: &self.groups,
             tags: &self.tags,

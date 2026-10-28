@@ -85,6 +85,10 @@ impl Tasks {
 }
 
 /// The possible results from a task
+#[allow(
+    clippy::large_enum_variant,
+    reason = "boxing a variant changes how every task builds and matches its result"
+)]
 pub enum TaskResult {
     /// Find and remove any zombie jobs
     ZombieJobs,
@@ -143,8 +147,16 @@ pub struct ZombieChecker {
     /// The workers that may be zombies
     maybe_workers: HashMap<String, bool>,
     /// Whether we should suppress maybe zombie events
+    #[allow(
+        dead_code,
+        reason = "set from the zombie checker's arguments but not consulted yet"
+    )]
     suppress_maybes: bool,
     /// Whether we should suppress confirmed zombie events
+    #[allow(
+        dead_code,
+        reason = "set from the zombie checker's arguments but not consulted yet"
+    )]
     suppress_confirmed: bool,
 }
 
@@ -196,7 +208,7 @@ impl ZombieChecker {
             // check if this worker is still active
             if !spawned.contains(&job.worker) {
                 // add this worker to our maybe zombie set
-                if self.maybe_jobs.insert(job.job_id.clone(), true).is_some() {
+                if self.maybe_jobs.insert(job.job_id, true).is_some() {
                     // this worker was already in our maybe set
                     // remove it from our maybe set and add it to our confirmed one
                     self.maybe_jobs.remove(&job.job_id);

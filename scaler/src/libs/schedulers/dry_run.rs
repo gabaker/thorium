@@ -44,7 +44,7 @@ impl DryRunNode {
         // assume 100 worker slots
         resources.available.worker_slots = 100;
         // set our total resources
-        resources.total = resources.available.clone();
+        resources.total = resources.available;
         // build a pretend dry run node
         DryRunNode {
             health: NodeHealth::Healthy,
@@ -80,9 +80,13 @@ impl Default for DryRun {
 
 impl DryRun {
     /// Create some DryRun cluster schedulers
+    #[allow(
+        clippy::new_ret_no_self,
+        reason = "registers one scheduler per cluster in the given map instead of returning one; renaming it changes its callers"
+    )]
     pub fn new(schedulers: &mut HashMap<String, Box<dyn Scheduler + Send>>, conf: &Conf) {
         // create a default cluster for each k8s cluster
-        for (name, _) in conf.thorium.scaler.k8s.clusters.iter() {
+        for name in conf.thorium.scaler.k8s.clusters.keys() {
             schedulers.insert(name.clone(), Box::new(DryRun::default()));
         }
     }
@@ -138,19 +142,15 @@ impl Scheduler for DryRun {
                 }
                 NodeHealth::Registered => {
                     // build a node update
-                    let node_update = NodeAllocatableUpdate::new(
-                        node.resources.available.clone(),
-                        node.resources.total.clone(),
-                    );
+                    let node_update =
+                        NodeAllocatableUpdate::new(node.resources.available, node.resources.total);
                     // add this update
                     update.nodes.insert(name.clone(), node_update);
                 }
                 NodeHealth::Healthy => {
                     // build a node update
-                    let mut node_update = NodeAllocatableUpdate::new(
-                        node.resources.available.clone(),
-                        node.resources.total.clone(),
-                    );
+                    let mut node_update =
+                        NodeAllocatableUpdate::new(node.resources.available, node.resources.total);
                     // add our active workers
                     node_update
                         .active
@@ -210,7 +210,7 @@ impl Scheduler for DryRun {
         // track our errors
         let mut errors = HashMap::default();
         // crawl over the spawns and spawn them
-        for (_, spawns) in spawns.iter() {
+        for spawns in spawns.values() {
             // crawl over the spawns in this spawn group
             for spawn in spawns {
                 // get the node for this spawn
@@ -283,7 +283,7 @@ impl Scheduler for DryRun {
             // get this nodes worker
             node.workers.retain(|spawn| spawn.name != scale_down.name);
             // release this workers resources
-            node.resources.available += scale_down.resources.clone();
+            node.resources.available += scale_down.resources;
             // build our delete object
             let delete = WorkerDeletion::Deleted(scale_down);
             // add this delete to our list

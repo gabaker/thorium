@@ -838,8 +838,8 @@ macro_rules! add_expire {
 /// * `dest` - The destination group status set this is being moved to
 /// * `shared` - Shared Thorium objects
 #[rustfmt::skip]
-async fn build_expire<'a>(
-    pipe: &'a mut redis::Pipeline,
+async fn build_expire(
+    pipe: &mut redis::Pipeline,
     reaction: &Reaction,
     keys: &ReactionKeys,
     dest: &str,
@@ -913,7 +913,7 @@ async fn build_expire<'a>(
     let mut cursor = 0;
     loop {
         // 200 jobs to expire at at time
-        let jobs = list_jobs(&reaction, cursor, 200, shared).await?;
+        let jobs = list_jobs(reaction, cursor, 200, shared).await?;
         // expire all the data for these jobs
         for id in jobs.names.iter(){
             let key = JobKeys::data(id, shared);

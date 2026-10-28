@@ -23,6 +23,10 @@ pub const CONSISTENCY_DELAY: u64 = 3;
 /// * `now` - A timestamp from before we pulled events
 /// * `delay` - How many seconds events must wait before they are mature
 /// * `serialized` - The serialized events to check for maturity
+#[allow(
+    clippy::type_complexity,
+    reason = "the result tuple's three parts are named where it is destructured; an alias would hide them"
+)]
 fn classify_immature<D: for<'de> serde::de::Deserialize<'de>>(
     now: DateTime<Utc>,
     delay: u64,
@@ -70,6 +74,10 @@ fn classify_immature<D: for<'de> serde::de::Deserialize<'de>>(
 /// * `serialized` - The serialized events to check for maturity
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "db::events::shared::filter_immature", skip_all, fields(pre_filter = serialized.len()), err(Debug))]
+#[allow(
+    clippy::type_complexity,
+    reason = "public thorium API; an alias for the result tuple adds a new public item"
+)]
 pub async fn filter_immature<D: for<'de> serde::de::Deserialize<'de>>(
     key: &String,
     now: DateTime<Utc>,

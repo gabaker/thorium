@@ -182,6 +182,10 @@ impl BareMetalIsolation {
     ///
     /// A meaningful drop requires reassigning the tool process to a non-root, unprivileged uid so
     /// it can no longer read the reactor's admin keys or the cached tokens of other tenants.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "only called by the isolation unit tests")
+    )]
     fn drops_privileges(&self) -> bool {
         // a privilege drop requires reassigning the uid to a non-root user
         matches!(self.uid, Some(uid) if uid != 0)
@@ -448,8 +452,7 @@ impl ActiveWorker {
         // get any child processes in this cgroup that we need to kill
         for child_proc in self.cgroup.procs() {
             // get this pid as a rustix pid
-            // this should not be unsafe as this doesn't cause against any I/O or memory safety problems
-            let child_pid = unsafe { rustix::process::Pid::from_raw(child_proc.pid as i32) };
+            let child_pid = rustix::process::Pid::from_raw(child_proc.pid as i32);
             // kill this pid if we could get a valid pid
             if let Some(child_pid) = child_pid {
                 rustix::process::kill_process(child_pid, Signal::KILL)?;
@@ -462,8 +465,10 @@ impl ActiveWorker {
 /// Handles launching jobs on bare metal nodes
 pub struct BareMetal {
     /// The name of the cluster we are on
+    #[allow(dead_code, reason = "set when the launcher is built but not read yet")]
     cluster: String,
     /// The name of the node we are on
+    #[allow(dead_code, reason = "set when the launcher is built but not read yet")]
     node: String,
     /// A map of currently active workers
     active: HashMap<String, ActiveWorker>,
@@ -633,7 +638,7 @@ impl BareMetal {
         let mut recovered_count: usize = 0;
         // filter out any workers that we already know about
         // crawl the workers that should exist on this node and check if their control group exists
-        for (name, _) in info.workers.iter() {
+        for name in info.workers.keys() {
             // skip any workers that we know about
             if self.active.contains_key(name) {
                 continue;
@@ -697,7 +702,7 @@ impl BareMetal {
     #[instrument(name = "BareMetal::cleanup", skip_all, fields(worker = name), err(Debug))]
     pub async fn cleanup(&mut self, thorium: &Thorium, name: &str) -> Result<(), Error> {
         // get this workers info
-        let worker = thorium.system.get_worker(&name).await?;
+        let worker = thorium.system.get_worker(name).await?;
         // if this worker has an active job then get its image
         if let Some(active) = &worker.active {
             // get the image this worker's tool instance runs
@@ -774,7 +779,7 @@ impl Launcher for BareMetal {
         // start our agent, dropping the tool process to our configured default ids if the image
         // does not pin its own security context
         let active =
-            ActiveWorker::new(&thorium, &worker, self.default_uid, self.default_gid).await?;
+            ActiveWorker::new(thorium, &worker, self.default_uid, self.default_gid).await?;
         Ok((worker, active))
     }
 

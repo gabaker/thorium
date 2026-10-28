@@ -270,7 +270,7 @@ impl NetworkPolicies {
     /// * `ns` - The namespace to deploy the network policies to
     /// * `network_policies` - The network policies to deploy
     /// * `errors` - A list of errors and the underlying policy that caused that error
-    pub async fn deploy<'a>(
+    pub async fn deploy(
         &self,
         ns: &str,
         network_policies: Vec<(Uuid, NetworkPolicy)>,
@@ -294,7 +294,7 @@ impl NetworkPolicies {
         .collect::<Vec<Result<_, _>>>()
         .await;
         // crawl our network policies and determine if any failures occurred
-        for ((id, policy), deploy) in network_policies.into_iter().zip(deploys.into_iter()) {
+        for ((id, policy), deploy) in network_policies.into_iter().zip(deploys) {
             // check if our deployment failed
             if let Err(error) = deploy {
                 // this attempt failed so track this error
@@ -380,7 +380,7 @@ impl NetworkPolicies {
         // collect errors and the policy names connected to them
         policy_names
             .into_iter()
-            .zip(deletes.into_iter())
+            .zip(deletes)
             .filter_map(|(policy_name, delete)| delete.err().map(|err| (policy_name, err)))
             .collect()
     }

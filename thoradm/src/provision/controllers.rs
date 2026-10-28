@@ -7,7 +7,7 @@ pub async fn handle(cmd: &ProvisionSubCommands) -> Result<(), Error> {
     match cmd {
         ProvisionSubCommands::Node(node_args) => {
             // provision k8s servers by default
-            if node_args.baremetal == true {
+            if node_args.baremetal {
                 println!("Provisioning baremetal servers not yet supported");
             } else {
                 provision::nodes::conf_thorium_dir(&node_args.keys).await?;

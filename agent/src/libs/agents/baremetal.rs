@@ -404,7 +404,7 @@ impl AgentExecutor for BareMetal {
     ) -> Result<TagBundle, Error> {
         tags::collect(
             job,
-            &raw,
+            raw,
             &image.output_collection,
             &self.tags_path,
             &mut self.logs,
