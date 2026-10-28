@@ -41,8 +41,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # trivy 0.74.0 (Apache-2.0 open source edition)
-  TRIVY_IMAGE: ghcr.io/aquasecurity/trivy@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
+  # trivy 0.76.1 (Apache-2.0 open source edition)
+  TRIVY_IMAGE: ghcr.io/aquasecurity/trivy@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
 
 jobs:
   rescan:
@@ -251,7 +251,7 @@ jobs:
       # the image built by deploy.yml is uploaded as trivy-image-build
       - name: Upload SARIF
         if: steps.sarif.outputs.found == 'true'
-        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           sarif_file: ${{ runner.temp }}/report/trivy-image-filtered.sarif
           category: trivy-image-published

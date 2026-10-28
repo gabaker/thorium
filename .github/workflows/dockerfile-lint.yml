@@ -21,6 +21,9 @@
 #   .github/scripts/check_tool_versions.py) and reports outdated versions as
 #   warnings; only a commit that does not match its declared tag fails the job.
 #   Its `tool-versions.json` artifact lists every pin with its latest release.
+# - Pushes and pull requests run this only when they change a Dockerfile,
+#   .hadolint.yaml, this workflow, or the scripts and ignore file it reads; the
+#   weekly schedule checks the unchanged Dockerfiles and tool versions too.
 #
 # To bump a scanner, resolve the new tag's multi-arch index digest from ghcr.io
 # and update both the tag comment and the digest. The Trivy digest is shared
@@ -32,7 +35,23 @@ on:
   # update runs once
   push:
     branches: ['**', '!dependabot/**']
+    paths:
+      - '**/Dockerfile*'
+      - '.hadolint.yaml'
+      - '.github/workflows/dockerfile-lint.yml'
+      - '.github/scripts/check_tool_versions.py'
+      - '.github/scripts/http_retry.py'
+      - '.github/scripts/lint_report.py'
+      - '.github/lint-ignore.toml'
   pull_request:
+    paths:
+      - '**/Dockerfile*'
+      - '.hadolint.yaml'
+      - '.github/workflows/dockerfile-lint.yml'
+      - '.github/scripts/check_tool_versions.py'
+      - '.github/scripts/http_retry.py'
+      - '.github/scripts/lint_report.py'
+      - '.github/lint-ignore.toml'
   schedule:
     # weekly, to surface findings from newly added checks and new upstream releases
     - cron: '41 6 * * 1'
@@ -48,8 +67,8 @@ concurrency:
 env:
   # hadolint v2.15.1 (scratch image containing only the static binary)
   HADOLINT_IMAGE: ghcr.io/hadolint/hadolint@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d
-  # trivy 0.74.0 (Apache-2.0 open source edition)
-  TRIVY_IMAGE: ghcr.io/aquasecurity/trivy@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
+  # trivy 0.76.1 (Apache-2.0 open source edition)
+  TRIVY_IMAGE: ghcr.io/aquasecurity/trivy@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
 
 jobs:
   hadolint:
@@ -120,7 +139,7 @@ jobs:
       # .github/lint-ignore.toml.
       - name: Upload hadolint SARIF
         if: ${{ !cancelled() && steps.hadolint.outputs.exit-code == '0' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           sarif_file: ${{ runner.temp }}/hadolint/hadolint-filtered.sarif
           category: hadolint
@@ -190,7 +209,7 @@ jobs:
       # leaves out findings ignored by .github/lint-ignore.toml.
       - name: Upload Trivy SARIF
         if: ${{ !cancelled() && steps.trivy.outcome == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           sarif_file: ${{ runner.temp }}/trivy-out/trivy-config-filtered.sarif
           category: trivy-config
