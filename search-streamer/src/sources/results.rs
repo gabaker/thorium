@@ -292,8 +292,9 @@ impl Results {
                 .await
                 .map_err(|err| Error::new(format!("Error pulling results: {err}")))?;
             while let Some(row) = typed_stream.next().await {
-                // check the row is valid
-                let row = row.unwrap();
+                // fail the batch if a row doesn't decode
+                let row =
+                    row.map_err(|err| Error::new(format!("Error decoding a result row: {err}")))?;
                 result_map.insert(row.id, (row.result, row.files, row.children));
             }
         }
@@ -331,8 +332,10 @@ impl Results {
                 .map_err(|err| Error::new(format!("Error pulling results info: {err}")))?;
             // organize the info by key
             while let Some(row) = typed_stream.next().await {
-                // make sure the row is valid
-                let row = row.unwrap();
+                // fail the batch if a row doesn't decode
+                let row = row.map_err(|err| {
+                    Error::new(format!("Error decoding a result info row: {err}"))
+                })?;
                 // get the right map based on the row's kind
                 let map = match row.kind {
                     OutputKind::Files => &mut results_data.files,
@@ -380,8 +383,10 @@ impl Results {
                 .map_err(|err| Error::new(format!("Error pulling info on event: {err}")))?;
             // organize the info by key
             while let Some(row) = typed_stream.next().await {
-                // make sure the row is valid
-                let row = row.unwrap();
+                // fail the batch if a row doesn't decode
+                let row = row.map_err(|err| {
+                    Error::new(format!("Error decoding a result event info row: {err}"))
+                })?;
                 // save info from the row to the map
                 let info = results_info
                     .entry(compacted_event.item.clone())
@@ -477,7 +482,136 @@ impl<'a> StoreLookup<'a> for CompactResultEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::ResultStoreId;
+    use scylla::client::session::Session;
+    use scylla::client::session_builder::SessionBuilder;
+    use uuid::Uuid;
+
+    use super::{DataSource, ResultStoreId, Results};
+
+    /// The statements that create a scratch keyspace with only the columns `Results` reads
+    ///
+    /// The real `results_ids` and `results_auth` objects are views over `results_stream`; plain
+    /// tables with the same columns and keys let a test write rows the views could hold directly.
+    ///
+    /// # Arguments
+    ///
+    /// * `ks` - The scratch keyspace to create
+    fn scratch_schema(ks: &str) -> Vec<String> {
+        vec![
+            format!(
+                "CREATE KEYSPACE {ks} WITH replication = {{'class': 'SimpleStrategy', 'replication_factor': 1}}"
+            ),
+            format!(
+                "CREATE TABLE {ks}.results (id UUID, uploaded TIMESTAMP, result TEXT, files SET<TEXT>, \
+                    children MAP<TEXT, UUID>, PRIMARY KEY (id, uploaded))"
+            ),
+            format!(
+                "CREATE TABLE {ks}.results_ids (key TEXT, id UUID, kind TEXT, group TEXT, \
+                    PRIMARY KEY (key, id, kind, group))"
+            ),
+            format!(
+                "CREATE TABLE {ks}.results_auth (key TEXT, kind TEXT, group TEXT, tool TEXT, id UUID, \
+                    PRIMARY KEY (key, kind, group, tool, id))"
+            ),
+        ]
+    }
+
+    /// Connect to the Scylla node the integration test environment names
+    ///
+    /// Returns the session and a scratch keyspace name under the test namespace.
+    async fn scratch_session() -> (Session, String) {
+        // read the Scylla nodes, credentials and test namespace from the test environment
+        let nodes = std::env::var("THORIUM__SCYLLA_OVERRIDE").expect("THORIUM__SCYLLA_OVERRIDE");
+        let ns = std::env::var("THORIUM__THORIUM__NAMESPACE").expect("THORIUM__THORIUM__NAMESPACE");
+        assert!(
+            ns.starts_with("testing"),
+            "refusing to test outside a testing namespace"
+        );
+        // connect with the credentials if the test environment has them
+        let mut builder = SessionBuilder::new().known_nodes(nodes.split(','));
+        if let (Ok(user), Ok(password)) = (
+            std::env::var("THORIUM__SCYLLA__AUTH__USERNAME"),
+            std::env::var("THORIUM__SCYLLA__AUTH__PASSWORD"),
+        ) {
+            builder = builder.user(user, password);
+        }
+        let session = builder.build().await.expect("connect to Scylla");
+        (session, format!("{ns}_rowdecode"))
+    }
+
+    /// A result row that doesn't decode fails the batch with an error naming the column instead
+    /// of panicking, while a row with empty collections still decodes.
+    #[tokio::test]
+    #[ignore = "needs the Scylla node and namespace of an integration test environment (THORIUM__*)"]
+    async fn undecodable_result_rows_fail_the_batch() {
+        // create a scratch keyspace holding the columns the results source reads
+        let (session, ks) = scratch_session().await;
+        session
+            .query_unpaged(format!("DROP KEYSPACE IF EXISTS {ks}"), &[])
+            .await
+            .expect("drop the scratch keyspace");
+        for statement in scratch_schema(&ks) {
+            session
+                .query_unpaged(statement, &[])
+                .await
+                .expect("create the scratch schema");
+        }
+        // write a result with no body, a result with no files or children, and an unknown kind
+        let (null_body, empty, unknown_kind) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        session
+            .query_unpaged(
+                format!("INSERT INTO {ks}.results (id, uploaded) VALUES (?, toTimestamp(now()))"),
+                (null_body,),
+            )
+            .await
+            .expect("insert a result with no body");
+        session
+            .query_unpaged(
+                format!(
+                    "INSERT INTO {ks}.results (id, uploaded, result) VALUES (?, toTimestamp(now()), '{{}}')"
+                ),
+                (empty,),
+            )
+            .await
+            .expect("insert a result with no files or children");
+        session
+            .query_unpaged(
+                format!(
+                    "INSERT INTO {ks}.results_ids (key, id, kind, group) VALUES ('sha', ?, 'Bogus', 'minerva')"
+                ),
+                (unknown_kind,),
+            )
+            .await
+            .expect("insert a result id with an unknown kind");
+        // pull each row through the results source
+        let results = Results::new(&session, &ks)
+            .await
+            .expect("prepare the statements");
+        let null_body_pull = results.pull_results(&[&null_body], &session).await;
+        let empty_pull = results.pull_results(&[&empty], &session).await;
+        let key = "sha".to_owned();
+        let unknown_kind_pull = results.pull_results_data(&[&key], &session).await;
+        // drop the scratch keyspace before checking, so a failed check leaves nothing behind
+        session
+            .query_unpaged(format!("DROP KEYSPACE IF EXISTS {ks}"), &[])
+            .await
+            .expect("drop the scratch keyspace");
+        // a result with no body fails the batch with an error naming the column
+        let err = null_body_pull.expect_err("a result with no body must fail the batch");
+        assert!(
+            err.to_string().contains("result"),
+            "the error must name the column: {err}"
+        );
+        // a result id with an unknown kind fails the batch
+        assert!(
+            unknown_kind_pull.is_err(),
+            "a result id with an unknown kind must fail the batch"
+        );
+        // a result with no files or children still decodes with empty collections
+        let map = empty_pull.expect("a result with no files or children must decode");
+        let (_, files, children) = &map[&empty];
+        assert!(files.is_empty() && children.is_empty());
+    }
 
     #[test]
     fn result_store_id_is_injective() {

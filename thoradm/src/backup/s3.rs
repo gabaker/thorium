@@ -424,6 +424,28 @@ pub async fn remove_staging(staging: &Path) -> Result<(), Error> {
     }
 }
 
+/// Opens a restored object for upload without following a symlink at its path
+///
+/// The restore walk sends only regular files, so a symlink here was swapped in after the walk
+/// checked the path; it is refused (`ELOOP`) rather than read from wherever it points.
+///
+/// # Arguments
+///
+/// * `path` - The path of the object to open
+async fn open_object(path: &Path) -> std::io::Result<File> {
+    // refuse to follow a symlink at the final path component where the platform can
+    #[cfg(unix)]
+    let opened = tokio::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .await;
+    // fall back to a plain open on platforms without O_NOFOLLOW
+    #[cfg(not(unix))]
+    let opened = File::open(path).await;
+    opened
+}
+
 /// The endpoint authorities thoradm's own tests route virtual-hosted requests through: a request
 /// to `<bucket>.<authority>` connects to `<authority>` and keeps its `Host` header, since the test
 /// host resolves no `<bucket>.localhost` names
@@ -1514,9 +1536,16 @@ impl<R: S3Restore> UploadSubWorker<R> {
     }
 
     /// Stream a single object to s3
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The backed up file to upload
+    /// * `bucket` - The bucket to upload it to
+    /// * `key` - Its key
+    /// * `upload_id` - The id of the multipart upload to send its parts to
     async fn stream_object(
         &mut self,
-        path: &PathBuf,
+        path: &Path,
         bucket: &str,
         key: &str,
         upload_id: &str,
@@ -1524,7 +1553,7 @@ impl<R: S3Restore> UploadSubWorker<R> {
         // make sure we do not have any lingering parts from old uploads
         self.parts.clear();
         // open a file handle to this file
-        let mut stream = ReaderStream::new(File::open(path).await?);
+        let mut stream = ReaderStream::new(open_object(path).await?);
         // track the current part numbers
         let mut part_num = 1;
         // start reading this file into our buffer
@@ -1647,12 +1676,7 @@ impl<R: S3Restore> UploadSubWorker<R> {
     /// * `path` - The backed up file to upload
     /// * `bucket` - The bucket to upload it to
     /// * `key` - Its key
-    async fn attempt_upload(
-        &mut self,
-        path: &PathBuf,
-        bucket: &str,
-        key: &str,
-    ) -> Result<(), Error> {
+    async fn attempt_upload(&mut self, path: &Path, bucket: &str, key: &str) -> Result<(), Error> {
         // initiate a multipart upload to s3
         let init = self
             .s3
@@ -1696,7 +1720,7 @@ impl<R: S3Restore> UploadSubWorker<R> {
     /// # Arguments
     ///
     /// * `path` - The backed up file to upload
-    pub async fn upload_helper(&mut self, path: &PathBuf) -> Result<bool, Error> {
+    pub async fn upload_helper(&mut self, path: &Path) -> Result<bool, Error> {
         // get the bucket and key to write to, recording a file that names no object
         let (bucket, key) = match R::parse(path, &self.objects, &self.conf) {
             Ok(parsed) => parsed,
@@ -2045,7 +2069,7 @@ pub fn object_key(
 
 #[cfg(test)]
 mod tests {
-    use super::{S3Restore, keepable_key, object_relative_path};
+    use super::{S3Restore, keepable_key, object_relative_path, open_object};
     use crate::args::BackupComponents;
     use crate::backup::graphics::Graphic;
     use crate::backup::tables::{Comment, Output, S3Id};
@@ -2059,6 +2083,30 @@ mod tests {
         "a/b",
         "/tmp/thoradm-tests/ThoriumBackups",
     ];
+
+    /// An object is opened for upload, but a symlink at an object's path is refused
+    #[tokio::test]
+    async fn open_object_refuses_symlinks() {
+        // make a scratch directory holding a regular file and a symlink to it
+        let dir =
+            std::env::temp_dir().join(format!("thoradm-open-object-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("object");
+        let link = dir.join("link");
+        std::fs::write(&file, b"restored object").unwrap();
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        // open both paths the way an upload does
+        let opened_file = open_object(&file).await;
+        let opened_link = open_object(&link).await;
+        std::fs::remove_dir_all(&dir).unwrap();
+        // the regular file opens and the symlink is refused without being followed
+        assert!(
+            opened_file.is_ok(),
+            "a regular object must open: {opened_file:?}"
+        );
+        let err = opened_link.expect_err("a symlinked object must not be opened");
+        assert_eq!(err.raw_os_error(), Some(libc::ELOOP), "{err}");
+    }
 
     /// Loads the test config, which names a bucket for every role
     fn conf() -> Conf {

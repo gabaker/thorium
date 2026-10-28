@@ -59,6 +59,19 @@ More functionality will be added over time!
 - identify
 - health
 
+### Files
+
+- count
+- list
+- list_details
+- get_results
+- download_result_file
+
+### Jobs
+
+- checkpoint
+- sleep
+
 ### Reactions
 
 - create
