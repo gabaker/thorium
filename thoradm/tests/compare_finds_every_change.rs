@@ -2,10 +2,10 @@
 //! namespace's snapshot, changed in a copy, is reported at exactly that location
 //!
 //! The checks of every column and view and of every census stream take tens of minutes, so they
-//! are ignored by default and run in their own CI jobs (`backup-checker-self-test-tables` and
-//! `backup-checker-self-test-census`) or with `--include-ignored`; a fixed subset of each runs by
-//! default. `THORADM_TEST_SHARD=<index>/<count>` splits each of the two into `count` shards and
-//! runs shard `index` (counted from 1), so CI can run them as parallel jobs.
+//! are ignored by default and run in their own CI jobs (the backup checker self-tests over every
+//! table and view and over every census stream) or with `--include-ignored`; a fixed subset of
+//! each runs by default. `THORADM_TEST_SHARD=<index>/<count>` splits each of the two into `count`
+//! shards and runs shard `index` (counted from 1), so CI can run them as parallel jobs.
 
 mod common;
 
@@ -235,7 +235,7 @@ async fn a_few_column_and_view_changes_are_found() {
 
 /// Changing one column of one row of any table or view is reported at that row and column
 #[tokio::test]
-#[ignore = "takes tens of minutes: runs in the backup-checker-self-test-tables CI job, or with --include-ignored"]
+#[ignore = "takes tens of minutes: runs in its own CI job (the backup checker self-test over every table and view), or with --include-ignored"]
 async fn every_column_and_view_change_is_found() {
     // change each set, non-key column of each table and view once
     let snapshot = seeded().await;
@@ -555,7 +555,7 @@ async fn a_census_change_is_found() {
 
 /// Changing any census stream is reported at that stream
 #[tokio::test]
-#[ignore = "takes tens of minutes: runs in the backup-checker-self-test-census CI job, or with --include-ignored"]
+#[ignore = "takes tens of minutes: runs in its own CI job (the backup checker self-test over every census stream), or with --include-ignored"]
 async fn every_census_change_is_found() {
     // drop the last bucket of each stream in turn
     let snapshot = seeded().await;

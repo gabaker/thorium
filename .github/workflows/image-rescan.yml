@@ -45,8 +45,9 @@ env:
   TRIVY_IMAGE: ghcr.io/aquasecurity/trivy@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
 
 jobs:
+  # rescans the published Thorium images for vulnerabilities and writes their SBOMs
   rescan:
-    name: trivy published images
+    name: Scan published images (Trivy)
     runs-on: ubuntu-24.04
     # the 90-minute scan step plus the SBOM, report and store steps
     timeout-minutes: 130
@@ -217,8 +218,9 @@ jobs:
           path: ${{ runner.temp }}/trivy-image/
           retention-days: 30
 
+  # uploads the rescan SARIF to code scanning in a job that runs no scanner
   upload:
-    name: Upload results
+    name: Upload published image scan results
     needs: rescan
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04

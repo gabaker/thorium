@@ -54,8 +54,9 @@ env:
   TRIVY_IMAGE: ghcr.io/aquasecurity/trivy@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
 
 jobs:
+  # lints the Dockerfiles with hadolint and uploads the SARIF
   hadolint:
-    name: hadolint
+    name: Lint Dockerfiles (hadolint)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -127,8 +128,9 @@ jobs:
           sarif_file: ${{ runner.temp }}/hadolint/hadolint-filtered.sarif
           category: hadolint
 
+  # scans the Dockerfiles for misconfigurations with trivy config and uploads the SARIF
   trivy:
-    name: trivy config
+    name: Scan Dockerfile config (Trivy)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -197,8 +199,9 @@ jobs:
           sarif_file: ${{ runner.temp }}/trivy-out/trivy-config-filtered.sarif
           category: trivy-config
 
+  # reports pinned tool versions that have newer releases
   tool-versions:
-    name: Tool version freshness
+    name: Check pinned tool versions
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

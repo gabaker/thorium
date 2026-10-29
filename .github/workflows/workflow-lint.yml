@@ -50,8 +50,9 @@ env:
   ZIZMOR_IMAGE: ghcr.io/zizmorcore/zizmor@sha256:42d409dbb851d4c5d35a058cf042b828bea1e3f2884378c526eb0974780e18d9
 
 jobs:
+  # audits the GitHub workflows with zizmor
   zizmor:
-    name: zizmor
+    name: Lint workflows (zizmor)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -119,6 +120,7 @@ jobs:
           path: ${{ runner.temp }}/zizmor/
           retention-days: 7
 
+  # uploads zizmor's SARIF to code scanning in a job that runs no scanner
   upload-zizmor:
     name: Upload zizmor results
     needs: zizmor
@@ -144,8 +146,9 @@ jobs:
           sarif_file: ${{ runner.temp }}/zizmor/zizmor-filtered.sarif
           category: zizmor
 
+  # reports pinned actions that have newer releases
   action-pins:
-    name: Action pin freshness
+    name: Check action pins
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

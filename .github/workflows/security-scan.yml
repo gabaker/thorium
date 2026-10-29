@@ -23,8 +23,8 @@
 #   ui/package-lock.json, and any others) and ranks its findings with
 #   .github/scripts/vuln_report.py with EPSS and CISA KEV data (downloaded in
 #   full, so no CVE IDs leave the runner), attributing each to its lockfile.
-# - The Thorium image is scanned on every build by ci.yml's Scan Thorium Core
-#   Container job, and its published images are rescanned weekly by
+# - The Thorium image is scanned on every build by ci.yml's Scan core container
+#   image job, and its published images are rescanned weekly by
 #   image-rescan.yml.
 #
 # To bump Trivy, resolve the new tag's multi-arch index digest from ghcr.io and
@@ -53,8 +53,9 @@ env:
   TRIVY_IMAGE: ghcr.io/aquasecurity/trivy@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
 
 jobs:
+  # scans the repository for committed secrets
   trivy-secret:
-    name: trivy secret
+    name: Scan for secrets (Trivy)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -106,8 +107,9 @@ jobs:
           path: ${{ runner.temp }}/trivy-secret/
           retention-days: 7
 
+  # scans the Helm charts and Ansible playbooks for misconfigurations
   trivy-iac:
-    name: trivy helm and ansible
+    name: Scan Helm and Ansible config (Trivy)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     # misconfigurations only warn, so a failed image pull or scan must not fail the workflow either
@@ -161,8 +163,9 @@ jobs:
           path: ${{ runner.temp }}/trivy-iac/
           retention-days: 7
 
+  # scans the lockfiles for vulnerable dependencies, ranked with EPSS and CISA KEV
   trivy-deps:
-    name: trivy dependencies
+    name: Scan dependencies (Trivy)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     # dependency vulnerabilities, and failures to scan or rank them, never fail the workflow
@@ -225,10 +228,11 @@ jobs:
           path: ${{ runner.temp }}/trivy-deps/
           retention-days: 30
 
+  # uploads each scan's SARIF to code scanning in a job that runs no scanner
   upload:
     # a static name, since a skipped matrix job shows its name unexpanded;
     # GitHub appends the scan to it when the job runs
-    name: Upload results
+    name: Upload scan results
     needs: [trivy-secret, trivy-iac, trivy-deps]
     # Fork pull requests get a read-only token, so only upload for pushes,
     # schedules, manual runs, and same-repo pull requests. Each scan uploads

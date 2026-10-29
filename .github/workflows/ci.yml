@@ -6,13 +6,13 @@
 # for the account's runners (20 at once on the free plan, and far fewer macOS runners). One
 # workflow lets `needs:` decide the order instead:
 #
-#   0. Detect Changes: `git diff` against the pull request's base or the branch's previous push
-#      decides which stages this run needs (see its step for the rules).
+#   0. Detect changed paths: `git diff` against the pull request's base or the branch's previous
+#      push decides which stages this run needs (see its step for the rules).
 #   1. Builds: the mdBook docs, the UI bundle, and the glibc, musl, and Windows binaries. macOS
 #      thorctl builds only once the Linux-hosted Rust builds succeed, so the run asks for one
 #      scarce macOS runner and only when the image can still be built.
-#   2. Build Thorium Core Container from the build artifacts, then publish it on the default
-#      branch, release tags, and every branch on forks, never on pull requests
+#   2. Build core container image: the image is built from the build artifacts, then published
+#      on the default branch, release tags, and every branch on forks, never on pull requests
 #      (.github/scripts/release_refs.py has the rules).
 #   3. After the publish, in parallel: the image scan (and its code scanning upload), the Rust
 #      checks (rust-check.yml), the repository scans (security-scan.yml), version consistency, the
@@ -68,8 +68,9 @@ env:
   CHARTS: deploy/charts
 
 jobs:
+  # decides which stages this run needs from the paths it changes (the rules are in its step)
   changes:
-    name: Detect Changes
+    name: Detect changed paths
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -204,8 +205,9 @@ jobs:
           cat "$changed"
           echo "::endgroup::"
 
+  # builds the user docs with mdBook, for the core image and GitHub Pages
   build-mdbook-docs:
-    name: Build mdBook Docs
+    name: Build docs (mdBook)
     needs: changes
     if: needs.changes.outputs.image == 'true'
     runs-on: ubuntu-24.04
@@ -232,8 +234,9 @@ jobs:
         with:
           path: api/docs/book/
 
+  # builds the web UI bundle for the core image; its style check only warns
   build-ui-bundle:
-    name: Build UI Bundle
+    name: Build UI bundle
     needs: changes
     if: needs.changes.outputs.image == 'true'
     runs-on: ubuntu-24.04
@@ -271,8 +274,9 @@ jobs:
           name: thorium-ui-bundle
           path: ui/dist/
 
+  # builds the Linux glibc binaries and the developer docs for the core image
   build-glibc-binaries:
-    name: Build Thorium glibc Binaries
+    name: Build Linux binaries (glibc)
     needs: changes
     if: needs.changes.outputs.image == 'true'
     runs-on: ubuntu-24.04
@@ -315,8 +319,9 @@ jobs:
           name: thorium-dev-docs-bundle
           path: dev_docs/
 
+  # builds the static Linux (musl) binaries for the core image, one job per platform
   build-cross-binaries:
-    name: Build Thorium Cross - ${{ matrix.platform.os-name }}
+    name: Build ${{ matrix.platform.os-name }} binaries (musl)
     needs: changes
     if: needs.changes.outputs.image == 'true'
     strategy:
@@ -396,7 +401,7 @@ jobs:
   # The three Windows binaries build in one job. actions-rust-cross builds this target through
   # cross, whose image carries the MinGW toolchain, so the runner installs no packages
   build-windows-cross-binaries:
-    name: Build Thorium Cross - Windows
+    name: Build Windows binaries
     needs: changes
     if: needs.changes.outputs.image == 'true'
     # This needs to run on Ubuntu or agent builds fail
@@ -459,7 +464,7 @@ jobs:
   # image serves only thorctl for macOS. Cargo runs directly, as actions-rust-cross does on macOS,
   # since that action takes a single target.
   build-macos-binaries:
-    name: Build Thorium Cross - macOS
+    name: Build macOS thorctl
     needs:
       - changes
       - build-glibc-binaries
@@ -498,8 +503,9 @@ jobs:
           path: target/x86_64-apple-darwin/release/thorctl
           if-no-files-found: error
 
+  # builds the core container image from the build artifacts and saves it for the publish
   build-core-container:
-    name: Build Thorium Core Container
+    name: Build core container image
     needs:
       - changes
       - build-mdbook-docs
@@ -635,8 +641,9 @@ jobs:
           path: ${{ runner.temp }}/thorium-image.tar
           retention-days: 1
 
+  # pushes the core container image when release_refs.py says this ref publishes
   publish-core-container:
-    name: Publish Thorium Core Container
+    name: Publish core container image
     needs: build-core-container
     if: needs.build-core-container.outputs.publish == 'true'
     runs-on: ubuntu-24.04
@@ -686,7 +693,7 @@ jobs:
   # vulnerability database. Vulnerabilities, and failures to scan, only warn, so this job never
   # fails the run, and the step timeouts keep a stalled download from running into the job's.
   scan-core-container:
-    name: Scan Thorium Core Container
+    name: Scan core container image (Trivy)
     needs:
       - build-core-container
       - publish-core-container
@@ -766,7 +773,7 @@ jobs:
   # uploads the image scan to code scanning in a job that runs no build or scanner code, so the
   # `security-events: write` token never shares a job with them
   upload-core-image-scan:
-    name: Upload Thorium Core Container Scan
+    name: Upload core container image scan
     needs: scan-core-container
     # Pushes only: a pull request's upload would make GitHub's code scanning check fail on high
     # severity CVEs, and image vulnerabilities only warn. Pull requests still get the artifact,
@@ -808,7 +815,7 @@ jobs:
   # rather than the `$/` form zizmor suggests, which actionlint rejects
 
   rust-check:
-    name: Rust Check
+    name: Rust checks
     needs:
       - changes
       - publish-core-container
@@ -818,7 +825,7 @@ jobs:
     uses: ./.github/workflows/rust-check.yml # zizmor: ignore[self-repository]
 
   security-scan:
-    name: Security Scan
+    name: Security scans
     needs:
       - changes
       - publish-core-container
@@ -829,7 +836,7 @@ jobs:
     uses: ./.github/workflows/security-scan.yml # zizmor: ignore[self-repository]
 
   workflow-lint:
-    name: Workflow Lint
+    name: Workflow lint
     needs:
       - changes
       - publish-core-container
@@ -840,7 +847,7 @@ jobs:
     uses: ./.github/workflows/workflow-lint.yml # zizmor: ignore[self-repository]
 
   dockerfile-lint:
-    name: Dockerfile Lint
+    name: Dockerfile lint
     needs:
       - changes
       - publish-core-container
@@ -850,8 +857,9 @@ jobs:
       security-events: write # upload SARIF results to code scanning
     uses: ./.github/workflows/dockerfile-lint.yml # zizmor: ignore[self-repository]
 
+  # checks every copy of the Thorium version matches the workspace version in Cargo.toml
   versions:
-    name: version consistency
+    name: Check version consistency
     needs:
       - changes
       - publish-core-container
@@ -870,8 +878,10 @@ jobs:
       - name: Check versions
         run: python3 .github/scripts/versions.py check
 
+  # lints and renders the Helm charts and checks the rendered manifests (GitLab runs these
+  # same steps, read from this job)
   helm-lint:
-    name: Lint Helm Charts
+    name: Lint Helm charts
     needs:
       - changes
       - publish-core-container
@@ -1093,7 +1103,7 @@ jobs:
   # packages beside the chart lint rather than after it, so a lint failure never blocks packaging
   # or publishing; like the checks it waits for the image publish, whatever it concluded
   helm-package:
-    name: Package Helm Charts
+    name: Package Helm charts
     needs:
       - changes
       - publish-core-container
@@ -1137,8 +1147,9 @@ jobs:
           path: dist/*.tgz
           retention-days: 7
 
+  # pushes the packaged charts to the OCI registry when this ref publishes
   helm-publish:
-    name: Publish Helm Charts
+    name: Publish Helm charts
     needs:
       - changes
       - helm-package
@@ -1190,7 +1201,7 @@ jobs:
   # bash -n and linted with shellcheck (warnings and above), from the runner image or the distro's
   # signed packages
   deploy-tools-shell:
-    name: Lint Shell Scripts
+    name: Lint deployment shell scripts
     needs:
       - changes
       - publish-core-container
@@ -1229,7 +1240,7 @@ jobs:
   # rather than in a deployment. secrets.renderOnly stands in placeholder credentials, since helm
   # can't read generated ones back from a cluster.
   megathor-values:
-    name: Render megathor Values
+    name: Check megathor values render
     needs:
       - changes
       - publish-core-container
@@ -1382,7 +1393,7 @@ jobs:
   # docs deploy only from main on the core repo, and only after the container image is
   # published, so the hosted docs never describe an image that failed to publish
   deploy-updated-pages:
-    name: Deploy GitHub Pages
+    name: Deploy docs to GitHub Pages
     if: ${{ github.ref_type == 'branch' && github.ref == 'refs/heads/main' && !github.event.repository.fork }}
     needs:
       - build-mdbook-docs

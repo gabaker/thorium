@@ -57,8 +57,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # cargo check of the whole workspace, reported by lint_report.py
   check:
-    name: cargo check
+    name: Check the workspace (cargo check)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -149,8 +150,9 @@ jobs:
             target
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
+  # clippy on the workspace, reported by lint_report.py; warnings report but do not fail
   clippy:
-    name: clippy
+    name: Lint the workspace (Clippy)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -244,8 +246,9 @@ jobs:
             target
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
+  # thoradm's unit tests and offline harness tests, and a compile of the rest of its harness
   thoradm-test:
-    name: thoradm tests
+    name: Test thoradm (no services)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -315,8 +318,9 @@ jobs:
             target
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
+  # thorctl's unit tests and offline harness tests, and a compile of the rest of its harness
   thorctl-test:
-    name: thorctl tests
+    name: Test thorctl (no services)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -387,8 +391,9 @@ jobs:
             target
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
+  # cargo fmt --check, with the diff in the report
   fmt:
-    name: rustfmt
+    name: Check formatting (rustfmt)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -437,8 +442,10 @@ jobs:
             exit 1
           fi
 
+  # the unit tests that need no services, the chart CRD check, the schema change report, and the
+  # check that the schema test series stays off main
   test:
-    name: unit tests
+    name: Run unit tests and schema checks
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -556,8 +563,9 @@ jobs:
             target
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
+  # type-checks the API integration tests, which need services to run
   integration-tests-check:
-    name: integration tests check
+    name: Compile API integration tests
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:

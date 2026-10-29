@@ -11,11 +11,12 @@
 #   an empty runner name, no steps, and that annotation. A build or publish
 #   job that ran and failed, or one cancelled for any other reason, is left
 #   for a person.
-# - Only the build and publish jobs (Detect Changes, the builds, the image and chart package and publish, and GitHub Pages) are weighed, named by
-#   BUILD_JOBS. The scans, checks, tests, and lints report their own results,
-#   so their failures never stop a re-run, and a run where only they failed
-#   is not re-run. GitHub's "re-run failed jobs" re-runs every failed job, so
-#   a failed check runs again beside the re-run builds.
+# - Only the build and publish jobs (Detect changed paths, the builds, the image and chart
+#   package and publish, and the GitHub Pages deploy) are weighed, matched by their names in
+#   BUILD_JOBS (ci.yml names them with a leading Build, Publish, or Package). The scans, checks,
+#   tests, and lints report their own results, so their failures never stop a re-run, and a run
+#   where only they failed is not re-run. GitHub's "re-run failed jobs" re-runs every failed job,
+#   so a failed check runs again beside the re-run builds.
 # - At most two automatic re-runs per run: attempts 1 and 2 are re-run, and
 #   attempt 3 is left as it ends.
 # - A run that a newer run of the same branch of the same repository has
@@ -81,7 +82,7 @@ jobs:
       # the attempt that is never re-run, so a run gets at most two automatic re-runs
       LAST_ATTEMPT: "3"
       # the names of the build and publish jobs, the only jobs whose failures are weighed
-      BUILD_JOBS: '^(Detect Changes$|Build |Publish |Package |Deploy GitHub Pages$)'
+      BUILD_JOBS: '^(Detect changed paths$|Build |Publish |Package |Deploy docs to GitHub Pages$)'
       WORKFLOW_NAME: Thorium CI
     steps:
       - name: Decide and re-run
