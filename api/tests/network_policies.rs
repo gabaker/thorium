@@ -494,6 +494,70 @@ async fn delete() -> Result<(), thorium::Error> {
     Ok(())
 }
 
+/// The number of groups a network policy is placed in to go past one Scylla `IN` list
+const MANY_GROUPS: usize = 101;
+
+/// Deleting a network policy that is in more groups than one Scylla `IN` list holds removes it
+/// from every group
+#[tokio::test]
+async fn delete_many_groups() -> Result<(), thorium::Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    // create more groups than a single Scylla IN list accepts
+    let groups = generators::groups(MANY_GROUPS, &client)
+        .await?
+        .into_iter()
+        .map(|g| g.name)
+        .collect::<Vec<String>>();
+    // create a network policy in all of those groups
+    let req = gen_policy(&groups);
+    client.network_policies.create(req.clone()).await?;
+    // make sure the network policy is in all of them
+    let policy = client.network_policies.get(&req.name, None).await?;
+    is!(policy.groups.len(), MANY_GROUPS);
+    // delete the network policy
+    client.network_policies.delete(&req.name, None).await?;
+    // make sure the network policy is gone from every group
+    let resp = client.network_policies.get(&req.name, None).await;
+    fail!(resp, 404);
+    Ok(())
+}
+
+/// Removing a network policy from more groups than one Scylla `IN` list holds, while renaming it,
+/// leaves no rows under the old name
+#[tokio::test]
+async fn update_remove_many_groups() -> Result<(), thorium::Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    // create more groups than a single Scylla IN list accepts, plus one to keep
+    let mut groups = generators::groups(MANY_GROUPS + 1, &client)
+        .await?
+        .into_iter()
+        .map(|g| g.name)
+        .collect::<Vec<String>>();
+    // create a network policy in all of those groups
+    let req = gen_policy(&groups);
+    client.network_policies.create(req.clone()).await?;
+    let policy = client.network_policies.get(&req.name, None).await?;
+    // rename the policy and remove it from all but one group
+    let keep = groups.pop().unwrap();
+    let new_name = format!("{}-renamed", req.name);
+    let update = NetworkPolicyUpdate::default()
+        .new_name(&new_name)
+        .remove_groups(&groups);
+    client
+        .network_policies
+        .update(&req.name, Some(policy.id), &update)
+        .await?;
+    // make sure nothing is left under the old name in any group
+    let resp = client.network_policies.get(&req.name, None).await;
+    fail!(resp, 404);
+    // make sure the renamed policy is only in the group we kept
+    let renamed = client.network_policies.get(&new_name, None).await?;
+    assert_eq!(renamed.groups, vec![keep]);
+    Ok(())
+}
+
 #[tokio::test]
 async fn delete_bad() -> Result<(), thorium::Error> {
     // get admin client

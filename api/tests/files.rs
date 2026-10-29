@@ -967,6 +967,64 @@ async fn create_result() -> Result<(), thorium::Error> {
     Ok(())
 }
 
+/// A result's stream rows are bucketed by the same instant they are stamped with
+#[tokio::test]
+async fn create_result_stream_bucket_matches_uploaded() -> Result<(), thorium::Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    // Create a group
+    let group = generators::groups(1, &client).await?.remove(0).name;
+    // build a sample request
+    let file_req = SampleRequest::new("Cargo.toml", vec![group.clone()]).description("test file");
+    // upload this file
+    let hashes = client.files.create(file_req).await?;
+    // create a result for this file
+    let output_req = OutputRequest::new(
+        hashes.sha256,
+        "TestTool",
+        "I am a test result",
+        OutputDisplayType::String,
+    );
+    // send this result to the API
+    client.files.create_result(output_req).await?;
+    // connect to scylla
+    let session = test_utilities::scylla_session().await?;
+    let ns = &test_utilities::CONF.thorium.namespace;
+    // read this group's result stream rows as JSON
+    let rows = session
+        .query_unpaged(
+            format!("SELECT JSON * FROM {ns}.results_stream WHERE group = ? ALLOW FILTERING"),
+            (&group,),
+        )
+        .await
+        .map_err(|err| thorium::Error::new(err.to_string()))?
+        .into_rows_result()
+        .map_err(|err| thorium::Error::new(err.to_string()))?;
+    // we should have written exactly one stream row for our one group
+    let (json,) = rows
+        .first_row::<(String,)>()
+        .map_err(|err| thorium::Error::new(err.to_string()))?;
+    let row: serde_json::Value = serde_json::from_str(&json)?;
+    // get the timestamp this row was stamped with
+    let uploaded = chrono::NaiveDateTime::parse_from_str(
+        row["uploaded"].as_str().unwrap(),
+        "%Y-%m-%d %H:%M:%S%.3fZ",
+    )
+    .map_err(|err| thorium::Error::new(err.to_string()))?
+    .and_utc();
+    // get the year and bucket this row was written under
+    let year = i32::try_from(row["year"].as_i64().unwrap()).unwrap();
+    let bucket = i32::try_from(row["bucket"].as_i64().unwrap()).unwrap();
+    // the bucket must be the one our stamped timestamp falls in
+    let size = test_utilities::CONF.thorium.results.partition_size;
+    is!(year, chrono::Datelike::year(&uploaded));
+    is!(
+        bucket,
+        thorium::utils::helpers::partition(uploaded, year, size)
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn create_result_files() -> Result<(), thorium::Error> {
     // get admin client

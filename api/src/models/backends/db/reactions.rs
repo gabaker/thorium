@@ -1871,10 +1871,11 @@ pub async fn update(
 ) -> Result<(), ApiError> {
     // build reaction data keys
     let keys = ReactionKeys::new(reaction, shared);
-    // build pipeline to update our reactions data
+    // build pipeline to update our reactions args, sla, and tags
     let mut pipe = redis::pipe();
     pipe.cmd("hset").arg(&keys.data).arg("args").arg(serialize!(&reaction.args))
-        .cmd("hset").arg(&keys.data).arg("sla").arg(serialize!(&reaction.sla));
+        .cmd("hset").arg(&keys.data).arg("sla").arg(serialize!(&reaction.sla))
+        .cmd("hset").arg(&keys.data).arg("tags").arg(serialize!(&reaction.tags));
     // save our updated ephemeral files
     set_updated_ephemeral(&mut pipe, &keys.data, &reaction.ephemeral)?;
     // get our reaction id as a string

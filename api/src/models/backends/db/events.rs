@@ -13,11 +13,11 @@ use crate::{conn, deserialize, query, serialize};
 
 pub mod shared;
 
-/// Save new events to scylla
+/// Add a new event to its kind's event queue in Redis
 ///
 /// # Arguments
 ///
-/// * `event` - The event to save to scylla
+/// * `event` - The event to add to its queue
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "db::events::create", skip_all, err(Debug))]
 pub async fn create(event: &Event, shared: &Shared) -> Result<(), ApiError> {
