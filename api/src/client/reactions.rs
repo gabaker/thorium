@@ -51,6 +51,9 @@ impl Reactions {
     }
 }
 
+#[cfg(test)]
+mod tests;
+
 #[cfg_attr(feature = "sync", thorium_derive::blocking_struct)]
 impl Reactions {
     /// Creates a new reactions handler
@@ -1184,7 +1187,7 @@ impl Reactions {
             "{base}/api/reactions/list/{group}/{pipeline}/",
             base = self.host,
             group = group,
-            pipeline = pipeline
+            pipeline = super::helpers::encode_path_segment(pipeline)
         );
         Cursor::new(url, &self.token, &self.client)
     }
@@ -1234,7 +1237,7 @@ impl Reactions {
             "{base}/api/reactions/status/{group}/{pipeline}/{status}/",
             base = self.host,
             group = group,
-            pipeline = pipeline,
+            pipeline = super::helpers::encode_path_segment(pipeline),
             status = status
         );
         Cursor::new(url, &self.token, &self.client)
@@ -1686,7 +1689,7 @@ impl Reactions {
         let url = format!(
             "{base}/api/reactions/list/{pipeline}/",
             base = self.host,
-            pipeline = pipeline
+            pipeline = super::helpers::encode_path_segment(pipeline)
         );
         // build our query params
         let query = Self::build_cursor_query(opts);
@@ -1750,7 +1753,7 @@ impl Reactions {
         let url = format!(
             "{base}/api/reactions/status/{pipeline}/{status}/",
             base = self.host,
-            pipeline = pipeline,
+            pipeline = super::helpers::encode_path_segment(pipeline),
             status = status
         );
         // build our query params
