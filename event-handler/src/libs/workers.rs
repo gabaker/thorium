@@ -15,13 +15,13 @@ use tokio::task::JoinHandle;
 use tracing::{Level, event, instrument};
 use uuid::Uuid;
 
-pub mod ai;
 pub mod hunts;
 pub mod reaction_triggers;
+pub mod workflows;
 
-pub use ai::AiWorker;
 pub use hunts::sigma::{SigmaRuleContext, SigmaRuleWorker};
 pub use reaction_triggers::ReactionTriggerWorker;
+pub use workflows::WorkflowsWorker;
 
 use crate::libs::EventWorkerCache;
 use crate::libs::cache::TriggerCache;
@@ -113,8 +113,8 @@ pub enum EventWorkerKinds {
     ReactionTriggers,
     /// A sigma scanner worker,
     SigmaScanner,
-    /// The AI worker that builds workflow instances
-    Ai,
+    /// The workflows worker that builds toolset and workflow instances and refreshes model catalogs
+    Workflows,
 }
 
 impl EventWorkerKinds {
@@ -128,7 +128,7 @@ impl EventWorkerKinds {
         let subscribed = match self {
             Self::ReactionTriggers => ReactionTriggerWorker::cache_subscriptions(),
             Self::SigmaScanner => SigmaRuleWorker::cache_subscriptions(),
-            Self::Ai => AiWorker::cache_subscriptions(),
+            Self::Workflows => WorkflowsWorker::cache_subscriptions(),
         };
         // check if this is something we are subscribed too
         subscribed.contains(&update_kind)
@@ -171,13 +171,14 @@ impl EventWorkerKinds {
                 // spawn this sigma worker
                 tokio::task::spawn(worker.start())
             }
-            EventWorkerKinds::Ai => {
+            EventWorkerKinds::Workflows => {
                 // get the send side of our states channel
-                let stats_tx = &stats_channels.ai.0;
-                // build the AI worker, which handles each batch as a whole
+                let stats_tx = &stats_channels.workflows.0;
+                // build the workflows worker, which handles each batch as a whole
                 let worker =
-                    EventWorkerMutable::<AiWorker>::new(cache, thorium, &msg_rx, stats_tx).await;
-                // spawn the AI worker
+                    EventWorkerMutable::<WorkflowsWorker>::new(cache, thorium, &msg_rx, stats_tx)
+                        .await;
+                // spawn the workflows worker
                 tokio::task::spawn(worker.start())
             }
         };

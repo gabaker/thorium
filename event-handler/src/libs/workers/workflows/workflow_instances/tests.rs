@@ -13,8 +13,8 @@ use thorium::test_utilities::generators;
 use uuid::Uuid;
 
 use super::WorkflowInstancer;
-use crate::libs::workers::ai::fake::{FakeApi, entity, event};
-use crate::libs::workers::ai::{AiWorkerStats, retry_after};
+use crate::libs::workers::workflows::fake::{FakeApi, entity, event};
+use crate::libs::workers::workflows::{WorkflowsWorkerStats, retry_after};
 
 /// Add a workflow catalog to a graph
 ///
@@ -787,7 +787,7 @@ async fn stats_count_each_occurrence() {
     let outcome = instancer(&api).process(&events).await;
     // one invalid instance created, one dedupe skip, a sent and a failed manual notice, and an
     // invalid notice for the fresh build
-    let expected = AiWorkerStats {
+    let expected = WorkflowsWorkerStats {
         events_processed: 4,
         instances_created: 1,
         skipped: 1,
@@ -820,7 +820,7 @@ async fn stats_count_each_occurrence() {
     assert!(invalid.1.msg.contains("#r1"), "{}", invalid.1.msg);
     assert!(invalid.1.msg.contains("has no agents"), "{}", invalid.1.msg);
     // stats add up across batches
-    let mut total = AiWorkerStats::default();
+    let mut total = WorkflowsWorkerStats::default();
     total += outcome.stats.clone();
     total += outcome.stats;
     assert_eq!(total.events_processed, 8);

@@ -1,4 +1,4 @@
-//! Runs the AI worker in process against the test API
+//! Runs the workflows worker in process against the test API
 //!
 //! Every test pops the shared workflow graph and model refresh queues, so the tests take turns
 //! through one lock and each starts from empty queues. The workflow graph queue's maturity delay
@@ -36,7 +36,9 @@ use thorium::test_utilities::generators::{GroupRoles, TestUser, god_group, moon_
 use thorium::test_utilities::mock_provider::{MockProvider, MockReply};
 use thorium::test_utilities::{self, events, generators};
 use thorium::{Error, Thorium};
-use thorium_event_handler::libs::workers::ai::{AiWorker, AiWorkerStats, AuthHosts, RefreshLimits};
+use thorium_event_handler::libs::workers::workflows::{
+    AuthHosts, RefreshLimits, WorkflowsWorker, WorkflowsWorkerStats,
+};
 use thorium_event_handler::libs::workers::{
     EventWorkerMutableSupport, EventWorkerSupportCore, ReactionTriggerWorker, SigmaRuleWorker,
     WorkerCacheUpdates,
@@ -59,12 +61,12 @@ const DELAY_KEY: &str = "THORIUM__THORIUM__EVENTS__WORKFLOW_GRAPH_DELAY";
 /// The maturity delay the tests run with, in seconds
 const DELAY_SECS: u64 = 1;
 
-/// A test's turn at the shared queue with an admin client and an AI worker
+/// A test's turn at the shared queue with an admin client and a workflows worker
 struct Harness {
     /// The admin client the worker and the test share
     admin: Thorium,
     /// The worker under test
-    worker: AiWorker,
+    worker: WorkflowsWorker,
     /// This test's turn at the queue
     _turn: MutexGuard<'static, ()>,
 }
@@ -103,7 +105,7 @@ impl Harness {
     }
 
     /// Pop every mature event and process it
-    async fn run(&mut self) -> Result<AiWorkerStats, Error> {
+    async fn run(&mut self) -> Result<WorkflowsWorkerStats, Error> {
         // pop and process one page
         let events = self.pop().await?;
         self.process(events).await
@@ -114,9 +116,9 @@ impl Harness {
     /// # Arguments
     ///
     /// * `events` - The popped events
-    async fn process(&mut self, events: Vec<Event>) -> Result<AiWorkerStats, Error> {
+    async fn process(&mut self, events: Vec<Event>) -> Result<WorkflowsWorkerStats, Error> {
         // process them as the event worker wrapper does
-        let mut stats = AiWorkerStats::default();
+        let mut stats = WorkflowsWorkerStats::default();
         EventWorkerMutableSupport::process(&mut self.worker, events, &mut stats).await?;
         Ok(stats)
     }
@@ -128,19 +130,19 @@ impl Harness {
     }
 }
 
-/// Build an AI worker over an admin client with the test API's crawl limits
+/// Build a workflows worker over an admin client with the test API's crawl limits
 ///
 /// # Arguments
 ///
 /// * `admin` - The admin client
-fn new_worker(admin: &Thorium) -> AiWorker {
+fn new_worker(admin: &Thorium) -> WorkflowsWorker {
     // the worker instances with the admin client
-    AiWorker::with_client(
+    WorkflowsWorker::with_client(
         Arc::new(admin.clone()),
         CrawlLimits::from(&test_utilities::CONF.thorium.events),
         ToolSetLimits::from(&test_utilities::CONF.thorium.events),
     )
-    .expect("the AI worker builds")
+    .expect("the workflows worker builds")
 }
 
 /// Wait long enough for every event queued so far to be mature
@@ -826,7 +828,7 @@ fn entry_of<'a>(meta: &'a ModelEndpointEntity, model_id: &str) -> &'a ModelCatal
 /// # Arguments
 ///
 /// * `harness` - The test's harness
-async fn refresh_pass(harness: &mut Harness) -> Result<AiWorkerStats, Error> {
+async fn refresh_pass(harness: &mut Harness) -> Result<WorkflowsWorkerStats, Error> {
     // refreshes have no maturity delay, so one pop gets them all
     let opts = EventPopOpts::default().limit(1000);
     let events = harness
@@ -993,7 +995,7 @@ async fn refresh_pass_deadline_bounds_its_batch() -> Result<(), Error> {
         ..RefreshLimits::default()
     });
     let started = Instant::now();
-    let mut stats = AiWorkerStats::default();
+    let mut stats = WorkflowsWorkerStats::default();
     EventWorkerMutableSupport::process(&mut worker, popped, &mut stats).await?;
     let took = started.elapsed();
     assert!(took < Duration::from_secs(10), "took {took:?}");
@@ -1046,13 +1048,13 @@ async fn duplicate_refreshes_list_once() -> Result<(), Error> {
     Ok(())
 }
 
-/// The AI worker pops refreshes before workflow graph events, and the other workers keep their
+/// The workflows worker pops refreshes before workflow graph events, and the other workers keep their
 /// one kind
 #[test]
 fn refreshes_pop_first() {
-    // the AI worker's kinds, in pop order
+    // the workflows worker's kinds, in pop order
     assert_eq!(
-        AiWorker::event_kinds(),
+        WorkflowsWorker::event_kinds(),
         vec![EventType::ModelRefresh, EventType::WorkflowGraph]
     );
     // the other workers are unchanged
@@ -1935,7 +1937,7 @@ async fn refresh_signs_in() -> Result<(), Error> {
     // one pass refreshes all three
     let opts = EventPopOpts::default().limit(1000);
     let popped = admin.events.pop(EventType::ModelRefresh, &opts).await?;
-    let mut stats = AiWorkerStats::default();
+    let mut stats = WorkflowsWorkerStats::default();
     EventWorkerMutableSupport::process(&mut worker, popped, &mut stats).await?;
     assert_eq!(stats.events_processed, 3);
     // Bedrock's listing was signed for its region with the session token
@@ -3194,7 +3196,7 @@ async fn deleted_toolset_clears_its_events() -> Result<(), Error> {
     // the old instance is still readable, and the next pass reads nothing
     assert_eq!(admin.entities.get(r1).await?.id, r1);
     let next = harness.run().await?;
-    assert_eq!(next, AiWorkerStats::default());
+    assert_eq!(next, WorkflowsWorkerStats::default());
     Ok(())
 }
 
@@ -4515,7 +4517,10 @@ async fn racing_workers_make_one_revision() -> Result<(), Error> {
     // two workers process the same events at once
     let mut first = new_worker(&admin);
     let mut second = new_worker(&admin);
-    let (mut first_stats, mut second_stats) = (AiWorkerStats::default(), AiWorkerStats::default());
+    let (mut first_stats, mut second_stats) = (
+        WorkflowsWorkerStats::default(),
+        WorkflowsWorkerStats::default(),
+    );
     let (one, two) = tokio::join!(
         EventWorkerMutableSupport::process(&mut first, popped.clone(), &mut first_stats),
         EventWorkerMutableSupport::process(&mut second, popped, &mut second_stats),
@@ -4782,7 +4787,7 @@ async fn throughput() -> Result<(), Error> {
     events::push(&queued).await?;
     // every batch builds each workflow at most once
     let mut batches = 0;
-    let mut total = AiWorkerStats::default();
+    let mut total = WorkflowsWorkerStats::default();
     loop {
         let popped = harness.pop().await?;
         if popped.is_empty() {

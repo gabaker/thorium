@@ -11,19 +11,21 @@ trigger have been met. If they have then a reaction will be created for the user
 whose event met this triggers conditions. A single event can trigger multiple
 distinct triggers.
 
-The event handler also runs an AI worker that keeps AI workflows and model catalogs current:
+The event handler also runs a workflows worker that keeps AI workflows and model catalogs current:
 
 - **Workflow graph events.** Creating or editing a workflow, an AI agent, a toolset, a graph edge,
   or a tool's tags, and publishing or deprecating a tool version, queue `WorkflowGraph` events. The
-  AI worker rebuilds the toolset instances and workflow instances they affect (toolsets first, so a
-  workflow built in the same batch uses the new toolset instances), creates a new instance only when
-  something that matters changed, and notifies the user who caused the build. These events wait
-  `thorium.events.workflow_graph_delay` seconds (10 by default) so a burst of changes is handled
-  together. See [AI Agents, Toolsets, and Workflows](../developers/agents_workflows.md).
+  workflows worker rebuilds the toolset instances and workflow instances they affect (toolsets
+  first, so a workflow built in the same batch uses the new toolset instances), creates a new
+  instance only when something that matters changed, and notifies the user who caused the build.
+  These events wait `thorium.events.workflow_graph_delay` seconds (10 by default) so a burst of
+  changes is handled together. See
+  [AI Agents, Toolsets, and Workflows](../developers/agents_workflows.md).
 - **Model refresh events.** Creating a model endpoint, changing its connection, rotating a
-  credential, or asking with `thorctl models refresh` queues a `ModelRefresh` event. The AI worker
-  lists the endpoint's models through the provider's API (five refreshes at a time) and reports them
-  back, and the API merges them into the endpoint's catalog and bans. See [Models](../users/models.md).
+  credential, or asking with `thorctl models refresh` queues a `ModelRefresh` event. The
+  workflows worker lists the endpoint's models through the provider's API (five refreshes at a
+  time) and reports them back, and the API merges them into the endpoint's catalog and bans. See
+  [Models](../users/models.md).
 
 Workflow graph and model refresh events never trigger reactions.
 

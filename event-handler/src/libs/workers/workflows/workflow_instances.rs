@@ -23,7 +23,8 @@ use tracing::{Level, event, instrument};
 use uuid::Uuid;
 
 use super::{
-    Affected, AiWorkerStats, BuildCause, InstanceApi, PhaseOutcome, Reach, notify_all, tagged_roots,
+    Affected, BuildCause, InstanceApi, PhaseOutcome, Reach, WorkflowsWorkerStats, notify_all,
+    tagged_roots,
 };
 
 #[cfg(test)]
@@ -209,7 +210,7 @@ type LookupKey = (LookupTag, Uuid, Vec<String>);
 type LookupResult = (LookupKey, Result<Vec<(Uuid, Uuid)>, Error>, (usize, usize));
 
 /// An affected workflow and the stats of its build
-type BuildResult<'b> = (&'b AffectedWorkflow, Result<AiWorkerStats, Error>);
+type BuildResult<'b> = (&'b AffectedWorkflow, Result<WorkflowsWorkerStats, Error>);
 
 /// Builds the workflow instances a batch of workflow graph events calls for
 pub struct WorkflowInstancer<'a, A: InstanceApi + ?Sized> {
@@ -402,7 +403,7 @@ impl<'a, A: InstanceApi + ?Sized> WorkflowInstancer<'a, A> {
         &self,
         affected: &AffectedWorkflow,
         catalog: &WorkflowCatalogEntity,
-        stats: &mut AiWorkerStats,
+        stats: &mut WorkflowsWorkerStats,
     ) -> Result<Option<BuildCause<WorkflowInstanceTrigger>>, Error> {
         // read the newest instance's tags only when a looked up event missed it
         let newest = catalog.newest_instance;
@@ -437,11 +438,11 @@ impl<'a, A: InstanceApi + ?Sized> WorkflowInstancer<'a, A> {
         fields(workflow = affected.root.to_string()),
         err(Debug)
     )]
-    async fn build(&self, affected: &AffectedWorkflow) -> Result<AiWorkerStats, Error> {
+    async fn build(&self, affected: &AffectedWorkflow) -> Result<WorkflowsWorkerStats, Error> {
         // read the workflow catalog, which is gone when it was deleted after its events queued
-        let mut stats = AiWorkerStats {
+        let mut stats = WorkflowsWorkerStats {
             graph_reads: 1,
-            ..AiWorkerStats::default()
+            ..WorkflowsWorkerStats::default()
         };
         let reader = self.api.reader();
         let Some(node) = reader.node(affected.root, &[], Directionality::To).await? else {

@@ -25,7 +25,9 @@ use thorium::models::{
 use tracing::{Level, event, instrument};
 use uuid::Uuid;
 
-use super::{Affected, AiWorkerStats, InstanceApi, PhaseOutcome, Reach, notify_all, tagged_roots};
+use super::{
+    Affected, InstanceApi, PhaseOutcome, Reach, WorkflowsWorkerStats, notify_all, tagged_roots,
+};
 
 #[cfg(test)]
 mod tests;
@@ -183,7 +185,7 @@ type ToolKey = (Uuid, Vec<String>);
 type ToolResult = (ToolKey, Result<Vec<String>, Error>);
 
 /// An affected toolset and the stats of its build
-type BuildResult<'b> = (&'b AffectedToolSet, Result<AiWorkerStats, Error>);
+type BuildResult<'b> = (&'b AffectedToolSet, Result<WorkflowsWorkerStats, Error>);
 
 /// Sort a list of groups
 ///
@@ -481,11 +483,11 @@ impl<'a, A: InstanceApi + ?Sized> ToolSetInstancer<'a, A> {
         fields(tool_set = affected.root.to_string()),
         err(Debug)
     )]
-    async fn build(&self, affected: &AffectedToolSet) -> Result<AiWorkerStats, Error> {
+    async fn build(&self, affected: &AffectedToolSet) -> Result<WorkflowsWorkerStats, Error> {
         // read the toolset, which is gone when it was deleted after its events queued
-        let mut stats = AiWorkerStats {
+        let mut stats = WorkflowsWorkerStats {
             graph_reads: 1,
-            ..AiWorkerStats::default()
+            ..WorkflowsWorkerStats::default()
         };
         let reader = self.api.reader();
         let Some(node) = reader.node(affected.root, &[], Directionality::To).await? else {

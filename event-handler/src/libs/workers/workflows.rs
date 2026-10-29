@@ -1,4 +1,4 @@
-//! The AI worker, which handles the agentic event types in one worker
+//! The workflows worker, which handles the agentic event types in one worker
 //!
 //! It builds toolset and workflow instances for workflow graph events with the event handler's
 //! admin client, recording the user whose change caused each build, and tells that user how the
@@ -25,12 +25,12 @@ mod fake;
 pub mod models;
 pub mod providers;
 pub mod toolsets;
-pub mod workflows;
+pub mod workflow_instances;
 
 pub use models::{ModelRefresher, RefreshLimits, UserClients};
 pub use providers::{AuthHosts, ListingLimits};
 pub use toolsets::ToolSetInstancer;
-pub use workflows::WorkflowInstancer;
+pub use workflow_instances::WorkflowInstancer;
 
 use crate::libs::EventWorkerCache;
 use crate::libs::workers::{
@@ -40,9 +40,9 @@ use crate::libs::workers::{
 /// How many minutes events left in flight wait before they're retried
 const RETRY_MINUTES: i64 = 3;
 
-/// The stats for the AI worker
+/// The stats for the workflows worker
 #[derive(Default, Debug, Clone, Eq, PartialEq)]
-pub struct AiWorkerStats {
+pub struct WorkflowsWorkerStats {
     /// The events that were finished and cleared
     pub events_processed: usize,
     /// The workflow instances created, ready or invalid
@@ -77,7 +77,7 @@ pub struct AiWorkerStats {
     pub user_lookups: usize,
 }
 
-impl std::ops::AddAssign for AiWorkerStats {
+impl std::ops::AddAssign for WorkflowsWorkerStats {
     /// Add another set of stats to these
     ///
     /// # Arguments
@@ -110,7 +110,7 @@ impl std::ops::AddAssign for AiWorkerStats {
     }
 }
 
-/// What the AI worker reads and writes through the API while it builds instances
+/// What the workflows worker reads and writes through the API while it builds instances
 ///
 /// The event handler's admin client implements it; tests implement it over an in-memory graph.
 pub trait InstanceApi: Sync {
@@ -562,7 +562,7 @@ pub struct PhaseOutcome {
     /// The events left in flight to be retried
     pub in_flight: Vec<Uuid>,
     /// The stats for the batch
-    pub stats: AiWorkerStats,
+    pub stats: WorkflowsWorkerStats,
 }
 
 impl PhaseOutcome {
@@ -643,7 +643,7 @@ pub async fn notify_all<A: InstanceApi + ?Sized>(
     api: &A,
     recipients: &[String],
     note: &NotificationRequest<User>,
-    stats: &mut AiWorkerStats,
+    stats: &mut WorkflowsWorkerStats,
 ) {
     // write one notification per recipient
     for username in recipients {
@@ -705,7 +705,7 @@ pub fn retry_after(left_in_flight: bool, current: Option<DateTime<Utc>>) -> Opti
 }
 
 /// The worker for the agentic event types
-pub struct AiWorker {
+pub struct WorkflowsWorker {
     /// The event handler's admin client
     thorium: Arc<Thorium>,
     /// The crawl limits workflows are resolved under
@@ -724,8 +724,8 @@ pub struct AiWorker {
     refresh_limits: RefreshLimits,
 }
 
-impl AiWorker {
-    /// Build an AI worker over an admin client
+impl WorkflowsWorker {
+    /// Build a workflows worker over an admin client
     ///
     /// # Arguments
     ///
@@ -740,7 +740,7 @@ impl AiWorker {
         // listings are bounded by the listing client's timeouts
         let listing = providers::listing_client()?;
         // nothing is waiting to be retried yet and no user clients are built
-        Ok(AiWorker {
+        Ok(WorkflowsWorker {
             thorium,
             limits,
             tool_set_limits,
@@ -785,11 +785,11 @@ impl AiWorker {
     }
 }
 
-impl EventWorkerSupportCore for AiWorker {
-    /// The stats for the AI worker
-    type Stats = AiWorkerStats;
+impl EventWorkerSupportCore for WorkflowsWorker {
+    /// The stats for the workflows worker
+    type Stats = WorkflowsWorkerStats;
 
-    /// Build the AI worker with a client for every user the event handler knows
+    /// Build the workflows worker with a client for every user the event handler knows
     ///
     /// # Arguments
     ///
@@ -809,7 +809,7 @@ impl EventWorkerSupportCore for AiWorker {
             ToolSetLimits::from(&cache.conf.thorium.events),
         ) {
             Ok(worker) => worker,
-            Err(error) => panic!("Failed to build the AI worker: {error}"),
+            Err(error) => panic!("Failed to build the workflows worker: {error}"),
         };
         // build a client for each user known at startup
         worker.clients.apply_users(thorium, cache.users.clone());
@@ -823,7 +823,7 @@ impl EventWorkerSupportCore for AiWorker {
         vec![EventType::ModelRefresh, EventType::WorkflowGraph]
     }
 
-    /// The AI worker keeps a client for each user refreshes act as
+    /// The workflows worker keeps a client for each user refreshes act as
     #[inline]
     fn cache_subscriptions() -> Vec<WorkerCacheUpdateKinds> {
         vec![WorkerCacheUpdateKinds::Users]
@@ -835,7 +835,7 @@ impl EventWorkerSupportCore for AiWorker {
     ///
     /// * `update` - The update to apply
     fn apply_cache_update(&mut self, update: WorkerCacheUpdates) {
-        // only user updates matter to the AI worker
+        // only user updates matter to the workflows worker
         if let WorkerCacheUpdates::Users(users) = update {
             self.clients.apply_users(&self.thorium, users);
         }
@@ -852,7 +852,7 @@ impl EventWorkerSupportCore for AiWorker {
         // the controller only reports stats that changed
         event!(
             Level::INFO,
-            worker = "AiWorker",
+            worker = "WorkflowsWorker",
             events_processed = stats.events_processed,
             instances_created = stats.instances_created,
             skipped = stats.skipped,
@@ -873,7 +873,7 @@ impl EventWorkerSupportCore for AiWorker {
     }
 }
 
-impl EventWorkerMutableSupport for AiWorker {
+impl EventWorkerMutableSupport for WorkflowsWorker {
     /// Refresh the models or build the instances a batch of events calls for, and clear the
     /// events that were finished
     ///
@@ -886,11 +886,11 @@ impl EventWorkerMutableSupport for AiWorker {
     ///
     /// * `events` - The events to process
     /// * `stats` - The stats to update
-    #[instrument(name = "AiWorker::process", skip_all, fields(events = events.len()), err(Debug))]
+    #[instrument(name = "WorkflowsWorker::process", skip_all, fields(events = events.len()), err(Debug))]
     async fn process(
         &mut self,
         events: Vec<Event>,
-        stats: &mut AiWorkerStats,
+        stats: &mut WorkflowsWorkerStats,
     ) -> Result<(), Error> {
         // split the batch by event type
         let (refreshes, graph): (Vec<Event>, Vec<Event>) = events

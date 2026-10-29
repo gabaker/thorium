@@ -1,4 +1,4 @@
-//! An instance API over an in-memory graph for the AI worker's unit tests
+//! An instance API over an in-memory graph for the workflows worker's unit tests
 
 use chrono::Utc;
 use std::collections::BTreeSet;
