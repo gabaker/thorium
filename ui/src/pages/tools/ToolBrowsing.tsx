@@ -120,6 +120,7 @@ const ToolBrowsing: FC = () => {
         <TextInput
           style={{ maxWidth: '20rem' }}
           placeholder="Filter by name, description, or version"
+          aria-label="Filter tools by name, description, or version"
           data-testid="tool-filter-text"
           value={filter.text}
           onChange={(event) => setFilter({ ...filter, text: event.target.value })}
@@ -127,6 +128,7 @@ const ToolBrowsing: FC = () => {
         <Select
           style={{ maxWidth: '10rem' }}
           data-testid="tool-filter-kind"
+          aria-label="Filter tools by kind"
           value={filter.kind}
           onChange={(event) => setFilter({ ...filter, kind: event.target.value as ToolKind | '' })}
         >
@@ -140,6 +142,7 @@ const ToolBrowsing: FC = () => {
         <Select
           style={{ maxWidth: '12rem' }}
           data-testid="tool-filter-group"
+          aria-label="Filter tools by group"
           value={filter.group}
           onChange={(event) => setFilter({ ...filter, group: event.target.value })}
         >

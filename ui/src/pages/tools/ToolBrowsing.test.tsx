@@ -80,6 +80,15 @@ describe('ToolBrowsing', () => {
     expect(render()).toMatch(/<a [^>]*href="\/tools\/tttttttt-0000"[^>]*><span class="[^"]*">uiloop-v2a2-gan1024-v1<\/span><\/a>/);
   });
 
+  it('names the text, kind, and group filters for assistive technology', () => {
+    const markup = render();
+    // the opening tag of the control with a test id, whatever order its attributes render in
+    const tag = (testId: string) => markup.match(new RegExp(`<[^>]*data-testid="${testId}"[^>]*>`))?.[0] ?? '';
+    expect(tag('tool-filter-text')).toContain('aria-label="Filter tools by name, description, or version"');
+    expect(tag('tool-filter-kind')).toContain('aria-label="Filter tools by kind"');
+    expect(tag('tool-filter-group')).toContain('aria-label="Filter tools by group"');
+  });
+
   it('gives the name column no fixed minimum width that would cap it below a long name', () => {
     expect(render()).toContain('<th>Name</th>');
   });

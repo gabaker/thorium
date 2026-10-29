@@ -313,7 +313,13 @@ const RunBrowsing: FC = () => {
         }))}
       />
       <Row style={{ margin: '1rem 0' }}>
-        <Select data-testid="runs-group" style={{ maxWidth: '16rem' }} value={group} onChange={(event) => setGroup(event.target.value)}>
+        <Select
+          data-testid="runs-group"
+          aria-label="Filter runs by group"
+          style={{ maxWidth: '16rem' }}
+          value={group}
+          onChange={(event) => setGroup(event.target.value)}
+        >
           <option value="">All my groups</option>
           {userGroups.map((name) => (
             <option key={name} value={name}>
