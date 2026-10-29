@@ -54,6 +54,14 @@ const MOCK_IMAGE_EXTERNAL = {
   description: 'External scaler image',
 };
 
+const MOCK_IMAGE_BANNED = {
+  ...MOCK_IMAGE,
+  name: 'banned-image',
+  bans: {
+    'ban-1': { id: 'ban-1', time_banned: '2026-10-01T12:00:00Z', ban_kind: { Generic: { msg: 'The image registry is gone' } } },
+  },
+};
+
 async function setupMockAuth(page: Page) {
   await page.route('**/api/users/whoami', (route) =>
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(MOCK_USER) }),
@@ -191,5 +199,65 @@ test.describe('Image Browsing Page', () => {
     await page.waitForTimeout(500);
 
     expect(deleteRequested).toBe(true);
+  });
+});
+
+/// Counts the columns of the balanced section grid in an expanded image's details
+async function sectionColumns(page: Page, name: string): Promise<number> {
+  return imageItem(page, name)
+    .locator('[data-testid="accordion-body"] b', { hasText: /^Resources$/ })
+    .evaluate((heading) => {
+      // the section cards sit in columns that are the children of the nearest grid container
+      let node: HTMLElement | null = heading as HTMLElement;
+      while (node && getComputedStyle(node).display !== 'grid') node = node.parentElement;
+      return node ? node.children.length : 0;
+    });
+}
+
+test.describe('Image details', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupMockAuth(page);
+  });
+
+  test('a banned image shows a warning icon and its ban details', async ({ page }) => {
+    await setupImageMocks(page, [MOCK_IMAGE, MOCK_IMAGE_BANNED]);
+    await page.goto('/images');
+    await page.waitForSelector('[data-testid="accordion"]', { timeout: 10000 });
+
+    // only the banned image carries the warning icon in its header status
+    await expect(imageItem(page, 'banned-image').locator('.accordion-item-status svg')).toHaveCount(1);
+    await expect(imageItem(page, 'test-image').locator('.accordion-item-status svg')).toHaveCount(0);
+
+    await imageItem(page, 'banned-image').locator('[data-testid="accordion-header"]').click();
+    const body = imageItem(page, 'banned-image').locator('[data-testid="accordion-body"]');
+    await expect(body.getByText('Ban: The image registry is gone. Banned on')).toBeVisible();
+  });
+
+  test('an External image shows None badges and leaves out the sections it does not use', async ({ page }) => {
+    await setupImageMocks(page);
+    await page.goto('/images');
+    await page.waitForSelector('[data-testid="accordion"]', { timeout: 10000 });
+
+    await imageItem(page, 'external-tool').locator('[data-testid="accordion-header"]').click();
+    const body = imageItem(page, 'external-tool').locator('[data-testid="accordion-body"]');
+    await expect(body.locator('b', { hasText: /^Resources$/ })).toBeVisible();
+    // the image sets none of its optional fields, so their grey badges say none
+    expect(await body.locator('.bg-grey', { hasText: /^none$/ }).count()).toBeGreaterThanOrEqual(3);
+    // an External image is not run by Thorium, so it has no output collection, dependencies, or child filters
+    for (const section of ['Output Collection', 'Dependencies', 'Child Filters']) {
+      await expect(body.locator('b', { hasText: new RegExp(`^${section}$`) })).toHaveCount(0);
+    }
+  });
+
+  test('the detail sections fill two columns on a wide window and one on a narrow one', async ({ page }) => {
+    await setupImageMocks(page);
+    await page.setViewportSize({ width: 1400, height: 900 });
+    await page.goto('/images');
+    await page.waitForSelector('[data-testid="accordion"]', { timeout: 10000 });
+    await imageItem(page, 'test-image').locator('[data-testid="accordion-header"]').click();
+    await expect.poll(() => sectionColumns(page, 'test-image')).toBe(2);
+
+    await page.setViewportSize({ width: 800, height: 900 });
+    await expect.poll(() => sectionColumns(page, 'test-image')).toBe(1);
   });
 });
