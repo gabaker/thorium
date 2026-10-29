@@ -395,7 +395,7 @@ impl Users {
         // build url for logging a user out
         let url = format!("{}/api/users/logout/{}", self.host, user);
         // build request
-        let req = self.client.post(&url).header("authorization", &self.token);
+        let req = self.client.get(&url).header("authorization", &self.token);
         // send request
         send!(self.client, req)
     }
@@ -728,5 +728,68 @@ impl Users {
             .header("authorization", &self.token);
         // send request
         send!(self.client, req)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::task::JoinHandle;
+
+    use super::Users;
+
+    /// Start a mock server that answers one request and reports its request line
+    ///
+    /// Returns the server's url and a handle that resolves to the request line it received.
+    async fn one_request_server() -> (String, JoinHandle<String>) {
+        // bind to a random local port
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // answer a single request in the background
+        let handle = tokio::spawn(async move {
+            // accept the request
+            let (mut stream, _) = listener.accept().await.unwrap();
+            // read until the end of the request head; these requests have no body
+            let mut buf = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            while !String::from_utf8_lossy(&buf).contains("\r\n\r\n") {
+                // read the next chunk of this request and stop if the client closed it
+                let read = stream.read(&mut chunk).await.unwrap();
+                if read == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..read]);
+            }
+            // answer with an empty success and close the connection
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            stream.shutdown().await.unwrap();
+            // report the request line we received
+            String::from_utf8_lossy(&buf)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_owned()
+        });
+        // return the server's address and a handle to its request line
+        (format!("http://{addr}"), handle)
+    }
+
+    /// Logging another user out sends a GET, the method the route is registered with
+    #[tokio::test]
+    async fn logout_user_sends_get() {
+        // build a users handler for a mock server
+        let (host, line) = one_request_server().await;
+        let users = Users::new(&host, "token", &reqwest::Client::new());
+        // log another user out
+        users.logout_user("someone").await.unwrap();
+        // the request must be a GET to the logout route for that user
+        let line = line.await.unwrap();
+        assert!(
+            line.starts_with("GET /api/users/logout/someone "),
+            "unexpected request line: {line}"
+        );
     }
 }

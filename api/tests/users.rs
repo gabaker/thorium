@@ -616,6 +616,24 @@ async fn expired_scoped_token_rotates_on_use() -> Result<(), Error> {
     Ok(())
 }
 
+/// An admin can log another user out through the client, which invalidates that user's token
+#[tokio::test]
+async fn admin_logout_user() -> Result<(), Error> {
+    // get admin client
+    let admin = test_utilities::admin_client().await?;
+    // get a user client
+    let client = generators::client(&admin).await?;
+    // get our users info
+    let info = client.users.info().await?;
+    // make sure our user's token works
+    client.users.info().await?;
+    // log the user out as an admin
+    admin.users.logout_user(&info.username).await?;
+    // make sure the user's old token no longer works
+    fail!(client.users.info().await, 401);
+    Ok(())
+}
+
 #[tokio::test]
 async fn scoped_token_logout() -> Result<(), Error> {
     // get admin client

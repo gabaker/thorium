@@ -44,15 +44,14 @@ pub async fn create<O: OutputSupport>(
     let mut past = get(kind, &form.groups, &key_str, &tools, true, shared).await?;
     // downselect to just this tools results
     let past = past.results.remove(&form.tool).unwrap_or_default();
-    // get the current year and number of hours so far this year
+    // get the one timestamp this result's bucket and upload time are both based on
     let now = Utc::now();
+    // get the current year
     let year = now.year();
     // get the chunk size for results
     let chunk_size = shared.config.thorium.results.partition_size;
     // determine what bucket to add data too
     let bucket = helpers::partition(now, year, chunk_size);
-    // get the current timestamp
-    let now = Utc::now();
     // the files column is a set and the entity counts are stored as checked unsigned integers
     let files = form.files.iter().cloned().collect::<HashSet<String>>();
     let entities = form

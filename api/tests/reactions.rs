@@ -2586,6 +2586,43 @@ async fn update() -> Result<(), Error> {
     Ok(())
 }
 
+/// An update's tag changes are stored on the reaction, so reading it back matches the response
+#[tokio::test]
+async fn update_stores_tags() -> Result<(), Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    // Create a group to test reactions creation in
+    let group = generators::groups(1, &client).await?.remove(0).name;
+    // create a random pipeline
+    let pipe_req = generators::pipelines(&group, 1, false, &client)
+        .await?
+        .remove(0);
+    // get the pipeline for this pipeline order
+    let pipe = client.pipelines.get(&group, &pipe_req.name).await?;
+    // pick tags no other test shares
+    let old_tag = format!("old-{}", generators::gen_string(6));
+    let new_tag = format!("new-{}", generators::gen_string(6));
+    // Create a reaction with our old tag
+    let react_req = generators::gen_reaction(&group, &pipe, Some(&old_tag));
+    let create = client.reactions.create(&react_req).await?;
+    // swap the old tag for the new one
+    let update = ReactionUpdate::default().tag(&new_tag).remove_tag(&old_tag);
+    let updated = client.reactions.update(&group, &create.id, &update).await?;
+    // the response must show the swapped tags
+    assert!(updated.tags.contains(&new_tag), "{:?}", updated.tags);
+    assert!(!updated.tags.contains(&old_tag), "{:?}", updated.tags);
+    // reading the reaction back must show them too
+    let stored = client.reactions.get(&group, create.id).await?;
+    assert!(stored.tags.contains(&new_tag), "{:?}", stored.tags);
+    assert!(!stored.tags.contains(&old_tag), "{:?}", stored.tags);
+    // deleting the reaction must also remove it from the new tag's listing
+    client.reactions.delete(&group, &create.id).await?;
+    let mut listed = client.reactions.list_tag(&group, &new_tag);
+    listed.next().await?;
+    assert!(listed.names.is_empty(), "{:?}", listed.names);
+    Ok(())
+}
+
 #[tokio::test]
 async fn delete() -> Result<(), Error> {
     // get admin client

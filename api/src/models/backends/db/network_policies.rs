@@ -491,28 +491,20 @@ pub async fn update(
         .arg(&SystemKeys::new(shared).data)
         .arg(K8S_CACHE_KEY)
         .arg(true);
-    // update/delete data in Scylla and Redis concurrently
-    tokio::try_join!(
-        async {
-            pipe.atomic()
-                .exec_async(conn!(shared))
-                .await
-                .map_err(ApiError::from)
-        },
-        async {
-            shared
-                .scylla
-                .queries
-                .network_policies
-                .delete_chunk(
-                    &shared.scylla.session,
-                    &scylla_delete_groups,
-                    scylla_delete_name,
-                )
-                .await
-                .map_err(ApiError::from)
-        }
-    )?;
+    // delete the removed or renamed rows from Scylla first, in chunks of groups, so a Scylla
+    // failure leaves Redis untouched and the update can be retried
+    shared
+        .scylla
+        .queries
+        .network_policies
+        .delete(
+            &shared.scylla.session,
+            &scylla_delete_groups,
+            scylla_delete_name,
+        )
+        .await?;
+    // update/delete the policy's data in Redis atomically
+    pipe.atomic().exec_async(conn!(shared)).await?;
     Ok(())
 }
 
@@ -541,30 +533,20 @@ pub async fn delete(network_policy: NetworkPolicy, shared: &Shared) -> Result<()
         .arg(&SystemKeys::new(shared).data)
         .arg(K8S_CACHE_KEY)
         .arg(true);
-    // delete from Redis and Scylla concurrently
-    tokio::try_join!(
-        // delete all the network policy's data in each group in Redis
-        async {
-            pipe.atomic()
-                .exec_async(conn!(shared))
-                .await
-                .map_err(ApiError::from)
-        },
-        // delete the network policy's rows in each group in Scylla
-        async {
-            shared
-                .scylla
-                .queries
-                .network_policies
-                .delete_chunk(
-                    &shared.scylla.session,
-                    &network_policy.groups,
-                    &network_policy.name,
-                )
-                .await
-                .map_err(ApiError::from)
-        }
-    )?;
+    // delete the network policy's rows in each group in Scylla first, in chunks of groups, so
+    // a Scylla failure leaves Redis untouched and the delete can be retried
+    shared
+        .scylla
+        .queries
+        .network_policies
+        .delete(
+            &shared.scylla.session,
+            &network_policy.groups,
+            &network_policy.name,
+        )
+        .await?;
+    // delete all the network policy's data in each group in Redis atomically
+    pipe.atomic().exec_async(conn!(shared)).await?;
     Ok(())
 }
 
