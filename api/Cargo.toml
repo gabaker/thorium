@@ -23,7 +23,7 @@ api = [
   ]
 
 # include scylla utility functions
-scylla-utils = ["scylla", "thorium-derive", "thorium-derive/schema", "utoipa", "sha2", "tokio", "argon2", "serde-value"]
+scylla-utils = ["scylla", "thorium-derive", "thorium-derive/schema", "utoipa", "sha2", "tokio", "argon2", "serde-value", "client"]
 
 # include the shared upgrade runtime: the migration runner API thoradm and the test harness run
 upgrades-runtime = [

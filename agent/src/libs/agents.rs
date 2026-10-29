@@ -412,10 +412,22 @@ impl Agent {
     /// * `err` - The error to report back to the API
     #[instrument(name = "agents::error", skip(self, reader), err(Debug))]
     pub async fn error(&mut self, reader: &mut BufReader<File>, err: &Error) -> Result<(), Error> {
-        // send any logs in our logs channel
-        self.send_channel_logs().await?;
-        // send any remaining logs from our log file
-        self.send_file_logs(reader).await?;
+        // send any logs in our logs channel, keeping unsent lines for the error report
+        if let Err(upload) = self.send_channel_logs().await {
+            event!(
+                Level::WARN,
+                msg = "Failed to upload stage logs",
+                error = upload.to_string()
+            );
+        }
+        // send any remaining logs from our log file, keeping unsent lines for the error report
+        if let Err(upload) = self.send_file_logs(reader).await {
+            event!(
+                Level::WARN,
+                msg = "Failed to upload stage logs",
+                error = upload.to_string()
+            );
+        }
         // add this error message to our log channel
         self.stage_logs.add(format!("Error: {err}"));
         self.thorium
@@ -431,8 +443,14 @@ impl Agent {
     ///
     /// * `err` - The error to report back to the API
     pub async fn error_channel_only(&mut self, err: &Error) -> Result<(), Error> {
-        // send any logs in our logs channel
-        self.send_channel_logs().await?;
+        // send any logs in our logs channel, keeping unsent lines for the error report
+        if let Err(upload) = self.send_channel_logs().await {
+            event!(
+                Level::WARN,
+                msg = "Failed to upload stage logs",
+                error = upload.to_string()
+            );
+        }
         // add this error message to our log channel
         self.stage_logs.add(format!("Error: {err}"));
         self.thorium
@@ -775,6 +793,17 @@ mod tests {
     /// Start a mock Thorium server that records each request line and answers every request
     /// with a job handle response
     async fn recording_server() -> (String, Recorded) {
+        // answer every request, stage log uploads included, with success
+        recording_server_with(false).await
+    }
+
+    /// Start a mock Thorium server that records each request line and answers requests with a
+    /// job handle response, optionally failing every stage log upload
+    ///
+    /// # Arguments
+    ///
+    /// * `fail_logs` - Whether stage log uploads get a server error
+    async fn recording_server_with(fail_logs: bool) -> (String, Recorded) {
         // bind to a random local port
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -816,11 +845,19 @@ mod tests {
                 // record this request line
                 let text = String::from_utf8_lossy(&buf).to_string();
                 let line = text.lines().next().unwrap_or_default().to_owned();
+                // fail stage log uploads when asked to, and answer everything else as a job handle
+                let (status, body) = if fail_logs && line.contains("/api/reactions/logs/") {
+                    (
+                        "500 Internal Server Error",
+                        r#"{"error":"logs unavailable"}"#,
+                    )
+                } else {
+                    ("202 Accepted", r#"{"status":"Completed"}"#)
+                };
                 inner.lock().unwrap().push(line);
-                // answer with a job handle response and close the connection
-                let body = r#"{"status":"Completed"}"#;
+                // send the response and close the connection
                 let resp = format!(
-                    "HTTP/1.1 202 Accepted\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                     body.len()
                 );
                 stream.write_all(resp.as_bytes()).await.unwrap();
@@ -998,6 +1035,48 @@ mod tests {
             ),
         ];
         assert_eq!(handles, expected.iter().collect::<Vec<_>>());
+    }
+
+    /// A failed job is still reported as errored when its stage log uploads fail
+    #[tokio::test]
+    async fn log_upload_error_still_reports_job_error() {
+        // start a recording mock server that fails every stage log upload
+        let (host, recorded) = recording_server_with(true).await;
+        // a failed job with a buffered channel line and a line in its log file
+        let mut failed = agent(&host, "pod/worker 1").await;
+        failed.sender.send("channel line".to_owned()).unwrap();
+        let log_path = std::env::temp_dir().join(format!("{}.log", failed.job.id));
+        tokio::fs::write(&log_path, "file line\n").await.unwrap();
+        let mut reader = BufReader::new(File::open(&log_path).await.unwrap());
+        // report the job's error
+        let reported = failed.error(&mut reader, &Error::new("boom")).await;
+        // remove the log file
+        tokio::fs::remove_file(&log_path).await.unwrap();
+        assert!(reported.is_ok(), "error report failed: {reported:?}");
+        // a failed job that only has channel logs
+        let mut channel_only = agent(&host, "pod/worker 1").await;
+        channel_only.sender.send("channel line".to_owned()).unwrap();
+        let reported = channel_only.error_channel_only(&Error::new("boom")).await;
+        assert!(
+            reported.is_ok(),
+            "channel-only error report failed: {reported:?}"
+        );
+        // both jobs attempted a log upload and then reported their error
+        let lines = recorded.lock().unwrap().clone();
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("/api/reactions/logs/")),
+            "no stage log upload was attempted: {lines:?}"
+        );
+        for job in [&failed.job.id, &channel_only.job.id] {
+            let expected =
+                format!("POST /api/jobs/handle/{job}/error?worker=pod%2Fworker+1 HTTP/1.1");
+            assert!(
+                lines.contains(&expected),
+                "job {job} was not reported as errored: {lines:?}"
+            );
+        }
     }
 
     /// An executor that runs a shell script as the job and collects a fixed result

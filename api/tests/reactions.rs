@@ -3135,6 +3135,45 @@ async fn failed_sub_reaction_counts_once_in_parent() -> Result<(), Error> {
     Ok(())
 }
 
+/// Ending a parent reaction expires each of its sub reaction status sets
+///
+/// The Created, Started, Completed, and Failed sub reaction sets of a parent are given the data
+/// retention TTL when the parent completes or fails, so none of them outlive the parent's data.
+#[tokio::test]
+async fn ended_parent_expires_sub_reaction_status_sets() -> Result<(), Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    // create a group to test in
+    let group = generators::groups(1, &client).await?.remove(0).name;
+    // create a parent reaction and a single sub reaction
+    let (_, parent) = generators::reactions(&group, 1, None, &client).await?;
+    let parent = parent.created[0];
+    let (_, subs, _) = generators::sub_reactions(&group, 1, &parent, &client).await?;
+    // fail the sub reaction so it moves into its parent's Failed sub reaction set
+    handle_reaction(&client, &group, &subs[0].id, "fail").await?;
+    // end the parent too unless finishing its only sub reaction already ended it
+    let status = client.reactions.get(&group, parent).await?.status;
+    if status != ReactionStatus::Completed && status != ReactionStatus::Failed {
+        handle_reaction(&client, &group, &parent, "fail").await?;
+    }
+    // read the TTL of the parent's Failed sub reaction set
+    let ns = &CONF.thorium.namespace;
+    let key = format!("{ns}:sub_reactions:{group}:{parent}:Failed");
+    let redis = test_utilities::redis_pool().await;
+    let mut conn = redis
+        .get()
+        .await
+        .map_err(|err| Error::new(err.to_string()))?;
+    let ttl: i64 = bb8_redis::redis::cmd("TTL")
+        .arg(&key)
+        .query_async(&mut *conn)
+        .await
+        .map_err(|err| Error::new(err.to_string()))?;
+    // the set holds the failed sub reaction and expires with the parent's data
+    assert!(ttl > 0, "{key} has TTL {ttl} instead of the data retention");
+    Ok(())
+}
+
 /// Paging through a group's reaction list advances past the first page
 ///
 /// `list_group_set` uses the cursor as the rank to start the next page at, so each page picks up

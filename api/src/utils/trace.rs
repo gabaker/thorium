@@ -191,9 +191,28 @@ pub fn from_file(name: &str, path: &str) -> Option<SdkTracerProvider> {
 pub fn shutdown(provider: Option<SdkTracerProvider>) {
     // if we have a provider shut it down
     if let Some(provider) = provider {
-        // shutdown this provider
+        // shutdown this provider, reporting a failure on stderr since the tracing layers are
+        // being torn down and the process should still exit with its own status
+        if let Err(error) = provider.shutdown() {
+            eprintln!("Failed to shutdown tracing provider: {error}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use opentelemetry_sdk::trace::SdkTracerProvider;
+
+    /// Shutting down a provider whose shutdown fails returns instead of panicking
+    #[test]
+    fn failed_shutdown_does_not_panic() {
+        // build a provider with no exporter and shut down a clone of it first
+        let provider = SdkTracerProvider::builder().build();
         provider
+            .clone()
             .shutdown()
-            .expect("Failed to shutdown tracing provider");
+            .expect("the first shutdown should succeed");
+        // shutting the provider down again fails with AlreadyShutdown, which must not panic
+        super::shutdown(Some(provider));
     }
 }
