@@ -1,11 +1,10 @@
 import { test, expect } from '@playwright/test';
 
-import { adminApi, loadFixtures } from './agentic-helpers';
+import { adminApi, loadFixtures, uniqueName } from './agentic-helpers';
 import { loginViaUI } from './helpers';
 
 // the legacy image page and the pipeline page run against the live fixture stack
 const fixtures = loadFixtures();
-const unique = () => `e2e-pipe-${Math.random().toString(36).slice(2, 8)}`;
 
 test.describe('legacy images and pipeline pages', () => {
   test.beforeEach(async ({ page }) => {
@@ -34,7 +33,7 @@ test.describe('legacy images and pipeline pages', () => {
   });
 
   test('creates a pipeline whose stage is backed by a tool and deletes it', async ({ page }) => {
-    const name = unique();
+    const name = uniqueName('pipe');
     await page.goto('/create/pipeline');
     await page.getByTestId('pipeline-name').fill(name);
     await page.getByTestId('pipeline-group').selectOption(fixtures.group);
@@ -51,7 +50,7 @@ test.describe('legacy images and pipeline pages', () => {
 
   test('a pipeline form with a stage and no tool cannot be submitted', async ({ page }) => {
     await page.goto('/create/pipeline');
-    await page.getByTestId('pipeline-name').fill(unique());
+    await page.getByTestId('pipeline-name').fill(uniqueName('pipe'));
     await page.getByTestId('pipeline-group').selectOption(fixtures.group);
     await page.getByTestId('stage-name-0-0').fill('scan');
     await expect(page.getByTestId('pipeline-problem')).toContainText('Choose a tool');

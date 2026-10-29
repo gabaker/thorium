@@ -1,11 +1,10 @@
 import { test, expect } from '@playwright/test';
 
-import { adminApi, loadFixtures } from './agentic-helpers';
+import { adminApi, loadFixtures, uniqueName } from './agentic-helpers';
 import { loginViaUI } from './helpers';
 
 // the tools pages run against the live fixture stack
 const fixtures = loadFixtures();
-const unique = () => `e2e-tool-${Math.random().toString(36).slice(2, 8)}`;
 
 const IMAGE_SPEC = `Image:
   environment:
@@ -61,7 +60,7 @@ test.describe('tools', () => {
   });
 
   test('creates a tool, publishes a version, deprecates it, and deletes the tool', async ({ page }) => {
-    const name = unique();
+    const name = uniqueName('tool');
     await page.goto('/tools/create');
     await page.getByTestId('tool-name').fill(name);
     await page.getByTestId('tool-description').fill('made by the browser test');
@@ -95,7 +94,7 @@ test.describe('tools', () => {
 
   test('refuses an invalid spec before sending it', async ({ page }) => {
     await page.goto('/tools/create');
-    await page.getByTestId('tool-name').fill(unique());
+    await page.getByTestId('tool-name').fill(uniqueName('tool'));
     await page.getByTestId(`groups-${fixtures.group}`).check();
     await page.getByTestId('tool-spec').fill('Other: {}');
     await expect(page.getByTestId('tool-problem')).toContainText('exactly one');

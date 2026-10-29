@@ -3,7 +3,7 @@ import type { Page } from '@playwright/test';
 import { authenticate, buildClient } from './helpers';
 
 // the live fixtures have one loader, shared with the specs that import it from here
-export { loadFixtures } from './agentic-fixtures';
+export { loadFixtures, uniqueName } from './agentic-fixtures';
 
 /**
  * Get an API client signed in as the test user.
