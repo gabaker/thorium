@@ -1178,7 +1178,7 @@ mod tests {
     use crate::args::results::ShowResults;
     use crate::args::runs::RunKind;
     use crate::args::runs::{CancelRun, RunInputArgs, RunPipeline};
-    use crate::handlers::reactions::retag::retag;
+    use crate::handlers::reactions::retag::{retag, retag_message};
     use crate::handlers::run_batch::BatchOpts;
     use crate::utils::run_wait;
     use crate::utils::run_wait::testing::{client, mock, reaction};
@@ -1343,6 +1343,31 @@ mod tests {
             crate::args::reactions::UpdateReaction::try_parse_from(["update", &id.to_string()])
                 .is_err()
         );
+    }
+
+    /// The retag report names the requested changes and the tags the API answered with
+    #[test]
+    fn retag_reports_stored_tags() {
+        // the API answered the update with the reaction's stored tags
+        let id = Uuid::new_v4();
+        let mut updated = reaction(id, ReactionStatus::Started);
+        updated.tags = vec!["new".to_owned(), "thorium".to_owned()];
+        let cmd = crate::args::reactions::UpdateReaction::try_parse_from([
+            "update",
+            &id.to_string(),
+            "-g",
+            "corn",
+            "--add-tag",
+            "new",
+            "--remove-tag",
+            "old",
+        ])
+        .unwrap();
+        // the report names the changes and the stored tags
+        let message = retag_message(&updated, &cmd);
+        assert!(message.contains("added tags [new]"), "{message}");
+        assert!(message.contains("removed tags [old]"), "{message}");
+        assert!(message.contains("tags are now [new, thorium]"), "{message}");
     }
 
     /// Build the arguments to cancel runs by filter in the corn group
