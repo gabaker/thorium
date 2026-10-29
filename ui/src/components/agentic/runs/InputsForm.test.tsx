@@ -7,10 +7,7 @@ import { InputsForm } from './InputsForm';
 import { BLANK_INPUTS, InputsMode, InputsRequirement, InputsState } from './inputs';
 
 /** Render the inputs form with the given values and props. */
-const render = (
-  value: Partial<InputsState> = {},
-  props: { showPrompt?: boolean; promptOptional?: boolean; requirement?: InputsRequirement } = {},
-): string =>
+const render = (value: Partial<InputsState> = {}, props: { promptOptional?: boolean; requirement?: InputsRequirement } = {}): string =>
   renderToStaticMarkup(
     <MemoryRouter>
       <InputsForm value={{ ...BLANK_INPUTS, ...value }} onChange={() => undefined} repoUrls={[]} {...props} />
@@ -27,9 +24,6 @@ describe('InputsForm prompt', () => {
     const markup = render({}, { promptOptional: true });
     expect(markup).toContain('Prompt (optional)');
     expect(markup).toContain('only used by stages that run agentic tools');
-  });
-  it('leaves the prompt out when it is not offered', () => {
-    expect(render({}, { showPrompt: false })).not.toContain('run-prompt');
   });
 });
 

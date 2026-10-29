@@ -31,13 +31,16 @@ import { isRunFinished, runKind } from '@utilities/runs';
 import { Reaction, ReactionStatus } from '@models/reactions';
 import { RunKind } from '@models/runs';
 
-/** The kind filter tabs; `all` shows every kind. */
-enum KindTab {
-  All = 'all',
-  Workflow = 'Workflow',
-  Tool = 'Tool',
-  Pipeline = 'Pipeline',
-}
+/** A kind filter tab: a run kind, or `all` for every kind. */
+type KindTab = RunKind | 'all';
+
+/** The kind filter tabs in the order shown, keyed by the run kind each one filters to. */
+export const KIND_TABS: { key: KindTab; label: string }[] = [
+  { key: 'all', label: 'All' },
+  { key: RunKind.Workflow, label: 'Workflow' },
+  { key: RunKind.Tool, label: 'Tool' },
+  { key: RunKind.Pipeline, label: 'Pipeline' },
+];
 
 /** The tag every workflow run carries. */
 const WORKFLOW_RUN_TAG = 'WorkflowRun';
@@ -167,7 +170,7 @@ const RunBrowsing: FC = () => {
   const { userInfo } = useAuth();
   const userGroups = useGroupNames();
   const [group, setGroup] = useState('');
-  const [tab, setTab] = useState<KindTab>(KindTab.All);
+  const [tab, setTab] = useState<KindTab>('all');
   const [runs, setRuns] = useState<Reaction[]>([]);
   const [more, setMore] = useState<PageCursor[]>([]);
   const [loading, setLoading] = useState(true);
@@ -284,8 +287,8 @@ const RunBrowsing: FC = () => {
 
   // the listings hold more runs than the pages read so far
   const hasMore = more.length > 0;
-  const filtered = tab !== KindTab.All;
-  const shown = filterRunsByKind(runs, filtered ? (tab as unknown as RunKind) : null);
+  const filtered = tab !== 'all';
+  const shown = filterRunsByKind(runs, tab === 'all' ? null : tab);
 
   return (
     <Page title="Runs · Thorium">
@@ -302,12 +305,12 @@ const RunBrowsing: FC = () => {
         active={tab}
         onChange={setTab}
         aria-label="Run kind"
-        tabs={[
-          { key: KindTab.All, label: 'All', count: runs.length, countMore: hasMore },
-          { key: KindTab.Workflow, label: 'Workflow', count: filterRunsByKind(runs, RunKind.Workflow).length, countMore: hasMore },
-          { key: KindTab.Tool, label: 'Tool', count: filterRunsByKind(runs, RunKind.Tool).length, countMore: hasMore },
-          { key: KindTab.Pipeline, label: 'Pipeline', count: filterRunsByKind(runs, RunKind.Pipeline).length, countMore: hasMore },
-        ]}
+        tabs={KIND_TABS.map(({ key, label }) => ({
+          key,
+          label,
+          count: filterRunsByKind(runs, key === 'all' ? null : key).length,
+          countMore: hasMore,
+        }))}
       />
       <Row style={{ margin: '1rem 0' }}>
         <Select data-testid="runs-group" style={{ maxWidth: '16rem' }} value={group} onChange={(event) => setGroup(event.target.value)}>

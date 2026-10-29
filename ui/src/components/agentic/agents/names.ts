@@ -18,17 +18,6 @@ export function nameIndex(...lists: AnyAgenticEntity[][]): Map<string, string> {
 }
 
 /**
- * Resolve ids to names, keeping an id that has no known name.
- *
- * @param ids - The ids to resolve; anything that is not a string id is skipped.
- * @param index - The id to name lookup.
- * @returns The names in order.
- */
-export function resolveNames(ids: unknown[] | null | undefined, index: Map<string, string>): string[] {
-  return (ids ?? []).filter((id): id is string => typeof id === 'string').map((id) => index.get(id) ?? id);
-}
-
-/**
  * Describe an agent's model list as one line.
  *
  * @param models - The agent's model matchers.

@@ -35,8 +35,6 @@ interface InputsFormProps {
   checks?: Record<string, HashCheck>;
   /** What the run kind requires of its inputs, which the copy states */
   requirement?: InputsRequirement;
-  /** Whether a prompt is offered (a direct tool run usually has none) */
-  showPrompt?: boolean;
   /** Whether the prompt is marked optional, for runs where only some steps read it (a static pipeline) */
   promptOptional?: boolean;
 }
@@ -48,20 +46,17 @@ export const InputsForm: FC<InputsFormProps> = ({
   repoUrls,
   checks = {},
   requirement = InputsRequirement.AtLeastOne,
-  showPrompt = true,
   promptOptional = false,
 }) => (
   <>
-    {showPrompt && (
-      <Field>
-        <span className="label">{promptOptional ? 'Prompt (optional)' : 'Prompt'}</span>
-        <span className="hint">
-          {promptOptional ? 'Optional: only used by stages that run agentic tools. ' : ''}
-          Uploaded as a text file named prompt.txt and given to the run as an input.
-        </span>
-        <TextArea data-testid="run-prompt" value={value.prompt} onChange={(event) => onChange({ ...value, prompt: event.target.value })} />
-      </Field>
-    )}
+    <Field>
+      <span className="label">{promptOptional ? 'Prompt (optional)' : 'Prompt'}</span>
+      <span className="hint">
+        {promptOptional ? 'Optional: only used by stages that run agentic tools. ' : ''}
+        Uploaded as a text file named prompt.txt and given to the run as an input.
+      </span>
+      <TextArea data-testid="run-prompt" value={value.prompt} onChange={(event) => onChange({ ...value, prompt: event.target.value })} />
+    </Field>
     {/* a div, not a label: a label would pass clicks on its tabs and tokens to its first control */}
     <Field as="div">
       <span className="label">{requirement === InputsRequirement.Optional ? 'Inputs (optional)' : 'Inputs'}</span>

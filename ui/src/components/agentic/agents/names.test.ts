@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 // project imports
-import { linkFor, modelsText, nameIndex, resolveNames, versionNote } from './names';
+import { linkFor, modelsText, nameIndex, versionNote } from './names';
 import { AgenticKinds } from '@models/agentic';
 
 const entity = (id: string, name: string) =>
@@ -23,12 +23,6 @@ describe('names', () => {
     const index = nameIndex([entity('1', 'a')], [entity('2', 'b')]);
     expect(index.get('1')).toBe('a');
     expect(index.get('2')).toBe('b');
-  });
-  it('resolves known ids and keeps unknown ones', () => {
-    const index = nameIndex([entity('1', 'a')]);
-    expect(resolveNames(['1', '9'], index)).toEqual(['a', '9']);
-    expect(resolveNames(undefined, index)).toEqual([]);
-    expect(resolveNames([{ x: 1 }, '1'], index)).toEqual(['a']);
   });
   it('describes models', () => {
     expect(modelsText([{ model_id: 'x' }, { model_id: 'y' }])).toBe('x > y');
