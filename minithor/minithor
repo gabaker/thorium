@@ -137,6 +137,58 @@ list_minikube_nodes() { minikube node list 2>/dev/null | awk 'NF {print $1}'; }
 
 log() { echo -e "\n====== $1 ======\n"; }
 
+# Fail unless every node of the profile holds the image, built for the node's architecture.
+# `minikube image load` succeeds for an image built for another architecture, which the node then
+# can't run: its pods sit in ImagePullBackOff or CreateContainerError until they time out
+#   $1 - the image reference passed to --local-image
+verify_local_image() {
+    local image=$1 node info image_arch node_arch failed=false mismatched=false
+    for node in $(list_minikube_nodes); do
+        node_arch="$(minikube ssh -n "$node" -- uname -m 2>/dev/null | tr -d '\r' || true)"
+        case "$node_arch" in
+            x86_64) node_arch=amd64 ;;
+            aarch64) node_arch=arm64 ;;
+        esac
+        if ! info="$(minikube ssh -n "$node" -- sudo crictl inspecti "$image" 2>/dev/null)"; then
+            echo "ERROR: $image is not on node $node after loading it, so pods using it can't start" >&2
+            failed=true
+            continue
+        fi
+        # the runtime's record of the image config names the architecture it was built for
+        image_arch="$(printf '%s\n' "$info" | sed -n 's/^ *"architecture": *"\([^"]*\)".*/\1/p' | head -1)"
+        if [ -n "$image_arch" ] && [ -n "$node_arch" ] && [ "$image_arch" != "$node_arch" ]; then
+            echo "ERROR: $image is built for $image_arch but node $node is $node_arch, so pods using it can't start" >&2
+            failed=true
+            mismatched=true
+        fi
+    done
+    [ "$failed" = true ] || return 0
+    if [ "$mismatched" = true ]; then
+        # Docker Desktop on Apple silicon runs amd64 images through Rosetta or QEMU, so an image
+        # that runs on the host can still be the wrong architecture for the nodes
+        echo "  The host may run this image through emulation (Rosetta or QEMU on Apple silicon, for" \
+            "example), but each node's container runtime only unpacks images for its own platform." >&2
+        echo "  Pass --image with a registry image that has a linux/${node_arch:-<node arch>} variant instead of" \
+            "--local-image, so the nodes pull the variant for their architecture, or rebuild the image with" \
+            "docker build --platform linux/${node_arch:-<node arch>} and load it again" >&2
+    else
+        echo "  load the image again, or pass --image with a registry image the nodes can pull" >&2
+    fi
+    return 1
+}
+
+# Print why the chart's pre-upgrade CRD hook Job failed, which Helm only reports as a failed Job;
+# a failed hook Job is kept until the next upgrade, so its pods and events are still there
+#   $1 - the thorium namespace
+report_crd_hook_failure() {
+    local namespace=$1
+    kctl -n "$namespace" get job thorium-apply-crd &>/dev/null || return 0
+    echo "The pre-upgrade CRD hook Job thorium-apply-crd failed; its pods and events:" >&2
+    kctl -n "$namespace" get pods -l job-name=thorium-apply-crd -o wide >&2 || true
+    kctl -n "$namespace" describe pods -l job-name=thorium-apply-crd 2>/dev/null | sed -n '/^Events:/,$p' >&2 || true
+    kctl -n "$namespace" logs job/thorium-apply-crd --tail=20 >&2 2>/dev/null || true
+}
+
 ########################################
 # Port-forward + loopback alias helpers (shared)
 #
@@ -1165,7 +1217,8 @@ Configuration:
                               replaces --version)
   --local-image <name:tag>    A Thorium image built on this host: loaded into every node of
                               the profile and deployed with pull policy IfNotPresent (can't be
-                              combined with --image)
+                              combined with --image); deploy stops when a node lacks it or
+                              it is built for another architecture than the nodes
   --registry                  Deploy a container registry at
                               docker-registry.<thorium namespace>.svc.cluster.local:${REGISTRY_PORT}
                               (the cluster must have been installed or last started
@@ -2141,6 +2194,7 @@ cmd_deploy() {
     if [ -n "$local_image" ]; then
         log "Loading $local_image into every node of profile $MINIKUBE_PROFILE"
         minikube image load "$local_image"
+        verify_local_image "$local_image"
     fi
     # the node's container runtime only pulls over HTTP from registries trusted at start
     [ "$registry" = true ] && check_registry_trusted
@@ -2278,8 +2332,11 @@ cmd_deploy() {
     fi
 
     log "Deploying Thorium into $THORIUM_NAMESPACE"
-    helm_cmd upgrade --install "$THORIUM_RELEASE" "$THORIUM_CHART" ${THORIUM_CHART_ARGS[@]+"${THORIUM_CHART_ARGS[@]}"} \
-        -n "$THORIUM_NAMESPACE" --create-namespace "${values_args[@]}" --reset-values --timeout "${timeout}s"
+    if ! helm_cmd upgrade --install "$THORIUM_RELEASE" "$THORIUM_CHART" ${THORIUM_CHART_ARGS[@]+"${THORIUM_CHART_ARGS[@]}"} \
+        -n "$THORIUM_NAMESPACE" --create-namespace "${values_args[@]}" --reset-values --timeout "${timeout}s"; then
+        report_crd_hook_failure "$THORIUM_NAMESPACE"
+        exit 1
+    fi
     label_dev_namespace
     # the previous operator keeps reconciling until its replacement is ready, and it can report a
     # phase for the new spec (such as Error for a revision it doesn't know) that the new operator

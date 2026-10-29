@@ -303,8 +303,12 @@ uninstallHook:
 # upgrading (`thorium-operator crd --apply`, or kubectl apply of crds/thoriumcluster.yaml)
 crdHook:
   enabled: true
-  # how long the Job may run, including waiting for the CRD to be established
-  timeoutSeconds: 120
+  # how long the Job may run. The deadline also covers scheduling its pod and pulling the new
+  # image, which is the upgrade's first pull of that tag and can take minutes on a slow link; a
+  # pod that never starts (an image no node has or can pull, or no node it fits on) fails the Job
+  # with DeadlineExceeded and `failed: 1/1` (`kubectl -n <ns> describe pod -l
+  # job-name=thorium-apply-crd` shows why, since a failed hook Job is kept)
+  timeoutSeconds: 600
   resources:
     requests: { cpu: 10m, memory: 32Mi }
     limits: { cpu: 200m, memory: 128Mi }

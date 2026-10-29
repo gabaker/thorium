@@ -1199,7 +1199,7 @@ jobs:
 
   # Checks the minithor and megathor deployment tools: the shell scripts are syntax-checked with
   # bash -n and linted with shellcheck (warnings and above), from the runner image or the distro's
-  # signed packages
+  # signed packages, and minithor's offline tests run
   deploy-tools-shell:
     name: Lint deployment shell scripts
     needs:
@@ -1216,14 +1216,21 @@ jobs:
           persist-credentials: false
       - name: Check syntax
         run: |
-          for script in minithor/minithor megathor/scripts/*.bash; do
+          for script in minithor/minithor minithor/tests/*.sh megathor/scripts/*.bash; do
             bash -n "$script"
           done
       # shellcheck comes from the runner image, or the distro's signed packages when it lacks it
       - name: Install shellcheck
         run: command -v shellcheck >/dev/null || { sudo apt-get update && sudo apt-get install -y shellcheck; }
       - name: Run shellcheck
-        run: shellcheck --severity=warning minithor/minithor megathor/scripts/*.bash
+        run: shellcheck --severity=warning minithor/minithor minithor/tests/*.sh megathor/scripts/*.bash
+      # offline tests of deploy's helpers against stub minikube, kubectl, and helm commands (the
+      # chart checks use the runner image's helm)
+      - name: Run minithor's tests
+        run: |
+          for test in minithor/tests/*_test.sh; do
+            bash "$test"
+          done
       - name: Check every command's help
         run: |
           for cmd in "" minikube "minikube install" "minikube delete" start deploy credentials \

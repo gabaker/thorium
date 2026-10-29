@@ -153,7 +153,7 @@ minithor [--namespace-prefix <prefix>] deploy [options]
 | `--rand-password` | Let the chart generate the admin password on the first deploy; a redeploy without `--password` keeps the stored one. Can't be combined with `--password` |
 | `--version <tag>` | Thorium image tag (default: the chart's appVersion) |
 | `--image <repo[:tag]>` | Thorium image for the operator and every Thorium component, such as the image a fork's CI built for a branch; a tag here replaces `--version` |
-| `--local-image <name:tag>` | A Thorium image built on this host, loaded into every node of the profile and deployed with pull policy `IfNotPresent`; can't be combined with `--image` |
+| `--local-image <name:tag>` | A Thorium image built on this host, loaded into every node of the profile and deployed with pull policy `IfNotPresent`; can't be combined with `--image`. Deploy stops when a node lacks the image after loading or the image is built for another architecture than the node (an amd64 image on an Apple-silicon arm64 node, for example, which emulation on the host doesn't help); pass `--image` with a multi-architecture registry image instead |
 | `--registry` | Deploy a container registry at `docker-registry.<thorium namespace>.svc.cluster.local:5000` (see [Registry](#registry)) |
 | `--registry-user <name>` | Enable registry basic auth for this user (implies `--registry`; the password is in `credentials --all`) |
 | `--toolbox <path\|url>` | Toolbox to import, a legacy or format 2 toolbox file (default: `tools/toolbox.json` on GitHub main; `thorctl` reads either format and converts a legacy toolbox as it imports), fetched on this host. Read the import report with `kubectl logs job/<toolbox-import-...>` |
@@ -470,6 +470,14 @@ a fresh deployment.
 - **`expose` reports a forward as failed.** Each forward logs to `~/.cache/minithor/expose-logs/`.
   A port held by another program is left alone; pick other ports with `--port` or
   `--port-offset`.
+- **`deploy` fails with a pre-upgrade CRD hook error.** Helm runs the `thorium-apply-crd` Job with
+  the new Thorium image before upgrading; `deploy` prints its pods' events and logs when the
+  upgrade fails. A Job whose pod never started (an image no node has or can pull) fails with
+  `DeadlineExceeded` after `operator.crdHook.timeoutSeconds` (600 by default).
+- **Pods of a `--local-image` deployment never start on an Apple-silicon Mac.** The nodes are arm64,
+  and an amd64 image Docker runs through Rosetta or QEMU emulation can't run on them; `deploy`
+  stops after loading such an image. Pass `--image` with a registry image that has an arm64
+  variant, or build the image with `--platform linux/arm64`.
 - **kubectl can't reach the cluster after a reboot.** Every minithor command fixes a stale
   kubeconfig; run `minithor start` (or any command against a running cluster).
 

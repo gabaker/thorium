@@ -75,6 +75,12 @@ minithor deploy --chart deploy/charts/thorium --local-image thorium:dev
 
 Repeat the flag on every redeploy, since each deploy renders its values from its own options.
 
+`--local-image` checks that every node holds the image after loading it and that the image is built
+for the node's architecture, since `minikube image load` accepts an image for another architecture
+that the node then can't run. On an Apple-silicon Mac the nodes are arm64: an amd64 image that
+Docker runs through Rosetta or QEMU emulation still won't start on them, so pass `--image` with a
+registry image that has an arm64 variant (or build with `--platform linux/arm64`).
+
 ## Existing minithor deployments
 
 A deployment made by a minithor from before the Helm charts must be converted with
