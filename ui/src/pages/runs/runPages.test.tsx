@@ -241,6 +241,15 @@ describe('run kinds on the run details page', () => {
     expect(markup).toContain('data-testid="run-stage-logs"');
     expect(markup).toContain('data-testid="stage-logs-scan"');
   });
+  it('shows a tool run that recorded no plan as its one stage, named by its arguments, with its logs', () => {
+    const run = { ...toolRun([]), plan: undefined, args: { scan: {} } } as unknown as Reaction;
+    const { markup } = render(<RunSections run={run} />, run, []);
+    expect(markup).not.toContain('data-testid="run-plan"');
+    expect(markup).toContain('data-testid="run-stage-logs"');
+    expect(markup).toContain('data-stage="scan"');
+    // the stage's logs open on their own, as for a run of one tool with a plan
+    expect(markup).toMatch(/data-testid="toggle-logs-scan"[^>]*>Hide logs</);
+  });
   it('ends the Versions used card of a run of one tool without a line under its last row', () => {
     const run = toolRun([['scan']]);
     const { markup, css } = render(<RunSections run={run} />, run, []);

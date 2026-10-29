@@ -2,7 +2,7 @@
 import { DerivedStageState, IndicatorStatus } from './status';
 import { JobStatus, Reaction, ReactionStatus, StatusAction, StatusUpdate } from '@models/reactions';
 import { RunKind, RunProvenance } from '@models/runs';
-import { isRunFinished, runKind } from '@utilities/runs';
+import { isRunFinished, recordedStageOrder, runKind } from '@utilities/runs';
 import { parseTimestamp } from '@utilities/time';
 
 /** One job of a stage, as the run's status updates tell it. */
@@ -305,10 +305,11 @@ export enum RunStagesView {
  * @param run - The run.
  * @returns A diagram for a pipeline run, the stage alone for a run of one tool, and the plan otherwise.
  */
-export function runStagesView(run: Pick<Reaction, 'source' | 'plan'>): RunStagesView {
+export function runStagesView(run: Pick<Reaction, 'source' | 'plan'> & { args?: Reaction['args'] }): RunStagesView {
   const kind = runKind(run);
   if (kind === RunKind.Pipeline) return RunStagesView.Diagram;
-  if (kind === RunKind.Tool && (run.plan?.stages ?? []).flat().length === 1) return RunStagesView.SingleStage;
+  // a tool run that recorded no plan still has its one stage, named by its arguments
+  if (kind === RunKind.Tool && recordedStageOrder(run).flat().length <= 1) return RunStagesView.SingleStage;
   return RunStagesView.Plan;
 }
 

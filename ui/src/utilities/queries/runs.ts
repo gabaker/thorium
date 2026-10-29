@@ -7,7 +7,7 @@ import { Query, QueryClient, useQuery, useQueryClient } from '@tanstack/react-qu
 import { getPipeline } from '@thorpi/pipelines';
 import { getReaction, getReactionLogs } from '@thorpi/reactions';
 import { getRunStageLogs, listSubRuns } from '@thorpi/runs';
-import { isRunFinished, runKind } from '@utilities/runs';
+import { isRunFinished, recordedStageOrder, runKind } from '@utilities/runs';
 import { Reaction, StatusUpdate } from '@models/reactions';
 import { RunKind } from '@models/runs';
 
@@ -350,14 +350,15 @@ export function useSubRuns(
 }
 
 /**
- * Get a run's stage order: the plan it recorded, or for a pipeline reaction without a plan, its pipeline's order.
+ * Get a run's stage order: the plan it recorded, the one stage of a tool run without a plan, or for a pipeline reaction
+ * without a plan, its pipeline's order.
  *
  * @param run - The run.
  * @returns The stage names of each step; empty until a pipeline's order is read.
  */
-export function useStageOrder(run: Pick<Reaction, 'group' | 'pipeline' | 'plan' | 'source'>): string[][] {
+export function useStageOrder(run: Pick<Reaction, 'group' | 'pipeline' | 'plan' | 'source' | 'args'>): string[][] {
   // every poll reads a new run object, so the order is rebuilt only when its names change, keeping the diagram's layout still
-  const planKey = JSON.stringify((run.plan?.stages ?? []).map((step) => step.map((stage) => stage.name)));
+  const planKey = JSON.stringify(recordedStageOrder(run));
   const planned = useMemo(() => JSON.parse(planKey) as string[][], [planKey]);
   // only a pipeline reaction from before plans were recorded needs its pipeline read
   const needsPipeline = planned.length === 0 && runKind(run) === RunKind.Pipeline && !!run.pipeline;

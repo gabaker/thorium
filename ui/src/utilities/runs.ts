@@ -12,7 +12,7 @@ export function isRunFinished(status: ReactionStatus): boolean {
   return status === ReactionStatus.Completed || status === ReactionStatus.Failed;
 }
 
-/** What the legacy reaction page shows for the outcome of its latest reads. */
+/** What the single reaction status page shows for the outcome of its latest reads. */
 export enum ReactionReadView {
   /** The reaction was read (or the first read is still pending), so its details show */
   Details = 'Details',
@@ -23,7 +23,7 @@ export enum ReactionReadView {
 }
 
 /**
- * Choose what the legacy reaction page shows given its latest reads.
+ * Choose what the single reaction status page shows given its latest reads.
  *
  * A failed poll of a reaction that already loaded must not replace it with a not-found message,
  * because the reaction is known to exist.
@@ -90,10 +90,10 @@ export function runProvenance(reaction: Pick<Reaction, 'source'>): RunProvenance
  * @param reaction - The reaction.
  * @returns The result key, or `null` for a pipeline reaction.
  */
-export function runResultKey(reaction: Pick<Reaction, 'source' | 'plan'>): string | null {
+export function runResultKey(reaction: Pick<Reaction, 'source' | 'plan'> & { args?: Reaction['args'] }): string | null {
   const source = reaction.source;
   if (source && 'WorkflowRun' in source) return source.WorkflowRun.result_key;
-  if (source && 'Tool' in source) return reaction.plan?.stages[0]?.[0]?.name ?? null;
+  if (source && 'Tool' in source) return recordedStageOrder(reaction)[0]?.[0] ?? null;
   return null;
 }
 
@@ -218,6 +218,20 @@ export function noStageLogsMessage(stage: string, status: ReactionStatus | null,
  */
 export function plannedStageNames(reaction: Pick<Reaction, 'plan'>): string[] {
   return (reaction.plan?.stages ?? []).flat().map((stage) => stage.name);
+}
+
+/**
+ * List the stage names of each step of a run: its recorded plan, or for a tool run that recorded no plan, the one stage
+ * its arguments are keyed by.
+ *
+ * @param reaction - The run.
+ * @returns The stage names of each step; empty for a pipeline or workflow run without a plan.
+ */
+export function recordedStageOrder(reaction: Pick<Reaction, 'plan' | 'source'> & { args?: Reaction['args'] }): string[][] {
+  const planned = (reaction.plan?.stages ?? []).map((step) => step.map((stage) => stage.name));
+  if (planned.length > 0 || runKind(reaction) !== RunKind.Tool) return planned;
+  // a tool run keys its arguments by the name of the stage that runs the tool
+  return Object.keys(reaction.args ?? {}).map((name) => [name]);
 }
 
 /**

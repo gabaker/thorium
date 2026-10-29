@@ -15,6 +15,7 @@ import {
   ReactionReadView,
   reactionReadView,
   reactionPath,
+  recordedStageOrder,
   resultsDuringRun,
   resultDisplayName,
   runKind,
@@ -72,11 +73,18 @@ describe('run source', () => {
     expect(runResultKey({ source: WORKFLOW, plan: PLAN })).toBe('wf#r1~w');
     expect(runResultKey({ source: TOOL, plan: PLAN })).toBe('a');
     expect(runResultKey({ source: TOOL })).toBeNull();
+    expect(runResultKey({ source: TOOL, args: { scan: {} } as never })).toBe('scan');
     expect(runResultKey({ source: PIPELINE, plan: PLAN })).toBeNull();
   });
   it('lists the planned stages in order', () => {
     expect(plannedStageNames({ plan: PLAN })).toEqual(['a', 'b', 'c']);
     expect(plannedStageNames({})).toEqual([]);
+  });
+  it('takes the stage order from the plan, or for a tool run without one from its arguments', () => {
+    expect(recordedStageOrder({ source: TOOL, plan: PLAN, args: { other: {} } as never })).toEqual([['a'], ['b', 'c']]);
+    expect(recordedStageOrder({ source: TOOL, args: { scan: {} } as never })).toEqual([['scan']]);
+    expect(recordedStageOrder({ source: PIPELINE, args: { scan: {} } as never })).toEqual([]);
+    expect(recordedStageOrder({ source: TOOL })).toEqual([]);
   });
   it('splits a workflow result key', () => {
     expect(parseWorkflowResultKey('malware-triage#r3~abc-1')).toEqual({ name: 'malware-triage', revision: 3, instance: 'abc-1' });

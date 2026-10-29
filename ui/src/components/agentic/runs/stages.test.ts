@@ -328,6 +328,12 @@ describe('runStagesView', () => {
       RunStagesView.SingleStage,
     );
   });
+  it('shows a tool run that recorded no plan as its stage alone instead of an empty plan', () => {
+    expect(runStagesView({ source: { Tool: { tool_instance: 'i', provenance } }, args: { scan: {} } as never })).toBe(
+      RunStagesView.SingleStage,
+    );
+    expect(runStagesView({ source: { Tool: { tool_instance: 'i', provenance } } })).toBe(RunStagesView.SingleStage);
+  });
 });
 
 describe('stage selection', () => {
