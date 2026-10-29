@@ -1,0 +1,1386 @@
+# Builds, publishes, checks, and scans Thorium on every push and pull request, in one run whose
+# stages are ordered with `needs:`
+#
+# GitHub starts every queued job as soon as a runner is free and has no job priority, so when
+# separate workflows each start all their jobs at once the release builds wait behind the checks
+# for the account's runners (20 at once on the free plan, and far fewer macOS runners). One
+# workflow lets `needs:` decide the order instead:
+#
+#   0. Detect Changes: `git diff` against the pull request's base or the branch's previous push
+#      decides which stages this run needs (see its step for the rules).
+#   1. Builds: the mdBook docs, the UI bundle, and the glibc, musl, and Windows binaries. macOS
+#      thorctl builds only once the Linux-hosted Rust builds succeed, so the run asks for one
+#      scarce macOS runner and only when the image can still be built.
+#   2. Build Thorium Core Container from the build artifacts, then publish it on the default
+#      branch, release tags, and every branch on forks, never on pull requests
+#      (.github/scripts/release_refs.py has the rules).
+#   3. After the publish, in parallel: the image scan (and its code scanning upload), the Rust
+#      checks (rust-check.yml), the repository scans (security-scan.yml), version consistency, the
+#      Helm chart lint, the Helm chart package and publish, the deployment tools checks, and the
+#      workflow and Dockerfile lints (workflow-lint.yml, dockerfile-lint.yml) when their files
+#      changed.
+#   GitHub Pages deploys from the default branch once the docs are built and the image published.
+#
+# - No build, publish, package, or Pages job needs a check, test, scan, or lint job, directly or
+#   through its `if:`, so a failed check never skips or blocks a build or publish; the checks
+#   report their own results. The chart package and publish run beside the chart lint, not after
+#   it; package.sh checks the rendered chart it packages.
+# - The scan and check jobs run whatever the build and publish jobs concluded (`!cancelled()`), so
+#   a failed or skipped build never hides the checks; they wait only so the builds get the runners
+#   first. A stage a run doesn't need is skipped, and nothing that needs it is blocked by the skip.
+# - rust-check.yml, security-scan.yml, workflow-lint.yml, and dockerfile-lint.yml are reusable
+#   workflows called from here; they keep their own weekly schedules. image-rescan.yml (weekly
+#   rescans of published images), tools.yml (tool images), and rerun-unassigned.yml (re-runs this
+#   workflow's jobs no runner picked up) stay separate workflows.
+# - Jobs start with no token permissions and are granted only what they use. The registry and code
+#   scanning tokens are only held by jobs that build or scan nothing.
+# - Actions are pinned by full commit SHA, checkout does not persist credentials, context values
+#   reach scripts through env vars rather than template expansion, and setup-helm is given an empty
+#   token, since it needs none but defaults to the job's.
+name: Thorium CI
+
+on:
+  # Dependabot branches are built by their pull requests instead, so each update runs once
+  push:
+    branches:
+      - '**'
+      - '!dependabot/**'
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+*'
+  # pull requests build and check everything they change but never publish, so reviewers see
+  # whether the image builds
+  pull_request:
+  # runs every stage for the chosen ref, publishing as a push to it would
+  workflow_dispatch:
+
+# jobs start with no token permissions and are granted only what they use
+permissions: {}
+
+# superseded runs are cancelled, except on the default branch and release tags so their publish
+# is never interrupted. Fork feature branches also publish and can be cancelled mid-publish; the
+# next run republishes. A queued run is still replaced when a newer run queues behind it
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != format('refs/heads/{0}', github.event.repository.default_branch) && !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  HELM_VERSION: v3.22.0
+  CHARTS: deploy/charts
+
+jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      image: ${{ steps.decide.outputs.image }}
+      rust: ${{ steps.decide.outputs.rust }}
+      charts: ${{ steps.decide.outputs.charts }}
+      deploy-tools: ${{ steps.decide.outputs.deploy-tools }}
+      workflows: ${{ steps.decide.outputs.workflows }}
+      dockerfiles: ${{ steps.decide.outputs.dockerfiles }}
+      checks: ${{ steps.decide.outputs.checks }}
+    steps:
+      # the full history holds a push's previous commit and a pull request's base; without blobs it
+      # is only commits and trees, which is all `git diff --name-only` reads
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          filter: blob:none
+      # Each output switches on a stage:
+      # - image: the builds, the container build, its publish and scan, and GitHub Pages
+      # - rust: rust-check.yml
+      # - charts: the Helm chart lint and package, and the chart publish on refs that publish
+      # - deploy-tools: the minithor and megathor checks
+      # - workflows: workflow-lint.yml
+      # - dockerfiles: dockerfile-lint.yml
+      # - checks: security-scan.yml and version consistency, on every run but release tags
+      - name: Choose the stages to run
+        id: decide
+        env:
+          BEFORE: ${{ github.event.before }}
+          IS_FORK: ${{ github.event.repository.fork }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          full=false image=false rust=false charts=false deploy_tools=false workflows=false
+          dockerfiles=false checks=true base=""
+          changed="${RUNNER_TEMP}/changed-files.txt"
+          : > "$changed"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            # a release tag's commit was checked on its branch, so the tag only builds and
+            # publishes the image and the charts
+            image=true charts=true checks=false
+            reason="release tag ${GITHUB_REF_NAME}"
+          elif [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            # the checkout is the pull request's merge commit, whose first parent is its base
+            base="HEAD^1"
+            reason="the pull request's changes"
+          elif [[ "$GITHUB_EVENT_NAME" == "push" && ! "$BEFORE" =~ ^0*$ ]] \
+            && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            base="$BEFORE"
+            reason="the changes since ${BEFORE:0:12}"
+          else
+            # a manual run, a new branch (whose first image must publish), or a push that
+            # rewrote history so its previous commit is gone
+            full=true
+            reason="a full run (${GITHUB_EVENT_NAME} with no previous commit to compare)"
+          fi
+          # renames are listed as a removed and an added path, so both count, and rename
+          # detection never needs the blobs the checkout left out
+          if [[ -n "$base" ]] && ! git diff --no-renames --name-only "$base" HEAD > "$changed"; then
+            full=true
+            reason="a full run (git could not compare with ${base})"
+          fi
+          while IFS= read -r path; do
+            case "$path" in
+              # this workflow and the scripts and ignore file every stage's reports use
+              .github/workflows/ci.yml | .github/actions/* | .github/scripts/* \
+                | .github/lint-ignore.toml) full=true ;;
+              .github/workflows/rust-check.yml) rust=true ;;
+              .github/workflows/dockerfile-lint.yml) dockerfiles=true ;;
+              # the other workflows and GitHub settings only need the workflow lint below
+              .github/*) ;;
+              # the thoradm tests read these guides, which are also in the image's docs
+              api/docs/src/admins/thoradm/*) image=true rust=true ;;
+              # the UI, the docs, and the root Dockerfile all go into the image
+              ui/* | .gitmodules | api/docs/* | Dockerfile | .dockerignore) image=true ;;
+              # the Rust unit tests check the operator's CRD and read its template helpers
+              deploy/charts/thorium/charts/operator/*) charts=true deploy_tools=true rust=true ;;
+              deploy/charts/*) charts=true deploy_tools=true ;;
+              minithor/* | megathor/*) deploy_tools=true ;;
+              # thorctl's tests read the committed toolboxes; tools.yml builds the tool images
+              tools/toolbox.json | tools/toolbox.v1.json) rust=true ;;
+              tools/* | base/* | deploy/* | skills/* | README.md | contributors.md | LICENSE \
+                | cliff.toml | .gitignore | .hadolint.yaml) ;;
+              # anything else is treated as Rust source, so an unlisted path runs more, not less
+              *) image=true rust=true ;;
+            esac
+            case "$path" in
+              .github/*) workflows=true ;;
+            esac
+            case "$path" in
+              Dockerfile* | */Dockerfile* | .hadolint.yaml) dockerfiles=true ;;
+            esac
+          done < "$changed"
+          # every push that publishes (each branch on a fork and the default branch, by
+          # release_refs.py's rule; release tags are handled above) packages and publishes the
+          # charts whatever changed, so each such push has its own chart prerelease
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]] \
+            && [[ "$IS_FORK" == "true" || "$GITHUB_REF_NAME" == "$DEFAULT_BRANCH" ]]; then
+            charts=true
+          fi
+          if [[ "$full" == "true" ]]; then
+            image=true rust=true charts=true deploy_tools=true workflows=true dockerfiles=true
+          fi
+          {
+            echo "image=${image}"
+            echo "rust=${rust}"
+            echo "charts=${charts}"
+            echo "deploy-tools=${deploy_tools}"
+            echo "workflows=${workflows}"
+            echo "dockerfiles=${dockerfiles}"
+            echo "checks=${checks}"
+          } | tee -a "$GITHUB_OUTPUT"
+          {
+            echo "### Stages for ${reason}"
+            echo
+            echo "| Stage | Runs |"
+            echo "| --- | --- |"
+            echo "| Builds, container, image scan | ${image} |"
+            echo "| Rust checks | ${rust} |"
+            echo "| Helm charts | ${charts} |"
+            echo "| Deployment tools | ${deploy_tools} |"
+            echo "| Workflow lint | ${workflows} |"
+            echo "| Dockerfile lint | ${dockerfiles} |"
+            echo "| Security scan, version consistency | ${checks} |"
+            echo
+            echo "$(wc -l < "$changed") changed files"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::group::Changed files"
+          cat "$changed"
+          echo "::endgroup::"
+
+  build-mdbook-docs:
+    name: Build mdBook Docs
+    needs: changes
+    if: needs.changes.outputs.image == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Cargo install mdbook
+        run: cargo install --locked --version 0.5.4 mdbook
+      - name: Build mdbook docs
+        run: mdbook build api/docs
+      # the container image serves these docs from the API
+      - name: Upload docs as artifacts (API hosted)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: thorium-mdbook-bundle
+          path: api/docs/book/
+      # published to GitHub Pages by deploy-updated-pages
+      - name: Upload docs as artifacts (Github pages)
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: api/docs/book/
+
+  build-ui-bundle:
+    name: Build UI Bundle
+    needs: changes
+    if: needs.changes.outputs.image == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      # Node 26.12.1 on Alpine, the image GitLab's UI jobs use. To move it, resolve the new
+      # tag's multi-arch index digest from Docker Hub and update the tag and the digest together
+      NODE_IMAGE: docker.io/library/node:26.12.1-alpine@sha256:40cd011b55415bc894e45b02fdd5a5dfde056921b7d23a64c74f80497af48797
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # the UI installs, checks and builds in the pinned Node image rather than with the
+      # runner's preinstalled Node, which changes with the runner image
+      - name: Install UI Dependencies
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            -v "${GITHUB_WORKSPACE}/ui:/ui" -w /ui "$NODE_IMAGE" npm ci
+      # style problems only warn so they never block a UI build
+      - name: Check UI Style
+        continue-on-error: true
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            -v "${GITHUB_WORKSPACE}/ui:/ui" -w /ui "$NODE_IMAGE" npm run validate-style ||
+            echo "::warning title=UI style::prettier found style issues; run 'npm run format' in ui/"
+      - name: Build UI Bundle
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            -v "${GITHUB_WORKSPACE}/ui:/ui" -w /ui "$NODE_IMAGE" npm run build
+      - name: Upload UI Bundle Artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: thorium-ui-bundle
+          path: ui/dist/
+
+  build-glibc-binaries:
+    name: Build Thorium glibc Binaries
+    needs: changes
+    if: needs.changes.outputs.image == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      RUSTFLAGS: "-C target-feature=+aes,+sse2"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # only the server binaries the image runs; it takes thorctl, the agent, and the reactor
+      # from the musl and Windows builds
+      - name: Build binaries
+        run: |
+          rustup install nightly
+          rustup default nightly
+          lscpu
+          cargo build --release --features vendored-openssl -p thorium-api -p thorium-operator \
+            -p thoradm -p thorium-scaler -p thorium-search-streamer -p thorium-event-handler
+          cargo doc --no-deps
+          # gather the binaries the container build needs into one artifact
+          mkdir glibc
+          mv target/release/thoradm glibc/.
+          mv target/release/thorium-api glibc/.
+          mv target/release/thorium-scaler glibc/.
+          mv target/release/thorium-event-handler glibc/.
+          mv target/release/thorium-search-streamer glibc/.
+          mv target/release/thorium-operator glibc/.
+          mv target/doc dev_docs
+      - name: Upload glibc binaries as artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: thorium-glibc-binaries
+          path: glibc/
+      - name: Upload dev docs as artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: thorium-dev-docs-bundle
+          path: dev_docs/
+
+  build-cross-binaries:
+    name: Build Thorium Cross - ${{ matrix.platform.os-name }}
+    needs: changes
+    if: needs.changes.outputs.image == 'true'
+    strategy:
+      matrix:
+        platform:
+          - os-name: Linux-x86_64
+            runs-on: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            flags: "-C target-feature=+aes,+sse2"
+          #- os-name: Linux-aarch64
+          #  runs-on: ubuntu-24.04
+          #  target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.platform.runs-on }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # musl-tools (musl-gcc) is the one package the musl build needs beyond the runner image's own
+      # tools. Each apt-get is bounded and the whole install retried, and the step timeout stops a
+      # stalled mirror from holding the job
+      - name: Install musl-tools
+        timeout-minutes: 10
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 120 apt-get -o Acquire::Retries=3 update &&
+              sudo timeout 120 apt-get -o Acquire::Retries=3 install -y --no-install-recommends musl-tools; then
+              exit 0
+            fi
+            echo "::warning::installing musl-tools failed (attempt ${attempt} of 3)"
+            sleep 10
+          done
+          exit 1
+      # only the binaries the image serves for this target
+      - name: Build binary
+        uses: houseabsolute/actions-rust-cross@21b0f18dc621b25bfae556ff2791fca4173121e8 # v1.0.8
+        env:
+          RUSTFLAGS: "${{ matrix.platform.flags }}"
+        with:
+          command: build
+          target: ${{ matrix.platform.target }}
+          toolchain: nightly
+          args: "--features vendored-openssl --release -p thorctl -p thorium-agent -p thorium-reactor -p thoradm -p thorium-operator"
+          strip: true
+          # these binaries are published, so never restore caches another workflow run could have written
+          use-rust-cache: false
+          cache-cross-binary: false
+      - name: Upload ${{ matrix.platform.target }} binary artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.platform.target }}-binaries
+          path: |
+            target/${{ matrix.platform.target }}/release/thorctl
+            target/${{ matrix.platform.target }}/release/thorium-agent
+            target/${{ matrix.platform.target }}/release/thorium-reactor
+            target/${{ matrix.platform.target }}/release/thoradm
+            target/${{ matrix.platform.target }}/release/thorium-operator
+          if-no-files-found: error
+
+  # The three Windows binaries build in one job. actions-rust-cross builds this target through
+  # cross, whose image carries the MinGW toolchain, so the runner installs no packages
+  build-windows-cross-binaries:
+    name: Build Thorium Cross - Windows
+    needs: changes
+    if: needs.changes.outputs.image == 'true'
+    # This needs to run on Ubuntu or agent builds fail
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      RUSTFLAGS: "-C target-feature=+aes,+sse2"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build Windows Cross agent and thorctl Binaries
+        uses: houseabsolute/actions-rust-cross@21b0f18dc621b25bfae556ff2791fca4173121e8 # v1.0.8
+        with:
+          command: build
+          target: x86_64-pc-windows-gnu
+          toolchain: nightly
+          args: "--features vendored-openssl --release -p thorium-agent -p thorctl"
+          strip: true
+          # these binaries are published, so never restore caches another workflow run could have written
+          use-rust-cache: false
+          cache-cross-binary: false
+      # the reactor builds on its own and without default features, as GitLab builds it
+      - name: Build Windows Cross reactor Binary
+        uses: houseabsolute/actions-rust-cross@21b0f18dc621b25bfae556ff2791fca4173121e8 # v1.0.8
+        with:
+          command: build
+          target: x86_64-pc-windows-gnu
+          toolchain: nightly
+          args: "--features vendored-openssl --release --no-default-features -p thorium-reactor"
+          strip: true
+          # these binaries are published, so never restore caches another workflow run could have written
+          use-rust-cache: false
+          cache-cross-binary: false
+      - name: Upload agent x86_64-pc-windows-gnu binary artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: x86_64-pc-windows-gnu-agent
+          path: target/x86_64-pc-windows-gnu/release/thorium-agent.exe
+          if-no-files-found: error
+      - name: Upload thorctl x86_64-pc-windows-gnu binary artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: x86_64-pc-windows-gnu-thorctl
+          path: target/x86_64-pc-windows-gnu/release/thorctl.exe
+          if-no-files-found: error
+      - name: Upload reactor x86_64-pc-windows-gnu binary artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: x86_64-pc-windows-gnu-reactor
+          path: target/x86_64-pc-windows-gnu/release/thorium-reactor.exe
+          if-no-files-found: error
+
+  # Both macOS targets build in one cargo invocation on one runner, so a run needs only one macOS
+  # runner (the pool GitHub most often fails to assign) and build scripts and proc macros compile
+  # once. It waits for the Linux-hosted Rust builds, so it asks for that runner once, after
+  # the other builds have taken theirs, and never when the image could not be built anyway. The
+  # image serves only thorctl for macOS. Cargo runs directly, as actions-rust-cross does on macOS,
+  # since that action takes a single target.
+  build-macos-binaries:
+    name: Build Thorium Cross - macOS
+    needs:
+      - changes
+      - build-glibc-binaries
+      - build-cross-binaries
+      - build-windows-cross-binaries
+    if: needs.changes.outputs.image == 'true'
+    runs-on: macOS-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust nightly
+        run: rustup toolchain install nightly --profile minimal --target aarch64-apple-darwin --target x86_64-apple-darwin
+      # gxhash needs AES, which aarch64-apple-darwin enables by default and x86_64 needs named.
+      # Target-specific flags keep each target's own; RUSTFLAGS would apply to both
+      - name: Build thorctl
+        env:
+          CARGO_TARGET_X86_64_APPLE_DARWIN_RUSTFLAGS: "-C target-feature=+aes,+sse2"
+        run: |
+          cargo +nightly build --release --features vendored-openssl -p thorctl \
+            --target aarch64-apple-darwin --target x86_64-apple-darwin
+          strip target/aarch64-apple-darwin/release/thorctl target/x86_64-apple-darwin/release/thorctl
+      - name: Upload aarch64-apple-darwin binary artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: aarch64-apple-darwin-binaries
+          path: target/aarch64-apple-darwin/release/thorctl
+          if-no-files-found: error
+      - name: Upload x86_64-apple-darwin binary artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: x86_64-apple-darwin-binaries
+          path: target/x86_64-apple-darwin/release/thorctl
+          if-no-files-found: error
+
+  build-core-container:
+    name: Build Thorium Core Container
+    needs:
+      - changes
+      - build-mdbook-docs
+      - build-ui-bundle
+      - build-glibc-binaries
+      - build-cross-binaries
+      - build-macos-binaries
+      - build-windows-cross-binaries
+    if: needs.changes.outputs.image == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+      latest-image: ${{ steps.image.outputs.latest-image }}
+      latest-source: ${{ steps.image.outputs.latest-source }}
+      publish: ${{ steps.image.outputs.publish }}
+      # whether the saved image was uploaded, so the scan job is skipped when there is none
+      saved: ${{ steps.upload.outcome == 'success' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download UI Bundle Artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: thorium-ui-bundle
+          path: ui/dist
+      - name: Download mdBook Bundle Artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: thorium-mdbook-bundle
+          path: user_docs
+      - name: Download Developer Docs Artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: thorium-dev-docs-bundle
+          path: dev_docs
+      - name: Download Thorium glibc Binary Artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: thorium-glibc-binaries
+          path: glibc
+      - name: Download Thorium musl Binary Artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: x86_64-unknown-linux-musl-binaries
+          path: musl
+      #- name: Download Thorium Linux aarch64 Binary artifacts
+      #  uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      #  with:
+      #    name: aarch64-unknown-linux-musl-binaries
+      #    path: aarch
+      - name: Download Thorium Windows Agent Artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: x86_64-pc-windows-gnu-agent
+          path: windows/agent
+      - name: Download Thorium Windows Thorctl Artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: x86_64-pc-windows-gnu-thorctl
+          path: windows/thorctl
+      - name: Download Thorium Windows Reactor Artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: x86_64-pc-windows-gnu-reactor
+          path: windows/reactor
+      - name: Download Thorium macos x86_64 Binary Artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: x86_64-apple-darwin-binaries
+          path: macos/x86_64
+      - name: Download Thorium macos aarch64 Binary Artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: aarch64-apple-darwin-binaries
+          path: macos/aarch64
+      - name: Stage Artifacts For Container Build
+        run: |
+          mkdir -p glibc
+          mkdir -p target/release
+          mkdir -p target/doc
+          mkdir -p api/docs/book
+          mkdir -p target/x86_64-unknown-linux-musl/release
+          mkdir -p target/x86_64-pc-windows-gnu/release
+          mkdir -p target/x86_64-apple-darwin/release
+          mkdir -p target/aarch64-apple-darwin/release
+          mkdir -p target/aarch64-unknown-linux-musl/release
+          mv user_docs/* api/docs/book
+          mv dev_docs/* target/doc/.
+          mv glibc/* target/release/.
+          mv musl/* target/x86_64-unknown-linux-musl/release/.
+          # mv aarch64/* target/aarch64-unknown-linux-musl/release/.
+          mv windows/agent/thorium-agent.exe target/x86_64-pc-windows-gnu/release/
+          mv windows/thorctl/thorctl.exe target/x86_64-pc-windows-gnu/release/
+          mv windows/reactor/thorium-reactor.exe target/x86_64-pc-windows-gnu/release/
+          mv macos/x86_64/* target/x86_64-apple-darwin/release/.
+          mv macos/aarch64/* target/aarch64-apple-darwin/release/.
+      # .github/scripts/release_refs.py picks the image tag, whether to publish it, and which release
+      # `latest` points at; see its docstring for the rules
+      - name: Choose Image Tags
+        id: image
+        env:
+          IS_FORK: ${{ github.event.repository.fork }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: python3 .github/scripts/release_refs.py image
+      - name: Build Thorium Container Image
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+        run: docker build --file ./Dockerfile --tag "$IMAGE" --label "runnumber=${GITHUB_RUN_ID}" .
+      # the image is saved for the vulnerability scan, and handed to the publish job so the
+      # registry token never shares a job with the build
+      - name: Save Thorium Container Image
+        id: save
+        # a build that is not published only needs the tar for the scan, so failing to save it,
+        # such as running out of disk, does not fail the build
+        continue-on-error: ${{ steps.image.outputs.publish != 'true' }}
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+        run: docker save --output "${RUNNER_TEMP}/thorium-image.tar" "$IMAGE"
+      # handed to the publish job and the scan job, so the scan never delays or blocks publishing
+      - name: Upload Thorium Container Image
+        id: upload
+        if: steps.save.outcome == 'success'
+        # as with saving, a build that is not published only needs the image for the scan
+        continue-on-error: ${{ steps.image.outputs.publish != 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: thorium-core-image
+          path: ${{ runner.temp }}/thorium-image.tar
+          retention-days: 1
+
+  publish-core-container:
+    name: Publish Thorium Core Container
+    needs: build-core-container
+    if: needs.build-core-container.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      packages: write # push images to ghcr.io
+    steps:
+      - name: Download Thorium Container Image
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: thorium-core-image
+          path: ${{ runner.temp }}/image
+      - name: Load Thorium Container Image
+        run: docker load --input "${RUNNER_TEMP}/image/thorium-image.tar"
+      - name: Login to Container Registry
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Push Thorium Container Image
+        env:
+          IMAGE: ${{ needs.build-core-container.outputs.image }}
+        run: docker push "$IMAGE"
+      # copies the release's manifest in the registry, so the release image is never rebuilt
+      - name: Point latest at the Highest Release
+        if: needs.build-core-container.outputs.latest-source != ''
+        env:
+          LATEST_SOURCE: ${{ needs.build-core-container.outputs.latest-source }}
+          LATEST_IMAGE: ${{ needs.build-core-container.outputs.latest-image }}
+        run: |
+          # a release tag's own run may still be building when the default branch reaches it, so a
+          # missing release image is skipped while any other failure fails the step
+          if ! INSPECT=$(docker buildx imagetools inspect "$LATEST_SOURCE" 2>&1); then
+            if grep -qi "not found" <<< "$INSPECT"; then
+              echo "::warning::${LATEST_SOURCE} is not published yet, so latest was not updated"
+              exit 0
+            fi
+            echo "$INSPECT"
+            echo "::error::Failed to inspect ${LATEST_SOURCE}"
+            exit 1
+          fi
+          echo "Pointing latest at ${LATEST_SOURCE}"
+          docker buildx imagetools create --tag "$LATEST_IMAGE" "$LATEST_SOURCE"
+
+  # Every build of the image is scanned, the published one included, with the digest-pinned Trivy
+  # image the security workflows use (image-rescan.yml rescans published images weekly). Trivy
+  # reads the saved image, so it gets no Docker socket, and needs the network only for its
+  # vulnerability database. Vulnerabilities, and failures to scan, only warn, so this job never
+  # fails the run, and the step timeouts keep a stalled download from running into the job's.
+  scan-core-container:
+    name: Scan Thorium Core Container
+    needs:
+      - build-core-container
+      - publish-core-container
+    if: ${{ !cancelled() && needs.build-core-container.outputs.saved == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    continue-on-error: true
+    permissions:
+      contents: read
+    env:
+      # trivy 0.76.1 (Apache-2.0 open source edition)
+      TRIVY_IMAGE: ghcr.io/aquasecurity/trivy@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download Thorium Container Image
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: thorium-core-image
+          path: ${{ runner.temp }}/image
+      - name: Scan Thorium Container Image
+        id: scan
+        continue-on-error: true
+        timeout-minutes: 15
+        run: |
+          # Trivy spills large files to TMPDIR while analyzing, so it is on disk under the cache
+          # rather than in the small /tmp tmpfs
+          mkdir -p "${RUNNER_TEMP}/trivy-image" "${RUNNER_TEMP}/trivy-cache/tmp"
+          docker run --rm --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --user "$(id -u):$(id -g)" \
+            --tmpfs /tmp:rw,size=512m -e HOME=/tmp -e TMPDIR=/cache/tmp -w /tmp \
+            -v "${RUNNER_TEMP}/image/thorium-image.tar:/in/thorium-image.tar:ro" \
+            -v "${RUNNER_TEMP}/trivy-cache:/cache" \
+            -v "${RUNNER_TEMP}/trivy-image:/out" \
+            "$TRIVY_IMAGE" image --input /in/thorium-image.tar --scanners vuln --list-all-pkgs \
+            --skip-version-check --timeout 10m --cache-dir /cache --format json --output /out/thorium.json
+      # the CycloneDX SBOM is converted from the scan, so the image is read once
+      - name: Write Thorium Container Image SBOM
+        if: steps.scan.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --user "$(id -u):$(id -g)" \
+            --tmpfs /tmp:rw,size=512m -e HOME=/tmp -w /tmp \
+            -v "${RUNNER_TEMP}/trivy-image:/out" \
+            "$TRIVY_IMAGE" convert --format cyclonedx --output /out/thorium.cdx.json /out/thorium.json
+      # ranks findings by EPSS and CISA KEV (downloaded in full, so no CVE IDs leave the runner)
+      - name: Report Thorium Container Image Vulnerabilities
+        if: steps.scan.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 15
+        env:
+          IMAGE: ${{ needs.build-core-container.outputs.image }}
+        run: |
+          python3 .github/scripts/vuln_report.py --input "${RUNNER_TEMP}/trivy-image/thorium.json" \
+            --image-name "$IMAGE" --dockerfile Dockerfile \
+            --sarif "${RUNNER_TEMP}/trivy-image/trivy-image.sarif" \
+            --json "${RUNNER_TEMP}/trivy-image/vulnerabilities.json" \
+            --markdown "${RUNNER_TEMP}/trivy-image/vulnerabilities.md"
+          cat "${RUNNER_TEMP}/trivy-image/vulnerabilities.md" >> "$GITHUB_STEP_SUMMARY"
+          python3 .github/scripts/lint_report.py --tool trivy-image --format sarif --collapse-by-rule \
+            --input "${RUNNER_TEMP}/trivy-image/trivy-image.sarif" \
+            --sarif-output "${RUNNER_TEMP}/trivy-image/trivy-image-filtered.sarif" \
+            --ignore-file .github/lint-ignore.toml \
+            --output-dir "${RUNNER_TEMP}/trivy-image" --fail-level none
+      - name: Store Thorium Container Image Scan
+        if: ${{ !cancelled() && steps.scan.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: trivy-image-report
+          path: ${{ runner.temp }}/trivy-image/
+          retention-days: 30
+
+  # uploads the image scan to code scanning in a job that runs no build or scanner code, so the
+  # `security-events: write` token never shares a job with them
+  upload-core-image-scan:
+    name: Upload Thorium Core Container Scan
+    needs: scan-core-container
+    # Pushes only: a pull request's upload would make GitHub's code scanning check fail on high
+    # severity CVEs, and image vulnerabilities only warn. Pull requests still get the artifact,
+    # job summary and annotations.
+    if: ${{ !cancelled() && needs.scan-core-container.result == 'success' && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # a missing or unreadable scan never fails the run
+    continue-on-error: true
+    permissions:
+      contents: read
+      security-events: write # upload SARIF results to code scanning
+    steps:
+      - name: Download Thorium Container Image Scan
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: trivy-image-report
+          path: ${{ runner.temp }}/trivy-image
+      # the report step may have failed after the scan, leaving no SARIF to upload
+      - name: Check for filtered SARIF
+        id: sarif
+        run: |
+          if [ -f "${RUNNER_TEMP}/trivy-image/trivy-image-filtered.sarif" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No filtered SARIF in the scan artifact; nothing to upload"
+          fi
+      # the filtered SARIF leaves out findings ignored by .github/lint-ignore.toml
+      - name: Upload Thorium Container Image Scan SARIF
+        if: steps.sarif.outputs.found == 'true'
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: ${{ runner.temp }}/trivy-image/trivy-image-filtered.sarif
+          category: trivy-image-build
+
+  # The checks below wait for the publish job, whatever it concluded, so they take runners only
+  # once the builds have theirs; a failed or skipped build or publish never stops them. The
+  # reusable workflows are called with `./`, the local syntax actionlint and GitHub's docs use,
+  # rather than the `$/` form zizmor suggests, which actionlint rejects
+
+  rust-check:
+    name: Rust Check
+    needs:
+      - changes
+      - publish-core-container
+    if: ${{ !cancelled() && needs.changes.outputs.rust == 'true' }}
+    permissions:
+      contents: read # check out the repository
+    uses: ./.github/workflows/rust-check.yml # zizmor: ignore[self-repository]
+
+  security-scan:
+    name: Security Scan
+    needs:
+      - changes
+      - publish-core-container
+    if: ${{ !cancelled() && needs.changes.outputs.checks == 'true' }}
+    permissions:
+      contents: read # check out the repository
+      security-events: write # upload SARIF results to code scanning
+    uses: ./.github/workflows/security-scan.yml # zizmor: ignore[self-repository]
+
+  workflow-lint:
+    name: Workflow Lint
+    needs:
+      - changes
+      - publish-core-container
+    if: ${{ !cancelled() && needs.changes.outputs.workflows == 'true' }}
+    permissions:
+      contents: read # check out the repository, and let zizmor and the pin check query GitHub
+      security-events: write # upload SARIF results to code scanning
+    uses: ./.github/workflows/workflow-lint.yml # zizmor: ignore[self-repository]
+
+  dockerfile-lint:
+    name: Dockerfile Lint
+    needs:
+      - changes
+      - publish-core-container
+    if: ${{ !cancelled() && needs.changes.outputs.dockerfiles == 'true' }}
+    permissions:
+      contents: read # check out the repository
+      security-events: write # upload SARIF results to code scanning
+    uses: ./.github/workflows/dockerfile-lint.yml # zizmor: ignore[self-repository]
+
+  versions:
+    name: version consistency
+    needs:
+      - changes
+      - publish-core-container
+    if: ${{ !cancelled() && needs.changes.outputs.checks == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read # check out the repository
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # every copy of the version (Cargo, the web UI, the charts, deployment defaults, and docs)
+      # must match the workspace version; `python3 .github/scripts/versions.py bump` fixes them
+      - name: Check versions
+        run: python3 .github/scripts/versions.py check
+
+  helm-lint:
+    name: Lint Helm Charts
+    needs:
+      - changes
+      - publish-core-container
+    if: ${{ !cancelled() && needs.changes.outputs.charts == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+          token: ""
+      # helm lint can't read the generated credentials back from a cluster, so the thorium chart
+      # is linted with secrets.renderOnly for its templates to render at all
+      - name: Lint
+        run: |
+          helm lint --strict "$CHARTS/infra-operators"
+          helm lint --strict -n thorium --set secrets.renderOnly=true "$CHARTS/thorium"
+      # secrets.renderOnly stands in placeholder credentials, since helm template can't read the
+      # generated ones back from a cluster and the chart refuses to regenerate them otherwise
+      - name: Render the default, namespace-prefixed, and production deployments
+        run: |
+          helm template infra-operators "$CHARTS/infra-operators" -n infra-operators > /dev/null
+          helm template thorium "$CHARTS/thorium" -n thorium --set secrets.renderOnly=true > /dev/null
+          helm template thorium "$CHARTS/thorium" -n dev-thorium --set secrets.renderOnly=true > /dev/null
+          helm template thorium "$CHARTS/thorium" -n thorium -f "$CHARTS/thorium/values-production.yaml" \
+            --set secrets.renderOnly=true > /dev/null
+      # the example values files in the docs must keep rendering, alone and layered
+      - name: Render the example values files
+        run: |
+          for example in "$CHARTS"/examples/*.yaml "$CHARTS/thorium/values-production.yaml"; do
+            echo "rendering $example"
+            helm template thorium "$CHARTS/thorium" -n thorium --set secrets.renderOnly=true \
+              -f "$example" > /dev/null
+          done
+          helm template thorium "$CHARTS/thorium" -n thorium --set secrets.renderOnly=true \
+            -f "$CHARTS/thorium/values-production.yaml" -f "$CHARTS/examples/site.yaml" > /dev/null
+      - name: Check the chart refuses to regenerate credentials without renderOnly
+        run: |
+          if stderr=$(helm template thorium "$CHARTS/thorium" -n thorium 2>&1 > /dev/null); then
+            echo "helm template rendered generated credentials without secrets.renderOnly"
+            exit 1
+          fi
+          if ! grep -q "so these credentials would be regenerated" <<< "$stderr"; then
+            echo "helm template failed for another reason than the credentials guard:"
+            echo "$stderr"
+            exit 1
+          fi
+      # the Thorium namespace names the Scylla keyspace and prefixes the Redis keys, so the chart
+      # takes only lowercase letters, digits and underscores, a leading letter, and 48 characters
+      - name: Check the chart refuses a Thorium namespace the operator would refuse
+        run: |
+          longest="n$(head -c 47 /dev/zero | tr '\0' a)"
+          for good in thorium thorium_dev2 "$longest"; do
+            helm template thorium "$CHARTS/thorium" -n thorium --set secrets.renderOnly=true \
+              --set-string operator.cluster.config.thorium.namespace="$good" > /dev/null
+          done
+          for bad in Thorium thorium-dev 1thorium _thorium "" "${longest}a"; do
+            if stderr=$(helm template thorium "$CHARTS/thorium" -n thorium --set secrets.renderOnly=true \
+              --set-string operator.cluster.config.thorium.namespace="$bad" 2>&1 > /dev/null); then
+              echo "helm template accepted the Thorium namespace '$bad'"
+              exit 1
+            fi
+            if ! grep -q "/cluster/config/thorium/namespace" <<< "$stderr"; then
+              echo "helm template refused '$bad' for another reason than the namespace pattern:"
+              echo "$stderr"
+              exit 1
+            fi
+            if helm lint --strict -n thorium --set secrets.renderOnly=true \
+              --set-string operator.cluster.config.thorium.namespace="$bad" "$CHARTS/thorium" > /dev/null 2>&1; then
+              echo "helm lint accepted the Thorium namespace '$bad'"
+              exit 1
+            fi
+          done
+      # PyYAML comes from the distro's signed packages when the runner image lacks it
+      - name: Install PyYAML
+        run: python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update && sudo apt-get install -y python3-yaml; }
+      # the toolbox import Job's thorctl flags and retry limit follow the operator.toolbox values
+      - name: Check the toolbox import Job for each toolbox value combination
+        run: |
+          "$CHARTS/scripts/check-toolbox-job.sh"
+      - name: Check the namespace blacklist covers every prefixed namespace
+        run: |
+          helm template thorium "$CHARTS/thorium" -n dev-thorium --set secrets.renderOnly=true \
+            --set 'operator.cluster.namespaceBlacklist={extra}' \
+            --show-only charts/operator/templates/thoriumcluster.yaml \
+            | python3 -c '
+          import sys, yaml
+          cluster = next(d for d in yaml.safe_load_all(sys.stdin) if d and d.get("kind") == "ThoriumCluster")
+          found = set(cluster["spec"]["config"]["thorium"]["namespace_blacklist"])
+          prefixed = {f"dev-{ns}" for ns in ("thorium", "redis", "scylla", "elastic", "seaweedfs", "quickwit", "jaeger")}
+          fixed = {"infra-operators", "kube-system", "kube-public", "kube-node-lease", "default", "thorium", "scylla", "scylla-operator", "cert-manager", "redis", "elastic-system", "jaeger", "quickwit", "extra"}
+          missing = sorted((prefixed | fixed) - found)
+          if missing:
+              sys.exit(f"thorium.namespace_blacklist is missing {missing}")
+          '
+      # A dev cluster is marked by a label a cluster admin puts on the Thorium Namespace, so the
+      # chart must never render that Namespace or let anything it deploys change Namespaces, and
+      # the operator must be able to read it
+      - name: Check the operator only reads Namespaces and the chart never labels one
+        run: |
+          for own in true false; do
+            helm template thorium "$CHARTS/thorium" -n thorium --set secrets.renderOnly=true \
+              --set operator.cluster.upgrade.autoTargetDev=true \
+              --set operator.controller.watchOwnNamespaceOnly=$own \
+              | OWN=$own python3 -c '
+          import os, sys, yaml
+          docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+          own = os.environ["OWN"] == "true"
+          # the chart never renders the release Namespace, which helm install --create-namespace makes
+          named = [d["metadata"]["name"] for d in docs if d.get("kind") == "Namespace"]
+          if "thorium" in named:
+              sys.exit("the chart renders the release Namespace thorium")
+          # nothing the chart deploys may change a Namespace, so only a cluster admin sets its labels
+          for doc in docs:
+              if doc.get("kind") not in ("ClusterRole", "Role"):
+                  continue
+              for rule in doc.get("rules") or []:
+                  if "namespaces" in rule.get("resources", []) and set(rule.get("verbs", [])) & {"patch", "update", "*"}:
+                      sys.exit(doc["kind"] + " " + doc["metadata"]["name"] + " can change Namespaces: " + str(rule))
+          # the operator reads the Namespace, limited to the release namespace when it watches only it
+          role = next(d for d in docs if d.get("kind") == "ClusterRole" and d["metadata"]["name"] == "thorium-operator")
+          reads = [r for r in role["rules"] if "namespaces" in r.get("resources", []) and "get" in r.get("verbs", [])]
+          if not reads:
+              sys.exit("the operator ClusterRole cannot get Namespaces")
+          if own and any(r.get("resourceNames") != ["thorium"] for r in reads):
+              sys.exit(f"with watchOwnNamespaceOnly the Namespace read must be limited to thorium: {reads}")
+          print("watchOwnNamespaceOnly=" + os.environ["OWN"] + ": ok")
+          '
+          done
+      # Thorium namespaces sharing an S3 endpoint must not share buckets, so the default bucket
+      # names follow the release namespace, while names set in the config (as convert-to-helm.sh
+      # writes them) win
+      - name: Check the default bucket names follow the release namespace
+        run: |
+          check_buckets() {
+            local name=$1 namespace=$2 expected=$3
+            shift 3
+            helm template thorium "$CHARTS/thorium" -n "$namespace" --set secrets.renderOnly=true "$@" \
+              --show-only charts/operator/templates/thoriumcluster.yaml \
+              | EXPECTED="$expected" python3 -c '
+          import json, os, sys, yaml
+          cluster = next(d for d in yaml.safe_load_all(sys.stdin) if d and d.get("kind") == "ThoriumCluster")
+          config = cluster["spec"]["config"]["thorium"]
+          expected = json.loads(os.environ["EXPECTED"])
+          found = {kind: config.get(kind, {}).get("bucket") for kind in expected}
+          if found != expected:
+              sys.exit(f"expected buckets {expected}, rendered {found}")
+          '
+            echo "$name: ok"
+          }
+          kinds="files repos attachments results ephemeral graphics reaction_cache"
+          expect() {
+            local prefix=$1 kind suffix sep="" out="{"
+            for kind in $kinds; do
+              suffix=$kind
+              [ "$kind" = reaction_cache ] && suffix=reaction-cache-files
+              out+="$sep\"$kind\": \"$prefix-$suffix\""
+              sep=", "
+            done
+            echo "$out}"
+          }
+          check_buckets thorium thorium "$(expect thorium)"
+          check_buckets dev-thorium dev-thorium "$(expect dev-thorium)"
+          check_buckets explicit dev-thorium \
+            '{"files": "legacy-files", "graphics": "legacy-graphics", "repos": "dev-thorium-repos"}' \
+            --set operator.cluster.config.thorium.files.bucket=legacy-files \
+            --set operator.cluster.config.thorium.graphics.bucket=legacy-graphics
+      # ECK's self-signed HTTP certificate omits the .svc.<clusterDomain> name Thorium connects
+      # to unless the Elasticsearch resource adds it as a subject alternative name
+      - name: Check the Elasticsearch certificate covers the host Thorium connects to
+        run: |
+          for ns in thorium dev-thorium; do
+            helm template thorium "$CHARTS/thorium" -n "$ns" --set secrets.renderOnly=true \
+              --set global.clusterDomain=cluster.example \
+              --show-only charts/operator/templates/thoriumcluster.yaml \
+              --show-only charts/infra/templates/elastic.yaml \
+              | python3 -c '
+          import sys, yaml
+          from urllib.parse import urlparse
+          docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+          cluster = next(d for d in docs if d["kind"] == "ThoriumCluster")
+          elastic = next(d for d in docs if d["kind"] == "Elasticsearch")
+          host = urlparse(cluster["spec"]["config"]["elastic"]["node"]).hostname
+          sans = elastic["spec"].get("http", {}).get("tls", {}).get("selfSignedCertificate", {}).get("subjectAltNames", [])
+          if {"dns": host} not in sans:
+              sys.exit(f"the Elasticsearch certificate SANs {sans} do not include {host}")
+          print(f"{host} is in the Elasticsearch certificate SANs")
+          '
+          done
+      - name: Check every image follows global.imageRegistry
+        run: |
+          stray=$(helm template thorium "$CHARTS/thorium" -n thorium --set secrets.renderOnly=true \
+            --set global.imageRegistry=mirror.invalid \
+            | grep -E '^\s*(- )?(image|repository|agentRepository|registry):' \
+            | grep -v 'mirror.invalid' || true)
+          if [ -n "$stray" ]; then
+            echo "Images not using global.imageRegistry:"
+            echo "$stray"
+            exit 1
+          fi
+          stray=$(helm template infra-operators "$CHARTS/infra-operators" -n infra-operators \
+            --set global.imageRegistry=mirror.invalid \
+            | grep -E '^\s*(- )?(image|scyllaUtilsImage|unsupportedBashToolsImageOverride):\s*\S' \
+            | grep -v 'mirror.invalid' || true)
+          if [ -n "$stray" ]; then
+            echo "infra-operators images not using global.imageRegistry:"
+            echo "$stray"
+            exit 1
+          fi
+      - name: List images
+        run: |
+          "$CHARTS/scripts/list-images.sh"
+
+  # packages beside the chart lint rather than after it, so a lint failure never blocks packaging
+  # or publishing; like the checks it waits for the image publish, whatever it concluded
+  helm-package:
+    name: Package Helm Charts
+    needs:
+      - changes
+      - publish-core-container
+    if: ${{ !cancelled() && needs.changes.outputs.charts == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+          token: ""
+      # .github/scripts/release_refs.py picks the chart version, whether to publish, and the image the
+      # thorium chart deploys; see its docstring for the rules
+      - name: Choose the chart version
+        id: version
+        env:
+          IS_FORK: ${{ github.event.repository.fork }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: python3 .github/scripts/release_refs.py chart "$CHARTS/thorium/Chart.yaml" "$CHARTS/infra-operators/Chart.yaml"
+      # deploy/charts/scripts/package.sh points the thorium chart at this ref's image and checks the
+      # rendered result before packaging
+      - name: Package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          IMAGE_REPOSITORY: ${{ steps.version.outputs.image-repository }}
+          IMAGE_TAG: ${{ steps.version.outputs.image-tag }}
+        run: |
+          "$CHARTS/scripts/package.sh" -d dist --version "$VERSION" --image-repository "$IMAGE_REPOSITORY" \
+            --image-tag "$IMAGE_TAG"
+      - name: Upload packaged charts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: helm-charts
+          path: dist/*.tgz
+          retention-days: 7
+
+  helm-publish:
+    name: Publish Helm Charts
+    needs:
+      - changes
+      - helm-package
+      - publish-core-container
+    # A run that built the image publishes the charts only once the image they deploy is
+    # published, so a chart never points at an image that failed to publish. A run that skipped
+    # the image publishes the charts on their own; the image for the ref is already in the registry
+    if: >-
+      ${{ !cancelled() && needs.helm-package.result == 'success' && needs.helm-package.outputs.publish == 'true' &&
+      (needs.changes.outputs.image != 'true' || needs.publish-core-container.result == 'success') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      packages: write # push charts to ghcr.io
+    steps:
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+          token: ""
+      - name: Download packaged charts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: helm-charts
+          path: ${{ runner.temp }}/charts
+      - name: Log in to the container registry
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GHCR_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      # ghcr can briefly fail to tag a manifest it was just sent when pushes of the same blobs
+      # overlap, so each push is retried; pushing the same chart again is harmless
+      - name: Push
+        run: |
+          repo="${GITHUB_REPOSITORY,,}"
+          for chart in "${RUNNER_TEMP}"/charts/*.tgz; do
+            for delay in 10 30 0; do
+              if helm push "$chart" "oci://ghcr.io/${repo}/charts"; then
+                break
+              fi
+              if [ "$delay" -eq 0 ]; then
+                echo "::error::helm push of $(basename "$chart") failed 3 times"
+                exit 1
+              fi
+              echo "::warning::helm push of $(basename "$chart") failed; retrying in ${delay}s"
+              sleep "$delay"
+            done
+          done
+
+  # Checks the minithor and megathor deployment tools: the shell scripts are syntax-checked with
+  # bash -n and linted with shellcheck (warnings and above), from the runner image or the distro's
+  # signed packages
+  deploy-tools-shell:
+    name: Lint Shell Scripts
+    needs:
+      - changes
+      - publish-core-container
+    if: ${{ !cancelled() && needs.changes.outputs.deploy-tools == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check syntax
+        run: |
+          for script in minithor/minithor megathor/scripts/*.bash; do
+            bash -n "$script"
+          done
+      # shellcheck comes from the runner image, or the distro's signed packages when it lacks it
+      - name: Install shellcheck
+        run: command -v shellcheck >/dev/null || { sudo apt-get update && sudo apt-get install -y shellcheck; }
+      - name: Run shellcheck
+        run: shellcheck --severity=warning minithor/minithor megathor/scripts/*.bash
+      - name: Check every command's help
+        run: |
+          for cmd in "" minikube "minikube install" "minikube delete" start deploy credentials \
+            get-config expose stop cleanup; do
+            # word splitting turns each entry into its subcommand and arguments
+            # shellcheck disable=SC2086
+            bash minithor/minithor $cmd --help > /dev/null
+          done
+
+  # megathor's thorium chart values template is rendered with its default variables and each
+  # group_vars variant, and every rendering is linted and rendered against deploy/charts/thorium
+  # (and its infra-operators values template against deploy/charts/infra-operators), so a
+  # template change that breaks the chart (or a chart change that breaks megathor) fails here
+  # rather than in a deployment. secrets.renderOnly stands in placeholder credentials, since helm
+  # can't read generated ones back from a cluster.
+  megathor-values:
+    name: Render megathor Values
+    needs:
+      - changes
+      - publish-core-container
+    if: ${{ !cancelled() && needs.changes.outputs.deploy-tools == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+          token: ""
+      # Jinja2 and PyYAML come from the distro's signed packages when the runner image lacks them
+      - name: Install Jinja2 and PyYAML
+        run: |
+          python3 -c 'import jinja2, yaml' 2>/dev/null \
+            || { sudo apt-get update && sudo apt-get install -y python3-jinja2 python3-yaml; }
+      - name: Parse every megathor YAML file
+        run: |
+          find megathor -name '*.yml' -print0 | xargs -0 python3 -c '
+          import sys, yaml
+          for path in sys.argv[1:]:
+              with open(path) as handle:
+                  list(yaml.safe_load_all(handle))
+          '
+      # Each variant renders values.yaml.j2 from every role's defaults and group_vars/all.yml (as
+      # megathor/deploy.yml loads them), any extra vars, and placeholder credentials standing in for the
+      # ones the secrets role sets, then lints and renders the thorium chart with the result
+      - name: Render megathor's values and check them against the thorium chart
+        run: |
+          render_dir="${RUNNER_TEMP}/megathor-values"
+          mkdir -p "$render_dir"
+          creds="${render_dir}/credentials.yml"
+          for var in thorium_secret redis_password scylla_password elastic_password s3_access_key \
+            s3_secret_key quickwit_postgres_super_password thorium_admin_password; do
+            echo "${var}: render-only"
+          done > "$creds"
+          defaults=(megathor/roles/*/defaults/main.yml megathor/inventory/group_vars/all.yml)
+          # check <name> <thorium namespace> [vars files and -e key=value...]
+          check() {
+            local name=$1 namespace=$2
+            shift 2
+            local values="${render_dir}/${name}.yaml"
+            echo "::group::${name}"
+            python3 megathor/scripts/render-values.py megathor/roles/thorium/templates/values.yaml.j2 \
+              "${defaults[@]}" "$@" "$creds" > "$values"
+            helm lint --strict -n "$namespace" -f "$values" --set secrets.renderOnly=true "$CHARTS/thorium"
+            helm template thorium "$CHARTS/thorium" -n "$namespace" -f "$values" \
+              --set secrets.renderOnly=true > /dev/null
+            echo "::endgroup::"
+          }
+          check defaults thorium
+          check offline thorium megathor/inventory/group_vars/offline.yml
+          check single-node thorium megathor/inventory/group_vars/single_node.yml
+          check no-quickwit thorium -e quickwit_enabled=false \
+            -e thorium_tracing_endpoint=http://otel.example.com:4317
+          check external thorium -e redis_enabled=false -e thorium_external_redis_host=redis.example.com \
+            -e rook_enabled=false -e seaweedfs_enabled=false -e s3_endpoint=https://s3.example.com \
+            -e s3_region=us-east-1
+          check prefixed dev-thorium -e namespace_prefix=dev -e thorium_version=1.2.3 \
+            -e thorium_container_registry=registry.example.com:5000 -e thorium_scaler_enabled=false
+          check dev thorium -e thorium_upgrade_auto_target_dev=true \
+            -e thorium_upgrade_dangerous_downgrade_lossy=true
+          grep -q '^      autoTargetDev: true$' "${render_dir}/dev.yaml" \
+            || { echo "thorium_upgrade_auto_target_dev didn't set autoTargetDev"; exit 1; }
+          grep -q '^      dangerousDowngradeLossy: true$' "${render_dir}/dev.yaml" \
+            || { echo "thorium_upgrade_dangerous_downgrade_lossy didn't set dangerousDowngradeLossy"; exit 1; }
+          grep -q '^      dangerousDowngradeLossy: false$' "${render_dir}/defaults.yaml" \
+            || { echo "dangerousDowngradeLossy isn't false by default"; exit 1; }
+          grep -q '^      driftAcknowledged: \[\]$' "${render_dir}/defaults.yaml" \
+            || { echo "driftAcknowledged isn't empty by default"; exit 1; }
+      # Only a dev deployment's namespace keeps the dev label, which marks it a dev cluster
+      - name: Check megathor labels the Thorium namespace only for autoTargetDev
+        run: |
+          python3 - megathor/roles/thorium/tasks/main.yml <<'PY'
+          import sys, yaml
+          tasks = yaml.safe_load(open(sys.argv[1]))
+          def tasks_running(arg):
+              return [t for t in tasks if arg in str(t.get("ansible.builtin.command"))]
+          def gate(task):
+              return " ".join(str(task.get("when")).split())
+          labels = tasks_running("thorium.sandia.gov/dev=true")
+          if len(labels) != 1:
+              sys.exit(f"expected one task labelling the Thorium namespace, found {len(labels)}")
+          if gate(labels[0]) != "thorium_upgrade_auto_target_dev | bool":
+              sys.exit("the namespace label task must only run with thorium_upgrade_auto_target_dev")
+          removals = tasks_running("thorium.sandia.gov/dev-")
+          if len(removals) != 1:
+              sys.exit(f"expected one task removing the namespace label, found {len(removals)}")
+          if gate(removals[0]) != "not (thorium_upgrade_auto_target_dev | bool)":
+              sys.exit("the label removal task must only run without thorium_upgrade_auto_target_dev")
+          PY
+      # minithor's dev label follows autoTargetDev, and a failed ThoriumCluster read changes nothing
+      - name: Check minithor's dev label handling with a stubbed kctl
+        run: |
+          fn="$(sed -n '/^label_dev_namespace() {$/,/^}$/p' minithor/minithor)"
+          [ -n "$fn" ] || { echo "label_dev_namespace not found in minithor"; exit 1; }
+          # run the function against a kctl stub that answers the ThoriumCluster read with $read
+          # (failing when it is "fail") and the label read with $label, and prints label commands
+          check() {
+            local name=$1 read=$2 label=$3 expect=$4 out
+            out="$(
+              export THORIUM_NAMESPACE=thorium
+              # the function under test calls kctl once it is evaluated
+              # shellcheck disable=SC2329
+              kctl() {
+                case "$*" in
+                  *thoriumclusters*) if [ "$read" = fail ]; then return 1; fi; printf '%s' "$read" ;;
+                  *"get namespace"*) printf '%s' "$label" ;;
+                  "label "*) echo "RAN: kctl $*" ;;
+                esac
+              }
+              eval "$fn"
+              label_dev_namespace 2>&1
+            )"
+            if [ "$expect" = none ]; then
+              if grep -q '^RAN:' <<< "$out"; then echo "$name: unexpected $out"; exit 1; fi
+            else
+              grep -qxF "RAN: kctl $expect" <<< "$out" || { echo "$name: expected $expect, got $out"; exit 1; }
+            fi
+            echo "$name: ok"
+          }
+          check auto-true "true" "" "label namespace thorium thorium.sandia.gov/dev=true --overwrite"
+          check auto-false-labelled "false" "true" "label namespace thorium thorium.sandia.gov/dev-"
+          check unset-unlabelled "" "" none
+          check read-fails-labelled fail "true" none
+      - name: Render megathor's infra-operators values and check them against the chart
+        run: |
+          render_dir="${RUNNER_TEMP}/megathor-values"
+          mkdir -p "$render_dir"
+          defaults=(megathor/roles/*/defaults/main.yml megathor/inventory/group_vars/all.yml)
+          for variant in defaults offline; do
+            echo "::group::infra-operators ${variant}"
+            vars=()
+            if [ "$variant" = offline ]; then
+              vars=(megathor/inventory/group_vars/offline.yml)
+            fi
+            values="${render_dir}/infra-operators-${variant}.yaml"
+            python3 megathor/scripts/render-values.py megathor/roles/infra_operators/templates/values.yaml.j2 \
+              "${defaults[@]}" "${vars[@]}" > "$values"
+            helm lint --strict -n infra-operators -f "$values" "$CHARTS/infra-operators"
+            helm template infra-operators "$CHARTS/infra-operators" -n infra-operators -f "$values" > /dev/null
+            echo "::endgroup::"
+          done
+
+  # docs deploy only from main on the core repo, and only after the container image is
+  # published, so the hosted docs never describe an image that failed to publish
+  deploy-updated-pages:
+    name: Deploy GitHub Pages
+    if: ${{ github.ref_type == 'branch' && github.ref == 'refs/heads/main' && !github.event.repository.fork }}
+    needs:
+      - build-mdbook-docs
+      - publish-core-container
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      pages: write # create the GitHub Pages deployment
+      id-token: write # OIDC token deploy-pages uses to authenticate the deployment
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

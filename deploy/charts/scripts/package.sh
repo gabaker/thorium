@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Package the infra-operators and thorium charts as .tgz files, optionally pointing the thorium
-# chart at a specific Thorium image. The Helm Charts workflow publishes what this script builds,
+# chart at a specific Thorium image. The Thorium CI workflow publishes what this script builds,
 # and it can be run by hand to test charts without publishing them.
 #
 #   deploy/charts/scripts/package.sh [options]

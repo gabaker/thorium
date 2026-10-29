@@ -1,8 +1,11 @@
 # Scans the repo for secrets, for Helm and Ansible misconfigurations, and for
 # vulnerable dependencies in its lockfiles, with Trivy (open source edition)
 #
+# - ci.yml calls this workflow on every push and pull request, after its builds
+#   and image publish, whatever they concluded. It also runs weekly and on
+#   demand on its own.
 # - Trivy runs from the same digest-pinned image as dockerfile-lint.yml,
-#   image-rescan.yml and deploy.yml; keep the digests in step.
+#   image-rescan.yml and ci.yml; keep the digests in step.
 # - The secret and IaC scans run with no network, a read-only root filesystem,
 #   no capabilities, as the runner's unprivileged user, and with the repo
 #   mounted read-only. They receive no tokens and no Docker socket, and run
@@ -20,21 +23,18 @@
 #   ui/package-lock.json, and any others) and ranks its findings with
 #   .github/scripts/vuln_report.py with EPSS and CISA KEV data (downloaded in
 #   full, so no CVE IDs leave the runner), attributing each to its lockfile.
-# - The Thorium image is scanned on every build, before it is published, in
-#   deploy.yml, and its published images are rescanned weekly by
+# - The Thorium image is scanned on every build by ci.yml's Scan Thorium Core
+#   Container job, and its published images are rescanned weekly by
 #   image-rescan.yml.
 #
 # To bump Trivy, resolve the new tag's multi-arch index digest from ghcr.io and
 # update both the tag comment and the digest here, in dockerfile-lint.yml,
-# image-rescan.yml and deploy.yml.
+# image-rescan.yml and ci.yml.
 name: Security Scan
 
 on:
-  # Dependabot branches are checked by their pull requests instead, so each
-  # update runs once
-  push:
-    branches: ['**', '!dependabot/**']
-  pull_request:
+  # called by ci.yml for pushes and pull requests
+  workflow_call:
   schedule:
     # weekly, to surface newly disclosed dependency vulnerabilities and new checks
     - cron: '23 6 * * 1'
@@ -42,9 +42,10 @@ on:
 
 permissions: {}
 
-# superseded runs are cancelled, except on main
+# superseded runs are cancelled, except on main. A called run's github.workflow
+# is the caller's name, so the suffix keeps this group apart from the caller's own
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-security-scan-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:

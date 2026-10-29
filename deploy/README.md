@@ -19,7 +19,7 @@ with "Deploying Thorium" (`deploy.md`) and "Install with Helm" (`deploy-helm.md`
 | `charts/scripts/convert-to-helm.sh` | Converts a deployment made by the pre-Helm minithor or megathor scripts so the charts can take it over |
 | `charts/scripts/vendor-charts.sh` | Re-vendors the upstream charts (Quickwit, Scylla operator, ECK operator, Kubegres) with their patches |
 | `charts/scripts/list-images.sh` | Prints every image the charts deploy, with its path in a mirror registry |
-| `charts/scripts/package.sh` | Packages both charts, optionally pointing the thorium chart at a given Thorium image; used by the Helm Charts workflow and for local testing |
+| `charts/scripts/package.sh` | Packages both charts, optionally pointing the thorium chart at a given Thorium image; used by the Thorium CI workflow's Package Helm Charts job and for local testing |
 
 Both charts carry all of their subcharts, so they install from a directory or packaged `.tgz`
 with no dependency downloads.
@@ -41,15 +41,17 @@ move or remove a value, add it to that list and to the schema.
 
 ## Publishing
 
-`.github/workflows/charts.yml` publishes both charts to `oci://ghcr.io/<owner>/<repo>/charts`
+`.github/workflows/ci.yml` publishes both charts to `oci://ghcr.io/<owner>/<repo>/charts`
 (`oci://ghcr.io/cisagov/thorium/charts` for the core repo) under the same rules as the Thorium
 image (`.github/scripts/release_refs.py`): prereleases
 (`<chart version>-<branch>.<run number>.g<short sha>`) from `main` on the core repo and from every
 branch on forks, releases from `X.Y.Z` release tags (equal to the chart version or a prerelease of
-it), and nothing from pull requests. A published thorium chart deploys the image `deploy.yml`
-publishes for the same branch or tag in the same repository, so a fork's charts run that fork's
-image. The two workflows run independently, so a chart can be published before its image is, or
-without one when the image build fails.
+it), and nothing from pull requests. A published thorium chart deploys the image the same
+workflow publishes for the same branch or tag in the same repository, so a fork's charts run that
+fork's image. When a run builds the image, its charts are published only after the image is, and
+not at all when the image fails to build or publish. A run whose changes don't touch the image
+(only the charts, for example) skips the image build and publishes the charts on their own,
+deploying the image already published for that branch or tag.
 
 ## Versions
 

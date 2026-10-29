@@ -1,20 +1,17 @@
 # Runs Thorium's Rust static checks: cargo check, clippy, and rustfmt; the unit tests that need no
 # services along with a check that the chart's CRD matches the operator, the schema change
 # warnings, and a check that the schema pattern test series stays off main; a check that the
-# integration tests compile; thoradm's tests that need no backing services; thorctl's unit tests
-# and its harness tests that need no services; and a check that every copy of Thorium's version
-# matches the Cargo workspace version (.github/scripts/versions.py)
+# integration tests compile; thoradm's tests that need no backing services; and thorctl's unit
+# tests and its harness tests that need no services
 #
-# - Failures are reported here, as failed (red) jobs on the commit and pull
-#   request. This workflow has no `needs` or `workflow_run` link to deploy.yml
-#   or tools.yml, so a failure never gates or blocks a build or image publish.
-#   Any of these jobs can be made a required status check later through branch
+# - ci.yml calls this workflow on pushes and pull requests that change Rust code, after its
+#   builds and image publish, whatever they concluded, so these jobs never gate or block a build
+#   or image publish and a failed build never hides them. It also runs weekly and on demand on
+#   its own. Any of these jobs can be made a required status check later through branch
 #   protection.
 # - Every diagnostic is written to the job log, inline annotations, the job
 #   summary, and a `<check>-report` artifact by .github/scripts/lint_report.py,
 #   so reviewers can read the results without digging through build output.
-#   The version check is small enough to print its mismatches and annotations
-#   itself, and needs no toolchain or cache.
 # - Integration tests are type-checked but not run here; they need ScyllaDB,
 #   Redis, Elasticsearch, and S3. The unit tests and the integration test check
 #   are separate jobs with no `needs` between them, so a failed check never
@@ -31,18 +28,14 @@
 #   request code can never write a cache entry that a main run restores. These
 #   jobs publish nothing, and no other workflow uses the `rust-check-` cache
 #   keys.
-# - Runs on every push to every branch, on every pull request, and weekly. A
-#   same-repo pull request is checked twice (by its push and pull request
-#   runs) so every pull request shows real results that can be made required
-#   checks; a job skipped by a condition would count as passing.
+# - A same-repo pull request is checked twice (by its push and pull request
+#   runs of ci.yml) so every pull request shows real results that can be made
+#   required checks; a job skipped by a condition would count as passing.
 name: Rust Check
 
 on:
-  # Dependabot branches are checked by their pull requests instead, so each
-  # update runs once
-  push:
-    branches: ['**', '!dependabot/**']
-  pull_request:
+  # called by ci.yml for pushes and pull requests
+  workflow_call:
   schedule:
     # weekly, to catch breakage from new nightly toolchains and lints
     - cron: '23 8 * * 1'
@@ -51,9 +44,10 @@ on:
 permissions: {}
 
 # superseded runs are cancelled; runs on main always finish so they can save
-# the cache
+# the cache. A called run's github.workflow is the caller's name, so the suffix
+# keeps this group apart from the caller's own
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-rust-check-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
@@ -628,20 +622,3 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ steps.cache.outputs.cache-primary-key }}
-
-  versions:
-    name: version consistency
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: read # check out the repository
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      # every copy of the version (Cargo, the web UI, the charts, deployment defaults, and docs)
-      # must match the workspace version; `python3 .github/scripts/versions.py bump` fixes them
-      - name: Check versions
-        run: python3 .github/scripts/versions.py check

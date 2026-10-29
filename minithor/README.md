@@ -27,9 +27,10 @@ deploy/charts/scripts/package.sh -d /tmp/charts               # or package both 
 minithor deploy --chart /tmp/charts/thorium-1.8.1.tgz         # infra-operators-*.tgz is found alongside
 ```
 
-`deploy/charts/scripts/package.sh` is what the Helm Charts workflow runs. Its `--image-repository`,
-`--image-tag`, and `--pull-policy` options point the packaged thorium chart at another Thorium
-image (see `--help`), for example a branch image a fork has published:
+`deploy/charts/scripts/package.sh` is what the Thorium CI workflow's Package Helm Charts job
+runs. Its `--image-repository`, `--image-tag`, and `--pull-policy` options point the packaged
+thorium chart at another Thorium image (see `--help`), for example a branch image a fork has
+published:
 
 ```bash
 deploy/charts/scripts/package.sh -d /tmp/charts \
@@ -39,7 +40,8 @@ minithor deploy --chart /tmp/charts/thorium-1.8.1.tgz
 
 Every branch pushed to a fork publishes prerelease charts to that fork's registry, and they
 deploy the fork's image for that branch (see `deploy/README.md`). Install one with
-`MINITHOR_CHART_REPO`, using the version printed by the `Helm Charts` workflow run:
+`MINITHOR_CHART_REPO`, using the version printed by the `Package Helm Charts` job of the
+`Thorium CI` workflow run:
 
 ```bash
 MINITHOR_CHART_REPO=oci://ghcr.io/<owner>/<repo>/charts \

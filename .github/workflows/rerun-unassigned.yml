@@ -1,16 +1,17 @@
-# Re-runs the jobs of a Build Thorium Release run that no hosted runner picked up
+# Re-runs the jobs of a Thorium CI run (ci.yml) that no hosted runner picked up
 #
 # - GitHub cancels a job that no hosted runner picks up within about 15
 #   minutes, annotated "The job was not acquired by Runner of type hosted even
 #   after multiple attempts"; the macOS jobs are the most exposed. GitHub
-#   Actions has no job-level retry, so this workflow runs whenever a Build
-#   Thorium Release run completes.
+#   Actions has no job-level retry, so this workflow runs whenever a Thorium CI
+#   run completes. The jobs of the workflows ci.yml calls are part of its run,
+#   so they are covered too.
 # - It re-runs the run's failed jobs (and the jobs that need them) only when
 #   every failed or cancelled build or publish job is one no runner picked up:
 #   an empty runner name, no steps, and that annotation. A build or publish
 #   job that ran and failed, or one cancelled for any other reason, is left
 #   for a person.
-# - Only the build and publish jobs (the builds, the image publish, and GitHub Pages) are weighed, named by
+# - Only the build and publish jobs (Detect Changes, the builds, the image and chart package and publish, and GitHub Pages) are weighed, named by
 #   BUILD_JOBS. The scans, checks, tests, and lints report their own results,
 #   so their failures never stop a re-run, and a run where only they failed
 #   is not re-run. GitHub's "re-run failed jobs" re-runs every failed job, so
@@ -32,12 +33,12 @@ on:
   # workflow_run is the only way to act when another workflow finishes. This one checks out no
   # code, downloads no artifacts, and expands no value from the triggering run into a script
   workflow_run: # zizmor: ignore[dangerous-triggers]
-    workflows: ['Build Thorium Release']
+    workflows: ['Thorium CI']
     types: [completed]
   workflow_dispatch:
     inputs:
       run-id:
-        description: The id of the Build Thorium Release run to evaluate
+        description: The id of the Thorium CI run to evaluate
         required: true
         type: string
       attempt:
@@ -78,8 +79,8 @@ jobs:
       # the attempt that is never re-run, so a run gets at most two automatic re-runs
       LAST_ATTEMPT: "3"
       # the names of the build and publish jobs, the only jobs whose failures are weighed
-      BUILD_JOBS: '^(Build |Publish |Deploy GitHub Pages$)'
-      WORKFLOW_NAME: Build Thorium Release
+      BUILD_JOBS: '^(Detect Changes$|Build |Publish |Package |Deploy GitHub Pages$)'
+      WORKFLOW_NAME: Thorium CI
     steps:
       - name: Decide and re-run
         run: |

@@ -21,37 +21,19 @@
 #   .github/scripts/check_tool_versions.py) and reports outdated versions as
 #   warnings; only a commit that does not match its declared tag fails the job.
 #   Its `tool-versions.json` artifact lists every pin with its latest release.
-# - Pushes and pull requests run this only when they change a Dockerfile,
-#   .hadolint.yaml, this workflow, or the scripts and ignore file it reads; the
+# - ci.yml calls this workflow for pushes and pull requests that change a
+#   Dockerfile, .hadolint.yaml, this workflow, or the scripts and ignore file it
+#   reads, after its builds and image publish, whatever they concluded; the
 #   weekly schedule checks the unchanged Dockerfiles and tool versions too.
 #
 # To bump a scanner, resolve the new tag's multi-arch index digest from ghcr.io
 # and update both the tag comment and the digest. The Trivy digest is shared
-# with security-scan.yml, image-rescan.yml and deploy.yml; keep them in step.
+# with security-scan.yml, image-rescan.yml and ci.yml; keep them in step.
 name: Dockerfile Lint
 
 on:
-  # Dependabot branches are checked by their pull requests instead, so each
-  # update runs once
-  push:
-    branches: ['**', '!dependabot/**']
-    paths:
-      - '**/Dockerfile*'
-      - '.hadolint.yaml'
-      - '.github/workflows/dockerfile-lint.yml'
-      - '.github/scripts/check_tool_versions.py'
-      - '.github/scripts/http_retry.py'
-      - '.github/scripts/lint_report.py'
-      - '.github/lint-ignore.toml'
-  pull_request:
-    paths:
-      - '**/Dockerfile*'
-      - '.hadolint.yaml'
-      - '.github/workflows/dockerfile-lint.yml'
-      - '.github/scripts/check_tool_versions.py'
-      - '.github/scripts/http_retry.py'
-      - '.github/scripts/lint_report.py'
-      - '.github/lint-ignore.toml'
+  # called by ci.yml for pushes and pull requests that change what it lints
+  workflow_call:
   schedule:
     # weekly, to surface findings from newly added checks and new upstream releases
     - cron: '41 6 * * 1'
@@ -59,9 +41,10 @@ on:
 
 permissions: {}
 
-# superseded runs are cancelled, except on main
+# superseded runs are cancelled, except on main. A called run's github.workflow
+# is the caller's name, so the suffix keeps this group apart from the caller's own
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-dockerfile-lint-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:

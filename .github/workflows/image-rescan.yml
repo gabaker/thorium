@@ -2,16 +2,16 @@
 # Trivy (open source edition), so CVEs disclosed after an image was built still
 # surface
 #
-# - Every build of the image is already scanned before it is published, in
-#   deploy.yml; this workflow only rescans published images. It runs weekly and
-#   on demand, never on pushes or pull requests, since a push's image is not in
-#   the registry until deploy.yml publishes it.
+# - Every build of the image is already scanned by ci.yml; this workflow only
+#   rescans published images. It runs weekly and on demand, never on pushes or
+#   pull requests, since a push's image is not in the registry until ci.yml
+#   publishes it.
 # - It scans the images published for the ref it runs on, worked out from git
 #   rather than by listing the registry: `main`, `latest` and the release tags on
 #   the default branch (every scheduled run), a fork branch's own image when run
 #   manually on that branch, or a release tag when run manually on that tag.
 # - Trivy runs from the same digest-pinned image as dockerfile-lint.yml,
-#   security-scan.yml and deploy.yml; keep the digests in step. It pulls the
+#   security-scan.yml and ci.yml; keep the digests in step. It pulls the
 #   public images itself, with no credentials or Docker socket.
 # - .github/scripts/vuln_report.py ranks findings with EPSS and CISA KEV data
 #   (downloaded in full, so no CVE IDs leave the runner), and
@@ -24,7 +24,7 @@
 #
 # To bump Trivy, resolve the new tag's multi-arch index digest from ghcr.io and
 # update both the tag comment and the digest here, in dockerfile-lint.yml,
-# security-scan.yml and deploy.yml.
+# security-scan.yml and ci.yml.
 name: Image Rescan
 
 on:
@@ -68,12 +68,12 @@ jobs:
       - name: Pull Trivy image
         run: docker pull "$TRIVY_IMAGE"
 
-      # Scans only the images deploy.yml published for the ref this run is on,
+      # Scans only the images ci.yml published for the ref this run is on,
       # worked out from git rather than by listing the registry:
       # - the default branch (every scheduled run): main, latest, and the release
       #   tags on it, newest first
       # - a branch on a fork (a manual run on that branch): the branch's tag,
-      #   sanitized as deploy.yml does; the core repo publishes no branch images
+      #   sanitized as ci.yml does; the core repo publishes no branch images
       # - a release tag (a manual run on that tag): that tag
       - name: Choose images to scan
         env:
@@ -87,15 +87,15 @@ jobs:
           # GitHub runs schedules only on the default branch, but documents no
           # repository payload for them, so DEFAULT_BRANCH may be empty there
           elif [[ "$GITHUB_EVENT_NAME" == "schedule" || "$GITHUB_REF_NAME" == "$DEFAULT_BRANCH" ]]; then
-            # deploy.yml tags the default branch's image with the branch name;
+            # ci.yml tags the default branch's image with the branch name;
             # this repo and its forks use main, so a renamed default branch
             # would need this tag changed too
             printf '%s\n' main latest >> "${RUNNER_TEMP}/tags.txt"
-            # the release tags deploy.yml accepts, newest first
+            # the release tags ci.yml accepts, newest first
             git tag --merged HEAD | { grep -E '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || true; } \
               | sort -rV | head -n "$MAX_RELEASES" >> "${RUNNER_TEMP}/tags.txt"
           elif [[ "$IS_FORK" == "true" ]]; then
-            # keep in step with the branch tag in deploy.yml's "Choose Image Tags" step
+            # keep in step with the branch tag in ci.yml's "Choose Image Tags" step
             TAG="${GITHUB_REF_NAME//[^a-zA-Z0-9._-]/-}"
             TAG=$(sed -E 's/^[.-]+//' <<< "$TAG")
             if [[ "$TAG" == "latest" || "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
@@ -248,7 +248,7 @@ jobs:
           fi
 
       # the filtered SARIF leaves out findings ignored by .github/lint-ignore.toml;
-      # the image built by deploy.yml is uploaded as trivy-image-build
+      # the image built by ci.yml is uploaded as trivy-image-build
       - name: Upload SARIF
         if: steps.sarif.outputs.found == 'true'
         uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1

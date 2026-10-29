@@ -7,7 +7,8 @@ Vars files are merged in order (later files win), then each -e value. String val
 are templated against the merged vars until nothing changes, like Ansible's lazy templating. Only
 the Ansible filters and tests megathor's templates use are provided. CI uses this to render
 roles/thorium/templates/values.yaml.j2 and roles/infra_operators/templates/values.yaml.j2 and check
-the results against the thorium and infra-operators charts (see .github/workflows/deploy-tools.yml).
+the results against the thorium and infra-operators charts (see the megathor-values job in
+.github/workflows/ci.yml).
 """
 
 import json
