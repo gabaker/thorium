@@ -99,8 +99,11 @@ function update(action: unknown, values: Record<string, string>, second: number,
 /** A job created in a stage. */
 const created = (job: string, stage: string, second: number) =>
   update('JobCreated', { job, id: job, stage, status: '"Created"', deadline: '2099-01-01 00:00:00.0 UTC' }, second);
-/** The claim of a job by a worker. */
+/** The claim of a job by a worker, as an older status log holds it: naming only the worker. */
 const claimed = (worker: string, second: number) => update('JobRunning', { worker, status: 'running' }, second);
+/** The claim of a job by a worker, naming the job and its stage. */
+const claimedJobUpdate = (job: string, stage: string, worker: string, second: number) =>
+  update('JobRunning', { job, stage, worker, status: 'running' }, second);
 /** A completed job. */
 const completed = (job: string, second: number) => update('JobCompleted', { job, status: 'Completed' }, second);
 /** A failed job. */
@@ -226,6 +229,23 @@ test.describe('run stages (mocked)', () => {
         await shot(page, `after-${width}-${name}-pipeline-failed.png`);
       }
     }
+  });
+
+  test('a claim naming its job marks that stage running, though its worker runs a tool named otherwise', async ({ page }) => {
+    await mockAuth(page);
+    // the stages run tools named tool-<stage>, so the worker's name matches neither queued stage
+    await serve(page, makeRun(), [...MIXED.slice(0, 5), claimedJobUpdate('j3', 'yara', 'tool-yara-1-0-0-b', 4)]);
+    for (const [, url] of PAGES) {
+      await page.goto(url);
+      await expect(node(page, 'strings')).toHaveAttribute('aria-label', 'strings: Created');
+      await expect(node(page, 'yara')).toHaveAttribute('aria-label', 'yara: Running');
+      await expect(page.getByTestId('stage-jobs-yara')).toContainText('tool-yara-1-0-0-b');
+    }
+    // the claim's update card names the job and its stage
+    await page.goto(`/runs/system/${RUN}`);
+    const row = page.getByTestId('run-update-row').last();
+    await expect(row.getByTestId('update-field-job')).toContainText('j3');
+    await expect(row.getByTestId('update-field-stage')).toContainText('yara');
   });
 
   test('a running run updates its nodes as the polls read new updates, without moving them', async ({ page }) => {

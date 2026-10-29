@@ -96,6 +96,9 @@ and known gaps before upgrading.
   under `workloads`.
 - Workers, jobs, and deadlines carry `tool_instance` and `run`, and `thorctl clusters` output
   changes.
+- A job claim's status update (`JobRunning`) names the claimed job (`job`) and its stage (`stage`)
+  beside the worker, since workers are named after their tool. Claims logged before the upgrade name
+  only the worker.
 - Pods are labelled `thorium-tool`, `thorium-tool-instance`, and `thorium-run` instead of
   `pipeline`. A network policy `allowed_tools` entry selects a tool or tool instance by id, or the
   tools in the policy's group with exactly that name; a name entry follows whatever tool holds that

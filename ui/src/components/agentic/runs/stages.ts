@@ -78,8 +78,9 @@ const FAILED_STATE: IndicatorStatus = JobStatus.Failed;
 const STOPPED_STATE: IndicatorStatus = DerivedStageState.Stopped;
 
 /**
- * Turn a stage name into the prefix the scaler gives its workers' names (lowercase, runs of other
- * characters as one dash), such as `jup-stub-tool` for `jup-stub-tool` or `clamav` for `ClamAV`.
+ * Turn a stage name into the worker name prefix it matches (lowercase, runs of other characters as one
+ * dash), such as `jup-stub-tool` for `jup-stub-tool` or `clamav` for `ClamAV`. The scaler starts a
+ * worker's name with its tool's name, so only a stage named after its tool matches its workers.
  *
  * @param stage - The stage's name.
  * @returns The worker name prefix.
@@ -92,9 +93,10 @@ export function workerPrefix(stage: string): string {
 }
 
 /**
- * Find the job a worker claimed. A claim update names only the worker, so the job is the queued job of
- * the stage whose worker name prefix the worker carries (the longest such prefix wins), or the only
- * queued job when no prefix matches.
+ * Guess the job a worker claimed from the worker's name, for a claim update that names no job (older
+ * status logs name only the worker). The job is the queued job of the stage whose worker name prefix the
+ * worker carries (the longest such prefix wins), or the only queued job when no prefix matches, so a guess
+ * can miss when parallel stages are not named after their tools.
  *
  * @param worker - The worker's name.
  * @param jobs - The jobs read so far with their stage names.
@@ -156,9 +158,9 @@ export function stageJobs(updates: StatusUpdate[], generators: string[] = []): M
       byStage.set(stage, [...(byStage.get(stage) ?? []), job]);
       continue;
     }
-    // a claim names only the worker, every other job update names the job
-    const claimed = action === StatusAction.JobRunning && !values.job;
-    const job = claimed ? claimedJob(values.worker ?? '', [...byId.values()]) : values.job ? byId.get(values.job)?.job : undefined;
+    // every job update names its job, except a claim in an older status log, which names only its worker
+    const guessed = action === StatusAction.JobRunning && !values.job;
+    const job = guessed ? claimedJob(values.worker ?? '', [...byId.values()]) : values.job ? byId.get(values.job)?.job : undefined;
     if (!job) continue;
     switch (action) {
       case StatusAction.JobRunning:

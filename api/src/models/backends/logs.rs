@@ -96,17 +96,22 @@ impl StatusRequest {
         update
     }
 
-    /// Build a job claim status update based on a RawJob and a worker
+    /// Build a job claim status update based on a `RawJob` and a worker
+    ///
+    /// The update names the claimed job and its stage beside the worker, since a worker is named
+    /// after its tool and may claim the jobs of any stage that runs that tool.
     ///
     /// # Arguments
     ///
     /// * `job` - The job that this update is for
     /// * `worker` - The worker that claimed this job
     pub fn claim_job<T: Into<String>>(job: &RawJob, worker: T) -> Self {
-        // build status update
-        let mut update = HashMap::with_capacity(2);
+        // build a status update naming the claimed job, its stage, and the worker that claimed it
+        let mut update = HashMap::with_capacity(4);
         update.insert("status".to_string(), "running".to_string());
         update.insert("worker".to_string(), worker.into());
+        update.insert("job".to_string(), job.id.to_string());
+        update.insert("stage".to_string(), job.stage.clone());
         // build a status request from this job claim
         StatusRequest {
             group: job.group.clone(),
@@ -197,5 +202,99 @@ impl StatusUpdate {
     /// * `raw` - The string to deserialize into a status update
     pub fn deserialize(raw: &str) -> Result<Self, ApiError> {
         Ok(deserialize!(raw))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{TimeZone, Utc};
+    use std::collections::HashMap;
+    use uuid::Uuid;
+
+    use crate::models::{Actions, ImageScaler, JobStatus, RawJob, StatusRequest, StatusUpdate};
+
+    /// Build a queued job of a pipeline stage
+    ///
+    /// # Arguments
+    ///
+    /// * `stage` - The stage of the job
+    fn job(stage: &str) -> RawJob {
+        // a created job with fixed ids so updates can be compared
+        RawJob {
+            group: "jupiter".to_owned(),
+            pipeline: "orbit".to_owned(),
+            reaction: Uuid::from_u128(1),
+            stage: stage.to_owned(),
+            creator: "europa".to_owned(),
+            id: Uuid::from_u128(2),
+            args: "{}".to_owned(),
+            status: JobStatus::Created,
+            deadline: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            worker: None,
+            parent: None,
+            generator: false,
+            scaler: ImageScaler::K8s,
+            samples: Vec::new(),
+            ephemeral: Vec::new(),
+            parent_ephemeral: HashMap::new(),
+            repos: Vec::new(),
+            trigger_depth: None,
+            tool_instance: Uuid::from_u128(3),
+            run: None,
+        }
+    }
+
+    /// A claim's status update names the claimed job and its stage beside the worker and status
+    #[test]
+    fn claim_update_names_the_job_and_stage() {
+        // a worker named after its tool claims the job of a stage named otherwise
+        let job = job("stub-stage");
+        let request = StatusRequest::claim_job(&job, "jup-stub-tool-1-0-0-x1");
+        // the update is a job running update in the job's reaction
+        assert!(matches!(request.action, Actions::JobRunning));
+        assert_eq!(request.group, "jupiter");
+        assert_eq!(request.pipeline, "orbit");
+        assert_eq!(request.reaction, job.reaction.to_string());
+        // it names the job, its stage, the worker, and the running status
+        let expected = [
+            ("job", job.id.to_string()),
+            ("stage", "stub-stage".to_owned()),
+            ("worker", "jup-stub-tool-1-0-0-x1".to_owned()),
+            ("status", "running".to_owned()),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value))
+        .collect::<HashMap<String, String>>();
+        assert_eq!(request.update, expected);
+    }
+
+    /// Claim updates read back from a status log both with their job and stage and, as older
+    /// status logs hold them, with only their worker
+    #[test]
+    fn claim_updates_read_back_with_or_without_a_job() {
+        // a claim update keeps its job and stage through the status log's JSON
+        let job = job("stub-stage");
+        let update = StatusUpdate::new(
+            StatusRequest::claim_job(&job, "jup-stub-tool-1-0-0-x1"),
+            None,
+        );
+        let raw = serde_json::to_string(&update).expect("a serialized claim update");
+        let read = StatusUpdate::deserialize(&raw).expect("a claim update");
+        assert!(matches!(read.action, Actions::JobRunning));
+        assert_eq!(read.update.get("job"), Some(&job.id.to_string()));
+        assert_eq!(
+            read.update.get("stage").map(String::as_str),
+            Some("stub-stage")
+        );
+        // a claim update naming only its worker still reads
+        let older = r#"{"group":"jupiter","pipeline":"orbit","reaction":"00000000-0000-0000-0000-000000000001","action":"JobRunning","timestamp":"2026-10-28T10:32:58.529118835Z","msg":null,"update":{"status":"running","worker":"jup-stub-tool-1-0-0-x1"}}"#;
+        let read = StatusUpdate::deserialize(older).expect("an older claim update");
+        assert!(matches!(read.action, Actions::JobRunning));
+        assert_eq!(
+            read.update.get("worker").map(String::as_str),
+            Some("jup-stub-tool-1-0-0-x1")
+        );
+        assert!(!read.update.contains_key("job"));
+        assert!(!read.update.contains_key("stage"));
     }
 }

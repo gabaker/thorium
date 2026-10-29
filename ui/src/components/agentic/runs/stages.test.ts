@@ -38,8 +38,11 @@ function update(action: StatusUpdate['action'], values: Record<string, string>, 
 /** A job creation update. */
 const created = (job: string, stage: string, second = 0) =>
   update('JobCreated', { job, id: job, stage, status: '"Created"', deadline: '2026-11-05 20:25:56.1 UTC' }, second);
-/** A job claim update, which names only the worker. */
+/** A job claim update from an older status log, which names only the worker. */
 const claimed = (worker: string, second = 0) => update('JobRunning', { worker, status: 'running' }, second);
+/** A job claim update that names the claimed job and its stage beside the worker. */
+const claimedJobUpdate = (job: string, stage: string, worker: string, second = 0) =>
+  update('JobRunning', { job, stage, worker, status: 'running' }, second);
 /** A job completion update. */
 const completed = (job: string, second = 0) => update('JobCompleted', { job, status: 'Completed' }, second);
 /** A job failure update. */
@@ -136,6 +139,37 @@ describe('stageJobs', () => {
     const jobs = stageJobs([failed('j1', 9), created('j1', 'scan', 0)], ['j1']).get('scan')!;
     expect(jobs[0]).toMatchObject({ status: JobStatus.Failed, generator: true });
   });
+  it('trusts the job a claim names over a worker name that prefixes another stage', () => {
+    // the worker runs the tool jup-stub-tool for the stage stub-stage, and its name starts with the stage name jup
+    const queued = [created('j1', 'jup', 0), created('j2', 'stub-stage', 0)];
+    const named = stageJobs([...queued, claimedJobUpdate('j2', 'stub-stage', 'jup-stub-tool-1-0-0-x', 1)]);
+    expect(named.get('stub-stage')![0]).toMatchObject({ status: JobStatus.Running, worker: 'jup-stub-tool-1-0-0-x' });
+    expect(named.get('jup')![0].status).toBe(JobStatus.Created);
+    // an older claim naming only the worker is guessed by the name, which picks the wrong stage
+    const guessed = stageJobs([...queued, claimed('jup-stub-tool-1-0-0-x', 1)]);
+    expect(guessed.get('jup')![0].status).toBe(JobStatus.Running);
+    expect(guessed.get('stub-stage')![0].status).toBe(JobStatus.Created);
+  });
+  it('replays a log that mixes claims with and without job ids', () => {
+    const jobs = stageJobs([
+      created('j1', 'scan', 0),
+      claimed('scan-1-0-0-a', 1),
+      completed('j1', 2),
+      created('j2', 'strings', 3),
+      created('j3', 'yara', 3),
+      claimedJobUpdate('j3', 'yara', 'tool-yara-1-0-0-b', 4),
+      claimedJobUpdate('j2', 'strings', 'tool-strings-1-0-0-c', 5),
+      completed('j3', 6),
+    ]);
+    expect(jobs.get('scan')![0]).toMatchObject({ status: JobStatus.Completed, worker: 'scan-1-0-0-a' });
+    expect(jobs.get('strings')![0]).toMatchObject({ status: JobStatus.Running, worker: 'tool-strings-1-0-0-c' });
+    expect(jobs.get('yara')![0]).toMatchObject({ status: JobStatus.Completed, worker: 'tool-yara-1-0-0-b' });
+  });
+  it('skips a claim naming a job the log never created instead of guessing', () => {
+    const [job] = stageJobs([created('j1', 'scan', 0), claimedJobUpdate('j9', 'scan', 'scan-1-0-0-a', 1)]).get('scan')!;
+    expect(job.status).toBe(JobStatus.Created);
+    expect(job.worker).toBeUndefined();
+  });
 });
 
 describe('combineJobStatuses', () => {
@@ -175,6 +209,18 @@ describe('buildStageViews', () => {
         .filter((stage) => stage.active)
         .map((stage) => stage.name),
     ).toEqual(['strings', 'yara']);
+  });
+  it('shows a stage running once its claim names the job, though its tool is named otherwise', () => {
+    // the parallel stages run tools named tool-strings and tool-yara, so their workers match neither stage name
+    const queued = [created('j1', 'scan'), completed('j1', 2), created('j2', 'strings', 3), created('j3', 'yara', 3)];
+    const named = buildStageViews(run(ReactionStatus.Started, 1), ORDER, [
+      ...queued,
+      claimedJobUpdate('j3', 'yara', 'tool-yara-1-0-0-b', 4),
+    ]);
+    expect(states(named)).toEqual({ scan: 'Completed', strings: 'Created', yara: 'Running', report: 'Waiting' });
+    // an older claim naming only the worker can't be told apart from the other queued job, so both stay queued
+    const guessed = buildStageViews(run(ReactionStatus.Started, 1), ORDER, [...queued, claimed('tool-yara-1-0-0-b', 4)]);
+    expect(states(guessed)).toEqual({ scan: 'Completed', strings: 'Created', yara: 'Created', report: 'Waiting' });
   });
   it('shows a completed run as all completed, even with no updates read', () => {
     expect(states(buildStageViews(run(ReactionStatus.Completed, 3), ORDER, null))).toEqual({

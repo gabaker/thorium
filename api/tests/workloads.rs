@@ -2,9 +2,9 @@
 
 use thorium::client::ResultsClient;
 use thorium::models::{
-    BareMetalEnvironment, ImageArgs, ImageScaler, PipelineRequest, Pools, ReactionListParams,
-    ReactionRequest, ReactionStatus, Resources, ResultGetParams, StageLogsAdd, ToolSpec,
-    ToolVersion, WorkerRegistrationList, WorkloadEnvironment, WorkloadSpec,
+    Actions, BareMetalEnvironment, ImageArgs, ImageScaler, PipelineRequest, Pools,
+    ReactionListParams, ReactionRequest, ReactionStatus, Resources, ResultGetParams, StageLogsAdd,
+    ToolSpec, ToolVersion, WorkerRegistrationList, WorkloadEnvironment, WorkloadSpec,
 };
 use thorium::test_utilities::{self, generators};
 use thorium::{Error, Thorium, fail, is};
@@ -113,6 +113,52 @@ async fn stage_claim_route_gone() -> Result<(), Error> {
     is!(resp.status().as_u16(), 404);
     // the same job is claimed through the workload route
     is!(claim_one(&admin, &group, instance, &worker).await?.len(), 1);
+    generators::delete_worker(&worker, &admin).await?;
+    Ok(())
+}
+
+/// A claim's status update names the claimed job and its stage beside the worker, so the
+/// reaction's status log tells which of its parallel stages runs, whatever their tools are named
+#[tokio::test]
+async fn claim_update_names_the_job_and_stage() -> Result<(), Error> {
+    // a reaction of a pipeline whose two parallel stages run two tools named otherwise
+    let admin = test_utilities::admin_client().await?;
+    generators::node("cluster0", "node0", Resources::default(), &admin).await?;
+    let suffix = generators::name_suffix();
+    let roles = generators::GroupRoles::default();
+    let group = generators::god_group(&admin, "pallas", &suffix, &roles).await?;
+    let (_, harvest) =
+        generators::stage_tool(&group, &generators::gen_image_spec(), &admin).await?;
+    let (_, sow) = generators::stage_tool(&group, &generators::gen_image_spec(), &admin).await?;
+    let pipe = generators::gen_string(20).to_lowercase();
+    let req = PipelineRequest::new(&group, &pipe, serde_json::json!([["harvest", "sow"]]))
+        .stage_tool("harvest", harvest)
+        .stage_tool("sow", sow);
+    admin.pipelines.create(&req).await?;
+    let reaction = admin
+        .reactions
+        .create(&ReactionRequest::new(group.as_str(), pipe.as_str()))
+        .await?
+        .id;
+    // a worker of the second stage's tool claims that stage's job
+    let worker = generators::gen_string(24);
+    shared_worker(&worker, "thorium", &group, sow, ImageScaler::K8s).await?;
+    let jobs = claim_one(&admin, &group, sow, &worker).await?;
+    is!(jobs.len(), 1);
+    is!(jobs[0].stage, "sow");
+    // the reaction's one claim update names the job, its stage, and the worker
+    let logs = admin.reactions.status_logs(&group, &reaction).await?;
+    let claims = logs
+        .iter()
+        .filter(|log| matches!(log.action, Actions::JobRunning))
+        .collect::<Vec<_>>();
+    is!(claims.len(), 1);
+    is!(claims[0].update.get("job"), Some(&jobs[0].id.to_string()));
+    is!(
+        claims[0].update.get("stage").map(String::as_str),
+        Some("sow")
+    );
+    is!(claims[0].update.get("worker"), Some(&worker));
     generators::delete_worker(&worker, &admin).await?;
     Ok(())
 }
