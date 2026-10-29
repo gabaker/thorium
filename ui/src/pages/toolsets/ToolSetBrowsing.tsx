@@ -5,7 +5,6 @@ import { useNavigate } from 'react-router-dom';
 import {
   Actions,
   BannerSlot,
-  CodeSpans,
   Badge,
   BadgeTone,
   EntityLink,
@@ -23,9 +22,9 @@ import {
   TableScroll,
   WrapBadge,
 } from '@components/agentic/shared';
+import ListErrorBanner from '@components/shared/alerts/ListErrorBanner';
 import { useAgenticList } from '@components/agentic/hooks';
 import { selectorText } from '@components/agentic/toolsets/forms';
-import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
 import { Button } from '@components/shared/buttons';
 import { ButtonVariant } from '@components/shared/buttons/types';
 import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
@@ -93,11 +92,8 @@ const ToolSetBrowsing: FC = () => {
         </Actions>
       </PageHead>
       <BannerSlot>
-        {sets.error && (
-          <AlertBanner severity={Severity.Error}>
-            <CodeSpans text={sets.error} />
-          </AlertBanner>
-        )}
+        {/* the page's own list reports first, then the lists that fill in its columns */}
+        <ListErrorBanner errors={[sets.error, instances.error, agents.error]} className="" />
       </BannerSlot>
       <LoadingSpinner loading={sets.loading} />
       {!sets.loading && sets.error === '' && sets.items.length === 0 && <Muted data-testid="toolset-empty">No toolsets found.</Muted>}
@@ -168,6 +164,9 @@ const ToolSetBrowsing: FC = () => {
                               </InlineList>
                             </div>
                           </>
+                        ) : instances.error ? (
+                          // a failed or cut off instance list cannot tell that no instance is Ready
+                          <Muted>-</Muted>
                         ) : meta.highest_revision > 0 ? (
                           <>
                             <ToolSetName name={newest ? newest.name : `r${meta.highest_revision}`} />

@@ -7,6 +7,8 @@ import { Severity } from '@components/shared/alerts/AlertBanner';
 
 // the pill primitives live in the shared badges module; agentic pages keep importing them from here
 export { Badge, BadgeSize, BadgeTone, statusTone, WrapBadge } from '@components/shared/badges/Badge';
+// the inline code primitives live in the shared syntax module, so shared banners can render API text with them too
+export { CodeSpans, Mono } from '@components/shared/syntax/CodeSpans';
 
 /** A wrapping row of badges or links; the gap spaces the items, so a wrapped item starts flush with the first. */
 export const InlineList = styled.div`
@@ -165,28 +167,6 @@ export const Pre = styled.pre`
   white-space: pre-wrap;
   word-break: break-word;
 `;
-
-/** Monospace inline text for ids, hashes, and names. */
-export const Mono = styled.code`
-  font-family: monospace;
-  color: inherit;
-  font-size: 0.85em;
-  overflow-wrap: anywhere;
-`;
-
-/** Props for {@link CodeSpans}. */
-interface CodeSpansProps {
-  /** Text from the API that may mark names with markdown backticks */
-  text: string;
-}
-
-/** Render API text with its `backticked` names as inline code instead of literal backticks. */
-export const CodeSpans: FC<CodeSpansProps> = ({ text }) => (
-  <>
-    {/* splitting on a capture group puts each backticked name at an odd index */}
-    {text.split(/`([^`]*)`/).map((part, index) => (index % 2 === 1 ? <Mono key={index}>{part}</Mono> : part))}
-  </>
-);
 
 /** A labelled form field. */
 export const Field = styled.label`

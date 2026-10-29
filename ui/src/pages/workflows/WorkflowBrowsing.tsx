@@ -6,7 +6,6 @@ import {
   Actions,
   BannerSlot,
   Badge,
-  CodeSpans,
   EntityLink,
   LinkRow,
   Muted,
@@ -18,12 +17,12 @@ import {
   Table,
   TableScroll,
 } from '@components/agentic/shared';
+import ListErrorBanner from '@components/shared/alerts/ListErrorBanner';
 import { InstanceStatusBadge } from '@components/agentic/InstanceStatusBadge';
 import { useAgenticList } from '@components/agentic/hooks';
 import { EntityName } from '@components/agentic/models/ModelRows';
 import { nameIndex } from '@components/agentic/agents/names';
 import { entryText } from '@components/agentic/workflows/format';
-import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
 import { Button } from '@components/shared/buttons';
 import { ButtonVariant } from '@components/shared/buttons/types';
 import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
@@ -54,11 +53,8 @@ const WorkflowBrowsing: FC = () => {
         </Actions>
       </PageHead>
       <BannerSlot>
-        {workflows.error && (
-          <AlertBanner severity={Severity.Error}>
-            <CodeSpans text={workflows.error} />
-          </AlertBanner>
-        )}
+        {/* the page's own list reports first, then the lists that fill in its columns */}
+        <ListErrorBanner errors={[workflows.error, instances.error, agents.error]} className="" />
       </BannerSlot>
       <LoadingSpinner loading={workflows.loading} />
       {!workflows.loading && workflows.error === '' && workflows.items.length === 0 && (
@@ -104,6 +100,9 @@ const WorkflowBrowsing: FC = () => {
                               <InstanceStatusBadge status={latest.metadata.WorkflowInstance.status} />
                             </div>
                           </>
+                        ) : instances.error ? (
+                          // a failed or cut off instance list cannot tell that no instance is Ready
+                          <Muted>-</Muted>
                         ) : (
                           <Badge tone={statusTone('no ready instance')}>No ready instance</Badge>
                         )}

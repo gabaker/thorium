@@ -1,7 +1,7 @@
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MemoryRouter } from 'react-router-dom';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // project imports
 import ToolSetBrowsing from './ToolSetBrowsing';
@@ -13,6 +13,9 @@ const LONG_NAME = 'a-really-long-toolset-name-to-force-the-scroll';
 /** An instance name longer than the short-name limit whose last name segment is short. */
 const LONG_INSTANCE_NAME = 'uiloop-r3w-set-europa-and-more-l6y6#r1';
 
+/** The per-kind list errors and whether the instance list comes back empty, set by each test. */
+const listState = vi.hoisted((): { errors: Record<string, string>; noInstances: boolean } => ({ errors: {}, noInstances: false }));
+
 // the page shell needs the auth provider, and the lists need the API; neither is under test here
 vi.mock('@components/pages/Page', () => ({
   default: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
@@ -20,63 +23,71 @@ vi.mock('@components/pages/Page', () => ({
 vi.mock('@components/agentic/hooks', () => ({
   useAgenticList: (kind: AgenticKinds) => ({
     items:
-      kind === AgenticKinds.ToolSet
-        ? [
-            {
-              id: 'ssssssss-0000',
-              name: 'long-toolset-name',
-              groups: ['g'],
-              metadata: {
-                ToolSet: {
-                  read_only: true,
-                  selector: null,
-                  tools: [{}, {}, {}],
-                  auto_instance: false,
-                  latest_instance: 'iiiiiiii-0000',
-                  highest_revision: 2,
-                },
-              },
-            },
-            {
-              id: 'ssssssss-0001',
-              name: LONG_NAME,
-              groups: ['g'],
-              metadata: {
-                ToolSet: { read_only: false, selector: null, auto_instance: false, latest_instance: 'iiiiiiii-0001', highest_revision: 1 },
-              },
-            },
-          ]
-        : kind === AgenticKinds.ToolSetInstance
+      listState.noInstances && kind === AgenticKinds.ToolSetInstance
+        ? []
+        : kind === AgenticKinds.ToolSet
           ? [
               {
-                id: 'iiiiiiii-0000',
-                name: 'long-toolset-name#r2',
-                metadata: { ToolSetInstance: { tool_set: 'ssssssss-0000', revision: 2, status: 'Ready', members: [{}, {}] } },
-              },
-              {
-                id: 'iiiiiiii-0001',
-                name: LONG_INSTANCE_NAME,
-                metadata: { ToolSetInstance: { tool_set: 'ssssssss-0001', revision: 1, status: 'Ready', members: [{}] } },
-              },
-            ]
-          : [
-              // one agent that follows the toolset and one that pins an instance of it
-              { id: 'a1', name: 'a1', metadata: { Agent: { tool_sets: [{ id: 'ssssssss-0000', kind: 'ToolSet', metadata: {} }] } } },
-              {
-                id: 'a2',
-                name: 'a2',
+                id: 'ssssssss-0000',
+                name: 'long-toolset-name',
+                groups: ['g'],
                 metadata: {
-                  Agent: {
-                    tool_sets: [
-                      { id: 'iiiiiiii-0000', kind: 'ToolSetInstance', metadata: { ToolSetInstance: { tool_set: 'ssssssss-0000' } } },
-                    ],
+                  ToolSet: {
+                    read_only: true,
+                    selector: null,
+                    tools: [{}, {}, {}],
+                    auto_instance: false,
+                    latest_instance: 'iiiiiiii-0000',
+                    highest_revision: 2,
                   },
                 },
               },
-              { id: 'a3', name: 'a3', metadata: { Agent: { tool_sets: [] } } },
-            ],
+              {
+                id: 'ssssssss-0001',
+                name: LONG_NAME,
+                groups: ['g'],
+                metadata: {
+                  ToolSet: {
+                    read_only: false,
+                    selector: null,
+                    auto_instance: false,
+                    latest_instance: 'iiiiiiii-0001',
+                    highest_revision: 1,
+                  },
+                },
+              },
+            ]
+          : kind === AgenticKinds.ToolSetInstance
+            ? [
+                {
+                  id: 'iiiiiiii-0000',
+                  name: 'long-toolset-name#r2',
+                  metadata: { ToolSetInstance: { tool_set: 'ssssssss-0000', revision: 2, status: 'Ready', members: [{}, {}] } },
+                },
+                {
+                  id: 'iiiiiiii-0001',
+                  name: LONG_INSTANCE_NAME,
+                  metadata: { ToolSetInstance: { tool_set: 'ssssssss-0001', revision: 1, status: 'Ready', members: [{}] } },
+                },
+              ]
+            : [
+                // one agent that follows the toolset and one that pins an instance of it
+                { id: 'a1', name: 'a1', metadata: { Agent: { tool_sets: [{ id: 'ssssssss-0000', kind: 'ToolSet', metadata: {} }] } } },
+                {
+                  id: 'a2',
+                  name: 'a2',
+                  metadata: {
+                    Agent: {
+                      tool_sets: [
+                        { id: 'iiiiiiii-0000', kind: 'ToolSetInstance', metadata: { ToolSetInstance: { tool_set: 'ssssssss-0000' } } },
+                      ],
+                    },
+                  },
+                },
+                { id: 'a3', name: 'a3', metadata: { Agent: { tool_sets: [] } } },
+              ],
     loading: false,
-    error: '',
+    error: listState.errors[kind] ?? '',
     reload: () => undefined,
   }),
 }));
@@ -129,5 +140,31 @@ describe('ToolSetBrowsing', () => {
     expect(markup).toMatch(
       /<div class="[^"]*"><span class="[^"]*">read only<\/span><span class="[^"]*">3 explicit tools<\/span><span class="[^"]*">auto off<\/span><\/div>/,
     );
+  });
+});
+
+afterEach(() => {
+  listState.errors = {};
+  listState.noInstances = false;
+});
+
+describe('ToolSetBrowsing list errors', () => {
+  it('shows the error of the instance list under the page list', () => {
+    listState.errors[AgenticKinds.ToolSetInstance] = 'List ToolSetInstance: showing only the first 2000 entities';
+    const text = render().replace(/<[^>]*>/g, ' ');
+    expect(text).toContain('List ToolSetInstance: showing only the first 2000 entities');
+  });
+
+  it('shows the error of the agent list', () => {
+    listState.errors[AgenticKinds.Agent] = 'List Agent: injected failure';
+    expect(render().replace(/<[^>]*>/g, ' ')).toContain('List Agent: injected failure');
+  });
+
+  it('shows no instance verdict while the instance list has an error', () => {
+    listState.errors[AgenticKinds.ToolSetInstance] = 'List ToolSetInstance: injected failure';
+    listState.noInstances = true;
+    const text = render().replace(/<[^>]*>/g, ' ');
+    expect(text).not.toMatch(/No ready instance|not Ready/);
+    expect(text).toMatch(/ - /);
   });
 });

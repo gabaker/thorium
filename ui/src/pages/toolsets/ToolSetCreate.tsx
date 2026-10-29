@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 
 // project imports
 import { Actions, BannerSlot, CheckRow, CodeSpans, Field, PageHead, PageTitle, Row, Section } from '@components/agentic/shared';
+import ListErrorBanner from '@components/shared/alerts/ListErrorBanner';
 import { useAgenticList, useEditableGroupNames } from '@components/agentic/hooks';
 import { EntityChecks, GroupChecks, VersionPins } from '@components/agentic/pickers';
 import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
@@ -67,6 +68,8 @@ const ToolSetCreate: FC = () => {
             <CodeSpans text={error} />
           </AlertBanner>
         )}
+        {/* the pickers' lists report their errors so a missing choice is explained */}
+        <ListErrorBanner errors={[tools.error]} className="" />
       </BannerSlot>
       <Section>
         <Field>

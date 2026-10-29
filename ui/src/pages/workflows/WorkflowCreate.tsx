@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 
 // project imports
 import { Actions, BannerSlot, CheckRow, Field, PageHead, PageTitle, Section, TextArea } from '@components/agentic/shared';
+import ListErrorBanner from '@components/shared/alerts/ListErrorBanner';
 import { useAgenticList, useEditableGroupNames } from '@components/agentic/hooks';
 import { EntityChecks, EntitySelect, GroupChecks } from '@components/agentic/pickers';
 import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
@@ -66,7 +67,11 @@ const WorkflowCreate: FC = () => {
       <PageHead>
         <PageTitle>Create workflow</PageTitle>
       </PageHead>
-      <BannerSlot>{error && <AlertBanner severity={Severity.Error}>{error}</AlertBanner>}</BannerSlot>
+      <BannerSlot>
+        {error && <AlertBanner severity={Severity.Error}>{error}</AlertBanner>}
+        {/* the pickers' lists report their errors so a missing choice is explained */}
+        <ListErrorBanner errors={[agents.error]} className="" />
+      </BannerSlot>
       <Section>
         <Field>
           <span className="label">Name</span>

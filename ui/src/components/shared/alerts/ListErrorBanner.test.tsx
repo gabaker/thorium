@@ -19,4 +19,16 @@ describe('ListErrorBanner', () => {
     const html = renderToStaticMarkup(<ListErrorBanner errors={['List Images: boom', 'List Images: boom', 'List Images: other']} />);
     expect(html.match(/data-testid="list-error"/g)).toHaveLength(2);
   });
+
+  it('skips the empty messages of lists that loaded cleanly', () => {
+    expect(renderToStaticMarkup(<ListErrorBanner errors={['', '']} />)).toBe('');
+    const html = renderToStaticMarkup(<ListErrorBanner errors={['', 'List Agent: down', 'List Tool: down', 'List Agent: down']} />);
+    expect(html.match(/data-testid="list-error"/g)).toHaveLength(2);
+    expect(html.match(/List Agent: down/g)).toHaveLength(1);
+  });
+
+  it('renders backticked names as inline code', () => {
+    const html = renderToStaticMarkup(<ListErrorBanner errors={['List Tool: `scanner` is unreadable']} />);
+    expect(html.replace(/<code[^>]*>/g, '<code>')).toContain('List Tool: <code>scanner</code> is unreadable');
+  });
 });
