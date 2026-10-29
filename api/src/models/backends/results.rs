@@ -446,17 +446,17 @@ impl OutputMap {
 
 /// Build the S3 object key for a result file, containing it under its result id's prefix
 ///
-/// The `file_path` here is the fully user-controlled `result_file` query parameter. Per-result
-/// authorization is checked one step earlier against `result_id` only, so the constructed key must
-/// stay under the `{result_id}/` prefix — otherwise a `..` segment, absolute path, or empty
-/// component could resolve to another result's file on any object store or proxy that normalizes
-/// dot-segments.
+/// The `file_path` is either the fully user-controlled `result_file` query parameter or a stored
+/// result file name that grep streams. Per-result authorization is checked one step earlier
+/// against `result_id` only, so the constructed key must stay under the `{result_id}/` prefix —
+/// otherwise a `..` segment, absolute path, or empty component could resolve to another result's
+/// file on any object store or proxy that normalizes dot-segments.
 ///
 /// # Arguments
 ///
 /// * `result_id` - The result id whose prefix contains the file
 /// * `file_path` - The user-supplied relative path to the result file
-fn build_result_file_key(
+pub(crate) fn build_result_file_key(
     result_id: &Uuid,
     file_path: &std::path::Path,
 ) -> Result<String, ApiError> {

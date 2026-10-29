@@ -16,6 +16,7 @@ use grep::searcher::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::AsyncReadExt;
@@ -24,6 +25,7 @@ use tracing::{Level, event, instrument};
 use uuid::Uuid;
 
 use super::db;
+use super::results::build_result_file_key;
 use crate::conf::Grep;
 use crate::models::backends::GrepSupport;
 use crate::models::{
@@ -337,7 +339,7 @@ impl GrepSearchWorker {
                 let mut searcher = build_searcher(limits, multi_line, true);
                 let matcher = matcher.clone();
                 // search this document on a blocking thread so we never stall the runtime
-                let searched = tokio::task::spawn_blocking(move || {
+                let outcome = tokio::task::spawn_blocking(move || {
                     // search our document, capped the same way a streamed document is
                     let result = searcher.search_slice(
                         &matcher,
@@ -349,7 +351,7 @@ impl GrepSearchWorker {
                 })
                 .await?;
                 // unpack our search result and sink
-                let (result, sink) = searched;
+                let (result, sink) = outcome;
                 // keep this documents matches and decide why it was cut short if it was
                 self.matches = classify_search(result, sink, max);
             }
@@ -384,7 +386,7 @@ impl GrepSearchWorker {
                 let mut searcher = build_searcher(limits, multi_line, false);
                 let matcher = matcher.clone();
                 // search this document on a blocking thread so we never stall the runtime
-                let searched = tokio::task::spawn_blocking(move || {
+                let outcome = tokio::task::spawn_blocking(move || {
                     // search our streamed document
                     let result = searcher.search_reader(&matcher, bridge, &mut sink);
                     // hand back our sink either way so partial matches are not lost
@@ -392,7 +394,7 @@ impl GrepSearchWorker {
                 })
                 .await?;
                 // unpack our search result and sink
-                let (result, sink) = searched;
+                let (result, sink) = outcome;
                 // keep this documents matches and decide why it was cut short if it was
                 self.matches = classify_search(result, sink, max);
             }
@@ -592,6 +594,10 @@ impl Sink for GrepSink {
             let snippet = build_snippet(mat.bytes(), found.start(), self.max_snippet_size);
             // a multi line search can coalesce matches on adjacent lines into one
             // block, so count the newlines before this match to find its own line
+            #[allow(
+                clippy::naive_bytecount,
+                reason = "snippet prefixes are short, and a bytecount crate would be a new dependency"
+            )]
             let line = line
                 + mat.bytes()[..found.start()]
                     .iter()
@@ -773,7 +779,7 @@ impl GrepSearcher {
             remaining,
             multi_line: params.multi_line,
             with_truncated: params.with_truncated,
-            resume: resume.map(GrepResume::into_map).unwrap_or_default(),
+            resume: resume.map_or_default(GrepResume::into_map),
             limits,
         }
     }
@@ -1063,8 +1069,11 @@ async fn queue_results<T: GrepSupport>(
             // queue this results files if we are searching them
             if params.searches(GrepSource::ResultFiles) {
                 for name in &output.files {
-                    // build the path to this result file in s3
-                    let path = format!("{}/{}", output.id, name);
+                    // build the path to this result file in s3, skipping any stored name that
+                    // could escape its result's prefix
+                    let Ok(path) = build_result_file_key(&output.id, Path::new(name)) else {
+                        continue;
+                    };
                     // queue this result file to be streamed and searched
                     let doc = GrepDocument::ResultFile {
                         tool: tool.clone(),
@@ -1198,6 +1207,10 @@ where
     ///
     /// * `parts` - The request parts to extract our query params from
     /// * `_state` - The shared state for this router
+    #[allow(
+        clippy::unused_async_trait_impl,
+        reason = "axum's FromRequestParts trait defines this method as async"
+    )]
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         // try to extract our query
         if let Some(query) = parts.uri.query() {
@@ -1211,11 +1224,16 @@ where
     }
 }
 
-/// Build a map of matches keyed by their source names for a single item
+/// Collect the snippets of every match in a single document
 ///
 /// This is only used by our tests to make asserting on matches less verbose.
+///
+/// # Arguments
+///
+/// * `matches` - The document matches to collect snippets from
 #[cfg(test)]
 fn snippets(matches: &GrepDocumentMatches) -> Vec<&str> {
+    // borrow each match's snippet in order
     matches
         .matches
         .iter()
@@ -1378,7 +1396,7 @@ mod tests {
         searcher
             .search_slice(&sensitive, b"CORN\n", &mut sink)
             .unwrap();
-        assert!(sink.into_matches().matches.is_empty());
+        assert_eq!(sink.into_matches().matches, [] as [GrepMatch; 0]);
         // but a case insensitive search should
         let insensitive = matcher("corn", true, false, &limits).unwrap();
         let remaining = Arc::new(AtomicUsize::new(limits.max_matches));
@@ -1501,7 +1519,7 @@ mod tests {
             .search_slice(&matcher, b"corn\n", &mut second)
             .unwrap();
         let second = second.into_matches();
-        assert!(second.matches.is_empty());
+        assert_eq!(second.matches, [] as [GrepMatch; 0]);
         assert_eq!(second.truncated, Some(TruncationReason::MatchBudget));
         // and our budget should be fully drained
         assert_eq!(remaining.load(Ordering::Relaxed), 0);
@@ -1577,9 +1595,9 @@ mod tests {
             .search_slice(&matcher, b"corn\n", &mut sink)
             .unwrap();
         // classifying an errored search must keep the matches the sink collected
-        let matches = classify_search(Err(std::io::Error::other("corn error")), sink, 1024);
-        assert_eq!(matches.matches.len(), 1);
-        assert_eq!(matches.truncated, Some(TruncationReason::Error));
+        let classified = classify_search(Err(std::io::Error::other("corn error")), sink, 1024);
+        assert_eq!(classified.matches.len(), 1);
+        assert_eq!(classified.truncated, Some(TruncationReason::Error));
         // and the budget those matches claimed maps to matches we actually return
         assert_eq!(remaining.load(Ordering::Relaxed), limits.max_matches - 1);
     }
@@ -1627,12 +1645,15 @@ mod tests {
         let mut sink = GrepSink::new(matcher.clone(), remaining, &limits, 0);
         let mut searcher = build_searcher(&limits, false, true);
         let result = searcher.search_slice(&matcher, cap_document(body.as_bytes(), max), &mut sink);
-        let matches = classify_search(result, sink, max);
+        let classified = classify_search(result, sink, max);
         // the match in the prefix should be found and the document flagged as truncated
-        assert_eq!(matches.matches.len(), 1);
-        assert_eq!(matches.truncated, Some(TruncationReason::MaxDocumentSize));
+        assert_eq!(classified.matches.len(), 1);
+        assert_eq!(
+            classified.truncated,
+            Some(TruncationReason::MaxDocumentSize)
+        );
         // and we should have searched exactly one byte past the limit
-        assert_eq!(matches.searched, max + 1);
+        assert_eq!(classified.searched, max + 1);
     }
 
     /// Binary content abandons a document and flags it
@@ -1862,7 +1883,7 @@ mod tests {
         let limits = limits(100);
         let (matches, remaining) = search_memory_skip("corn", "corn\n", &limits, 5);
         // nothing should be recorded and nothing should be claimed
-        assert!(matches.matches.is_empty());
+        assert_eq!(matches.matches, [] as [GrepMatch; 0]);
         assert_eq!(remaining, 100);
         assert!(matches.truncated.is_none());
     }

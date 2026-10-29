@@ -257,6 +257,19 @@ pub async fn sha256<P: AsRef<Path>>(path: P) -> Result<String, Error> {
     Ok(sha256)
 }
 
+/// Returns true if the string is a valid SHA256 (is 64 ASCII hex digits)
+///
+/// # Arguments
+///
+/// * `s` - The string to check if it's probably a SHA256
+#[must_use]
+pub fn is_sha256<T: AsRef<str>>(s: T) -> bool {
+    // get the string to check
+    let s = s.as_ref();
+    // a SHA256 is exactly 64 hex digits
+    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 /// Returns true if the haystack matches user filters
 ///
 /// If filters are provided, returns true if the haystack matches at least one of the
