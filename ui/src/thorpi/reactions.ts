@@ -106,7 +106,7 @@ export async function getReactionLogs(
   cursor: string | null = null,
   limit = 100,
 ): Promise<StatusUpdate[] | null> {
-  const url = '/reactions/logs/' + group + '/' + uuid;
+  const url = `/reactions/logs/${encodeURIComponent(group)}/${encodeURIComponent(uuid)}`;
   const params: { cursor?: string; limit?: number } = {};
   if (cursor) {
     params['cursor'] = cursor;
@@ -132,7 +132,7 @@ export async function getReactionLogs(
  *
  * @param group - The group the reaction belongs to.
  * @param uuid - The reaction's unique id.
- * @param stage - The name of the pipeline stage whose logs to fetch.
+ * @param stage - The name of the pipeline stage whose logs to fetch; it is encoded into the path.
  * @param errorHandler - Called with a formatted message if the request fails.
  * @param cursor - Pagination cursor from a previous call, or `null` for the first page.
  * @param limit - Maximum number of log lines to return per page (defaults to 100).
@@ -146,7 +146,7 @@ export const getReactionStageLogs = async (
   cursor: string | null = null,
   limit = 100,
 ): Promise<string[] | null> => {
-  const url = '/reactions/logs/' + group + '/' + uuid + '/' + stage;
+  const url = `/reactions/logs/${encodeURIComponent(group)}/${encodeURIComponent(uuid)}/${encodeURIComponent(stage)}`;
   const params: { cursor?: string; limit?: number } = {};
   if (cursor) {
     params['cursor'] = cursor;
@@ -171,7 +171,7 @@ export const getReactionStageLogs = async (
  *
  * When `tag` is empty the list is scoped by `pipeline` (`/reactions/list/{group}/{pipeline}/`);
  * when `tag` is provided it takes precedence and the list is scoped by tag
- * (`/reactions/tag/{group}/{tag}/`).
+ * (`/reactions/tag/{group}/{tag}/`). Every path segment is URL-encoded.
  *
  * @param group - The group whose reactions to list.
  * @param errorHandler - Called with a formatted message if the request fails.
@@ -193,9 +193,9 @@ export async function listReactions(
 ): Promise<ReactionDetailsListResponse | ReactionListResponse | null> {
   let url = '/reactions/';
   if (tag == '') {
-    url += 'list/' + group + '/' + pipeline + '/';
+    url += `list/${encodeURIComponent(group)}/${encodeURIComponent(pipeline)}/`;
   } else {
-    url += 'tag/' + group + '/' + tag + '/';
+    url += `tag/${encodeURIComponent(group)}/${encodeURIComponent(tag)}/`;
   }
   if (details) {
     url += 'details/';
