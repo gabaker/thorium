@@ -79,6 +79,13 @@ helm upgrade thorium oci://ghcr.io/cisagov/thorium/charts/thorium --version $VER
   -n thorium -f site.yaml --set operator.cluster.upgrade.startingRevision=2026-10-v02
 ```
 
+The chart's `ScyllaCluster` rack spec has changed since the first Helm release: the rack no longer
+names a `scyllaAgentConfig` Secret (and the coredump volume can be turned off with
+`scylla.coredumps.enabled`). So upgrading from that release makes the Scylla operator recreate the
+Scylla pods (the cluster's members) once, whatever revision the operator starts from. Writes fail
+while the pods restart (for example the first pods of the toolbox import Job report
+`ScyllaExecution ConnectionRefused` and are retried), so upgrade at a quiet time.
+
 The operator records the starting revision (`thoradm schema apply --seed-revision`) only after the
 live schema matches that revision's schema, and refuses otherwise, naming the differences; once a
 record exists the setting is reported in `status.upgrade.stale_approvals` and can be removed.
