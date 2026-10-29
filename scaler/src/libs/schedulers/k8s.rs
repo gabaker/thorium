@@ -433,7 +433,8 @@ impl K8s {
         let (k8s_base_policies, k8s_policies) =
             self.get_all_thorium_network_policies(cache).await?;
         // setup base network policies, making sure everything in K8's matches our cache
-        self.setup_base_network_policies(k8s_base_policies, cache)
+        let base_ok = self
+            .setup_base_network_policies(k8s_base_policies, cache)
             .await;
         // calculate which policies we need to delete and add
         let mut policies_to_remove: HashMap<String, Vec<String>> = HashMap::new();
@@ -521,11 +522,11 @@ impl K8s {
         // re-creating it
         let removed = self.remove_network_policies(policies_to_remove).await;
         let added = self.add_network_policies(policies_to_add).await;
-        // remember the tool ids every policy is now rendered with, but only when every delete and
-        // add succeeded: when a replaced policy's delete fails its create conflicts with the old
-        // copy, and the retried delete would then leave the policy missing, so the next sync
-        // reconciles every policy again instead
-        if removed && added {
+        // remember the tool ids every policy is now rendered with, but only when every base and
+        // regular policy delete and add succeeded: when a replaced policy's delete fails its
+        // create conflicts with the old copy, and the retried delete would then leave the policy
+        // missing (or a base policy stale), so the next sync reconciles every policy again instead
+        if base_ok && removed && added {
             self.network_policies.cache.reconciled_tool_ids =
                 Some(cache.network_policies.tool_ids.clone());
         }
@@ -533,6 +534,9 @@ impl K8s {
     }
 
     /// Make sure base network policies are in all of our Thorium groups
+    ///
+    /// Returns whether every base policy delete and deploy succeeded; a policy that was already
+    /// gone counts as deleted.
     ///
     /// # Arguments
     ///
@@ -543,7 +547,9 @@ impl K8s {
         &mut self,
         k8s_base_policies: Vec<(String, Vec<NetworkPolicy>)>,
         cache: &Cache,
-    ) {
+    ) -> bool {
+        // track whether every base policy delete and deploy succeeded
+        let mut all_ok = true;
         // calculate which base policies we need to delete and add
         let mut delete_base_policies: HashMap<String, Vec<String>> = HashMap::new();
         let mut add_base_policies: HashMap<String, Vec<NetworkPolicy>> = HashMap::new();
@@ -597,6 +603,8 @@ impl K8s {
                                 "Failed to delete base network policy '{policy_name}' from namespace '{ns}': {k8s_err}"
                             );
                             event!(Level::ERROR, msg = msg);
+                            // the stale policy is still in place, so its re-create conflicts
+                            all_ok = false;
                         }
                     }
                     _ => {
@@ -605,6 +613,8 @@ impl K8s {
                             "Failed to delete base network policy '{policy_name}' from namespace '{ns}': {k8s_err}"
                         );
                         event!(Level::ERROR, msg = msg);
+                        // the stale policy may still be in place, so its re-create may conflict
+                        all_ok = false;
                     }
                 }
             }
@@ -617,8 +627,12 @@ impl K8s {
                     .cache
                     .namespaces_with_base_policies
                     .insert(ns);
+            } else {
+                // a failed deploy leaves this namespace's base policies to the next reconcile
+                all_ok = false;
             }
         }
+        all_ok
     }
 
     /// Sync any changes in our network policies since last cache reload to K8's
@@ -1499,6 +1513,71 @@ mod tests {
         let held_now = held.lock().unwrap().clone();
         let Some(policy) = held_now.get(&(group.to_owned(), "fenced-1234".to_owned())) else {
             panic!("the replaced policy is missing from K8s");
+        };
+        assert_eq!(held_tools(policy), [new_tool.to_string()]);
+        assert!(!k8s.network_policies.cache.tools_changed(&ids(new_tool)));
+    }
+
+    /// A base policy whose replacement's delete fails isn't recorded as reconciled, so after the
+    /// retried delete the next sync re-creates it with the current tool ids instead of leaving
+    /// the namespace with the stale copy
+    #[tokio::test]
+    async fn failed_base_policy_replace_is_reconciled_again() {
+        // a base policy whose ingress names a tool by name
+        let api =
+            crate::libs::test_api::MockApi::start(crate::libs::test_api::World::default()).await;
+        let mut conf = Conf::new("../api/tests/thorium-testing.yml").unwrap();
+        conf.thorium.base_network_policies = vec![
+            serde_json::from_value(serde_json::json!({
+                "name": "base-fence",
+                "ingress": [{"allowed_tools": ["ghidra-cli"]}],
+            }))
+            .unwrap(),
+        ];
+        let group = crate::libs::test_api::GROUP;
+        let (old_tool, new_tool) = (Uuid::new_v4(), Uuid::new_v4());
+        let ids = |tool: Uuid| -> crate::libs::cache::ToolIdsByGroup {
+            let tools: thorium::models::ToolIdsByName =
+                [("ghidra-cli".to_owned(), [tool].into_iter().collect())]
+                    .into_iter()
+                    .collect();
+            [(group.to_owned(), tools)].into_iter().collect()
+        };
+        let mut cache =
+            crate::libs::test_api::cache(&api, conf.clone(), ImageScaler::K8s, &[]).await;
+        cache.network_policies.tool_ids = ids(old_tool);
+        let held: FakePolicies = std::sync::Arc::default();
+        let fail_deletes = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let client = fake_kube(&held, &fail_deletes);
+        let mut k8s = fake_scheduler(&client, &conf);
+        let key = (group.to_owned(), "base-fence".to_owned());
+        // the first reconcile deploys the base policy for the tool holding the name
+        k8s.setup_network_policies(&cache).await.unwrap();
+        assert_eq!(
+            held_tools(&held.lock().unwrap()[&key]),
+            [old_tool.to_string()]
+        );
+        assert!(!k8s.network_policies.cache.tools_changed(&ids(old_tool)));
+        // another tool takes the name while deletes fail, so the replace's delete fails, its
+        // create conflicts with the old copy, and the sync isn't recorded as reconciled
+        cache.network_policies.tool_ids = ids(new_tool);
+        fail_deletes.store(true, std::sync::atomic::Ordering::SeqCst);
+        k8s.sync_network_policies(&cache).await.unwrap();
+        assert_eq!(
+            held_tools(&held.lock().unwrap()[&key]),
+            [old_tool.to_string()]
+        );
+        assert!(
+            !k8s.network_policies.cache.tools_changed(&ids(old_tool)),
+            "a failed base policy replace must not be recorded as reconciled"
+        );
+        // once deletes work, the next sync replaces the base policy for the tool holding the
+        // name now
+        fail_deletes.store(false, std::sync::atomic::Ordering::SeqCst);
+        k8s.sync_network_policies(&cache).await.unwrap();
+        let held_now = held.lock().unwrap().clone();
+        let Some(policy) = held_now.get(&key) else {
+            panic!("the replaced base policy is missing from K8s");
         };
         assert_eq!(held_tools(policy), [new_tool.to_string()]);
         assert!(!k8s.network_policies.cache.tools_changed(&ids(new_tool)));
