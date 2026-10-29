@@ -366,6 +366,21 @@ jobs:
           # these binaries are published, so never restore caches another workflow run could have written
           use-rust-cache: false
           cache-cross-binary: false
+      # the upload's if-no-files-found only fails when every path is missing, so a shipped binary
+      # that cargo did not produce (a renamed bin target, a dropped -p) fails here, in this job,
+      # instead of as a COPY error in the image build
+      - name: Check ${{ matrix.platform.target }} binaries exist
+        env:
+          TARGET: ${{ matrix.platform.target }}
+        run: |
+          missing=0
+          for bin in thorctl thorium-agent thorium-reactor thoradm thorium-operator; do
+            if [ ! -f "target/${TARGET}/release/${bin}" ]; then
+              echo "::error::target/${TARGET}/release/${bin} was not built"
+              missing=1
+            fi
+          done
+          exit "$missing"
       - name: Upload ${{ matrix.platform.target }} binary artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
