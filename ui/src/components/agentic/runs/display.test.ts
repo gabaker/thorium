@@ -1,7 +1,17 @@
 import { describe, expect, it } from 'vitest';
 
 // project imports
-import { agentName, filterRunsByKind, formatTimestamp, mergeRuns, sampleFileNames, statusTone, workflowInstanceLabel } from './display';
+import {
+  agentName,
+  filterRunsByKind,
+  formatTimestamp,
+  mergeRuns,
+  refreshedRows,
+  sampleFileNames,
+  staleUnfinished,
+  statusTone,
+  workflowInstanceLabel,
+} from './display';
 import { BadgeTone } from '@components/agentic/shared';
 import { Reaction, ReactionStatus } from '@models/reactions';
 import { RunKind } from '@models/runs';
@@ -36,6 +46,22 @@ describe('run lists', () => {
     const later = { id: 'c', sla: '2026-03-01T00:00:00.500Z' } as unknown as Reaction;
     const earlier = { id: 'd', sla: '2026-03-01T00:00:00Z' } as unknown as Reaction;
     expect(mergeRuns([[earlier, later]]).map((run) => run.id)).toEqual(['c', 'd']);
+  });
+});
+
+describe('refreshing shown runs', () => {
+  const started = { id: 'x', sla: '2026-01-01', status: ReactionStatus.Started } as unknown as Reaction;
+  const done = { id: 'y', sla: '2026-01-02', status: ReactionStatus.Completed } as unknown as Reaction;
+  const other = { id: 'z', sla: '2026-01-03', status: ReactionStatus.Started } as unknown as Reaction;
+  it('finds the shown unfinished runs the refreshed pages no longer hold', () => {
+    expect(staleUnfinished([started, done], [[other]])).toEqual([started]);
+    expect(staleUnfinished([started, done], [[other], [started]])).toEqual([]);
+  });
+  it('shows a re-read run in its new status and drops a run that is gone', () => {
+    const finished = { ...started, status: ReactionStatus.Completed };
+    const rows = refreshedRows([started, done], [[other]], [finished], []);
+    expect(rows.find((row) => row.id === 'x')?.status).toBe(ReactionStatus.Completed);
+    expect(refreshedRows([started, done], [[other]], [], ['x']).map((row) => row.id)).toEqual(['z', 'y']);
   });
 });
 

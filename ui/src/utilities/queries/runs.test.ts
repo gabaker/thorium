@@ -11,6 +11,7 @@ import {
   isGone,
   MAX_POLL_FAILURES,
   reactionKey,
+  rereadRuns,
   RunReadError,
   runRefetchInterval,
   UPDATES_PAGE_SIZE,
@@ -49,6 +50,24 @@ describe('fetchReaction', () => {
     expect(error).toBeInstanceOf(RunReadError);
     expect((error as RunReadError).message).toBe('Get Reaction: not found');
     expect(isGone(error)).toBe(true);
+  });
+});
+
+describe('rereadRuns', () => {
+  it('returns the runs read again, lists the ones the API cannot find, and reports other failures', async () => {
+    vi.mocked(getReaction).mockImplementation((_group, id, onError, onStatus) => {
+      if (id === 'done') return Promise.resolve({ id, group: 'g', status: ReactionStatus.Completed } as Reaction);
+      onError(`Get Reaction: ${id}`);
+      onStatus?.(id === 'deleted' ? 404 : id === 'signed-out' ? 401 : 500);
+      return Promise.resolve(null);
+    });
+    const errors: string[] = [];
+    const shown = ['done', 'deleted', 'signed-out', 'flaky'].map((id) => ({ id, group: 'g', status: ReactionStatus.Started }) as Reaction);
+    const { found, gone } = await rereadRuns(shown, (error) => errors.push(error));
+    expect(found.map((item) => [item.id, item.status])).toEqual([['done', ReactionStatus.Completed]]);
+    // only the run the API cannot find is gone; a 401 keeps its row like any other failure
+    expect(gone).toEqual(['deleted']);
+    expect(errors).toEqual(['Get Reaction: signed-out', 'Get Reaction: flaky']);
   });
 });
 

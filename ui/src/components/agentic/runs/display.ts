@@ -2,7 +2,7 @@
 import { Sample } from '@models/files';
 import { Reaction } from '@models/reactions';
 import { RunKind, RunProvenance } from '@models/runs';
-import { parseWorkflowResultKey, runKind } from '@utilities/runs';
+import { isRunFinished, parseWorkflowResultKey, runKind } from '@utilities/runs';
 
 // the run status tone is the shared status tone, so a status has one colour on every page
 export { statusTone } from '@components/shared/badges/Badge';
@@ -32,6 +32,35 @@ export function mergeRuns(lists: Reaction[][]): Reaction[] {
   for (const run of lists.flat()) byId.set(run.id, run);
   // compare instants: the timestamps vary in fractional precision, so they don't sort as text
   return [...byId.values()].sort((a, b) => Date.parse(b.sla) - Date.parse(a.sla));
+}
+
+/**
+ * Find the shown unfinished runs that no refreshed page holds.
+ *
+ * A refresh reads only the first page of each listing, so a run that changed status and fell below the first page of
+ * its new listing, or was deleted, would otherwise keep its old status for good.
+ *
+ * @param shown - The rows shown before the refresh.
+ * @param lists - The pages the refresh read.
+ * @returns The shown runs that are unfinished and in none of the pages, to read again by id.
+ */
+export function staleUnfinished(shown: Reaction[], lists: Reaction[][]): Reaction[] {
+  const read = new Set(lists.flat().map((run) => run.id));
+  return shown.filter((run) => !isRunFinished(run.status) && !read.has(run.id));
+}
+
+/**
+ * Merge a refresh into the shown rows.
+ *
+ * @param shown - The rows shown before the refresh.
+ * @param lists - The pages the refresh read.
+ * @param reread - The stale runs read again by id.
+ * @param gone - The ids of stale runs the API no longer finds.
+ * @returns The rows to show: the shown rows without the gone runs, updated by the pages and the runs read again.
+ */
+export function refreshedRows(shown: Reaction[], lists: Reaction[][], reread: Reaction[], gone: string[]): Reaction[] {
+  const dropped = new Set(gone);
+  return mergeRuns([shown.filter((run) => !dropped.has(run.id)), ...lists, reread]);
 }
 
 /**

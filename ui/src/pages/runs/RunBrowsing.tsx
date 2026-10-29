@@ -2,7 +2,7 @@ import { FC, useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 // project imports
-import { filterRunsByKind, mergeRuns } from '@components/agentic/runs/display';
+import { filterRunsByKind, mergeRuns, refreshedRows, staleUnfinished } from '@components/agentic/runs/display';
 import { RunTime } from '@components/agentic/runs/RunTime';
 import { StatusPill } from '@components/agentic/runs/StatusIndicator';
 import {
@@ -26,6 +26,7 @@ import { Button, ButtonVariant } from '@components/shared/buttons';
 import { Tabs } from '@components/shared/tabs';
 import { listRunsByStatus, listRunsByTag, RunPage } from '@thorpi/runs';
 import { useAuth } from '@utilities/auth';
+import { rereadRuns } from '@utilities/queries/runs';
 import { isRunFinished, runKind } from '@utilities/runs';
 import { Reaction, ReactionStatus } from '@models/reactions';
 import { RunKind } from '@models/runs';
@@ -82,6 +83,77 @@ function readPage(
   return source === WORKFLOW_RUN_TAG ? listRunsByTag(group, source, onError, cursor) : listRunsByStatus(group, source, onError, cursor);
 }
 
+/** What one sweep read: the first page of every listing and, on a refresh, the stale shown rows read again by id. */
+export interface SweepRead {
+  /** The first page of each listing that answered */
+  lists: Reaction[][];
+  /** Where the next page of each listing with more runs starts */
+  next: PageCursor[];
+  /** The stale shown runs read again by id */
+  reread: Reaction[];
+  /** The ids of stale shown runs the API no longer finds */
+  gone: string[];
+  /** How many listings the sweep read */
+  requests: number;
+  /** How many listing reads failed; only these decide whether a refresh's pages are used */
+  failures: number;
+  /** How many reads of stale rows by id failed for a reason other than the run being gone */
+  rereadFailures: number;
+}
+
+/**
+ * Read the first page of every listing of the groups and, on a refresh, read again by id the shown unfinished rows no
+ * first page holds anymore, so they show their new status or leave when gone.
+ *
+ * @param groups - The groups to list.
+ * @param shown - The rows shown before a refresh, or `null` for a full load, which reads nothing again.
+ * @param onError - Called with the message of each failed read.
+ * @returns What the sweep read, with the count of listing requests and of the listing and re-read failures.
+ */
+export async function readSweep(groups: string[], shown: Reaction[] | null, onError: (message: string) => void): Promise<SweepRead> {
+  let failures = 0;
+  let rereadFailures = 0;
+  let requests = 0;
+  // count each failed listing read before reporting it
+  const failed = (message: string) => {
+    failures += 1;
+    onError(message);
+  };
+  // re-read failures are counted apart, so rows that fail to read again never make a refresh drop pages its listings read
+  const rereadFailed = (message: string) => {
+    rereadFailures += 1;
+    onError(message);
+  };
+  const lists: Reaction[][] = [];
+  const next: PageCursor[] = [];
+  for (const name of groups) {
+    for (const source of SOURCES) {
+      requests += 1;
+      const page = await readPage(name, source, undefined, failed);
+      if (!page) continue;
+      lists.push(page.runs);
+      if (page.cursor !== null) next.push({ group: name, source, cursor: page.cursor });
+    }
+  }
+  // the stale rows are read again only when some listing answered, so a refresh with the API down reads nothing more
+  let reread: Reaction[] = [];
+  let gone: string[] = [];
+  if (shown !== null && failures < requests) {
+    ({ found: reread, gone } = await rereadRuns(staleUnfinished(shown, lists), rereadFailed));
+  }
+  return { lists, next, reread, gone, requests, failures, rereadFailures };
+}
+
+/**
+ * Tell whether a refresh's pages replace the shown rows.
+ *
+ * @param sweep - The refresh's listing request and failure counts.
+ * @returns Whether a listing answered, or there was nothing to list; a refresh where every listing failed keeps the rows.
+ */
+export function usesRefresh(sweep: Pick<SweepRead, 'requests' | 'failures'>): boolean {
+  return sweep.requests === 0 || sweep.failures < sweep.requests;
+}
+
 /** Tell which runs of a list are in which status, so a reload can tell whether anything moved. */
 function runsSignature(runs: Reaction[]): string {
   return runs
@@ -110,8 +182,13 @@ const RunBrowsing: FC = () => {
   const epoch = useRef(0);
   // what the first pages held at the last sweep, to tell whether a refresh found any change
   const signature = useRef('');
+  // the rows shown now, so a refresh can find the unfinished ones its first pages no longer hold
+  const shownRuns = useRef<Reaction[]>([]);
+  useEffect(() => {
+    shownRuns.current = runs;
+  }, [runs]);
 
-  // read the first page of every listing; a refresh adds to the rows already shown, a full load replaces them
+  // read the first page of every listing; a refresh merges into the rows already shown, a full load replaces them
   const load = useCallback(
     async (refresh: boolean): Promise<boolean> => {
       const current = ++sweep.current;
@@ -122,38 +199,29 @@ const RunBrowsing: FC = () => {
         // pages being read for the rows this load replaces are abandoned
         setLoadingMore(false);
       }
-      let failures = 0;
-      let requests = 0;
       const onError = (message: string) => {
-        failures += 1;
         if (current === sweep.current) setError(message);
       };
-      const lists: Reaction[][] = [];
-      const next: PageCursor[] = [];
-      for (const name of groups) {
-        for (const source of SOURCES) {
-          requests += 1;
-          const page = await readPage(name, source, undefined, onError);
-          if (!page) continue;
-          lists.push(page.runs);
-          if (page.cursor !== null) next.push({ group: name, source, cursor: page.cursor });
-        }
-      }
+      const { lists, next, reread, gone, requests, failures, rereadFailures } = await readSweep(
+        groups,
+        refresh ? shownRuns.current : null,
+        onError,
+      );
       // a stale sweep must not replace the rows of the newer one
       if (current !== sweep.current) return false;
       if (!refresh) {
         // a full load replaces the rows and cursors even when every request failed, so no other group's rows stay under this one
         setRuns(mergeRuns(lists));
         setMore(next);
-      } else if (requests === 0 || failures < requests) {
+      } else if (usesRefresh({ requests, failures })) {
         // a refresh where every request failed keeps the rows, so refreshing goes on and can restore them
-        setRuns((shown) => mergeRuns([shown, ...lists]));
+        setRuns((shown) => refreshedRows(shown, lists, reread, gone));
       }
       setLoading(false);
-      // a sweep that read every listing clears an error left by an earlier failed read
-      if (failures === 0) setError('');
+      // a sweep that read every listing and every stale row clears an error left by an earlier failed read
+      if (failures === 0 && rereadFailures === 0) setError('');
       // a refresh that read the same runs in the same statuses found nothing new
-      const seen = runsSignature(lists.flat());
+      const seen = runsSignature([...lists.flat(), ...reread]);
       const changed = seen !== signature.current;
       signature.current = seen;
       return changed;

@@ -98,6 +98,31 @@ export async function fetchReaction(group: string, id: string): Promise<Reaction
   return found;
 }
 
+/**
+ * Read runs again by id, one request per run, all at once.
+ *
+ * @param runs - The runs to read again.
+ * @param onError - Called with the message of each read that failed for a reason other than the run being gone.
+ * @returns The runs read, and the ids of the runs the API could not find.
+ */
+export async function rereadRuns(runs: Reaction[], onError: (message: string) => void): Promise<{ found: Reaction[]; gone: string[] }> {
+  const found: Reaction[] = [];
+  const gone: string[] = [];
+  await Promise.all(
+    runs.map(async (run) => {
+      try {
+        found.push(await fetchReaction(run.group, run.id));
+      } catch (error: unknown) {
+        // only a run the API cannot find leaves the list; a refused read (an expired session answers 401) or any other
+        // failure keeps its row for the next refresh to retry
+        if (error instanceof RunReadError && error.status === 404) gone.push(run.id);
+        else onError(error instanceof Error ? error.message : String(error));
+      }
+    }),
+  );
+  return { found, gone };
+}
+
 /** How many status updates one page reads. */
 export const UPDATES_PAGE_SIZE = 1000;
 
