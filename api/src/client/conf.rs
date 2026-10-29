@@ -310,8 +310,13 @@ impl CtlConf {
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, Error> {
         // get the path to our config
         let path = path.as_ref();
-        // read the raw config file body from disk
-        let file_body = std::fs::read_to_string(path)?;
+        // read the raw config file body from disk, naming the file if it can't be read
+        let file_body = std::fs::read_to_string(path).map_err(|err| {
+            std::io::Error::new(
+                err.kind(),
+                format!("failed to read client config {}: {err}", path.display()),
+            )
+        })?;
         // build the environment overlay for THORCTL_* variables
         let env = config::Environment::with_prefix("THORCTL").separator("__");
         // assemble the config from the file body overlaid with the environment
@@ -425,5 +430,26 @@ mod conf_tests {
             printed.len()
         );
         assert!(printed.contains("himalia"));
+    }
+
+    /// A client config that can't be read reports its path and keeps the I/O error's kind
+    #[test]
+    fn missing_config_names_its_path() {
+        // a path under a temp directory that is never created, so the file can't exist
+        let path = std::env::temp_dir()
+            .join(format!("thorium-missing-conf-{}", std::process::id()))
+            .join("callisto.yml");
+        // try to load the missing config
+        let err = CtlConf::from_path(&path).expect_err("a missing config should not load");
+        // the error message must name the file that couldn't be read
+        assert!(
+            err.to_string().contains(&path.display().to_string()),
+            "error does not name the config path: {err}"
+        );
+        // the error must stay an I/O error whose kind is still NotFound
+        match err {
+            crate::Error::IO(io_err) => assert_eq!(io_err.kind(), std::io::ErrorKind::NotFound),
+            other => panic!("expected an I/O error, got {other}"),
+        }
     }
 }

@@ -142,6 +142,40 @@ async fn get() -> Result<(), Error> {
     Ok(())
 }
 
+/// Downloading a repo with no commits returns the server's not found error instead of trying
+/// to unpack the error body
+///
+/// The repo's default checkout branch was never uploaded, so the server answers 404 naming the repo.
+#[tokio::test]
+async fn download_unpack_without_commits_is_not_found() -> Result<(), Error> {
+    const REPO_URL: &str = "github.com/thorium-test/no-commits";
+    // Get admin client
+    let client = test_utilities::admin_client().await?;
+    // Create a group
+    let group = generators::groups(1, &client).await?.remove(0).name;
+    // Create a repo without uploading any commits for it
+    let req = RepoRequest::new(REPO_URL, vec![group], Some(RepoCheckout::branch("main")));
+    client.repos.create(&req).await?;
+    // try to download and unpack the repo into a scratch directory
+    let target = std::env::temp_dir().join(format!("no-commits-{}", uuid::Uuid::new_v4()));
+    let result = client
+        .repos
+        .download_unpack(REPO_URL, &RepoDownloadOpts::default(), &target)
+        .await;
+    // remove anything the download left behind
+    let _ = std::fs::remove_dir_all(&target);
+    // the download fails with the server's 404 and its message naming the repo
+    let Err(err) = result else {
+        return Err(Error::new("downloading a repo without commits succeeded"));
+    };
+    is!(err.status(), Some(reqwest::StatusCode::NOT_FOUND));
+    assert!(
+        err.msg().unwrap_or_default().contains(REPO_URL),
+        "unexpected error: {err}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn get_fail() -> Result<(), Error> {
     const REPO_URL: &str = "github.com/serde-rs/serde";

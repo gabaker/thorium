@@ -314,19 +314,19 @@ impl SubReactionLists {
         let started = ReactionKeys::sub_status_set(
             &reaction.group,
             &reaction.id,
-            &ReactionStatus::Created,
+            &ReactionStatus::Started,
             shared,
         );
         let completed = ReactionKeys::sub_status_set(
             &reaction.group,
             &reaction.id,
-            &ReactionStatus::Created,
+            &ReactionStatus::Completed,
             shared,
         );
         let failed = ReactionKeys::sub_status_set(
             &reaction.group,
             &reaction.id,
-            &ReactionStatus::Created,
+            &ReactionStatus::Failed,
             shared,
         );
         SubReactionLists {

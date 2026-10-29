@@ -424,6 +424,10 @@ impl Repos {
             .query(&query)
             .send()
             .await?;
+        // return the server's error rather than trying to uncart an error body
+        if !resp.status().is_success() {
+            return Err(Error::from(resp));
+        }
         // convert our path to a path buf
         let path = path.into();
         // get our response as a stream of bytes
