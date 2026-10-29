@@ -1191,8 +1191,14 @@ Installs the infra-operators chart (once per cluster, skipping operators that al
 and the thorium chart, waits for Thorium to be ready, installs thorctl, and imports the
 default toolbox. Generated credentials are kept on redeploys, but no other option is: each
 deploy renders the values from its own options alone (helm --reset-values), so repeat them
-(--registry, --no-kibana, --values, ...) on every redeploy. A cluster runs one Thorium
-deployment, so deploy refuses when one already exists under another namespace prefix.
+(--registry, --no-kibana, --values, ...) on every redeploy. The exception is the backing
+services' sizes and settings that can't or shouldn't change in place: when the Redis PVC size,
+the Scylla rack storage, or the Elasticsearch node count, storage, heap (javaOpts), CPU and
+memory limits, or config run with other values than the deploy renders (a deployment from an
+older chart, for example), deploy keeps the running ones in a values overlay it prints and
+layers under --values and --set (pass --reset-infra to apply the rendered values instead). A
+cluster runs one Thorium deployment, so deploy refuses when one already exists under another
+namespace prefix.
 
 Charts (default: ${CHART_REPO}/{thorium,infra-operators} at ${CHART_VERSION}):
   --chart <path|oci-ref>      The thorium chart: a local chart directory, a packaged
@@ -1248,6 +1254,10 @@ Configuration:
 
 Other:
   --skip-operators            Don't install or upgrade the infra-operators chart
+  --reset-infra               Apply the rendered infra sizes and settings instead of keeping the
+                              running ones (infra.redis.storage, infra.scylla.storage,
+                              infra.elastic.{count,storage,javaOpts,resources.limits,config});
+                              storage can only grow, and Scylla refuses any rack storage change
   --timeout <seconds>         Timeout for each install and the readiness wait
                               (default: 1800)
 
@@ -1876,6 +1886,202 @@ infra:
 EOF
 }
 
+# The infra settings deploy compares with a running deployment before upgrading it, one per line:
+# the values key, the variable naming its namespace, the resource and name of the live object, the
+# object's Kind in the chart, and the JSONPath of the setting. Deploy renders its values without
+# the previous release's (helm --reset-values), so a chart or minithor whose defaults differ from
+# the ones a deployment was installed with would change these, and the backends refuse or restart
+# for them: a PVC or Elasticsearch volume can't shrink, Scylla refuses any change to rack storage,
+# and every Elasticsearch change restarts its nodes
+INFRA_LIVE_FIELDS='
+infra.redis.storage REDIS_NAMESPACE persistentvolumeclaim redis-persistent-storage-claim PersistentVolumeClaim {.spec.resources.requests.storage}
+infra.scylla.storage SCYLLA_NAMESPACE scyllacluster.scylla.scylladb.com scylla ScyllaCluster {.spec.datacenter.racks[0].storage.capacity}
+infra.elastic.count ELASTIC_NAMESPACE elasticsearch.elasticsearch.k8s.elastic.co elastic Elasticsearch {.spec.nodeSets[0].count}
+infra.elastic.storage ELASTIC_NAMESPACE elasticsearch.elasticsearch.k8s.elastic.co elastic Elasticsearch {.spec.nodeSets[0].volumeClaimTemplates[0].spec.resources.requests.storage}
+infra.elastic.javaOpts ELASTIC_NAMESPACE elasticsearch.elasticsearch.k8s.elastic.co elastic Elasticsearch {.spec.nodeSets[0].podTemplate.spec.containers[?(@.name=="elasticsearch")].env[?(@.name=="ES_JAVA_OPTS")].value}
+infra.elastic.resources.limits.cpu ELASTIC_NAMESPACE elasticsearch.elasticsearch.k8s.elastic.co elastic Elasticsearch {.spec.nodeSets[0].podTemplate.spec.containers[?(@.name=="elasticsearch")].resources.limits.cpu}
+infra.elastic.resources.limits.memory ELASTIC_NAMESPACE elasticsearch.elasticsearch.k8s.elastic.co elastic Elasticsearch {.spec.nodeSets[0].podTemplate.spec.containers[?(@.name=="elasticsearch")].resources.limits.memory}
+infra.elastic.config ELASTIC_NAMESPACE elasticsearch.elasticsearch.k8s.elastic.co elastic Elasticsearch {.spec.nodeSets[0].config}
+'
+
+# Split a rendered multi-document manifest into one file per object, named <Kind>_<name>.yaml
+#
+#   split_manifests <manifest> <dir>
+split_manifests() {
+    awk -v dir="$2" '
+        function flush(f) {
+            if (kind != "" && name != "") { f = dir "/" kind "_" name ".yaml"; printf "%s", doc > f; close(f) }
+            doc = ""; kind = ""; name = ""; meta = 0
+        }
+        /^---/ { flush(); next }
+        { doc = doc $0 "\n" }
+        /^kind: / { kind = $2 }
+        /^[^ #]/ { meta = ($0 ~ /^metadata:/) }
+        meta && /^  name: / { name = $2; gsub(/"/, "", name); meta = 0 }
+        END { flush() }' "$1"
+}
+
+# Print one setting of a rendered object file (offline), or nothing when it doesn't have it
+#
+#   infra_rendered_value <object file> <JSONPath or go-template output format>
+infra_rendered_value() {
+    kctl annotate --local -f "$1" minithor-render=true -o "$2" 2>/dev/null || true
+}
+
+# Print a live setting as a values file scalar: null for an unset one, numbers and JSON maps
+# (the Elasticsearch config) as they are, anything else quoted
+#
+#   infra_overlay_value <value>
+infra_overlay_value() {
+    if [ -z "$1" ]; then
+        echo null
+    elif [[ "$1" =~ ^[0-9]+$ ]] || [[ "$1" == "{"* ]]; then
+        echo "$1"
+    else
+        yaml_str "$1"
+    fi
+}
+
+# Write a values file from "<dotted key><TAB><YAML value>" lines on stdin, nesting the keys
+#
+#   write_values_overlay <file>
+write_values_overlay() {
+    {
+        echo "# Generated by minithor deploy: the running deployment's infra settings, kept since this"
+        echo "# deploy's values render others (deploy --reset-infra applies the values instead)"
+        sort -t "$(printf '\t')" -k1,1 | awk -F'\t' '
+            function indent(depth, s) { s = ""; while (depth-- > 0) s = s "  "; return s }
+            {
+                n = split($1, part, ".")
+                i = 1
+                while (i < n && i <= depth && part[i] == prev[i]) i++
+                for (j = i; j < n; j++) print indent(j - 1) part[j] ":"
+                print indent(n - 1) part[n] ": " $2
+                for (j = 1; j < n; j++) prev[j] = part[j]
+                depth = n - 1
+            }'
+    } > "$1"
+}
+
+# Print the infra settings whose rendered value differs from the running deployment's, as
+# "<key><TAB><live value><TAB><rendered value><TAB><values file scalar keeping the live one>"
+# lines. Settings of objects that don't run or that the chart doesn't render are skipped. A config
+# key the values add but the live node set lacks is set to null so the overlay drops it, and a live
+# node set without a config compares as an empty one
+#
+#   infra_differences <dir of rendered object files> <file of "<key><TAB><live value>" lines>
+infra_differences() {
+    local objects=$1 live_file=$2 key nsvar resource name kind path live rendered value extra k
+    local keys_format='go-template={{range $k, $v := (index .spec.nodeSets 0).config}}{{$k}}{{"\n"}}{{end}}'
+    while read -r key nsvar resource name kind path; do
+        [ -n "$key" ] && [ -f "$objects/${kind}_${name}.yaml" ] || continue
+        grep -q "^${key}	" "$live_file" || continue
+        live="$(grep "^${key}	" "$live_file" | cut -f2-)"
+        # a node set without a config has an empty one, which the chart renders as {}
+        [ "$path" != "{.spec.nodeSets[0].config}" ] || [ -n "$live" ] || live="{}"
+        rendered="$(infra_rendered_value "$objects/${kind}_${name}.yaml" "jsonpath=$path")"
+        [ "$live" != "$rendered" ] || continue
+        value="$(infra_overlay_value "$live")"
+        if [ "$path" = "{.spec.nodeSets[0].config}" ]; then
+            # null each key only the rendered config has, since values files merge maps
+            extra=""
+            for k in $(infra_rendered_value "$objects/${kind}_${name}.yaml" "$keys_format"); do
+                grep -qF "\"$k\":" <<<"$live" || extra+="\"$k\":null,"
+            done
+            if [ -n "$extra" ]; then
+                value="${live%\}}"
+                [ "$value" = "{" ] || value+=","
+                value+="${extra%,}}"
+            fi
+        fi
+        printf '%s\t%s\t%s\t%s\n' "$key" "$live" "$rendered" "$value"
+    done <<<"$INFRA_LIVE_FIELDS"
+}
+
+# Keep a running deployment's infra sizes and settings when this deploy's values render others:
+# writes them to a values overlay that deploy layers above its own values and under the user's
+# --values and --set, and prints what it kept and what the user's values still change. With
+# --reset-infra it only prints what the deploy changes. Nothing is printed or written for a first
+# install, or when every setting matches
+#
+#   keep_live_infra <true for --reset-infra> <overlay file> <count of minithor's values args>
+#       <minithor's values args...> <the user's values args...>
+keep_live_infra() {
+    local reset=$1 overlay=$2 count=$3
+    shift 3
+    local -a minithor_args=("${@:1:$count}") extra_args=("${@:$((count + 1))}")
+    local key nsvar resource name kind path object="" exists=false found=false tmp
+    rm -f "$overlay"
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/minithor-infra.XXXXXX")"
+    # read each setting of the objects that run, checking each object once
+    while read -r key nsvar resource name kind path; do
+        [ -n "$key" ] || continue
+        if [ "$object" != "$nsvar/$resource/$name" ]; then
+            object="$nsvar/$resource/$name"
+            exists=false
+            kctl -n "${!nsvar}" get "$resource" "$name" -o name &>/dev/null && exists=true
+        fi
+        [ "$exists" = true ] || continue
+        found=true
+        printf '%s\t%s\n' "$key" "$(kctl -n "${!nsvar}" get "$resource" "$name" -o "jsonpath=$path" 2>/dev/null || true)" \
+            >> "$tmp/live.tsv"
+    done <<<"$INFRA_LIVE_FIELDS"
+    if [ "$found" = false ]; then
+        rm -rf "$tmp"
+        return 0
+    fi
+    # render the chart as this deploy would (placeholder credentials, never applied) and compare
+    mkdir -p "$tmp/render" "$tmp/kept"
+    if ! helm_cmd template "$THORIUM_RELEASE" "$THORIUM_CHART" ${THORIUM_CHART_ARGS[@]+"${THORIUM_CHART_ARGS[@]}"} \
+        -n "$THORIUM_NAMESPACE" "${minithor_args[@]}" ${extra_args[@]+"${extra_args[@]}"} --set secrets.renderOnly=true \
+        > "$tmp/render.yaml" 2> "$tmp/render.err"; then
+        echo "WARNING: couldn't render the thorium chart to compare it with the running infra settings, so" \
+            "none are kept:" >&2
+        cat "$tmp/render.err" >&2
+        rm -rf "$tmp"
+        return 0
+    fi
+    split_manifests "$tmp/render.yaml" "$tmp/render"
+    infra_differences "$tmp/render" "$tmp/live.tsv" > "$tmp/diff.tsv"
+    local note="(storage can only grow, and only with a storage class that allows expansion; Scylla refuses any change to its rack storage)"
+    if [ ! -s "$tmp/diff.tsv" ]; then
+        rm -rf "$tmp"
+        return 0
+    fi
+    if [ "$reset" = true ]; then
+        echo "--reset-infra: this deploy changes these running infra settings $note:"
+        awk -F'\t' '{ printf "  %s: running %s, the values render %s\n", $1, $2, $3 }' "$tmp/diff.tsv"
+        rm -rf "$tmp"
+        return 0
+    fi
+    # render again with the live settings under the user's values: what still differs is the user's
+    cut -f1,4 "$tmp/diff.tsv" | write_values_overlay "$overlay"
+    : > "$tmp/user.tsv"
+    if helm_cmd template "$THORIUM_RELEASE" "$THORIUM_CHART" ${THORIUM_CHART_ARGS[@]+"${THORIUM_CHART_ARGS[@]}"} \
+        -n "$THORIUM_NAMESPACE" "${minithor_args[@]}" -f "$overlay" ${extra_args[@]+"${extra_args[@]}"} --set secrets.renderOnly=true \
+        > "$tmp/render.yaml" 2> "$tmp/render.err"; then
+        split_manifests "$tmp/render.yaml" "$tmp/kept"
+        infra_differences "$tmp/kept" "$tmp/live.tsv" > "$tmp/user.tsv"
+    fi
+    # keep only what the user's values don't override
+    awk -F'\t' 'FILENAME == ARGV[1] { user[$1] = 1; next } !($1 in user)' "$tmp/user.tsv" "$tmp/diff.tsv" > "$tmp/keep.tsv"
+    if [ -s "$tmp/keep.tsv" ]; then
+        cut -f1,4 "$tmp/keep.tsv" | write_values_overlay "$overlay"
+        echo "Keeping the running deployment's infra settings where this deploy's values differ (pass" \
+            "--reset-infra to apply the values instead):"
+        awk -F'\t' '{ printf "  %s: running %s, the values render %s\n", $1, $2, $3 }' "$tmp/keep.tsv"
+        echo "They are in $overlay, layered under your --values and --set:"
+        sed 's/^/    /' "$overlay"
+    else
+        rm -f "$overlay"
+    fi
+    if [ -s "$tmp/user.tsv" ]; then
+        echo "Your --values/--set change these running infra settings $note:"
+        awk -F'\t' '{ printf "  %s: running %s, your --values/--set render %s\n", $1, $2, $3 }' "$tmp/user.tsv"
+    fi
+    rm -rf "$tmp"
+}
+
 # The thorctl config deploy logs in to: thorctl's default config for the default profile,
 # and a separate one for any other profile so a deploy never replaces another cluster's login
 thorctl_config_path() {
@@ -2129,7 +2335,7 @@ cmd_deploy() {
     local image="" local_image="" image_repo="" pull_policy=""
     local registry_user="" toolbox="$DEFAULT_TOOLBOX_URL" banner="" docker_config=""
     local bin_dir="/usr/local/bin" kibana=true skip_operators=false thorctl=true
-    local timeout=1800
+    local timeout=1800 reset_infra=false
     local proxy="${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}"
     local extra_no_proxy=""
     local -a user_values=() user_sets=()
@@ -2159,6 +2365,7 @@ cmd_deploy() {
             --proxy)           need_value "$1" $#; proxy="$2"; shift ;;
             --no-proxy)        need_value "$1" $#; extra_no_proxy="$2"; shift ;;
             --skip-operators)  skip_operators=true ;;
+            --reset-infra)     reset_infra=true ;;
             --timeout)         need_value "$1" $#; need_number "$1" "$2"; timeout="$2"; shift ;;
             *) echo "Unknown option: $1"; usage_deploy; exit 1 ;;
         esac
@@ -2293,10 +2500,11 @@ cmd_deploy() {
         fi
     } > "$values_file"
     echo "Values written to $values_file"
-    # embedded defaults, then the flag values, then the user's own values and --set flags
-    local -a values_args=(-f "$defaults_file" -f "$values_file")
+    # embedded defaults, then the flag values, then the kept infra settings, then the user's own
+    # values and --set flags
+    local -a values_args=(-f "$defaults_file" -f "$values_file") user_args=()
     local f s
-    for f in ${user_values[@]+"${user_values[@]}"}; do values_args+=(-f "$f"); done
+    for f in ${user_values[@]+"${user_values[@]}"}; do user_args+=(-f "$f"); done
     if [ -n "$toolbox" ]; then
         # fetch the toolbox on this host (which has the proxy settings), not in the cluster
         local toolbox_file
@@ -2307,11 +2515,18 @@ cmd_deploy() {
         else
             cp "$toolbox" "$toolbox_file"
         fi
-        values_args+=(--set-file "operator.toolbox.json=$toolbox_file")
+        user_args+=(--set-file "operator.toolbox.json=$toolbox_file")
     fi
-    [ -n "$banner" ] && values_args+=(--set-file "operator.banner=$banner")
-    [ -n "$docker_config" ] && values_args+=(--set-file "operator.dockerConfigJson=$docker_config")
-    for s in ${user_sets[@]+"${user_sets[@]}"}; do values_args+=(--set "$s"); done
+    [ -n "$banner" ] && user_args+=(--set-file "operator.banner=$banner")
+    [ -n "$docker_config" ] && user_args+=(--set-file "operator.dockerConfigJson=$docker_config")
+    for s in ${user_sets[@]+"${user_sets[@]}"}; do user_args+=(--set "$s"); done
+
+    log "Comparing the running infra settings with the values"
+    local live_file
+    live_file="${MINITHOR_STATE_DIR}/values-live$(profile_suffix).yaml"
+    keep_live_infra "$reset_infra" "$live_file" "${#values_args[@]}" "${values_args[@]}" ${user_args[@]+"${user_args[@]}"}
+    [ -f "$live_file" ] && values_args+=(-f "$live_file")
+    values_args+=(${user_args[@]+"${user_args[@]}"})
 
     log "Deploying cluster-wide operators"
     if [ "$skip_operators" = true ]; then

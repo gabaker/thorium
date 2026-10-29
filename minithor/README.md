@@ -81,6 +81,18 @@ that the node then can't run. On an Apple-silicon Mac the nodes are arm64: an am
 Docker runs through Rosetta or QEMU emulation still won't start on them, so pass `--image` with a
 registry image that has an arm64 variant (or build with `--platform linux/arm64`).
 
+## Redeploying over an older deployment
+
+Each `deploy` renders its values from its own options (Helm `--reset-values`), so a newer minithor
+or chart can render other backing-service sizes than a deployment was installed with. Before
+upgrading, `deploy` compares the running Redis PVC size, Scylla rack storage, and Elasticsearch node
+count, storage, heap, CPU and memory limits, and config with what its values render, and keeps the
+running ones: it prints each difference and writes them to `~/.cache/minithor/values-live.yaml`
+(`values-live-<profile>.yaml` for another profile), layered under your `--values` and `--set`.
+Pass `--reset-infra` to apply the rendered values instead (storage can only grow, and Scylla
+refuses any change to its rack storage), or set a key such as `infra.redis.storage` with `--set`
+to change one setting on purpose.
+
 ## Existing minithor deployments
 
 A deployment made by a minithor from before the Helm charts must be converted with

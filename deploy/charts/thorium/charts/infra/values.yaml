@@ -149,7 +149,8 @@ elastic:
   # the number of Elasticsearch nodes (the ECK node set's count)
   count: 1
   # extra elasticsearch.yml settings for every node (merged over the chart's
-  # node.store.allow_mmap: true and http.max_content_length: 1024mb). allow_mmap needs the
+  # node.store.allow_mmap: true and http.max_content_length: 1024mb; a null removes a setting,
+  # including one of the chart's or one an earlier values file set). allow_mmap needs the
   # vm.max_map_count kernel setting at 262144 or more on every node Elasticsearch runs on, or
   # Elasticsearch fails its bootstrap check; set it on the nodes, turn on setMaxMapCount, or set
   # node.store.allow_mmap: false here (slower searches, no kernel setting needed)

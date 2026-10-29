@@ -168,13 +168,15 @@ minithor [--namespace-prefix <prefix>] deploy [options]
 | `--values <file>` | Extra values file for the thorium chart (repeatable) |
 | `--set <key.path=value>` | Extra value for the thorium chart (repeatable), for example `--set operator.cluster.components.scaler=null` to omit the k8s scaler |
 | `--skip-operators` | Don't install or upgrade the infra-operators chart |
+| `--reset-infra` | Apply the rendered backing-service sizes and settings instead of keeping the running ones (see [Kept infra settings](#kept-infra-settings)) |
 | `--timeout <seconds>` | Timeout for each install and for the readiness wait (default 1800) |
 
 **Chart values.** The values come, in increasing precedence, from development defaults embedded in
 the script (every backing service in the cluster, an nginx ingress, toolbox `mode: overwrite`, a
 1 GiB Elasticsearch heap), then the values your flags produce (written to
-`~/.cache/minithor/values.yaml`, or `values-<profile>.yaml` for another profile), then your
-`--values` files and `--set` flags. The flag values also set `global.clusterCIDRs` to the
+`~/.cache/minithor/values.yaml`, or `values-<profile>.yaml` for another profile), then the
+running infra settings a redeploy keeps (see [Kept infra settings](#kept-infra-settings)), then
+your `--values` files and `--set` flags. The flag values also set `global.clusterCIDRs` to the
 profile's service and pod CIDRs, `operator.cluster.upgrade.autoTargetDev: true`, and
 `operator.cluster.upgrade.dangerousDowngradeLossy: true` (a development cluster accepts the loss of
 a lossy downgrade step without a code or backup; see [Accepting
@@ -198,6 +200,34 @@ printing the operator's message, when one is in the `Error` phase, in the `Upgra
 (a `targetRevision` or `autoTargetDev: false` from your `--values` or `--set` holds it below the
 latest revision), or has an upgrade step that is `Blocked` (for example a step waiting for an
 approval; see [Upgrading Thorium](./upgrades.md)).
+
+#### Kept infra settings
+
+Since every `deploy` renders its values from its own flags, a newer minithor or chart can render
+other backing-service sizes and settings than a deployment runs with (for example a deployment an
+older chart installed with a 4Gi Redis volume, 8Gi Scylla and Elasticsearch volumes, and a 512m
+Elasticsearch heap). Applying those would fail or disrupt the backing services: a PVC or
+Elasticsearch volume can't shrink (and grows only with a storage class that allows expansion), the
+Scylla operator refuses any change to rack storage, and any Elasticsearch change restarts its
+nodes. So before installing the thorium chart, `deploy` reads these settings from the running
+objects and renders the chart with the same values (`helm template`, with placeholder
+credentials) to compare them:
+
+| Values key | Running object |
+|------------|----------------|
+| `infra.redis.storage` | The Redis PVC `redis-persistent-storage-claim` |
+| `infra.scylla.storage` | The `ScyllaCluster` rack's `storage.capacity` |
+| `infra.elastic.count`, `infra.elastic.storage` | The `Elasticsearch` node set's count and volume size |
+| `infra.elastic.javaOpts` | The node set's `ES_JAVA_OPTS` (the heap) |
+| `infra.elastic.resources.limits.cpu`, `infra.elastic.resources.limits.memory` | The node set's container limits |
+| `infra.elastic.config` | The node set's `elasticsearch.yml` settings (a key the values add is set to `null`, which removes it) |
+
+Every setting that differs is kept: `deploy` prints it with both values and writes the running
+values to `~/.cache/minithor/values-live.yaml` (`values-live-<profile>.yaml` for another profile),
+which it layers above its own values and under your `--values` and `--set`, and prints. A key you
+set yourself still wins, and `deploy` lists it as a change. Pass `--reset-infra` to apply the
+rendered values instead; `deploy` then lists what changes. A first install has nothing running and
+skips the comparison.
 
 **One deployment per cluster.** A namespace prefix only renames namespaces, so `deploy` refuses
 when a `thorium` release or a `ThoriumCluster` exists under another prefix (pass that prefix, or
