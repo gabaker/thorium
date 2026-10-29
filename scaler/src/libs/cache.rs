@@ -171,6 +171,9 @@ fn should_refresh_client(expires: Option<DateTime<Utc>>, now: DateTime<Utc>) -> 
 
 /// Reads in the Thorium keys and refreshes the client if its needed
 ///
+/// A client that authenticated with a token alone (a keys file with no username and password)
+/// can't be refreshed, so it logs a warning and keeps its token until the token expires.
+///
 /// # Arguments
 ///
 /// * `thorium` - The Thorium client to refresh
@@ -185,16 +188,18 @@ async fn refresh_client(thorium: &mut Arc<Thorium>, keys: &str, span: &Span) -> 
         let span = span!(parent: span, Level::INFO, "Thorium Client Refresh");
         // reload auth keys
         let keys = Keys::new(keys).expect("Failed to load auth keys");
-        // panic if username is not known
-        assert!(
-            keys.username.is_some() && keys.password.is_some(),
-            "keys.yml must contain username/password"
-        );
+        // a token can't be refreshed without credentials, so keep using it until it expires
+        let (Some(username), Some(password)) = (keys.username, keys.password) else {
+            event!(
+                parent: &span,
+                Level::WARN,
+                msg = "keys.yml has no username/password, so the token can't be refreshed"
+            );
+            return Ok(());
+        };
         // try to get a mutable reference to our Thorium client
         if let Some(thorium) = Arc::get_mut(thorium) {
-            thorium
-                .refresh(keys.username.unwrap(), keys.password.unwrap())
-                .await?;
+            thorium.refresh(username, password).await?;
         } else {
             // keep trying to refresh our token until it expires then panic
             if thorium.expires > Some(Utc::now()) {
@@ -1728,6 +1733,98 @@ mod tests {
         assert!(
             !should_refresh_client(expires, now),
             "a token expiring far in the future must not be refreshed early"
+        );
+    }
+
+    /// Write a keys file for a mock API into a fresh temp directory
+    ///
+    /// Returns the directory that holds the file and the path to the file.
+    ///
+    /// # Arguments
+    ///
+    /// * `api` - The url of the mock API the keys point at
+    /// * `credentials` - Whether the keys hold a username and password instead of a token
+    fn write_keys(api: &str, credentials: bool) -> (std::path::PathBuf, String) {
+        // make a directory that only this test uses
+        let dir = std::env::temp_dir().join(format!("scaler-keys-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // build the keys file contents for the requested kind of auth
+        let keys = if credentials {
+            format!("api: {api}\nusername: corn\npassword: harvest\n")
+        } else {
+            format!("api: {api}\ntoken: corn-token\n")
+        };
+        // write the keys file and return where it is
+        let path = dir.join("keys.yml");
+        std::fs::write(&path, keys).unwrap();
+        (dir, path.to_str().unwrap().to_owned())
+    }
+
+    /// Checks that the cache refresh skips a client whose keys file holds only a token
+    #[tokio::test]
+    async fn token_only_keys_skip_the_refresh() {
+        // listen where a refresh would try to authenticate
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = format!("http://{}", listener.local_addr().unwrap());
+        // build a token client and a token-only keys file that point at the listener
+        let mut thorium = Arc::new(Thorium::build(&host).token("t").build().await.unwrap());
+        assert!(thorium.expires.is_none());
+        let (dir, keys) = write_keys(&host, false);
+        // refresh the client, which has no credentials to refresh with
+        let span = Span::none();
+        let result = refresh_client(&mut thorium, &keys, &span).await;
+        std::fs::remove_dir_all(&dir).unwrap();
+        // the refresh must succeed without contacting the API
+        assert!(result.is_ok(), "{result:?}");
+        let accepted =
+            tokio::time::timeout(std::time::Duration::from_millis(100), listener.accept()).await;
+        assert!(accepted.is_err(), "the refresh sent a request to the API");
+    }
+
+    /// Checks that a client whose keys file holds a username and password is still refreshed
+    #[tokio::test]
+    async fn credential_keys_still_refresh() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // answer every request with a server error and record each request line
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = format!("http://{}", listener.local_addr().unwrap());
+        let lines = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = lines.clone();
+        let mock = tokio::spawn(async move {
+            loop {
+                // read the head of the next request
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buf = [0_u8; 4096];
+                let read = stream.read(&mut buf).await.unwrap();
+                let head = String::from_utf8_lossy(&buf[..read]).to_string();
+                // record its request line
+                seen.lock()
+                    .unwrap()
+                    .push(head.lines().next().unwrap_or_default().to_owned());
+                // fail the request and close the connection
+                stream
+                    .write_all(b"HTTP/1.1 500 Internal Server Error\r\nconnection: close\r\ncontent-length: 0\r\n\r\n")
+                    .await
+                    .unwrap();
+                stream.shutdown().await.unwrap();
+            }
+        });
+        // build a token client and a keys file with credentials that point at the mock
+        let mut thorium = Arc::new(Thorium::build(&host).token("t").build().await.unwrap());
+        let (dir, keys) = write_keys(&host, true);
+        // refresh the client, which should log out and authenticate against the mock
+        let span = Span::none();
+        let result = refresh_client(&mut thorium, &keys, &span).await;
+        mock.abort();
+        std::fs::remove_dir_all(&dir).unwrap();
+        // the mock fails the auth requests, but the refresh must have reached it
+        assert!(result.is_err());
+        let lines = lines.lock().unwrap();
+        assert!(
+            lines
+                .first()
+                .is_some_and(|line| line.contains("/api/users/logout")),
+            "{lines:?}"
         );
     }
 }
