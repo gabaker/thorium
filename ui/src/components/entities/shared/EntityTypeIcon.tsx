@@ -1,6 +1,7 @@
 import React from 'react';
 import { IconType } from 'react-icons';
 import {
+  FaBoxesStacked,
   FaCodeBranch,
   FaCube,
   FaFileLines,
@@ -9,10 +10,11 @@ import {
   FaFolderTree,
   FaHardDrive,
   FaLayerGroup,
+  FaMagnifyingGlass,
   FaMicrochip,
   FaShieldHalved,
 } from 'react-icons/fa6';
-import { FaCode, FaExclamationTriangle, FaFileImport, FaPuzzlePiece, FaRegFileCode } from 'react-icons/fa';
+import { FaBinoculars, FaCode, FaCrosshairs, FaExclamationTriangle, FaFileImport, FaPuzzlePiece, FaRegFileCode } from 'react-icons/fa';
 import { MdBusinessCenter } from 'react-icons/md';
 import { PiNetwork } from 'react-icons/pi';
 
@@ -32,6 +34,10 @@ const ENTITY_TYPE_ICONS: Record<Entities, IconType> = {
   [Entities.WindowsProcess]: FaCube,
   [Entities.NetworkConnection]: PiNetwork,
   [Entities.SigmaRule]: FaShieldHalved,
+  [Entities.YaraRule]: FaMagnifyingGlass,
+  [Entities.YaraRuleHit]: FaCrosshairs,
+  [Entities.RuleSet]: FaBoxesStacked,
+  [Entities.Hunt]: FaBinoculars,
   [Entities.Flag]: FaFlag,
   [Entities.Incident]: FaExclamationTriangle,
   [Entities.CompiledFunction]: FaCode,

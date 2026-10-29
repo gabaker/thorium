@@ -30,6 +30,10 @@ const COMMITTED: &[(&str, &str)] = &[
         "2026-10-v04",
         include_str!("../../../schema/revisions/2026-10-v04.json"),
     ),
+    (
+        "2026-10-v05",
+        include_str!("../../../schema/revisions/2026-10-v05.json"),
+    ),
 ];
 
 /// A committed snapshot that is malformed or doesn't match its own canonical forms

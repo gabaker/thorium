@@ -481,6 +481,19 @@ export function entityFields(entity: NonNullable<TreeNode['Entity']>): { identif
         ]),
       };
     }
+    case Entities.YaraRule: {
+      const y = m.YaraRule as { rule?: string; score?: number; applies_to?: string[]; actions?: unknown[] };
+      return {
+        identifiers: [],
+        fields: compact([
+          { label: 'Score', value: y.score },
+          { label: 'Applies To', value: y.applies_to, layout: FieldLayout.Inline },
+          { label: 'Actions', value: y.actions ? y.actions.length : undefined },
+          // the raw yara source — the defining content of the rule, shown as a collapsible code block
+          { label: 'Rule', value: y.rule, render: FieldRender.Code },
+        ]),
+      };
+    }
     case Entities.Flag: {
       const fl = m.Flag as { suspicion?: number; confidence?: string; content?: string | null; reasoning?: string };
       return {

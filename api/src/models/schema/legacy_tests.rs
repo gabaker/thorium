@@ -112,7 +112,13 @@ fn the_support_window_is_the_released_revisions_above_the_floor() {
     let window = support_window(&Catalog::PRODUCTION);
     assert_eq!(
         window.iter().map(RevisionId::as_str).collect::<Vec<_>>(),
-        ["2026-10-v04", "2026-10-v03", "2026-10-v02", "2026-10-v01"]
+        [
+            "2026-10-v05",
+            "2026-10-v04",
+            "2026-10-v03",
+            "2026-10-v02",
+            "2026-10-v01"
+        ]
     );
     // a catalog with a floor drops the revisions below it
     let floors: &'static [SupportFloor] = Box::leak(Box::new([SupportFloor {
@@ -129,7 +135,7 @@ fn the_support_window_is_the_released_revisions_above_the_floor() {
             .iter()
             .map(RevisionId::as_str)
             .collect::<Vec<_>>(),
-        ["2026-10-v04", "2026-10-v03", "2026-10-v02"]
+        ["2026-10-v05", "2026-10-v04", "2026-10-v03", "2026-10-v02"]
     );
 }
 
@@ -199,15 +205,7 @@ fn the_listing_sorts_live_objects() {
         .iter()
         .map(|status| status.id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(
-        ids,
-        [
-            "scylla:events",
-            "scylla:entities_by_name",
-            "scylla:foo",
-            "scylla:bar"
-        ]
-    );
+    assert_eq!(ids, ["scylla:events", "scylla:foo", "scylla:bar"]);
     let events = &listing.objects[0];
     assert!(events.present);
     assert_eq!(events.rows, 18204);
@@ -215,11 +213,11 @@ fn the_listing_sorts_live_objects() {
     assert_eq!(events.created_by, ["2026-10-v01", "2026-10-v02"]);
     assert_eq!(events.droppable, Droppable::Yes);
     // a registered object the keyspace lacks is not present, with no rows
-    let bar = &listing.objects[3];
+    let bar = &listing.objects[2];
     assert!(!bar.present);
     assert_eq!(bar.rows, 0);
     // a required use refuses a drop
-    assert!(matches!(listing.objects[2].droppable, Droppable::No { .. }));
+    assert!(matches!(listing.objects[1].droppable, Droppable::No { .. }));
     // not-registered: live, in past snapshots, not declared, not registered
     assert_eq!(listing.not_registered.len(), 1);
     assert_eq!(listing.not_registered[0].name, "tool_runs");
@@ -256,13 +254,13 @@ fn resolving_ids_refuses_declared_and_unregistered_objects() {
     let ids = |names: &[&str]| names.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
     // registered ids resolve, once each
     let found = resolve_legacy(
-        &ids(&["scylla:events", "scylla:entities_by_name", "scylla:events"]),
+        &ids(&["scylla:events", "scylla:foo", "scylla:events"]),
         &sources,
     )
     .expect("registered");
     assert_eq!(
         found.iter().map(LegacyDef::id).collect::<Vec<_>>(),
-        ["scylla:events", "scylla:entities_by_name"]
+        ["scylla:events", "scylla:foo"]
     );
     // a declared object
     let refusal = resolve_legacy(&ids(&["scylla:events", "scylla:samples_list"]), &sources)
@@ -271,12 +269,19 @@ fn resolving_ids_refuses_declared_and_unregistered_objects() {
         refusal.to_string(),
         "scylla:samples_list is a declared object; refusing."
     );
+    // the view that came back is declared again, so it refuses like any declared object
+    let refusal =
+        resolve_legacy(&ids(&["scylla:entities_by_name"]), &sources).expect_err("declared");
+    assert_eq!(
+        refusal.to_string(),
+        "scylla:entities_by_name is a declared object; refusing."
+    );
     // an unregistered id lists the registered ones
     let refusal = resolve_legacy(&ids(&["scylla:tools"]), &sources).expect_err("unregistered");
     assert_eq!(
         refusal.to_string(),
         "scylla:tools is not a registered legacy object. Registered: scylla:events, \
-         scylla:entities_by_name, scylla:foo, scylla:bar."
+         scylla:foo, scylla:bar."
     );
     // an object a past snapshot names says so, and what to do
     let refusal =
@@ -296,10 +301,12 @@ fn resolving_ids_refuses_declared_and_unregistered_objects() {
         resolve_legacy(&ids(&["events"]), &sources),
         Err(LegacyRefusal::Unregistered { .. })
     ));
-    // the declared names are the registry's Scylla objects, and no exemplar is among them
+    // the declared names are the registry's Scylla objects; the events exemplar is retired
+    // while the entities_by_name view is declared again
     let declared = declared_scylla();
     assert!(declared.contains("samples_list"));
-    assert!(!declared.contains("events") && !declared.contains("entities_by_name"));
+    assert!(!declared.contains("events"));
+    assert!(declared.contains("entities_by_name"));
 }
 
 /// Planning drops refuses the whole list when one object's rows are needed, and otherwise renders
@@ -309,19 +316,24 @@ fn planning_refuses_required_data_and_renders_the_statements() {
     let sources = sources();
     let rows = BTreeMap::from([("events".to_owned(), 5), ("foo".to_owned(), 42)]);
     let listing = classify(&sources, &live(), &rows);
-    // the two exemplars plan, a table and a view each with its own statement
-    let entries = LEGACY.to_vec();
+    // the exemplar and the view fixture plan, a table and a view each with its own statement
+    let entries = [LEGACY[0], BAR];
     let plan = plan_drops("ks", &entries, &listing).expect("droppable");
     assert_eq!(plan.drops.len(), 2);
     assert_eq!(plan.drops[0].statement, "DROP TABLE IF EXISTS ks.events");
     assert_eq!(
         plan.drops[1].statement,
-        "DROP MATERIALIZED VIEW IF EXISTS ks.entities_by_name"
+        "DROP MATERIALIZED VIEW IF EXISTS ks.bar"
     );
     assert_eq!(plan.drops[0].rows, 5);
     assert!(plan.drops[0].present);
-    assert!(plan.drops[1].present);
-    assert_eq!(plan.drops[0].downgrades.len(), 4);
+    // planning renders absent objects too, since their drops are IF EXISTS
+    assert!(!plan.drops[1].present);
+    // one downgrade line per revision in the production support window
+    assert_eq!(
+        plan.drops[0].downgrades.len(),
+        support_window(&Catalog::PRODUCTION).len()
+    );
     // one object that a window revision needs refuses the whole list, naming the revision and rows
     let entries = [LEGACY[0], FOO];
     let refusal = plan_drops("ks", &entries, &listing).expect_err("required");

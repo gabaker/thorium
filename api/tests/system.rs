@@ -2839,3 +2839,66 @@ async fn user_recreated_during_delete_keeps_new_notifications() -> Result<(), Er
     is!(recreated.users.notifications().await?.len(), 1);
     Ok(())
 }
+
+/// Pin the schema of the any-authenticated-user stats route
+///
+/// `GET /api/system/stats` is reachable by every authenticated user and group
+/// scoped, so no admin-only scan stats or hunt census field may ever join it.
+/// The request goes out raw so the typed client cannot mask unexpected fields,
+/// and as a plain `User` role so the pin covers the least privileged reader.
+#[serial_test::serial]
+#[tokio::test]
+async fn system_stats_schema_regression() -> Result<(), Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    // create a plain User role user with a known password for the raw request
+    let username = generators::gen_string(24);
+    let password = generators::gen_string(64);
+    let bp = UserCreate::new(&username, &password, "fake@fake.gov").skip_verification();
+    Users::create(
+        &client.host,
+        bp,
+        Some(&test_utilities::CONF.thorium.secret_key),
+        &ClientSettings::default(),
+    )
+    .await?;
+    // hit the stats route raw as that plain user
+    let url = format!("{}/api/system/stats", client.host);
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .basic_auth(&username, Some(&password))
+        .send()
+        .await
+        .map_err(|err| Error::new(err.to_string()))?;
+    // any authenticated user must be able to read the route
+    is!(resp.status().as_u16(), 200);
+    // parse the raw body so unexpected fields cannot hide behind a typed model
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|err| Error::new(err.to_string()))?;
+    let top_level: HashSet<String> = body
+        .as_object()
+        .expect("system stats must serialize as an object")
+        .keys()
+        .cloned()
+        .collect();
+    // the exact top level key set is pinned so no M5 field can leak onto the
+    // one stats route non admins can reach
+    let expected: HashSet<String> = [
+        "deadlines",
+        "running",
+        "users",
+        "k8s",
+        "baremetal",
+        "external",
+        "windows",
+        "kvm",
+        "groups",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    is!(top_level, expected);
+    Ok(())
+}

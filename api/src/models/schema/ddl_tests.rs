@@ -420,6 +420,10 @@ fn golden(name: &str, actual: &str) -> String {
 /// setup statement to match
 const STATE_TABLES: [&str; 2] = ["schema_migrations", "schema_migration_issues"];
 
+/// The objects declared after the setup statements were retired, which no setup statement
+/// created: yara scanning's scan stats table and the re-declared exact-name entities view
+const DECLARED_ONLY: [&str; 2] = ["scan_stats", "entities_by_name"];
+
 /// Every declared table and view creates the same schema as the setup statements Thorium ran
 /// before its schema was declared, compared as Scylla's schema tables describe it; the
 /// migration-state tables, which no setup statement created, are left out
@@ -434,9 +438,15 @@ fn declared_schema_matches_setup_statements() {
     for name in STATE_TABLES {
         assert!(generated.remove(name).is_some(), "{name} isn't declared");
     }
+    // objects declared after the setup statements were retired have none to match either
+    for name in DECLARED_ONLY {
+        assert!(generated.remove(name).is_some(), "{name} isn't declared");
+    }
     let objects = <ThoriumKeyspace as Keyspace>::OBJECTS
         .iter()
-        .filter(|object| !STATE_TABLES.contains(&object.name()))
+        .filter(|object| {
+            !STATE_TABLES.contains(&object.name()) && !DECLARED_ONLY.contains(&object.name())
+        })
         .collect::<Vec<_>>();
     // the same 16 tables and 12 views on both sides
     assert_eq!(

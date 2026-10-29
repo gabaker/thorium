@@ -106,3 +106,29 @@ export const ChartsRow = styled.div`
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
 `;
+
+/// The legend row under a multi-series chart: one swatch + text-token label per series.
+export const ChartLegend = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  gap: ${spacers.one} ${spacers.three};
+  margin-top: ${spacers.one};
+  font-size: 0.75rem;
+  color: var(--thorium-secondary-text);
+`;
+
+/// One legend entry: the series swatch beside its label.
+export const ChartLegendEntry = styled.span`
+  display: inline-flex;
+  align-items: center;
+  gap: ${spacers.one};
+`;
+
+/// The colored swatch carrying a legend entry's series identity.
+export const ChartLegendSwatch = styled.span<{ $color: string }>`
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: ${(props) => props.$color};
+`;

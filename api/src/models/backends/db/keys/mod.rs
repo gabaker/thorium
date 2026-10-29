@@ -19,7 +19,7 @@ pub mod system;
 pub mod tags;
 pub mod users;
 
-pub use entities::VendorKeys;
+pub use entities::{HuntKeys, VendorKeys};
 pub use events::EventKeys;
 pub use groups::GroupKeys;
 pub use images::ImageKeys;

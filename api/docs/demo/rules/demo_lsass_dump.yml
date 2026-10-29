@@ -1,0 +1,15 @@
+title: Demo LSASS Dump via comsvcs
+status: experimental
+description: Detects rundll32 invoking comsvcs.dll MiniDump against lsass, the demo credential-theft tell
+author: Thorium Demo
+level: high
+logsource:
+  product: windows
+  category: process_creation
+detection:
+  selection:
+    Image|endswith: '\rundll32.exe'
+    CommandLine|contains|all:
+      - 'comsvcs.dll'
+      - 'MiniDump'
+  condition: selection

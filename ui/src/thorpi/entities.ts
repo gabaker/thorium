@@ -100,6 +100,93 @@ export const deleteEntity = async (id: string, errorHandler: (error: string) => 
     });
 };
 
+/**
+ * Delete tag values from an entity (`DELETE /entities/tags/{id}`).
+ *
+ * The route takes a JSON body (`{groups, tags}`) on the DELETE, so the body rides in
+ * axios' `data` option. Deleting a rule's `YaraRuleStatus` values is the re-admit path
+ * for a quarantined yara rule; the backend gates this on group-edit permissions.
+ *
+ * @param id - The id of the entity to delete tags from.
+ * @param tags - Map of tag keys to the value lists to delete.
+ * @param groups - The groups to delete these tags from.
+ * @param errorHandler - Called with a formatted message if the request fails.
+ * @returns `true` if the tags were deleted (HTTP 204), otherwise `false`.
+ */
+export const deleteEntityTags = async (
+  id: string,
+  tags: Record<string, string[]>,
+  groups: string[],
+  errorHandler: (error: string) => void,
+): Promise<boolean> => {
+  const url = `/entities/tags/${id}`;
+  return client
+    .delete(url, { data: { groups, tags } })
+    .then((res) => {
+      if (res?.status && res.status == 204) {
+        return true;
+      }
+      return false;
+    })
+    .catch((error: unknown) => {
+      parseRequestError(error, errorHandler, 'Delete Entity Tags');
+      return false;
+    });
+};
+
+/**
+ * Exempt a yara rule from noisy/slow quarantine (`POST /entities/rules/{id}/quarantine-exemption`).
+ *
+ * Admin only. Setting the exemption also clears any Noisy/Slow `YaraRuleStatus` values
+ * server-side, so the rule rejoins scanning in the same action.
+ *
+ * @param id - The id of the yara rule to exempt.
+ * @param errorHandler - Called with a formatted message if the request fails (non-admin
+ *                       401s and non-yara-rule 400s surface the API's error text).
+ * @returns `true` when the API acknowledged the exemption with a 204.
+ */
+export const setQuarantineExemption = async (id: string, errorHandler: (error: string) => void): Promise<boolean> => {
+  const url = `/entities/rules/${id}/quarantine-exemption`;
+  return client
+    .post(url)
+    .then((res) => {
+      if (res?.status && res.status == 204) {
+        return true;
+      }
+      return false;
+    })
+    .catch((error: unknown) => {
+      parseRequestError(error, errorHandler, 'Set Quarantine Exemption');
+      return false;
+    });
+};
+
+/**
+ * Clear a yara rule's quarantine exemption (`DELETE /entities/rules/{id}/quarantine-exemption`).
+ *
+ * Admin only. Clearing only removes the rule's protection from future quarantine; it
+ * never adds or removes any `YaraRuleStatus` values.
+ *
+ * @param id - The id of the yara rule to clear the exemption from.
+ * @param errorHandler - Called with a formatted message if the request fails.
+ * @returns `true` when the API acknowledged the clear with a 204.
+ */
+export const clearQuarantineExemption = async (id: string, errorHandler: (error: string) => void): Promise<boolean> => {
+  const url = `/entities/rules/${id}/quarantine-exemption`;
+  return client
+    .delete(url)
+    .then((res) => {
+      if (res?.status && res.status == 204) {
+        return true;
+      }
+      return false;
+    })
+    .catch((error: unknown) => {
+      parseRequestError(error, errorHandler, 'Clear Quarantine Exemption');
+      return false;
+    });
+};
+
 export interface EntityImage {
   url: string;
   isSvg: boolean;
@@ -132,14 +219,35 @@ export const fetchEntityImage = async (entityId: string): Promise<EntityImage | 
 };
 
 /**
- * List entities matching the given filters (`GET /entities` or `/entities/details/`).
+ * A thin entity list line as serialized by the summary list route (`GET /entities/`).
+ *
+ * Mirrors the API's `EntityListLine`: only `id`, `name`, `kind`, and `created` come over the
+ * wire (`groups` is skipped server-side, and there are no tags or kind-specific metadata).
+ * Full {@link EntityTypes} objects only come back from the details route (`GET /entities/details/`).
+ */
+export interface EntityListLine {
+  /** The entity's unique id */
+  id: string;
+  /** The entity's name */
+  name: string;
+  /** The kind of entity this is (without the kind's metadata) */
+  kind: EntityTypes['kind'];
+  /** The time this entity was created */
+  created: string;
+}
+
+/**
+ * List entities matching the given filters (`GET /entities/` or `GET /entities/details/` —
+ * both routes require the trailing slash; the bare `/entities` path is a 404).
  *
  * Results are paginated via an opaque cursor: pass the returned `entityCursor` back in on the
  * next call to fetch the following page (`null` cursor means no more pages).
  *
  * @param data - Search/filter parameters (groups, tags, time range, limit, etc.).
  * @param errorHandler - Called with a formatted message if the request fails.
- * @param details - When `true`, request full entity objects (`/details/`) instead of summaries.
+ * @param details - When `true`, request full entity objects (`/details/`); when `false`, each
+ *                  returned line is a thin {@link EntityListLine} (id/name/kind/created only)
+ *                  despite the `EntityTypes[]` return type — do not read tags/metadata off it.
  * @param cursor - Pagination cursor from a previous call, or `null` for the first page.
  * @returns The page of entities and the next-page cursor (`entityCursor` is `null` when exhausted).
  *          On failure, returns an empty list and a `null` cursor.
@@ -150,9 +258,10 @@ export const listEntities = async (
   details: boolean,
   cursor: string | null,
 ): Promise<{ entityList: EntityTypes[]; entityCursor: string | null }> => {
-  let url = '/entities';
+  // both list routes require the trailing slash (the bare path is a 404)
+  let url = '/entities/';
   if (details) {
-    url += '/details/';
+    url += 'details/';
   }
   if (cursor) {
     data.cursor = cursor;

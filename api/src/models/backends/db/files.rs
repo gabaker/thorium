@@ -18,7 +18,7 @@ use crate::models::{
     BasicSubmissionRow, Comment, CommentForm, Event, FileListParams, OutputKind, ResultSearchEvent,
     S3Objects, Sample, SampleCheck, SampleCheckResponse, SampleForm, SampleListLine,
     SampleSubmissionResponse, Submission, SubmissionChunk, SubmissionUpdate, TagDeleteRequest,
-    TagRequest, TagSearchEvent, User,
+    TagRequest, TagSearchEvent, User, YaraScanTrigger,
 };
 use crate::utils::s3::StandardHashes;
 use crate::utils::{ApiError, Shared, helpers};
@@ -258,6 +258,16 @@ pub async fn create(
     let event = Event::new_sample(user, form.groups.clone(), hashes.sha256.clone(), form.trigger_depth);
     // save our event
     super::events::create(&event, shared).await?;
+    // create a yara scan event since this samples bytes are newly visible to these groups
+    let scan_event = Event::yara_scannable_sample(
+        user,
+        form.groups.clone(),
+        hashes.sha256.clone(),
+        form.trigger_depth,
+        YaraScanTrigger::NewSubmission,
+    );
+    // save our yara scan event
+    super::events::create(&scan_event, shared).await?;
     // build our submission response object
     let resp = SampleSubmissionResponse { sha256: hashes.sha256, sha1: hashes.sha1, md5: hashes.md5, id };
     Ok(resp)

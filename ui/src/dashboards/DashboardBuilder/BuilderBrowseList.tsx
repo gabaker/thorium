@@ -18,7 +18,7 @@ import Tabs from '@components/shared/tabs/Tabs';
 import { TabItem } from '@components/shared/tabs/types';
 import TagSelect from '@components/shared/inputs/tags/TagSelect/TagSelect';
 import { listFiles } from '@thorpi/files';
-import { Entities } from '@models/entities/entities';
+import { Entities, ExtendedTypeMap } from '@models/entities/entities';
 import { Filters } from '@models/search';
 import { Sample } from '@models/files';
 import { TagEntry } from '@models/tags';
@@ -349,7 +349,7 @@ const BuilderBrowseList: React.FC<BuilderBrowseListProps> = ({ mode, onModeChang
   // wrap the kind's renderEntity so each row gets an add control mapped to a File/Repo/Entity selection
   const displayEntity = useCallback(
     (entity: unknown, idx: number, rowFilters?: Filters) => {
-      const kind = mode as Entities;
+      const kind = mode as keyof ExtendedTypeMap;
       const config = EntityBrowsingConfig[kind];
       // map the browse kind to the selection kind (File/Repo browse to their own selection kinds;
       // every other entity kind is an Entity selection)
@@ -381,7 +381,7 @@ const BuilderBrowseList: React.FC<BuilderBrowseListProps> = ({ mode, onModeChang
   }
 
   // after the TAG_MODE guard above, mode is narrowed to an entity kind
-  const kind = mode;
+  const kind = mode as keyof ExtendedTypeMap;
   const config = EntityBrowsingConfig[kind];
 
   return (

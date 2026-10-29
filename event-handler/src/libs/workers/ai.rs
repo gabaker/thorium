@@ -7,7 +7,7 @@
 //! the listing to the API, which merges it.
 
 use chrono::prelude::*;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use thorium::models::entities::workflows::GraphReader;
@@ -722,6 +722,9 @@ pub struct AiWorker {
     hosts: AuthHosts,
     /// The bounds model refreshes run under
     refresh_limits: RefreshLimits,
+    /// The identity of this event handler process that owns our popped events,
+    /// set only when this worker runs under the event worker wrapper
+    worker: Option<String>,
 }
 
 impl AiWorker {
@@ -749,6 +752,7 @@ impl AiWorker {
             listing,
             hosts: AuthHosts::default(),
             refresh_limits: RefreshLimits::default(),
+            worker: None,
         })
     }
 
@@ -795,25 +799,29 @@ impl EventWorkerSupportCore for AiWorker {
     ///
     /// * `cache` - The shared cache, which holds the Thorium config and the users
     /// * `thorium` - The event handler's admin client
+    /// * `worker` - The identity of this event handler process, which scopes
+    ///   this workers event clears to its own in flight keys
     ///
     /// # Panics
     ///
     /// Panics if the listing client can't be built, which only happens when TLS can't start
     // the trait builds workers asynchronously, though this one has nothing to wait on
     #[allow(clippy::unused_async_trait_impl)]
-    async fn new(cache: &EventWorkerCache, thorium: &Arc<Thorium>) -> Self {
+    async fn new(cache: &EventWorkerCache, thorium: &Arc<Thorium>, worker: &str) -> Self {
         // resolve workflows and toolsets under the configured limits
-        let mut worker = match Self::with_client(
+        let mut ai_worker = match Self::with_client(
             thorium.clone(),
             CrawlLimits::from(&cache.conf.thorium.events),
             ToolSetLimits::from(&cache.conf.thorium.events),
         ) {
-            Ok(worker) => worker,
+            Ok(ai_worker) => ai_worker,
             Err(error) => panic!("Failed to build the AI worker: {error}"),
         };
+        // the wrapper pops our events under this identity so clears must use it too
+        ai_worker.worker = Some(worker.to_owned());
         // build a client for each user known at startup
-        worker.clients.apply_users(thorium, cache.users.clone());
-        worker
+        ai_worker.clients.apply_users(thorium, cache.users.clone());
+        ai_worker
     }
 
     /// The types of events this worker handles, refreshes first so they never wait behind a
@@ -871,6 +879,48 @@ impl EventWorkerSupportCore for AiWorker {
             user_lookups = stats.user_lookups,
         );
     }
+
+    /// Flatten this worker kinds stats into cumulative counters for publishing
+    ///
+    /// Every counter keys by its stats field name so the published counters
+    /// match the tracing gauges field for field.
+    ///
+    /// # Arguments
+    ///
+    /// * `stats` - The stats to flatten
+    fn counter_map(stats: &Self::Stats) -> BTreeMap<String, u64> {
+        // key each counter by its stats field name
+        BTreeMap::from([
+            ("events_processed".to_owned(), stats.events_processed as u64),
+            (
+                "instances_created".to_owned(),
+                stats.instances_created as u64,
+            ),
+            ("skipped".to_owned(), stats.skipped as u64),
+            ("invalid".to_owned(), stats.invalid as u64),
+            (
+                "notifications_sent".to_owned(),
+                stats.notifications_sent as u64,
+            ),
+            (
+                "notification_failures".to_owned(),
+                stats.notification_failures as u64,
+            ),
+            ("tag_lookups".to_owned(), stats.tag_lookups as u64),
+            ("graph_reads".to_owned(), stats.graph_reads as u64),
+            (
+                "tool_set_instances_created".to_owned(),
+                stats.tool_set_instances_created as u64,
+            ),
+            ("tool_set_skipped".to_owned(), stats.tool_set_skipped as u64),
+            ("tool_set_invalid".to_owned(), stats.tool_set_invalid as u64),
+            ("models_added".to_owned(), stats.models_added as u64),
+            ("bans_added".to_owned(), stats.bans_added as u64),
+            ("bans_cleared".to_owned(), stats.bans_cleared as u64),
+            ("listing_failures".to_owned(), stats.listing_failures as u64),
+            ("user_lookups".to_owned(), stats.user_lookups as u64),
+        ])
+    }
 }
 
 impl EventWorkerMutableSupport for AiWorker {
@@ -927,23 +977,31 @@ impl EventWorkerMutableSupport for AiWorker {
             Some(Box::pin(process_batch(thorium, limits, tool_set_limits, &graph)).await)
         };
         let (refresh_outcome, build_outcome) = tokio::join!(refresh_phase, build_phase);
-        // clear the finished refreshes and retry the rest later
+        // clear the finished refreshes from our own in flight keys and retry the rest later
         if let Some(outcome) = refresh_outcome {
             if !outcome.cleared.is_empty() {
                 self.thorium
                     .events
-                    .clear(EventType::ModelRefresh, &EventIds::from(outcome.cleared))
+                    .clear(
+                        EventType::ModelRefresh,
+                        &EventIds::from(outcome.cleared),
+                        self.worker.as_deref(),
+                    )
                     .await?;
             }
             self.retry_ts = retry_after(!outcome.in_flight.is_empty(), self.retry_ts);
             *stats += outcome.stats;
         }
-        // clear the finished graph events and retry the rest later
+        // clear the finished graph events from our own in flight keys and retry the rest later
         if let Some(outcome) = build_outcome {
             if !outcome.cleared.is_empty() {
                 self.thorium
                     .events
-                    .clear(EventType::WorkflowGraph, &EventIds::from(outcome.cleared))
+                    .clear(
+                        EventType::WorkflowGraph,
+                        &EventIds::from(outcome.cleared),
+                        self.worker.as_deref(),
+                    )
                     .await?;
             }
             self.retry_ts = retry_after(!outcome.in_flight.is_empty(), self.retry_ts);

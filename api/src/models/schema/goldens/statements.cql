@@ -142,6 +142,14 @@ SELECT reaction, stage, bucket, position, line FROM {ns}.logs
 SELECT reaction, stage, bucket, position, line FROM {ns}.logs WHERE token(reaction, stage, bucket) >= ? AND token(reaction, stage, bucket) <= ?
 -- logs.CENSUS
 SELECT reaction, stage, bucket, count(*) AS count FROM {ns}.logs WHERE token(reaction, stage, bucket) >= ? AND token(reaction, stage, bucket) <= ? GROUP BY reaction, stage, bucket
+-- scan_stats.INSERT
+INSERT INTO {ns}.scan_stats (year, bucket, snapshot_at, data) VALUES (?, ?, ?, ?)
+-- scan_stats.SELECT_ALL
+SELECT year, bucket, snapshot_at, data FROM {ns}.scan_stats
+-- scan_stats.SCAN
+SELECT year, bucket, snapshot_at, data FROM {ns}.scan_stats WHERE token(year, bucket) >= ? AND token(year, bucket) <= ?
+-- scan_stats.CENSUS
+SELECT year, bucket, count(*) AS count FROM {ns}.scan_stats WHERE token(year, bucket) >= ? AND token(year, bucket) <= ? GROUP BY year, bucket
 -- samples_list.insert
 INSERT INTO {ns}.samples_list (group, year, bucket, uploaded, id, sha256, sha1, md5, name, description, submitter, origin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 -- samples_list.delete_multiple_groups
@@ -284,6 +292,8 @@ SELECT group FROM {ns}.entities_by_id WHERE id = ?
 SELECT id, group, kind FROM {ns}.entities_by_id WHERE id IN ?
 -- entities_by_id.get_names_kinds_by_ids
 SELECT id, name, kind FROM {ns}.entities_by_id WHERE id IN ?
+-- entities_by_name.get
+SELECT id, group, kind, created, name, submitter, kind_data, description, image FROM {ns}.entities_by_name WHERE name = ? AND group IN ? AND kind IN ? PER PARTITION LIMIT 501
 -- associations.insert
 INSERT INTO {ns}.associations (group, year, bucket, source, created, target, direction, kind, submitter, extra_source, extra_target, submissions_source, submissions_other) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 -- associations.delete
@@ -352,6 +362,10 @@ INSERT INTO {ns}.notifications (kind, key, created, id, msg, level, ban_id) VALU
 INSERT INTO {ns}.logs (reaction, stage, bucket, position, line) VALUES (?, ?, ?, ?, ?)
 -- logs.get
 SELECT position, line FROM {ns}.logs WHERE reaction = ? AND stage = ? AND bucket IN ? AND position >= ? PER PARTITION LIMIT ?
+-- scan_stats.insert
+INSERT INTO {ns}.scan_stats (year, bucket, snapshot_at, data) VALUES (?, ?, ?, ?)
+-- scan_stats.pull
+SELECT snapshot_at, data FROM {ns}.scan_stats WHERE year = ? AND bucket IN ? AND snapshot_at < ? AND snapshot_at >= ? PER PARTITION LIMIT ?
 -- schema_migrations.insert
 INSERT INTO {ns}.schema_migrations (kind, id, fingerprint, apply_key, layouts, revision, version, entry, result, value, status, attempt, lease, started, finished, job, backup, counts, report, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 -- schema_migrations.insert_expiring

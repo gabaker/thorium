@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use thorium::models::{
     Association, AssociationKind, AssociationTarget, Directionality, Entity, EntityKinds,
     EntityListOpts, EntityMetadata, EntityMetadataUpdate, EntityRequest, EntityUpdate,
-    GroupAllowed, UserRole, WorkflowGraphChange,
+    GroupAllowed, GroupUpdate, GroupUsersUpdate, UserRole, WorkflowGraphChange,
 };
 use thorium::test_utilities::generators::{GroupRoles, TestUser};
 use thorium::test_utilities::{self, events, generators};
@@ -104,6 +104,28 @@ pub async fn setup() -> Result<(Thorium, String), Error> {
     // create a group for our entities to live in
     let group = generators::groups(1, &client).await?.remove(0).name;
     Ok((client, group))
+}
+
+/// Create a new non admin user that is a member of some groups
+///
+/// # Arguments
+///
+/// * `admin` - An admin client
+/// * `groups` - The groups to add this user to
+pub async fn member(admin: &Thorium, groups: &[&str]) -> Result<Thorium, Error> {
+    // create a new non admin user
+    let client = generators::client(admin).await?;
+    // get this users name
+    let username = client.users.info().await?.username;
+    // add this user to each group
+    for group in groups {
+        // build the update adding this user to this group
+        let users = GroupUsersUpdate::default().direct_add(&username);
+        let update = GroupUpdate::default().users(users);
+        // add this user to this group
+        admin.groups.update(group, &update).await?;
+    }
+    Ok(client)
 }
 
 /// List all entity details in a group, paging through the entire cursor

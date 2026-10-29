@@ -156,6 +156,7 @@ deployment is at in the `thorium-upgrade-state` ConfigMap in the thorium namespa
 | `2026-10-v02` | A deployment made by the Helm charts with the chart-managed operator |
 | `2026-10-v03` | Adds the step that applies the schema before any step that changes data, and the step that moves each user's theme into the user's settings |
 | `2026-10-v04` | Adds the steps that convert images, pipeline stages, and provenance to tools (see [Upgrading to Agentic Workflows](../agentic/upgrading.md)) |
+| `2026-10-v05` | Applies the yara scanning schema: the scan stats table, the exact-name entities view, and the yara ruleset cache bucket |
 
 When an operator knows a newer revision than the deployment's, it waits in `UpgradeRequired`
 until an admin sets a target revision, then runs the steps in order. The Thorium version a

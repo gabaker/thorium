@@ -13,6 +13,8 @@ mod v03;
 mod v03_reverse;
 mod v04;
 mod v04_reverse;
+mod v05;
+mod v05_reverse;
 
 pub use v02::{FIRST_HELM_REVISION, REINDEX_PROCEDURE};
 pub use v03::{SCHEMA_APPLY_STEP, USERS_SETTINGS_THEME_REVERSE_STEP, USERS_SETTINGS_THEME_STEP};
@@ -345,6 +347,8 @@ pub const CATALOG: &[CatalogEntry] = &[
     v03_reverse::ENTRY,
     v04::ENTRY,
     v04_reverse::ENTRY,
+    v05::ENTRY,
+    v05_reverse::ENTRY,
 ];
 
 /// The artifacts this build's reversible steps register: round-trip and new-layout fixtures,
@@ -418,6 +422,9 @@ mod tests {
     /// The revision that holds the steps converting images, pipelines, and provenance to tools
     const V04: &str = "2026-10-v04";
 
+    /// The revision that applies the yara scanning schema
+    const V05: &str = "2026-10-v05";
+
     /// The steps of revision `2026-10-v04`, in the order they run
     const V04_STEPS: [&str; 5] = [
         "drain-reactions",
@@ -436,6 +443,14 @@ mod tests {
         Catalog::PRODUCTION
             .edge(v03::ENTRY.id, V04)
             .expect("the edge to 2026-10-v04")
+    }
+
+    /// Get the release edge to the revision that applies the yara scanning schema
+    fn v05() -> &'static CatalogEntry {
+        // the edge starts at the revision that converts tools
+        Catalog::PRODUCTION
+            .edge(V04, V05)
+            .expect("the edge to 2026-10-v05")
     }
 
     /// Plan the steps from one revision to another over a state that reached the first
@@ -511,21 +526,50 @@ mod tests {
         assert_eq!(planned(v02::ENTRY.id, v03::ENTRY.id), V03_STEPS);
     }
 
-    /// The revision after it is the newest, holds only the conversion steps in order, starts from
-    /// the revision that applies the schema first, and is documented as released with this version
+    /// The revision after it holds only the conversion steps in order, starts from the revision
+    /// that applies the schema first, and is documented as released with this version
     #[test]
-    fn v04_is_the_newest_revision_with_the_conversion_steps() {
-        // the edge starts at the schema revision, reaches a newer id, and is the newest
+    fn v04_is_the_revision_with_the_conversion_steps() {
+        // the edge starts at the schema revision and reaches a newer id
         let edge = v04();
         let id = edge.id.parse::<RevisionId>().expect("valid revision");
         assert!(id > v03::ENTRY.revision());
         assert_eq!(edge.from, Some(v03::ENTRY.id));
         assert!(!edge.prerelease && !edge.sibling && !edge.is_downward());
-        assert_eq!(Catalog::PRODUCTION.latest(), id);
         assert_eq!(edge.released_with, v03::ENTRY.released_with);
         // its steps are the drain, the three conversions, and the record, in order
         let ids = edge.steps.iter().map(|step| step.id).collect::<Vec<_>>();
         assert_eq!(ids, V04_STEPS);
+        // the catalog's checks pass
+        assert_eq!(Catalog::PRODUCTION.check(), Ok(()));
+    }
+
+    /// The revision after the tool conversions is the newest, starts from the revision that
+    /// converts tools, is released with the same version, and holds only the record step: its
+    /// schema differs only additively, so the operator's schema apply covers it and a deployment
+    /// at the conversion revision plans exactly that step
+    #[test]
+    fn v05_is_the_newest_revision_applying_the_yara_scanning_schema() {
+        // the edge starts at the conversion revision, reaches a newer id, and is the newest
+        let edge = v05();
+        let id = edge.id.parse::<RevisionId>().expect("valid revision");
+        assert!(id > v04().revision());
+        assert_eq!(edge.from, Some(V04));
+        assert!(!edge.prerelease && !edge.sibling && !edge.is_downward());
+        assert_eq!(Catalog::PRODUCTION.latest(), id);
+        assert_eq!(edge.released_with, v04().released_with);
+        // its one step records the revision, unattended: the schema apply the operator runs for
+        // the image it deploys creates the scan stats table and the exact-name entities view, and
+        // the reconcile creates the yara ruleset cache bucket
+        let ids = edge.steps.iter().map(|step| step.id).collect::<Vec<_>>();
+        assert_eq!(ids, ["finalize-yara-scanning"]);
+        let record = edge.steps.first().expect("a step");
+        assert_eq!(record.kind, StepKind::Config);
+        assert!(!record.kind.needs_approval());
+        assert!(record.thoradm_migration.is_none());
+        assert_eq!(record.pause, []);
+        // a deployment at the conversion revision plans exactly the record step
+        assert_eq!(planned(V04, V05), ["finalize-yara-scanning"]);
         // the catalog's checks pass
         assert_eq!(Catalog::PRODUCTION.check(), Ok(()));
     }
@@ -668,7 +712,7 @@ mod tests {
     #[cfg(feature = "scylla-utils")]
     fn the_revisions_record_their_snapshots_fingerprints() {
         // the committed snapshot's deployment fingerprint is the one in each entry
-        for entry in [&v03::ENTRY, v04()] {
+        for entry in [&v03::ENTRY, v04(), v05()] {
             let snapshot = RevisionSnapshot::committed(entry.id)
                 .expect("a committed snapshot")
                 .expect("a valid snapshot");
@@ -679,9 +723,10 @@ mod tests {
                 entry.id
             );
         }
-        // the two revisions declare different schemas: pipelines are stored in a second layout
-        // from the second one on
+        // the three revisions declare different schemas: pipelines are stored in a second layout
+        // from the second one on, and the third adds the yara scanning objects
         assert_ne!(v03::ENTRY.schema, v04().schema);
+        assert_ne!(v04().schema, v05().schema);
     }
 
     /// The users example's step is a `Data` step on the release edge to the revision that applies
@@ -794,7 +839,7 @@ mod tests {
             .expect("users layout");
         assert_eq!((users.version, users.reads_from), (2, 2));
         // each snapshot holds users layout 2 and the pipelines layout its release reads
-        for (revision, pipelines) in [(v02::ENTRY.id, 1), (v03::ENTRY.id, 1), (V04, 2)] {
+        for (revision, pipelines) in [(v02::ENTRY.id, 1), (v03::ENTRY.id, 1), (V04, 2), (V05, 2)] {
             let snapshot = RevisionSnapshot::committed(revision)
                 .expect("committed snapshot")
                 .expect("valid snapshot");
@@ -894,5 +939,43 @@ mod tests {
         );
         // it records the schema fingerprint of the revision it reaches
         assert_eq!(back.schema, v03::ENTRY.schema);
+    }
+
+    /// The reverse edge of the newest revision starts there, reaches the revision that converts
+    /// tools, and holds only the step that undoes the record: the objects the schema adds expire
+    /// by TTL or are rebuilt, so nothing is dropped on the way down
+    #[test]
+    fn v05_has_a_reverse_edge_that_undoes_only_the_record() {
+        // the edge back exists and leads down
+        let forward = v05();
+        let back = Catalog::PRODUCTION
+            .revert_edge(forward)
+            .expect("the edge back");
+        assert_eq!((back.from, back.id), (Some(V05), V04));
+        assert!(back.is_downward() && !back.prerelease);
+        // its one step reverses the record step, and nothing drops the added objects
+        let steps = back
+            .steps
+            .iter()
+            .map(|step| (step.id, step.reverses))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            steps,
+            [(
+                "finalize-yara-scanning-reverse",
+                Some("finalize-yara-scanning")
+            )]
+        );
+        // it records the schema fingerprint of the revision it reaches
+        assert_eq!(back.schema, v04().schema);
+        // a deployment at the newest revision plans only the record's reverse on the way back
+        let released = Catalog::PRODUCTION.reached(&forward.revision(), "0.0.0");
+        let planned = Catalog::PRODUCTION
+            .plan(&released, &V04.parse().expect("revision"))
+            .expect("plan")
+            .into_iter()
+            .map(|step| step.step)
+            .collect::<Vec<_>>();
+        assert_eq!(planned, ["finalize-yara-scanning-reverse"], "{planned:?}");
     }
 }

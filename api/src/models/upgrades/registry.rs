@@ -42,8 +42,8 @@ pub struct LayoutDef {
     /// `Redis` or `S3`
     pub backend: SchemaBackend,
     /// The Redis family (`users`, `jobs`, …), or for S3 the bucket role (`files`, `repos`,
-    /// `results`, `attachments`, `ephemeral`, `reaction_cache`, `graphics`); never a configured
-    /// bucket name, since bucket names are deployment config
+    /// `results`, `attachments`, `ephemeral`, `reaction_cache`, `graphics`, `yara_rulesets`);
+    /// never a configured bucket name, since bucket names are deployment config
     pub family: &'static str,
     /// The layout this build writes
     pub version: u32,
@@ -107,6 +107,7 @@ pub const LAYOUTS: &[LayoutDef] = &[
     S3_EPHEMERAL_LAYOUT,
     S3_REACTION_CACHE_LAYOUT,
     S3_GRAPHICS_LAYOUT,
+    S3_YARA_RULESETS_LAYOUT,
 ];
 
 /// The Redis layout of user data, the token, email and scoped-token maps, the analysts set, and
@@ -433,6 +434,17 @@ pub const S3_GRAPHICS_LAYOUT: LayoutDef = LayoutDef {
     enumerate: None,
 };
 
+/// The S3 layout of serialized compiled yara rulesets (`{engine_version}/{ruleset_hash}`),
+/// rebuilt from rule entities on demand
+pub const S3_YARA_RULESETS_LAYOUT: LayoutDef = LayoutDef {
+    backend: SchemaBackend::S3,
+    family: "yara_rulesets",
+    version: 1,
+    reads_from: 1,
+    security_sensitive: &[],
+    enumerate: None,
+};
+
 /// What kind of Scylla object a legacy object is
 #[cfg(feature = "scylla-utils")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -481,7 +493,9 @@ pub struct LegacyUse {
 /// One object an older release created that the current build no longer declares
 ///
 /// [`LEGACY`] is append-only: an entry is never removed or edited to say the object never
-/// existed, because a revision in the support window may have created it.
+/// existed, because a revision in the support window may have created it. The one exception is an
+/// object the build starts declaring again, whose entry leaves with the change that declares it,
+/// the way the `entities_by_name` view's did when exact-name entity reads brought it back.
 #[cfg(feature = "scylla-utils")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct LegacyDef {
@@ -535,27 +549,16 @@ pub fn backend_name(backend: SchemaBackend) -> &'static str {
 /// A developer who stops creating an object adds its entry in the same change. The class
 /// table's entry for the object carries the same data class.
 #[cfg(feature = "scylla-utils")]
-pub const LEGACY: &[LegacyDef] = &[
-    LegacyDef {
-        backend: SchemaBackend::Scylla,
-        kind: LegacyKind::Table,
-        name: "events",
-        class: crate::models::schema::DataClass::Runtime,
-        created_by: &["2026-10-v01", "2026-10-v02"],
-        used_by: &[],
-        retirement: "a table of trigger events that nothing reads or writes; setup no longer \
+pub const LEGACY: &[LegacyDef] = &[LegacyDef {
+    backend: SchemaBackend::Scylla,
+    kind: LegacyKind::Table,
+    name: "events",
+    class: crate::models::schema::DataClass::Runtime,
+    created_by: &["2026-10-v01", "2026-10-v02"],
+    used_by: &[],
+    retirement: "a table of trigger events that nothing reads or writes; setup no longer \
                      creates it",
-    },
-    LegacyDef {
-        backend: SchemaBackend::Scylla,
-        kind: LegacyKind::View,
-        name: "entities_by_name",
-        class: crate::models::schema::DataClass::Derived,
-        created_by: &["2026-10-v01", "2026-10-v02"],
-        used_by: &[],
-        retirement: "a view of the entities table that nothing reads; setup no longer creates it",
-    },
-];
+}];
 
 /// Look up the legacy entry for an object
 ///
@@ -626,6 +629,7 @@ mod tests {
         "ephemeral",
         "reaction_cache",
         "graphics",
+        "yara_rulesets",
     ];
 
     /// Every Redis family and S3 bucket role has exactly one layout, at its baseline version (the

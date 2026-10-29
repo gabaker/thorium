@@ -18,6 +18,10 @@ import PeImportDetailsConfig from './PeImportDetailsConfig';
 import { EntityDetailsConfig, makeGetEntityDetails } from './factory';
 import { Entities, EntityTypeMap } from '@models/entities';
 import SigmaRuleDetailsConfig from './SigmaRuleDetailsConfig';
+import YaraRuleDetailsConfig from './YaraRuleDetailsConfig';
+import YaraRuleHitDetailsConfig from './YaraRuleHitDetailsConfig';
+import RuleSetDetailsConfig from './RuleSetDetailsConfig';
+import HuntDetailsConfig from './HuntDetailsConfig';
 
 // The details-config type and factory live in `./factory` to avoid an import cycle with the
 // per-kind config files (see the note in that module). Re-exported here so existing callers can
@@ -38,6 +42,10 @@ export const EntitiesDetailsConfig = {
   [Entities.Other]: OtherDetailsConfig,
   [Entities.Flag]: FlagDetailsConfig,
   [Entities.SigmaRule]: SigmaRuleDetailsConfig,
+  [Entities.YaraRule]: YaraRuleDetailsConfig,
+  [Entities.YaraRuleHit]: YaraRuleHitDetailsConfig,
+  [Entities.RuleSet]: RuleSetDetailsConfig,
+  [Entities.Hunt]: HuntDetailsConfig,
   [Entities.Vendor]: VendorDetailsConfig,
   [Entities.WindowsProcessTree]: WindowsProcessTreeDetailsConfig,
   [Entities.WindowsProcess]: WindowsProcessDetailsConfig,
@@ -57,6 +65,10 @@ export const EntityDetailsPages = {
   [Entities.Other]: createEntityDetailsPage(OtherDetailsConfig),
   [Entities.Flag]: createEntityDetailsPage(FlagDetailsConfig),
   [Entities.SigmaRule]: createEntityDetailsPage(SigmaRuleDetailsConfig),
+  [Entities.YaraRule]: createEntityDetailsPage(YaraRuleDetailsConfig),
+  [Entities.YaraRuleHit]: createEntityDetailsPage(YaraRuleHitDetailsConfig),
+  [Entities.RuleSet]: createEntityDetailsPage(RuleSetDetailsConfig),
+  [Entities.Hunt]: createEntityDetailsPage(HuntDetailsConfig),
   [Entities.Vendor]: createEntityDetailsPage(VendorDetailsConfig),
   [Entities.WindowsProcessTree]: createEntityDetailsPage(WindowsProcessTreeDetailsConfig),
   [Entities.WindowsProcess]: createEntityDetailsPage(WindowsProcessDetailsConfig),

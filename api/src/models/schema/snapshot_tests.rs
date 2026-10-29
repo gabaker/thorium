@@ -139,12 +139,19 @@ fn committed_snapshots_are_generated_and_complete() {
             entry.id
         );
     }
-    // the baseline, the first Helm revision, the revision that applies the schema first, and the
-    // revision that converts tools are snapshotted
+    // the baseline, the first Helm revision, the revision that applies the schema first, the
+    // revision that converts tools, and the revision that applies the yara scanning schema are
+    // snapshotted
     let ids = RevisionSnapshot::committed_ids().collect::<Vec<_>>();
     assert_eq!(
         ids,
-        ["2026-10-v01", "2026-10-v02", "2026-10-v03", "2026-10-v04"]
+        [
+            "2026-10-v01",
+            "2026-10-v02",
+            "2026-10-v03",
+            "2026-10-v04",
+            "2026-10-v05"
+        ]
     );
     // every file in the snapshot directory is listed, and each is the generator's exact text
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("schema/revisions");
@@ -184,10 +191,11 @@ fn committed_snapshots_are_generated_and_complete() {
             "{id}.json isn't the baseline's snapshot"
         );
     }
-    // the revisions released after it are the declared schema with the layouts they wrote: the
-    // revision that applies the schema first wrote pipelines in layout 1, and the one after it
-    // writes the layout this build declares
-    for id in ["2026-10-v03", "2026-10-v04"] {
+    // the revisions released after it are the declared schema without the objects a later
+    // revision added and with the layouts they wrote: the revision that applies the schema first
+    // wrote pipelines in layout 1, the one after it writes the layout this build declares, and
+    // the newest holds the yara scanning objects
+    for id in ["2026-10-v03", "2026-10-v04", "2026-10-v05"] {
         let snapshot = RevisionSnapshot::committed(id)
             .expect("listed")
             .expect("valid");
@@ -197,20 +205,44 @@ fn committed_snapshots_are_generated_and_complete() {
             "{id}.json isn't the released schema's snapshot"
         );
     }
+    // between the first two released revisions only the pipelines layout moved
     let first = RevisionSnapshot::released("2026-10-v03".parse().expect("a valid revision"));
-    let newest = RevisionSnapshot::released("2026-10-v04".parse().expect("a valid revision"));
+    let second = RevisionSnapshot::released("2026-10-v04".parse().expect("a valid revision"));
     let moved = first
         .objects
         .iter()
-        .zip(&newest.objects)
+        .zip(&second.objects)
         .filter(|(old, new)| old.fingerprint != new.fingerprint)
         .map(|(old, _)| old.name.as_str())
         .collect::<Vec<_>>();
     assert_eq!(moved, ["pipelines"]);
-    assert_eq!(newest.objects.len(), first.objects.len());
+    assert_eq!(second.objects.len(), first.objects.len());
+    // the newest revision adds exactly the yara scanning objects and moves no other fingerprint
+    let newest = RevisionSnapshot::released("2026-10-v05".parse().expect("a valid revision"));
+    let in_second = |object: &super::SnapshotObject, same_fingerprint: bool| {
+        second.objects.iter().any(|old| {
+            (old.backend, &old.name) == (object.backend, &object.name)
+                && (old.fingerprint == object.fingerprint) == same_fingerprint
+        })
+    };
+    let added = newest
+        .objects
+        .iter()
+        .filter(|new| !in_second(new, true) && !in_second(new, false))
+        .map(|new| new.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(added, ["entities_by_name", "scan_stats", "yara_rulesets"]);
+    assert_eq!(newest.objects.len(), second.objects.len() + added.len());
+    let moved = newest
+        .objects
+        .iter()
+        .filter(|new| in_second(new, false))
+        .map(|new| new.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(moved, Vec::<&str>::new());
     assert_eq!(
         newest.deployment,
-        declared("2026-10-v04").deployment,
+        declared("2026-10-v05").deployment,
         "the newest revision is the declared schema"
     );
     // a snapshot's fingerprints are checked against its canonical forms

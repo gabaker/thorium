@@ -5,7 +5,6 @@
 use clap::Parser;
 use clap::builder::NonEmptyStringValueParser;
 use std::path::PathBuf;
-use thorium::client::conf;
 use thorium::models::ImageScaler;
 use uuid::Uuid;
 
@@ -302,15 +301,6 @@ impl DescribeSealed for DescribeImages {
 
 impl DescribeCommand for DescribeImages {}
 
-/// Provide the help message for the editor arg
-fn editor_help() -> String {
-    format!(
-        "The editor to use when editing the image ('{}' by default); the default can be modified using \
-    'thorctl config --default-editor', but this flag overrides any set defaults",
-        conf::default_default_editor()
-    )
-}
-
 /// Args for editing an image
 #[derive(Parser, Debug)]
 pub struct EditImage {
@@ -320,7 +310,7 @@ pub struct EditImage {
     /// the same name
     pub group: Option<String>,
     /// The editor to use when editing the image
-    #[clap(short, long, help = editor_help())]
+    #[clap(short, long, help = super::editor_help("image"))]
     pub editor: Option<String>,
 }
 

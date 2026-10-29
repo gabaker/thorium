@@ -7,7 +7,7 @@ use linearize::StaticMap;
 use papaya::HashMap as PapayaMap;
 use sigma_rust::Rule;
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::sync::Arc;
@@ -123,8 +123,24 @@ impl SigmaRuleContext {
                 // compile this sigma rule
                 let compiled = match &original.metadata {
                     EntityMetadata::SigmaRule(sigma) => {
-                        // compile this sigma rule
-                        let compiled = sigma_rust::rule_from_yaml(&sigma.rule).unwrap();
+                        // compile this sigma rule; a stored rule can go stale (e.g. across
+                        // sigma-rust upgrades) and one bad rule must never crash the daemon
+                        // now that this context is periodically rebuilt
+                        let compiled = match sigma_rust::rule_from_yaml(&sigma.rule) {
+                            Ok(compiled) => compiled,
+                            Err(error) => {
+                                // log that this stored sigma rule no longer compiles
+                                event!(
+                                    Level::ERROR,
+                                    msg = "Skipping sigma rule that failed to compile",
+                                    rule = original.name,
+                                    id = original.id.to_string(),
+                                    error = error.to_string(),
+                                );
+                                // skip this rule and keep the rest of the context
+                                continue;
+                            }
+                        };
                         // get the next available index that this new rule will go into
                         let index = combined_list.len();
                         // add this rules index to our rule map for all of its entity kinds
@@ -1046,7 +1062,9 @@ impl EventWorkerSupportCore for SigmaRuleWorker {
     ///
     /// * `cache` - A cache of all info a worker may need to be created
     /// * `thorium` - A Thorium client
-    async fn new(cache: &EventWorkerCache, thorium: &Arc<Thorium>) -> Self {
+    /// * `_worker` - The identity of this event handler process (unused since
+    ///   the wrapper performs this workers queue operations)
+    async fn new(cache: &EventWorkerCache, thorium: &Arc<Thorium>, _worker: &str) -> Self {
         // build this worker
         let mut worker = SigmaRuleWorker {
             context: cache.sigma.clone(),
@@ -1083,8 +1101,10 @@ impl EventWorkerSupportCore for SigmaRuleWorker {
         // Apply an updates
         match update {
             WorkerCacheUpdates::ReactionTriggers(_) => (),
-            WorkerCacheUpdates::SigmaRulesContext(context) => self.context = context,
+            WorkerCacheUpdates::SigmaRulesContext(context) => self.context = *context,
             WorkerCacheUpdates::Users(users) => self.create_user_clients(users),
+            // the sigma worker does not care about yara cache updates
+            WorkerCacheUpdates::YaraRulesContext(_) | WorkerCacheUpdates::GroupAllowances(_) => (),
         }
     }
 
@@ -1125,6 +1145,41 @@ impl EventWorkerSupportCore for SigmaRuleWorker {
                 flagged = entity_stats.flagged,
             );
         }
+    }
+
+    /// Flatten this worker kinds stats into cumulative counters for publishing
+    ///
+    /// The totals land under the `total.` prefix while the per entity kind
+    /// breakdown flattens to `by_entity.{kind}.` dotted paths; every kind is
+    /// emitted (zeros included) so the key set stays stable per worker.
+    ///
+    /// # Arguments
+    ///
+    /// * `stats` - The stats to flatten
+    fn counter_map(stats: &Self::Stats) -> BTreeMap<String, u64> {
+        // start with our totals under the total prefix
+        let mut map = BTreeMap::from([
+            ("total.scanned".to_owned(), stats.total.scanned as u64),
+            ("total.created".to_owned(), stats.total.created as u64),
+            ("total.flagged".to_owned(), stats.total.flagged as u64),
+        ]);
+        // flatten each entity kinds stats to dotted paths
+        for (kind, entity_stats) in &stats.by_entity {
+            // key this kinds counters under the by_entity prefix
+            map.insert(
+                format!("by_entity.{}.scanned", kind.as_str()),
+                entity_stats.scanned as u64,
+            );
+            map.insert(
+                format!("by_entity.{}.created", kind.as_str()),
+                entity_stats.created as u64,
+            );
+            map.insert(
+                format!("by_entity.{}.flagged", kind.as_str()),
+                entity_stats.flagged as u64,
+            );
+        }
+        map
     }
 }
 
@@ -1409,6 +1464,58 @@ mod tests {
             auth_of("/api/associations/"),
             vec![auth_for(ADMIN_TOKEN)],
             "association create"
+        );
+    }
+
+    /// The counter map flattens [`SigmaRuleStats`] to dotted paths: the totals land
+    /// under the `total.` prefix and the per entity kind breakdown under
+    /// `by_entity.{kind}.`, with every kind emitted (zeros included) so the published
+    /// key set stays stable per worker.
+    #[test]
+    fn sigma_stats_counter_map() {
+        // build stats with distinct totals and one active entity kind
+        let mut stats = SigmaRuleStats::default();
+        stats.total = SigmaRuleSpecificStats {
+            scanned: 1,
+            created: 2,
+            flagged: 3,
+        };
+        stats.by_entity[EntityKinds::SigmaRule].scanned = 4;
+        // flatten these stats into a counter map
+        let map = SigmaRuleWorker::counter_map(&stats);
+        // the totals must land under the total prefix
+        assert_eq!(
+            map.get("total.scanned"),
+            Some(&1),
+            "total.scanned must carry the total"
+        );
+        assert_eq!(
+            map.get("total.created"),
+            Some(&2),
+            "total.created must carry the total"
+        );
+        assert_eq!(
+            map.get("total.flagged"),
+            Some(&3),
+            "total.flagged must carry the total"
+        );
+        // an active kinds counters must land under its dotted path
+        assert_eq!(
+            map.get("by_entity.SigmaRule.scanned"),
+            Some(&4),
+            "an active kind must flatten to its dotted path"
+        );
+        // untouched kinds must still be emitted as zeros so the key set is stable
+        assert_eq!(
+            map.get("by_entity.Flag.scanned"),
+            Some(&0),
+            "untouched kinds must be emitted as zeros"
+        );
+        // the map must hold the totals plus three counters per entity kind
+        assert_eq!(
+            map.len(),
+            3 + 3 * (&stats.by_entity).into_iter().count(),
+            "the counter map must hold the totals plus three counters per entity kind"
         );
     }
 }

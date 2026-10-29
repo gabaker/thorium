@@ -174,8 +174,12 @@ export function getLimitFromClauses(clauses: Clause[], defaultLimit: number = 25
   const limitClauses = clauses.filter((clause) => clause.field == 'limit');
   limitClauses.forEach((clause) => {
     if (!ClauseIsMulti(clause)) {
-      if (Number.isInteger(Number(clause.value.value))) {
-        limit = Number.parseInt(clause.value.value);
+      // Number() keeps the value parseInt would truncate (e.g. '1e2' is 100, not 1)
+      const parsed = Number(clause.value.value);
+      // only accept whole positive limits: a zero or negative limit breaks
+      // client-side pagers (Math.ceil(n/0) is Infinity) and slice() math
+      if (Number.isInteger(parsed) && parsed > 0) {
+        limit = parsed;
       }
     }
   });

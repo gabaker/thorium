@@ -5,7 +5,7 @@ use futures::{StreamExt, TryStreamExt};
 use reqwest::StatusCode;
 use std::path::{Path, PathBuf};
 use tokio::fs::OpenOptions;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::io::StreamReader;
 use uuid::Uuid;
 
@@ -42,6 +42,17 @@ cfg_if::cfg_if! {
 // python client imports
 #[cfg(feature = "python")]
 use pyo3::pyclass;
+/// The outcome of downloading a sample's bytes into memory
+#[derive(Debug)]
+pub enum SampleBytes {
+    /// The complete uncarted bytes for this sample
+    Complete(Vec<u8>),
+    /// This sample exceeded the download cap and was not buffered
+    Oversize {
+        /// The cap in bytes that this sample exceeded
+        cap: u64,
+    },
+}
 
 /// A handler for the files routes in Thorium
 #[cfg_attr(feature = "sync", thorium_derive::blocking_struct(python))]
@@ -255,6 +266,81 @@ impl Files {
             .query(&query);
         // send this request and build a sample from the response
         send!(self.client, req)
+    }
+
+    /// Download a sample's uncarted bytes into memory with a hard size cap
+    ///
+    /// This is the yara scanner's download path: bytes stream from the API
+    /// through the CaRT decoder straight into a buffer and never touch local
+    /// disk. The cap is enforced while the buffer fills and the carted
+    /// `content-length` pre-filters clearly oversize objects without reading
+    /// them at all (CaRT's compression expands incompressible data by well
+    /// under 0.1%, so a carted length comfortably above the cap proves the
+    /// uncarted bytes exceed it too).
+    ///
+    /// # Arguments
+    ///
+    /// * `sha256` - The sha256 of the sample to download
+    /// * `cap` - The max number of uncarted bytes to buffer before aborting
+    #[cfg_attr(
+        feature = "trace",
+        instrument(name = "Thorium::Files::download_bytes", skip(self), err(Debug))
+    )]
+    pub async fn download_bytes(&self, sha256: &str, cap: u64) -> Result<SampleBytes, Error> {
+        // build url for downloading this sample
+        let url = format!(
+            "{base}/api/files/sample/{sha256}/download",
+            base = self.host,
+            sha256 = sha256
+        );
+        // build and send the request
+        let resp = self
+            .client
+            .get(&url)
+            .header("authorization", &self.token)
+            .send()
+            .await?;
+        // make sure we got a 200
+        if resp.status() != StatusCode::OK {
+            // convert this response into an error and bail
+            return Err(Error::from(resp));
+        }
+        // pre-filter clearly oversize objects by their carted length; carted
+        // bytes are at most slightly larger then the original so a carted
+        // length comfortably over the cap proves the original is over it too
+        let slack = (cap / 512).max(1_048_576);
+        if let Some(carted_len) = resp.content_length()
+            && carted_len > cap.saturating_add(slack)
+        {
+            return Ok(SampleBytes::Oversize { cap });
+        }
+        // get our response as a stream of bytes
+        let stream = resp
+            .bytes_stream()
+            .map_err(|err| std::io::Error::other(err.to_string()));
+        // convert our async read to a buf reader
+        let reader = StreamReader::new(stream);
+        // start uncarting this stream of data
+        let mut uncart = UncartStream::new(reader);
+        // buffer the uncarted bytes while enforcing our cap as it fills
+        let mut buffer: Vec<u8> = Vec::with_capacity(65_536);
+        // read in bounded chunks so the cap check stays tight
+        let mut chunk = vec![0u8; 65_536];
+        loop {
+            // read the next chunk of uncarted bytes
+            let read = uncart.read(&mut chunk).await?;
+            // an empty read means the stream is done
+            if read == 0 {
+                break;
+            }
+            // abort this download if it would exceed our cap
+            if buffer.len() as u64 + read as u64 > cap {
+                return Ok(SampleBytes::Oversize { cap });
+            }
+            // add this chunk to our buffer
+            buffer.extend_from_slice(&chunk[..read]);
+        }
+        Ok(SampleBytes::Complete(buffer))
     }
 
     /// Downloads a file in the CART format

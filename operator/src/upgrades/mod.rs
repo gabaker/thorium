@@ -2004,7 +2004,7 @@ pub(crate) mod tests {
         // every step to the latest revision is listed as pending
         assert_eq!(progress.current.as_deref(), Some(BASELINE_REVISION));
         assert_eq!(progress.target, None);
-        assert_eq!(progress.steps.len(), 11);
+        assert_eq!(progress.steps.len(), 12);
         assert!(
             progress
                 .steps
@@ -2042,7 +2042,8 @@ pub(crate) mod tests {
                     "images-to-tools",
                     "pipelines-to-tool-stages",
                     "provenance-to-legacy-tools",
-                    "finalize-tool-only"
+                    "finalize-tool-only",
+                    "finalize-yara-scanning"
                 ]
             );
         }
@@ -2073,7 +2074,8 @@ pub(crate) mod tests {
                 "images-to-tools",
                 "pipelines-to-tool-stages",
                 "provenance-to-legacy-tools",
-                "finalize-tool-only"
+                "finalize-tool-only",
+                "finalize-yara-scanning"
             ]
         );
     }
@@ -2118,7 +2120,8 @@ pub(crate) mod tests {
                 "images-to-tools",
                 "pipelines-to-tool-stages",
                 "provenance-to-legacy-tools",
-                "finalize-tool-only"
+                "finalize-tool-only",
+                "finalize-yara-scanning"
             ]
         );
     }
@@ -2136,7 +2139,7 @@ pub(crate) mod tests {
         // the message names the target and how to continue
         assert!(message.contains("at its target revision 2026-10-v01"));
         assert_eq!(progress.target.as_deref(), Some(BASELINE_REVISION));
-        assert_eq!(progress.steps.len(), 11);
+        assert_eq!(progress.steps.len(), 12);
     }
 
     /// Backwards, malformed, unknown, and too new revisions are errors
@@ -2234,7 +2237,7 @@ pub(crate) mod tests {
             .expect("plan")
             .expect("held");
         assert!(message.contains("reached its target revision 2026-10-v01"));
-        assert_eq!(progress.steps.len(), 11);
+        assert_eq!(progress.steps.len(), 12);
         assert_eq!(progress.target.as_deref(), Some(BASELINE_REVISION));
         // reaching the latest revision holds nothing
         let current = UpgradeState::new(upgrades::latest(), OPERATOR_VERSION);
@@ -2323,7 +2326,7 @@ pub(crate) mod tests {
         assert_eq!(status["phase"], "UpgradeRequired");
         assert_eq!(
             status["upgrade"]["steps"].as_array().map(Vec::len),
-            Some(11)
+            Some(12)
         );
         assert_eq!(status["upgrade"]["steps"][2]["state"], "Pending");
     }

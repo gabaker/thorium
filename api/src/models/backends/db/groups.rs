@@ -79,7 +79,9 @@ pub async fn create(
     // add command to insert this group into the group set
     pipe.cmd("sadd").arg(&keys.set).arg(&cast.name)
         // invalidate our cache status
-        .cmd("hset").arg(cache_status).arg("status").arg(true)
+        .cmd("hset").arg(&cache_status).arg("triggers").arg(true)
+        // bump the triggers generation counter for replica safe cache polling
+        .cmd("hincrby").arg(&cache_status).arg("triggers_gen").arg(1)
         // set our group allowed settings
         .cmd("hset").arg(&keys.data).arg("allowed").arg(serialize!(&cast.allowed));
     // update user accounts
@@ -358,6 +360,33 @@ pub async fn exists(names: &[String], shared: &Shared) -> Result<bool, ApiError>
     helpers::exists_all(names, &GroupKeys::set(shared), shared).await
 }
 
+/// Checks which of a set of groups exist in the Redis backend
+///
+/// Unlike [`exists`] this reports membership per name so callers that treat
+/// deleted groups as policy suppressions (like the yara hit route) can filter
+/// instead of failing the whole request. The flags line up with `names` by
+/// index.
+///
+/// # Arguments
+///
+/// * `names` - The names of the groups to check the existence of
+/// * `shared` - Shared Thorium objects
+pub async fn exists_each(names: &[String], shared: &Shared) -> Result<Vec<bool>, ApiError> {
+    // no names means there is nothing to check membership for
+    if names.is_empty() {
+        return Ok(Vec::default());
+    }
+    // check each names membership in the global group set in one pipeline
+    let checks: Vec<bool> = names
+        .iter()
+        .fold(redis::pipe().atomic(), |pipe, name| {
+            pipe.cmd("sismember").arg(GroupKeys::set(shared)).arg(name)
+        })
+        .query_async(conn!(shared))
+        .await?;
+    Ok(checks)
+}
+
 /// update the users for a role in a group
 fn update_role(pipe: &mut redis::Pipeline, users: &HashSet<String>, key: &str) {
     // clear this key first
@@ -414,7 +443,9 @@ pub async fn update(
     // update description
     hset_del_opt_serialize!(pipe, &keys.data, "description", &group.description);
     // invalidate our event cache
-    pipe.cmd("hset").arg(cache_status).arg("status").arg(true);
+    pipe.cmd("hset").arg(&cache_status).arg("triggers").arg(true);
+    // bump the triggers generation counter for replica safe cache polling
+    pipe.cmd("hincrby").arg(&cache_status).arg("triggers_gen").arg(1);
     // set our group allowed settings
     pipe.cmd("hset").arg(&keys.data).arg("allowed").arg(serialize!(&group.allowed));
     // execute pipeline and check if it failed

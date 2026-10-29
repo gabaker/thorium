@@ -1,15 +1,32 @@
 # Event Handler
 ---
-The event handler in Thorium is responsible for triggering reactions based on
-events in Thorium. An event in thorium is an action taking place like:
+The event handler in Thorium is responsible for acting on events in Thorium. An event
+in Thorium is an action taking place like:
 - Uploading a file/repo
 - Creating tags
+- Saving a tool result that contains scannable entities (Sigma scanning)
+- Uploading a sample or widening its group visibility (YARA scanning)
+- A hunt chunk becoming ready to execute
 
-When these event happen they are pushed into a stream in redis. The event handler
-then pops events from this stream and determines if the conditions for a pipeline
-trigger have been met. If they have then a reaction will be created for the user
-whose event met this triggers conditions. A single event can trigger multiple
-distinct triggers.
+When these events happen they are pushed into per-kind queues in Redis. The event
+handler runs one worker per event kind:
+
+| Worker | Queue | What it does |
+|--------|-------|--------------|
+| `ReactionTriggers` | `ReactionTrigger` | Evaluates pipeline tag triggers and spawns reactions |
+| `SigmaScanner` | `SigmaScannableResults` | Scans tool-result entities with stored Sigma rules |
+| `YaraScanner` | `YaraScannableSample` | Scans sample bytes with the compiled YARA ruleset |
+| `YaraHunter` | `YaraHuntChunk` | Executes one chunk of a user-created hunt |
+
+For the trigger worker, a single event can satisfy multiple distinct triggers and each
+spawns a reaction for the user whose event met the trigger's conditions. The scanning
+and hunt workers are covered in depth in [Rule Scanning](./rule-scanning.md).
+
+Each event handler process claims the events it pops under its own worker identity and
+heartbeats every 10 seconds. A reaper reclaims the in-flight events of workers that
+stop heartbeating (crashed pods) or hold leases too long (wedged pods), so events are
+never stranded by a dead replica. This is what makes the event handler safe to run
+with multiple replicas.
 
 The event handler also runs an AI worker that keeps AI workflows and model catalogs current:
 
@@ -33,15 +50,21 @@ Workflow graph and model refresh events never trigger reactions.
 ### Is there a delay between events being created and being processed
 Yes, the event handler trails live events by 3 seconds (workflow graph events by
 `thorium.events.workflow_graph_delay`, 10 seconds by default; model refresh events don't wait). This is to ensure that
-Scylla has a chance to become consistent before the event handler process an
-event. Event though event data is stored in Redis the event-handler often has
+Scylla has a chance to become consistent before the event handler processes an
+event. Even though event data is stored in Redis the event-handler often has
 to query for additional data to determine if a trigger's conditions have been
 met. This data is stored in Scylla and so requires some time to become
 consistent.
 
 ### What stops an infinite loop in events?
-Triggers have an configurable depth limit meaning any events that reach that
-limit will be immediately dropped instead of processed.
+Triggers have a configurable depth limit (`thorium.events.max_depth`, default 5)
+meaning any events that reach that limit will be immediately dropped instead of
+processed. Tags written by YARA hits inherit the depth of the event that caused the
+scan plus one, so hit-triggered pipelines also terminate at the depth limit.
 
 ### Can I replay events?
-No, once an event is processed it is dropped and cannot be replayed.
+Successfully processed events are dropped and cannot be replayed. However, in-flight
+events held by a worker that dies or shuts down are automatically returned to the
+pending queue and processed again by another worker. This replay is bounded and safe
+for scanning (hit writes converge on the same entities), but a reaction spawned right
+before a crash can be duplicated.

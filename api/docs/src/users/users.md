@@ -11,6 +11,8 @@ responders to malware reverse engineers or vulnerability researchers. With this 
   - set up your own model endpoints and credentials (see [Models](./models.md))
   - view reaction status and logs
   - view tool results
+  - create YARA and Sigma detection rules and organize them into rule sets
+  - launch hunts that scan your historical files with those rules
   - comment on files and upload comment attachments
   - create new groups
 

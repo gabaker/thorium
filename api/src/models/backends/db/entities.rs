@@ -15,12 +15,12 @@ use crate::models::backends::TagSupport;
 use crate::models::backends::db::ScyllaCursor;
 use crate::models::schema::scylla::EntitiesTableRef;
 use crate::models::{
-    Entity, EntityForm, EntityGroupKindRow, EntityListLine, EntityListParams,
+    Entity, EntityForm, EntityGroupKindRow, EntityKinds, EntityListLine, EntityListParams,
     EntityListSupplementRow, EntityMetadata, GroupPolicy, KeySupport, TagDeleteRequest, TagRequest,
     User,
 };
 use crate::utils::{ApiError, Shared, helpers};
-use crate::{conflict, conn, deserialize, internal_err, not_found, serialize};
+use crate::{bad, conflict, conn, deserialize, internal_err, not_found, serialize};
 
 /// How long an instance lock is held before it expires, freeing a root whose holder died
 const INSTANCE_LOCK_EXPIRE_MS: u64 = 30_000;
@@ -76,6 +76,8 @@ pub async fn create(
         // create the associations for this entity
         assoc_req.apply(user, shared).await?;
     }
+    // mark any event handler rule cache built from this entity kind as stale
+    super::events::set_rules_stale(entity.kind, shared).await?;
     Ok(entity)
 }
 
@@ -425,6 +427,195 @@ pub async fn all_groups(id: Uuid, shared: &Shared) -> Result<Vec<String>, ApiErr
     Ok(groups)
 }
 
+/// Get all entities of some kinds sharing an exact name from Scylla
+///
+/// Entity names are not unique so this reads the `entities_by_name` view and
+/// dedupes the rows by entity id, merging group rows for the same entity. The
+/// kind slice rides in the CQL because other kinds legally share a rule's name
+/// (every yara rule hit is named after its rule), so filtering in Rust would
+/// crawl one row per hit when resolving a productive rule's name. More than
+/// 500 distinct entities of the requested kinds sharing one name is rejected
+/// as too ambiguous, and a group chunk that fills its 501 row statement limit
+/// is rejected as truncated, so a pathological shared-name partition can never
+/// force an unbounded read or a silently incomplete entity. Matches come back
+/// ordered oldest-created first and an
+/// unknown name is just an empty list since callers distinguish the zero, one,
+/// and many match cases themselves.
+///
+/// # Arguments
+///
+/// * `groups` - The list of groups to check for entities
+/// * `name` - The exact name of the entities to get
+/// * `kinds` - The entity kinds to include
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::entities::get_by_name", skip(shared), err(Debug))]
+pub async fn get_by_name(
+    groups: &[String],
+    name: &str,
+    kinds: &[EntityKinds],
+    shared: &Shared,
+) -> Result<Vec<Entity>, ApiError> {
+    // a caller with no visible groups can match nothing; return the documented
+    // zero-match empty list instead of surfacing an internal guard as a 400
+    if groups.is_empty() {
+        return Ok(Vec::new());
+    }
+    // dedupe the requested kinds so duplicate params cannot inflate the
+    // clustering-key IN product past what the chunk sizing below accounts for
+    let mut seen_kinds = HashSet::with_capacity(kinds.len());
+    let kinds: Vec<EntityKinds> = kinds
+        .iter()
+        .filter(|kind| seen_kinds.insert(**kind))
+        .copied()
+        .collect();
+    // create a btreemap to keep the entities sorted by creation timestamp;
+    // the value is a list of entity ids in case some were created at the exact
+    // same time, where repeats are fine since we take from the data map below
+    let mut sorted: BTreeMap<DateTime<Utc>, Vec<Uuid>> = BTreeMap::new();
+    // make a map of the entity's id to its actual data
+    let mut data_map: HashMap<Uuid, Entity> = HashMap::new();
+    // scylla caps the clustering-key IN cartesian product (groups x kinds) at
+    // 100 per query, so size the group chunks to stay at or under that cap
+    let group_chunk_size = std::cmp::max(1, 100 / kinds.len().max(1));
+    // break our groups into cap-sized chunks
+    for groups_chunk in groups.chunks(group_chunk_size) {
+        // query for this chunk's rows of the requested kinds sharing our name
+        let rows = shared
+            .scylla
+            .queries
+            .entities_by_name
+            .get_chunk(&shared.scylla.session, name, groups_chunk, &kinds)
+            .await?;
+        // count this chunks rows so a truncated read can never pass silently
+        let mut chunk_rows: usize = 0;
+        // cast rows to entity rows and save the info
+        for cast in rows {
+            // make sure the row is valid
+            let row = cast?;
+            // count this row towards this chunks truncation guard
+            chunk_rows += 1;
+            // get an entry to the timestamp map
+            let timestamp_list = sorted.entry(row.created).or_default();
+            // add our entity's id to it
+            timestamp_list.push(row.id);
+            // bail out if far too many distinct entities share this name; the
+            // view holds one row per group so the guard must count entities,
+            // not group rows, or a single entity shared into many groups
+            // would trip it
+            if !data_map.contains_key(&row.id) && data_map.len() >= 500 {
+                return bad!(format!(
+                    "More than 500 entities share the name '{name}'; address this entity by its id"
+                ));
+            }
+            // set this entity's details
+            match data_map.entry(row.id) {
+                Entry::Vacant(empty) => {
+                    // make a new entity from the row
+                    let entity = Entity::try_from(row)?;
+                    // insert it into the entry
+                    empty.insert(entity);
+                }
+                // insert the row's group if we already have this entity
+                Entry::Occupied(occupied) => occupied.into_mut().add_row(row),
+            }
+        }
+        // the statement caps each chunk at 501 rows; a full pull means the
+        // read may have been truncated, so refuse to return a silently
+        // incomplete entity rather than dropping group memberships
+        if chunk_rows > 500 {
+            return bad!(format!(
+                "Too many rows share the name '{name}' in the requested groups; address this entity by its id"
+            ));
+        }
+    }
+    // get tags for all of the matched entities concurrently
+    stream::iter(data_map.values_mut())
+        .map(Ok::<_, ApiError>)
+        .try_for_each_concurrent(10, |entity| async {
+            entity.get_tags(groups, shared).await?;
+            Ok(())
+        })
+        .await?;
+    // compile our matches into a final list
+    let mut matches = Vec::with_capacity(data_map.len());
+    // keep oldest-created first order by crawling the sorted map in order,
+    // where ties keep their insertion order
+    for (_, ids) in sorted {
+        for id in ids {
+            // move this entity into our list if we haven't already
+            if let Some(entity) = data_map.remove(&id) {
+                matches.push(entity);
+            }
+        }
+    }
+    Ok(matches)
+}
+
+/// Get an entity's name, kind, and group rows by its id across all groups
+///
+/// The `entities_by_id` view partitions by id alone so this is a single
+/// partition read that needs no group or time bucket knowledge. This backs the
+/// deterministic create-as-merge path for yara rule hits where a creator in
+/// group B must find a hit that only exists in group A, and the server side
+/// hit route where a rules authoritative groups gate the whole write.
+///
+/// # Arguments
+///
+/// * `id` - The id of the entity to look for
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::entities::exists_by_id", skip(shared), err(Debug))]
+pub async fn exists_by_id(
+    id: Uuid,
+    shared: &Shared,
+) -> Result<Option<(String, EntityKinds, Vec<String>)>, ApiError> {
+    // read this entitys group and kind rows across all groups by its id
+    let rows = shared
+        .scylla
+        .queries
+        .entities_by_id
+        .get_groups_kinds_by_ids(&shared.scylla.session, &[id])
+        .await?;
+    // track the kind and groups this entity exists in
+    let mut kind: Option<EntityKinds> = None;
+    let mut groups: Vec<String> = Vec::default();
+    // crawl this entitys rows and collect its groups
+    for row in rows {
+        // make sure the row is valid
+        let row = row?;
+        // track this entitys kind
+        kind.get_or_insert(row.kind);
+        // keep each group once, as an entity may have several rows in a group
+        if !groups.contains(&row.group) {
+            groups.push(row.group);
+        }
+    }
+    // an entity with no rows doesn't exist
+    let Some(kind) = kind else {
+        return Ok(None);
+    };
+    // read this entitys name from the same single id partition
+    let names = shared
+        .scylla
+        .queries
+        .entities_by_id
+        .get_names_kinds_by_ids(&shared.scylla.session, &[id])
+        .await?;
+    // take the name from this entitys first row
+    let mut name: Option<String> = None;
+    for row in names {
+        // make sure the row is valid
+        let row = row?;
+        // track this entitys name
+        name.get_or_insert(row.name);
+    }
+    // a group row without a name row should be impossible on one partition
+    let Some(name) = name else {
+        return Ok(None);
+    };
+    // return the name, kind, and groups for this entity
+    Ok(Some((name, kind, groups)))
+}
+
 /// List entities in specific groups and with tags
 ///
 /// When the list is filtered by tags, only entities of the requested kinds are kept, because tag
@@ -443,6 +634,52 @@ pub async fn list(
     dedupe: bool,
     shared: &Shared,
 ) -> Result<ScyllaCursor<EntityListLine>, ApiError> {
+    // build and read this cursors first page
+    let cursor = list_inner(user, params, dedupe, shared).await?;
+    // save this cursor so callers can present its id again
+    cursor.save(shared).await?;
+    Ok(cursor)
+}
+
+/// List one page of entities without persisting a resumable cursor
+///
+/// Internal bounded aggregate readers (the hunt quota census and the admin
+/// hunt status census) read a single page and throw the cursor id away, so
+/// saving the cursor would just orphan an 8 hour TTL'd redis key per call
+/// whenever the page was not exhausted (`ScyllaCursor::save` already skips
+/// new-and-exhausted cursors on its own).
+///
+/// # Arguments
+///
+/// * `user` - The user that is listing entities
+/// * `params` - The query params to use when listing files
+/// * `dedupe` - Whether to dedupe submissions for the same sha256
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::entities::list_once", skip(user, shared), err(Debug))]
+pub async fn list_once(
+    user: &User,
+    params: EntityListParams,
+    dedupe: bool,
+    shared: &Shared,
+) -> Result<ScyllaCursor<EntityListLine>, ApiError> {
+    // build and read this cursors first page without ever saving it
+    list_inner(user, params, dedupe, shared).await
+}
+
+/// Build an entity list cursor and read its first page
+///
+/// # Arguments
+///
+/// * `user` - The user that is listing entities
+/// * `params` - The query params to use when listing files
+/// * `dedupe` - Whether to dedupe submissions for the same sha256
+/// * `shared` - Shared Thorium objects
+async fn list_inner(
+    user: &User,
+    params: EntityListParams,
+    dedupe: bool,
+    shared: &Shared,
+) -> Result<ScyllaCursor<EntityListLine>, ApiError> {
     // get our cursor scoped to the creating user
     let mut cursor = ScyllaCursor::from_params(params, &user.username, dedupe, shared).await?;
     // get the next page of data for this cursor
@@ -455,8 +692,6 @@ pub async fn list(
         let kinds = &cursor.retain.extra_filter;
         cursor.data.retain(|line| kinds.contains(&line.kind));
     }
-    // save this cursor
-    cursor.save(shared).await?;
     Ok(cursor)
 }
 
@@ -555,6 +790,27 @@ pub async fn get_many_untagged(
     }
     // read the entities' rows
     read_many(groups, ids, shared).await
+}
+
+/// Get details for many entities without hydrating their tags
+///
+/// Bounded aggregate readers like the admin hunt census project entities into
+/// tag free status lines, so loading tags for every entity across every group
+/// would just multiply the census read cost for data nothing reads.
+///
+/// # Arguments
+///
+/// * `groups` - The groups to get from
+/// * `ids` - The ids of the entities to get details on
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::entities::get_many_bare", skip(shared), err(Debug))]
+pub async fn get_many_bare(
+    groups: &[String],
+    ids: &[Uuid],
+    shared: &Shared,
+) -> Result<Vec<Entity>, ApiError> {
+    // hydrate these entities without their tags
+    get_many_untagged(groups, ids, shared).await
 }
 
 /// Read the rows of many entities without their tags, newest first
@@ -798,6 +1054,8 @@ pub async fn update(
         })
         .collect();
     super::tags::delete(&entity_key, &tag_delete_req, shared).await?;
+    // mark any event handler rule cache built from this entity kind as stale
+    super::events::set_rules_stale(entity.kind, shared).await?;
     Ok(())
 }
 
@@ -925,6 +1183,8 @@ async fn prune_tags(user: &User, entity: &Entity, shared: &Shared) -> Result<(),
             entity.delete_tags(user, tag_del, shared).await?;
         }
     }
+    // mark any event handler rule cache built from this entity kind as stale
+    super::events::set_rules_stale(entity.kind, shared).await?;
     Ok(())
 }
 
@@ -970,5 +1230,7 @@ pub async fn delete(user: &User, entity: &Entity, shared: &Shared) -> Result<(),
             Ok(())
         })
         .await?;
+    // mark any event handler rule cache built from this entity kind as stale
+    super::events::set_rules_stale(entity.kind, shared).await?;
     Ok(())
 }

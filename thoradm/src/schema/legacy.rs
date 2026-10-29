@@ -191,10 +191,10 @@ mod tests {
     use super::{legacy_error, render};
     use crate::Error;
 
-    /// Build a listing over the real registry for a keyspace holding both objects, a table a past
-    /// snapshot names, and one table no snapshot names
+    /// Build a listing over the real registry for a keyspace holding the exemplar, the
+    /// re-declared view, a table a past snapshot names, and one table no snapshot names
     fn listing() -> LegacyListing {
-        // both exemplars live with rows, plus an unregistered table in no snapshot
+        // the exemplar lives with rows, the declared view is skipped, and one table is extra
         let sources = LegacySources::production();
         let live = [
             ("events", "table"),
@@ -204,10 +204,7 @@ mod tests {
         .iter()
         .map(|(name, kind)| ((*name).to_owned(), (*kind).to_owned()))
         .collect::<BTreeMap<_, _>>();
-        let rows = BTreeMap::from([
-            ("events".to_owned(), 18204),
-            ("entities_by_name".to_owned(), 412_907),
-        ]);
+        let rows = BTreeMap::from([("events".to_owned(), 18204)]);
         let mut listing = classify(&sources, &live, &rows);
         // a table a past snapshot names
         listing.not_registered.push(NotRegistered {
@@ -231,16 +228,7 @@ mod tests {
             "    rows:        18204",
             "    created by:  2026-10-v01, 2026-10-v02",
             "    used by:     none",
-            "    downgrade to 2026-10-v04: recreated (it does not use this object)",
-            "    downgrade to 2026-10-v03: recreated (it does not use this object)",
-            "    downgrade to 2026-10-v02: recreated (it does not use this object)",
-            "    downgrade to 2026-10-v01: recreated (it does not use this object)",
-            "    droppable:   yes",
-            "  scylla:entities_by_name  (view, class Derived)",
-            "    present:     yes",
-            "    rows:        412907",
-            "    created by:  2026-10-v01, 2026-10-v02",
-            "    used by:     none",
+            "    downgrade to 2026-10-v05: recreated (it does not use this object)",
             "    downgrade to 2026-10-v04: recreated (it does not use this object)",
             "    downgrade to 2026-10-v03: recreated (it does not use this object)",
             "    downgrade to 2026-10-v02: recreated (it does not use this object)",

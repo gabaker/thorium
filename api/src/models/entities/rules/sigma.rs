@@ -46,6 +46,8 @@ impl FromStr for SigmaRuleAppliesTo {
         match val {
             "WindowsProcesses" => Ok(SigmaRuleAppliesTo::WindowsProcesses),
             "NetworkConnections" => Ok(SigmaRuleAppliesTo::NetworkConnections),
+            "CompiledFunctions" => Ok(SigmaRuleAppliesTo::CompiledFunctions),
+            "DecompiledFunctions" => Ok(SigmaRuleAppliesTo::DecompiledFunctions),
             _ => Err(InvalidEnum(format!("Unknown enum variant: {val}"))),
         }
     }

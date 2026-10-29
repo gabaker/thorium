@@ -184,23 +184,6 @@ const fn view(name: &'static str, base: &'static str) -> ClassEntry {
     }
 }
 
-/// Builds an entry for a view only keyspaces older releases created hold, backed up through its
-/// base table where it exists
-///
-/// # Arguments
-///
-/// * `name` - The view name
-/// * `base` - The base table
-const fn legacy_view(name: &'static str, base: &'static str) -> ClassEntry {
-    // a legacy view is derived data that restore and verification skip where it doesn't exist; it
-    // carries the class its `LEGACY` entry gives it
-    ClassEntry {
-        legacy: true,
-        class: DataClass::Derived,
-        ..view(name, base)
-    }
-}
-
 /// Builds an entry for a Redis family or bucket role that a backup carries
 ///
 /// # Arguments
@@ -459,6 +442,14 @@ pub const CLASSES: &[ClassEntry] = &[
         "stage logs of reactions, which are runtime state and expire by TTL",
         None,
     ),
+    excluded(
+        Store::ScyllaTable,
+        "scan_stats",
+        DataClass::Runtime,
+        "disposable scan-rate telemetry snapshots, which expire by TTL and are replaced by new \
+         snapshots",
+        None,
+    ),
     ClassEntry {
         legacy: true,
         ..excluded(
@@ -501,7 +492,7 @@ pub const CLASSES: &[ClassEntry] = &[
     view("network_policies_by_name", "network_policies"),
     view("network_policies_default", "network_policies"),
     view("entities_by_id", "entities"),
-    legacy_view("entities_by_name", "entities"),
+    view("entities_by_name", "entities"),
     // Redis families in the Redis backup
     backed_up(Store::Redis, "users", None),
     backed_up(Store::Redis, "user_data:*", None),
@@ -768,6 +759,13 @@ pub const CLASSES: &[ClassEntry] = &[
         "reaction_cache",
         DataClass::Runtime,
         "per-reaction cache files",
+        None,
+    ),
+    excluded(
+        Store::S3,
+        "yara_rulesets",
+        DataClass::Derived,
+        "serialized compiled yara rulesets, rebuilt from rule entities on demand",
         None,
     ),
 ];

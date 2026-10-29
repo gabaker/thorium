@@ -187,14 +187,14 @@ mod tests {
 
     use super::{confirm, render};
 
-    /// Plan dropping both exemplars from a keyspace holding the table with rows and not the view
+    /// Plan dropping the events exemplar from a keyspace holding it with rows
     fn plan() -> thorium::models::schema::DropPlan {
-        // the table is live with rows, the view is absent
+        // the table is live with rows
         let sources = LegacySources::production();
         let live = BTreeMap::from([("events".to_owned(), "table".to_owned())]);
         let rows = BTreeMap::from([("events".to_owned(), 18204)]);
         let listing = classify(&sources, &live, &rows);
-        let ids = ["scylla:events", "scylla:entities_by_name"].map(ToOwned::to_owned);
+        let ids = ["scylla:events"].map(ToOwned::to_owned);
         let entries = resolve_legacy(&ids, &sources).expect("registered");
         plan_drops("ks", &entries, &listing).expect("droppable")
     }
@@ -206,11 +206,7 @@ mod tests {
         let expected = "Plan (dry run: nothing is dropped; pass --execute to drop)
   scylla:events  (table, 18204 rows)
     statement: DROP TABLE IF EXISTS ks.events
-    downgrade to 2026-10-v04: recreated (it does not use this object)
-    downgrade to 2026-10-v03: recreated (it does not use this object)
-    downgrade to 2026-10-v02: recreated (it does not use this object)
-    downgrade to 2026-10-v01: recreated (it does not use this object)
-  scylla:entities_by_name  (view, not present: nothing to drop)
+    downgrade to 2026-10-v05: recreated (it does not use this object)
     downgrade to 2026-10-v04: recreated (it does not use this object)
     downgrade to 2026-10-v03: recreated (it does not use this object)
     downgrade to 2026-10-v02: recreated (it does not use this object)
@@ -239,11 +235,10 @@ mod tests {
         assert!(err.to_string().contains("--confirm"), "{err}");
     }
 
-    /// On a terminal each present object's id must be typed; a wrong answer aborts, and an
-    /// absent object isn't asked about
+    /// On a terminal each present object's id must be typed, and a wrong answer aborts
     #[test]
     fn each_object_id_is_typed_on_a_terminal() {
-        // only the present table is prompted, by its id
+        // the present table is prompted, by its id
         let mut prompts = Vec::new();
         let mut ask = |prompt: &str| -> Result<String, String> {
             prompts.push(prompt.to_owned());

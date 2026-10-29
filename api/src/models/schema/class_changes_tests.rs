@@ -199,7 +199,7 @@ fn expiring_changes_are_informational() {
         assert!(class.warns(), "{class:?}");
     }
     // the committed v02 snapshot holds cursors at layout 1, so the report lists the bump to 2 as
-    // informational, and so is the removal of the legacy events table and entities_by_name view
+    // informational, and so is the removal of the legacy events table
     let v02 = RevisionSnapshot::committed("2026-10-v02")
         .expect("listed")
         .expect("valid");
@@ -212,7 +212,8 @@ fn expiring_changes_are_informational() {
     };
     assert_eq!(class_of("cursors"), Some(Informational));
     assert_eq!(class_of("events"), Some(Informational));
-    assert_eq!(class_of("entities_by_name"), Some(Informational));
+    // the re-declared entities_by_name view matches v02's exactly, so it is no change at all
+    assert_eq!(class_of("entities_by_name"), None);
 }
 
 /// Removing an object registered in `LEGACY` is informational, needing no step and raising no
@@ -220,7 +221,8 @@ fn expiring_changes_are_informational() {
 #[test]
 fn legacy_removal_is_informational_and_unregistered_removal_is_contract() {
     use ChangeClass::{Contract, Informational};
-    // the released snapshot still lists the two legacy objects, which this build doesn't declare
+    // the released snapshot still lists the legacy events table, which this build doesn't
+    // declare; the entities_by_name view it also lists is declared again, so it isn't removed
     let v02 = RevisionSnapshot::committed("2026-10-v02")
         .expect("listed")
         .expect("valid");
@@ -232,7 +234,7 @@ fn legacy_removal_is_informational_and_unregistered_removal_is_contract() {
             .collect::<Vec<_>>()
     };
     let changes = SchemaChange::between(&v02.objects, &declared());
-    for object in ["events", "entities_by_name"] {
+    for object in ["events"] {
         let found = whole(&changes, object);
         assert_eq!(found.len(), 1, "{object}");
         assert_eq!(found[0].kind, ChangeKind::Removed, "{object}");
@@ -241,6 +243,8 @@ fn legacy_removal_is_informational_and_unregistered_removal_is_contract() {
         assert!(found[0].is_covered(std::iter::empty()), "{object}");
         assert!(!found[0].class.warns(), "{object}");
     }
+    // the view that came back has no removal entry
+    assert!(whole(&changes, "entities_by_name").is_empty());
     // the same table under a name nobody registered is a contract removal
     let mut unregistered = v02.objects.clone();
     for object in &mut unregistered {

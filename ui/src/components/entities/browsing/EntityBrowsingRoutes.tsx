@@ -2,7 +2,7 @@
 import { buildPathByType } from '@entities/shared/routePaths';
 import { Entities, ExtendedTypeMap } from '@models/entities';
 
-export const EntityBrowsingRoutes: Record<string, Entities> = {
+export const EntityBrowsingRoutes: Record<string, keyof ExtendedTypeMap> = {
   '/collections': Entities.Collection,
   '/collections/*': Entities.Collection,
   '/devices': Entities.Device,
@@ -18,6 +18,8 @@ export const EntityBrowsingRoutes: Record<string, Entities> = {
   '/functions/compiled/*': Entities.CompiledFunction,
   '/functions/decompiled': Entities.DecompiledFunction,
   '/functions/decompiled/*': Entities.DecompiledFunction,
+  '/hunts': Entities.Hunt,
+  '/hunts/*': Entities.Hunt,
   '/pe/sections': Entities.PeSection,
   '/pe/sections/*': Entities.PeSection,
   '/pe/imports': Entities.PeImport,
@@ -30,6 +32,14 @@ export const EntityBrowsingRoutes: Record<string, Entities> = {
   '/repos/*': Entities.Repo,
   '/rules/sigma': Entities.SigmaRule,
   '/rules/sigma/*': Entities.SigmaRule,
+  '/rules/yara': Entities.YaraRule,
+  '/rules/yara/*': Entities.YaraRule,
+  // longer static path: outranks the yara splat/param routes in both the router and the
+  // length-sorted page resolvers
+  '/rules/yara/hits': Entities.YaraRuleHit,
+  '/rules/yara/hits/*': Entities.YaraRuleHit,
+  '/rulesets': Entities.RuleSet,
+  '/rulesets/*': Entities.RuleSet,
   '/vendors': Entities.Vendor,
   '/vendors/*': Entities.Vendor,
   '/windows/process/trees': Entities.WindowsProcessTree,
@@ -38,8 +48,8 @@ export const EntityBrowsingRoutes: Record<string, Entities> = {
   '/windows/processes/*': Entities.WindowsProcess,
 };
 
-export const EntityBrowsingPathByType = buildPathByType(EntityBrowsingRoutes, (type) => type) as Record<Entities, string>;
+export const EntityBrowsingPathByType: Partial<Record<Entities, string>> = buildPathByType(EntityBrowsingRoutes, (type) => type);
 
-export function getBrowsingPathByEntity(entity: keyof ExtendedTypeMap): string {
-  return EntityBrowsingPathByType[entity];
+export function getBrowsingPathByEntity(entity: Entities): string {
+  return EntityBrowsingPathByType[entity] ?? '';
 }

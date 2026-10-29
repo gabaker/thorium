@@ -165,13 +165,17 @@ pub fn hold_note(state: &UpgradeState, open: Option<&AppliedStep>) -> Option<Str
 /// * `meta` - Thorium cluster client and metadata
 /// * `component` - The component
 fn declared(meta: &ClusterMeta, component: UpgradeComponent) -> Option<i32> {
-    // the API's count is configurable; every other component runs one replica when it is in the spec
+    // the API's and the event handler's counts are configurable; every other component runs one
+    // replica when it is in the spec
     let components = &meta.cluster.spec.components;
     match component {
         UpgradeComponent::Api => Some(i32::from(components.api.replicas)),
         UpgradeComponent::Scaler => components.scaler.is_some().then_some(1),
         UpgradeComponent::BaremetalScaler => components.baremetal_scaler.is_some().then_some(1),
-        UpgradeComponent::EventHandler => components.event_handler.is_some().then_some(1),
+        UpgradeComponent::EventHandler => components
+            .event_handler
+            .as_ref()
+            .map(|handler| i32::from(handler.replicas)),
         UpgradeComponent::SearchStreamer => components.search_streamer.is_some().then_some(1),
         UpgradeComponent::Unknown => None,
     }

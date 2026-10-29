@@ -401,6 +401,7 @@ Secret read plus root on the nodes. Grant it like `cluster-admin`.
 | `2026-10-v02` | 1.8.1 | Thorium deployed by the Helm charts with the chart-managed operator | `scylla-role` (Infra), `elastic-identity` (Infra), `elastic-reindex-keyword-mappings` (Data), `finalize` (Config) |
 | `2026-10-v03` | 1.8.1 | Schema apply runs before any step that changes data | `schema-apply` (Infra), `users-settings-theme` (Data) |
 | `2026-10-v04` | 1.8.1 | Images, pipeline stages, and provenance are converted for tools | `drain-reactions` (Data), `images-to-tools` (Data), `pipelines-to-tool-stages` (Data), `provenance-to-legacy-tools` (Data), `finalize-tool-only` (Config) |
+| `2026-10-v05` | 1.8.1 | The yara scanning schema: scan stats, exact-name entity reads, and the yara ruleset cache | `finalize-yara-scanning` (Config) |
 
 `thoradm migrate list` prints the catalog of the build you run. See [Upgrading
 Thorium](./upgrades.md) for what each step does.

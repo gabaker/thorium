@@ -9,8 +9,8 @@ use super::queries::{
 use super::scylla::{
     AssociationsTable, CommentsTable, CommitishListTable, CommitishesTable, EntitiesTable,
     LogsTable, NetworkPoliciesTable, NodesTable, NotificationsTable, RepoDataTable, ReposListTable,
-    ResultsStreamTable, ResultsTable, S3IdsTable, SamplesListTable, SchemaMigrationIssuesTable,
-    SchemaMigrationsTable, TagsTable,
+    ResultsStreamTable, ResultsTable, S3IdsTable, SamplesListTable, ScanStatsTable,
+    SchemaMigrationIssuesTable, SchemaMigrationsTable, TagsTable,
 };
 use super::{InKind, InList, Projection, TableStatements, plan_in_chunks};
 use crate::models::{
@@ -57,6 +57,14 @@ const INTENDED: [(&str, &str); 3] = [
 /// The cursor statement no generated statement replaces: a commitish tie query reads one kind,
 /// so the tie query reading the kinds sorted before the tied one is gone
 const REMOVED: [&str; 1] = ["commitish_list.list_ties_below"];
+
+/// The statements added after today's text was frozen, which replace no legacy statement:
+/// yara scanning's exact-name entity read and the scan stats insert and pull
+const ADDED: [&str; 3] = [
+    "entities_by_name.get",
+    "scan_stats.insert",
+    "scan_stats.pull",
+];
 
 /// Every converted projection reads the same columns, in the same order, as today's statement
 #[test]
@@ -325,6 +333,7 @@ fn generated_statements() -> Vec<(String, String)> {
     statements.extend(level_one::<NodesTable>("nodes"));
     statements.extend(level_one::<NotificationsTable>("notifications"));
     statements.extend(level_one::<LogsTable>("logs"));
+    statements.extend(level_one::<ScanStatsTable>("scan_stats"));
     statements.extend(ScyllaQueries::statements("{ns}"));
     statements.extend(SchemaStateQueries::statements("{ns}"));
     statements
@@ -536,9 +545,13 @@ fn parse_statements(text: &str) -> BTreeMap<String, String> {
 #[test]
 fn statements_match_todays_text() {
     let legacy = parse_statements(include_str!("goldens/legacy_statements.cql"));
-    let generated = ScyllaQueries::statements("{ns}")
+    let mut generated = ScyllaQueries::statements("{ns}")
         .into_iter()
         .collect::<BTreeMap<_, _>>();
+    // statements added after the freeze replace no legacy statement
+    for name in ADDED {
+        assert!(generated.remove(name).is_some(), "{name} isn't generated");
+    }
     // every statement replaced so far has a generated form, and the other way around
     assert_eq!(
         legacy.keys().collect::<Vec<_>>(),

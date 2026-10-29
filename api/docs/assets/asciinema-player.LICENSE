@@ -1,0 +1,8 @@
+asciinema-player (asciinema-player.min.js, asciinema-player.css)
+
+Vendored from the asciinema CLI v3.2.1 distribution assets
+(https://github.com/asciinema/asciinema, which bundles the player from
+https://github.com/asciinema/asciinema-player).
+
+asciinema-player is licensed under the Apache License, Version 2.0:
+https://github.com/asciinema/asciinema-player/blob/main/LICENSE

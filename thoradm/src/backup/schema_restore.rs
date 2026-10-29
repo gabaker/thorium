@@ -1296,14 +1296,11 @@ mod tests {
         assert_eq!(plan.migrations.len(), 1);
     }
 
-    /// The objects a restore leaves uncreated are the two only older releases created
+    /// The objects a restore leaves uncreated are the ones only older releases created
     #[test]
     fn the_skipped_objects_are_the_legacy_ones() {
-        // the class table's legacy table and view
-        assert_eq!(
-            skipped_objects(),
-            BTreeSet::from(["events".to_owned(), "entities_by_name".to_owned()])
-        );
+        // the class table's one legacy table; the re-declared entities_by_name view restores
+        assert_eq!(skipped_objects(), BTreeSet::from(["events".to_owned()]));
     }
     /// The plan writes back the rows of kinds this thoradm doesn't know and deletes none of the
     /// target's, so audit rows of both survive

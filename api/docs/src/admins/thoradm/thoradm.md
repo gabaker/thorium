@@ -106,6 +106,7 @@ A backup doesn't hold runtime state, which is invalid after a restore, or data a
 | Not backed up | Why |
 |---|---|
 | The `logs` and `events` Scylla tables | Stage logs of reactions, which expire by TTL, and a table of trigger events that nothing reads or writes, which only keyspaces older releases created hold |
+| The `scan_stats` Scylla table | Disposable scan-rate telemetry snapshots, which expire by TTL and are replaced by new snapshots |
 | The `job_result` rows of the `schema_migrations` Scylla table | The results of upgrade Jobs, which expire after seven days; a restore would make them permanent |
 | Run-scoped tokens | Each belongs to a run whose reaction and jobs aren't backed up, and expires with the run; a backup leaves them out, and a restore skips any that a backup holds |
 | The Redis keys of reactions, jobs, workers, and services: `reactions:*`, `reactions_group:*`, `reaction_data:*`, `reaction_jobs:*`, `reaction_tags:*`, `reaction_cache:*`, `sub_reactions:*`, `generators:*`, `stage_logs:*`, `logs:*`, `job_queue:*`, `job_data:*`, `workers:*`, `worker_data:*`, `streams:*`, `event-handler:*`, `search-streamer:*`, `cursors:*`, `schema-writer`, `rebucket:*`, `image_ttc:*`, `run_queue:*`, `workload_queue:*`, `workload_ttc:*`, `workloads:*`, and `entities:instance_lock:*` | Runtime state, invalid after a restore |
@@ -114,7 +115,7 @@ A backup doesn't hold runtime state, which is invalid after a restore, or data a
 | `census:*` | Counts rebuilt from the Scylla tables by the census that restore runs |
 | `system_info` | Re-initialized by restore |
 | `system_keys` | Written at setup and read by nothing |
-| The `ephemeral` and `reaction_cache` buckets | Per-reaction scratch and cache files |
+| The `ephemeral`, `reaction_cache`, and `yara_rulesets` buckets | Per-reaction scratch and cache files, and the serialized compiled yara ruleset cache, rebuilt from rule entities on demand |
 
 Because the Redis restore deletes every key of the namespace before it writes the backup's, a
 restore leaves no reactions, jobs, or worker state behind, and Elastic's search indexes aren't part
@@ -889,6 +890,10 @@ changes data, the component it `scales down`, and the `migration` it runs:
   - finalize-tool-only [Config]: Record the revision once every conversion step is done or skipped
 2026-10-v03 (released with Thorium 1.8.1; from 2026-10-v04; revert): Revert the revision that converts images, pipelines, and provenance
   - finalize-tool-only-reverse [Config]: Undo the record of the end of the revision that converts images, pipelines, and provenance; a revert that gets this far has no conversion to undo
+2026-10-v05 (released with Thorium 1.8.1; from 2026-10-v04): The yara scanning schema: scan stats, exact-name entity reads, and the yara ruleset cache
+  - finalize-yara-scanning [Config]: Record the revision once the yara scanning schema is applied
+2026-10-v04 (released with Thorium 1.8.1; from 2026-10-v05; revert): Revert the revision that applies the yara scanning schema
+  - finalize-yara-scanning-reverse [Config]: Undo the record of the end of the revision that applies the yara scanning schema; the objects it added expire by TTL or are rebuilt, so nothing is dropped
 ```
 
 The `needs approval + backup` note comes from a step's kind: every `Data` step carries it, though
@@ -1101,14 +1106,16 @@ show its own new objects as `unexpected`. `--acknowledged <file>` takes a JSON l
 
 ## Legacy Schema Objects
 
-Older releases created two Scylla objects that Thorium no longer uses: the `events` table and the
-`entities_by_name` view. Thorium no longer creates them, a keyspace an older release created keeps
-both with their rows, and starting Thorium against that keyspace leaves them alone. They cost disk
-and, for the view, write work, and an admin can remove them on purpose. Two commands list and drop
-them. Neither runs unless you type it, and `thoradm schema apply` never drops anything.
+Older releases created one Scylla object that Thorium no longer uses: the `events` table. Thorium
+no longer creates it, a keyspace an older release created keeps it with its rows, and starting
+Thorium against that keyspace leaves it alone. It costs disk, and an admin can remove it on
+purpose. Two commands list and drop legacy objects. Neither runs unless you type it, and
+`thoradm schema apply` never drops anything.
 
-Each object is named `<backend>:<name>`, here `scylla:events` and `scylla:entities_by_name`. A
-legacy object is one Thorium's registry of retired objects lists; only those can be dropped.
+Each object is named `<backend>:<name>`, here `scylla:events`. A legacy object is one Thorium's
+registry of retired objects lists; only those can be dropped. (The `entities_by_name` view was
+retired for a time too, but `2026-10-v05` declares it again, so it is part of the declared schema
+and no longer a legacy object.)
 
 ### Listing Legacy Objects
 
@@ -1126,13 +1133,12 @@ Legacy objects
     rows:        18204
     created by:  2026-10-v01, 2026-10-v02
     used by:     none
+    downgrade to 2026-10-v05: recreated (it does not use this object)
     downgrade to 2026-10-v04: recreated (it does not use this object)
     downgrade to 2026-10-v03: recreated (it does not use this object)
     downgrade to 2026-10-v02: recreated (it does not use this object)
     downgrade to 2026-10-v01: recreated (it does not use this object)
     droppable:   yes
-  scylla:entities_by_name  (view, class Derived)
-    ...
 
 Not registered (cannot be dropped by this command)
   none
@@ -1147,7 +1153,7 @@ can still move to does to it, and whether it can be dropped. A downgrade line sa
 | Line | Meaning |
 |---|---|
 | `recreated (it does not use this object)` | The revision doesn't use the object, so a downgrade creates it again |
-| `recreated and rebuilt from the base table` | The revision uses the object and its data can be recreated |
+| `recreated and rebuilt by that revision` (a table) or `recreated and rebuilt from the base table` (a view) | The revision uses the object and its data can be recreated |
 | `DATA LOSS (N rows)` | The revision uses the object and its rows are the only copy, so dropping it would lose them |
 
 The second section lists each object that is live and named in a past revision's schema but that
@@ -1169,8 +1175,8 @@ run, and what a downgrade does to the object afterwards, and drops nothing.
 ```Bash
 # see what dropping the events table would do
 thoradm schema drop-legacy --object scylla:events
-# drop both legacy objects, typing each id when asked
-thoradm schema drop-legacy --object scylla:events --object scylla:entities_by_name --execute
+# drop it, typing its id when asked
+thoradm schema drop-legacy --object scylla:events --execute
 ```
 
 With `--execute` the command asks you to type each object's id before it drops anything; a wrong
@@ -1180,8 +1186,8 @@ An object the keyspace doesn't hold is skipped.
 The command refuses, exits 1, and drops nothing in the whole list when any object is:
 
 ```
-scylla:samples_list is a declared object; refusing.
-scylla:tools is not a registered legacy object. Registered: scylla:events, scylla:entities_by_name.
+scylla:entities_by_name is a declared object; refusing.
+scylla:tools is not a registered legacy object. Registered: scylla:events.
 refused: scylla:foo is used by 2026-10-v02 (required data, 42 rows); a downgrade would lose it.
 ```
 
@@ -1205,4 +1211,4 @@ of `schema_migrations` except the Job results, and a restore writes them back.
 
 A dropped legacy object comes back when a deployment downgrades to a revision whose schema
 lists it, because a downgrade creates every object the target revision lists and the keyspace lacks.
-Dropping them first doesn't stop `2026-10-v01` from moving to `2026-10-v02` and later.
+Dropping it first doesn't stop `2026-10-v01` from moving to `2026-10-v02` and later.

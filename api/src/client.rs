@@ -41,7 +41,7 @@ pub use cursors::{Cursor, LogsCursor, SearchDate};
 pub use entities::Entities;
 pub use error::Error;
 pub use events::Events;
-pub use files::Files;
+pub use files::{Files, SampleBytes};
 pub use groups::Groups;
 pub use images::Images;
 pub use jobs::Jobs;

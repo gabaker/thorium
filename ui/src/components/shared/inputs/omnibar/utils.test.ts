@@ -72,6 +72,17 @@ describe('getLimitFromClauses', () => {
   it('falls back to the default for a non-integer limit', () => {
     expect(getLimitFromClauses([single('limit', 'limit', 'abc')], 25)).toBe(25);
   });
+
+  it('rejects zero and negative limits that would break pager math', () => {
+    // Math.ceil(n/0) is Infinity and slice(0, -n) drops rows, so neither may pass
+    expect(getLimitFromClauses([single('limit', 'limit', '0')], 25)).toBe(25);
+    expect(getLimitFromClauses([single('limit', 'limit', '-5')], 25)).toBe(25);
+  });
+
+  it('parses exponent-form integers at full value', () => {
+    // parseInt would truncate '1e2' to 1; Number() keeps it as 100
+    expect(getLimitFromClauses([single('limit', 'limit', '1e2')], 25)).toBe(100);
+  });
 });
 
 describe('getStringFieldFromClauses', () => {

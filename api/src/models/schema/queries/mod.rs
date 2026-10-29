@@ -5,14 +5,15 @@ pub mod migrations;
 mod repos;
 mod results;
 mod samples;
+mod scan_stats;
 #[cfg(feature = "search-streamer")]
 pub mod search;
 
 pub use entities::{
-    AssociationsListCursor, AssociationsQueries, EntitiesByIdQueries, EntitiesListCursor,
-    EntitiesQueries, LogsQueries, NetworkPoliciesByNameQueries, NetworkPoliciesDefaultQueries,
-    NetworkPoliciesListCursor, NetworkPoliciesQueries, NodesInsert, NodesListCursor,
-    NodesListDetailsCursor, NodesQueries, NotificationsQueries,
+    AssociationsListCursor, AssociationsQueries, EntitiesByIdQueries, EntitiesByNameQueries,
+    EntitiesListCursor, EntitiesQueries, LogsQueries, NetworkPoliciesByNameQueries,
+    NetworkPoliciesDefaultQueries, NetworkPoliciesListCursor, NetworkPoliciesQueries, NodesInsert,
+    NodesListCursor, NodesListDetailsCursor, NodesQueries, NotificationsQueries,
 };
 pub use repos::{
     CommitishListListCursor, CommitishListQueries, CommitishesQueries,
@@ -28,6 +29,7 @@ pub use samples::{
     CommentsByIdQueries, CommentsQueries, S3IdsQueries, S3Sha256sQueries, SamplesListListCursor,
     SamplesListQueries, SamplesQueries,
 };
+pub use scan_stats::ScanStatsQueries;
 
 use scylla::client::session::Session;
 use scylla::errors::PrepareError;
@@ -76,6 +78,8 @@ pub struct ScyllaQueries {
     pub entities: EntitiesQueries,
     /// Statements on the `entities_by_id` view
     pub entities_by_id: EntitiesByIdQueries,
+    /// Statements on the `entities_by_name` view
+    pub entities_by_name: EntitiesByNameQueries,
     /// Statements on the associations table
     pub associations: AssociationsQueries,
     /// Statements on the `network_policies` table
@@ -90,6 +94,8 @@ pub struct ScyllaQueries {
     pub notifications: NotificationsQueries,
     /// Statements on the logs table
     pub logs: LogsQueries,
+    /// Statements on the `scan_stats` table
+    pub scan_stats: ScanStatsQueries,
 }
 
 impl ScyllaQueries {
@@ -124,6 +130,7 @@ impl ScyllaQueries {
         let tags_case_insensitive = TagsCaseInsensitiveQueries::prepare(session, ns).await?;
         let entities = EntitiesQueries::prepare(session, ns).await?;
         let entities_by_id = EntitiesByIdQueries::prepare(session, ns).await?;
+        let entities_by_name = EntitiesByNameQueries::prepare(session, ns).await?;
         let associations = AssociationsQueries::prepare(session, ns).await?;
         let network_policies = NetworkPoliciesQueries::prepare(session, ns).await?;
         let network_policies_by_name = NetworkPoliciesByNameQueries::prepare(session, ns).await?;
@@ -131,6 +138,7 @@ impl ScyllaQueries {
         let nodes = NodesQueries::prepare(session, ns).await?;
         let notifications = NotificationsQueries::prepare(session, ns).await?;
         let logs = LogsQueries::prepare(session, ns).await?;
+        let scan_stats = ScanStatsQueries::prepare(session, ns).await?;
         Ok(ScyllaQueries {
             samples_list,
             samples,
@@ -153,6 +161,7 @@ impl ScyllaQueries {
             tags_case_insensitive,
             entities,
             entities_by_id,
+            entities_by_name,
             associations,
             network_policies,
             network_policies_by_name,
@@ -160,6 +169,7 @@ impl ScyllaQueries {
             nodes,
             notifications,
             logs,
+            scan_stats,
         })
     }
 
@@ -199,6 +209,7 @@ impl ScyllaQueries {
             ),
             ("entities", EntitiesQueries::statements(ns)),
             ("entities_by_id", EntitiesByIdQueries::statements(ns)),
+            ("entities_by_name", EntitiesByNameQueries::statements(ns)),
             ("associations", AssociationsQueries::statements(ns)),
             ("network_policies", NetworkPoliciesQueries::statements(ns)),
             (
@@ -212,6 +223,7 @@ impl ScyllaQueries {
             ("nodes", NodesQueries::statements(ns)),
             ("notifications", NotificationsQueries::statements(ns)),
             ("logs", LogsQueries::statements(ns)),
+            ("scan_stats", ScanStatsQueries::statements(ns)),
         ];
         groups
             .into_iter()

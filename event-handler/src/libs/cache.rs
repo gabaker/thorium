@@ -441,7 +441,8 @@ impl DataCache {
 
     /// Check an event and a trigger against the data in this cache
     ///
-    /// Workflow graph events and model refresh events never meet a trigger.
+    /// Workflow graph events, model refresh events, yara scan events, and hunt chunk
+    /// events never meet a trigger.
     ///
     /// # Arguments
     ///
@@ -517,6 +518,10 @@ impl DataCache {
             // workflow graph changes only rebuild instances and model refreshes only update
             // catalogs, so neither ever meets a trigger
             (EventData::WorkflowGraph(_) | EventData::ModelRefresh(_), _) => false,
+            // yara scan events are consumed by the yara scanner, never by triggers
+            (EventData::YaraScannableSample { .. }, _) => false,
+            // hunt chunk events are consumed by hunt workers, never by triggers
+            (EventData::YaraHuntChunk { .. }, _) => false,
         }
     }
 

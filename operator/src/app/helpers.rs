@@ -477,7 +477,7 @@ pub async fn create_all_buckets(meta: &ClusterMeta) -> Result<(), CheckError> {
     // build our s3 client from the s3 config
     let client = Client::from_conf(s3_config);
     // list every Thorium bucket once, since sites may share a bucket between uses
-    let mut buckets: Vec<&str> = Vec::with_capacity(7);
+    let mut buckets: Vec<&str> = Vec::with_capacity(8);
     for bucket in [
         &config.files.bucket,
         &config.repos.bucket,
@@ -486,6 +486,7 @@ pub async fn create_all_buckets(meta: &ClusterMeta) -> Result<(), CheckError> {
         &config.ephemeral.bucket,
         &config.graphics.bucket,
         &config.reaction_cache.bucket,
+        &config.yara.cache_bucket,
     ] {
         if !buckets.contains(&bucket.as_str()) {
             buckets.push(bucket);

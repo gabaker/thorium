@@ -1,5 +1,5 @@
 // EntityDetails.tsx
-import React, { useEffect, useState, createContext, useContext, Fragment, JSX, useMemo, useCallback } from 'react';
+import React, { useEffect, useState, createContext, useContext, Fragment, JSX, useMemo, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Button, Card, Row, Col, Form, Modal } from 'react-bootstrap';
 import { FaBackspace, FaRegEdit, FaSave, FaTrash } from 'react-icons/fa';
@@ -8,6 +8,8 @@ import styled from 'styled-components';
 
 // project imports
 import ListCollectionButton from './ListCollectionsButton';
+import ListHuntHitsButton from './ListHuntHitsButton';
+import CancelHuntButton from './CancelHuntButton';
 import { EntityDetailsConfig } from './configs/configs';
 const AssociationGraph = React.lazy(() => import('@components/associations/graph/AssociationGraph'));
 import { buildUpdateEntityForm } from '../utilities';
@@ -31,6 +33,7 @@ import { Entities, entityLabel, EntityTypeMap } from '@models/entities';
 import { ButtonProps } from '@models/components';
 import { GraphDataProvider } from '@components/associations/data/GraphDataContext';
 import { getBrowsingPathByEntity } from '../browsing/EntityBrowsingRoutes';
+import { getCreatePathByEntity } from '../create/EntityCreateRoutes';
 import AlertBanner from '@components/shared/alerts/AlertBanner';
 
 export type DetailsMetadataProps<T extends keyof EntityTypeMap> = {
@@ -38,9 +41,30 @@ export type DetailsMetadataProps<T extends keyof EntityTypeMap> = {
   pendingEntity: EntityTypeMap[T];
   handleUpdate: <K extends keyof EntityTypeMap[T]>(field: K, value: EntityTypeMap[T][K]) => void;
   editing: boolean;
+  /**
+   * Re-fetch the saved entity after a mutation. Kind-gated controls living inside a meta
+   * row (e.g. the yara rule quarantine controls) call this after their thorpi call lands,
+   * mirroring how `EntityButtons` hands `refreshEntity` to `CancelHuntButton`.
+   */
+  refreshEntity: () => void;
+  /** Surface an error on the details page's banner. */
+  setError: (error: string) => void;
 };
 
 export type MetadataComponent<K extends keyof EntityTypeMap> = React.ComponentType<DetailsMetadataProps<K>>;
+
+/**
+ * Props handed to a kind-specific section that replaces the default Associations card.
+ *
+ * The section always renders the saved (fetched) entity: pending edits live in the
+ * metadata card's inputs until a save publishes them back into `entity`.
+ */
+export type DetailsSectionProps<T extends keyof EntityTypeMap> = {
+  entity: EntityTypeMap[T];
+  editing: boolean;
+};
+
+export type SectionComponent<K extends keyof EntityTypeMap> = React.ComponentType<DetailsSectionProps<K>>;
 
 type EntityDetailsContextType<T extends keyof EntityTypeMap> = {
   entity: EntityTypeMap[T];
@@ -50,6 +74,7 @@ type EntityDetailsContextType<T extends keyof EntityTypeMap> = {
   editing: boolean;
   applyEntityUpdates: (entity: EntityTypeMap[T], pendingEntity: EntityTypeMap[T]) => Promise<void>;
   toggleEditMode: () => void;
+  refreshEntity: () => void;
   error: string;
   setError: (error: string) => void;
   supportsGraphic: boolean;
@@ -95,6 +120,36 @@ const SvgGraphic = styled.div<{ $src: string }>`
   -webkit-mask-position: center;
 `;
 
+/**
+ * Decide whether a failed entity refetch means the entity itself no longer exists.
+ *
+ * `getEntity` formats a 404 either from the API's JSON error body (`Get Entity:
+ * Entity <id> not found`) or, when no parseable body exists, as `Failed to Get
+ * Entity: 404`. A gone entity can never report fresh status again, so the details
+ * poll treats either shape as terminal and stops refetching.
+ *
+ * @param error - The formatted message handed to the refetch error handler.
+ * @returns True when the message indicates the entity no longer exists.
+ */
+export function isEntityGoneError(error: string): boolean {
+  return /\bnot found\b/i.test(error) || /\b404\b/.test(error);
+}
+
+/**
+ * Compute the page error after a successful poll tick.
+ *
+ * A transient blip (one failed tick) must not pin a permanent banner over a
+ * live-updating page, but a successful tick may only clear the banner the poll
+ * itself raised — an error a user action surfaced in between stays visible.
+ *
+ * @param current - The error banner currently shown.
+ * @param lastPollError - The message the last failed poll tick raised, if any.
+ * @returns An empty string when the current banner is the poll's own, otherwise `current` unchanged.
+ */
+export function nextErrorAfterPollSuccess(current: string, lastPollError: string | null): string {
+  return current !== '' && current === lastPollError ? '' : current;
+}
+
 export function createEntityDetailsPage<T extends keyof EntityTypeMap>(config: EntityDetailsConfig<T>) {
   const EntityDetailsContext = createContext<EntityDetailsContextType<T> | undefined>(undefined);
 
@@ -113,6 +168,8 @@ export function createEntityDetailsPage<T extends keyof EntityTypeMap>(config: E
       pendingEntity,
       editing,
       updatePendingEntity,
+      refreshEntity,
+      setError,
       supportsGraphic,
       graphicFile,
       setGraphicFile,
@@ -169,7 +226,14 @@ export function createEntityDetailsPage<T extends keyof EntityTypeMap>(config: E
                 <hr className="my-3" />
               </>
             )}
-            <Metadata entity={entity} pendingEntity={pendingEntity} handleUpdate={updatePendingEntity} editing={editing} />
+            <Metadata
+              entity={entity}
+              pendingEntity={pendingEntity}
+              handleUpdate={updatePendingEntity}
+              editing={editing}
+              refreshEntity={refreshEntity}
+              setError={setError}
+            />
             <hr className="my-3" />
             <Row>
               <InfoHeader>Description</InfoHeader>
@@ -336,6 +400,13 @@ export function createEntityDetailsPage<T extends keyof EntityTypeMap>(config: E
   const CreateButton: React.FC<ButtonProps> = ({ className, disabled = false }) => {
     const navigate = useNavigate();
     const { entity } = useEntityContext();
+    // resolve the canonical create route for this kind (undefined for machine-written kinds)
+    const createPath = getCreatePathByEntity(entity.kind);
+
+    // no create page to copy into: render nothing rather than a dead hand-built /create link
+    if (createPath === undefined) {
+      return null;
+    }
 
     return (
       <OverlayTipBottom tip={`Copy this ${entityLabel(entity.kind)}.`}>
@@ -344,7 +415,7 @@ export function createEntityDetailsPage<T extends keyof EntityTypeMap>(config: E
           variant=""
           disabled={disabled}
           onClick={() => {
-            void navigate(`/create/${entity.kind.toLowerCase()}`, { state: { entity } });
+            void navigate(createPath, { state: { entity } });
           }}
         >
           <FaSquarePlus size={20} />
@@ -383,16 +454,24 @@ export function createEntityDetailsPage<T extends keyof EntityTypeMap>(config: E
   };
 
   const EntityButtons: React.FC<ButtonProps> = ({ className }) => {
-    const { entity } = useEntityContext();
+    const { entity, setError, refreshEntity } = useEntityContext();
     const canModify = true;
     const canCreate = true;
+    // only kinds with a create route are human-creatable: machine-written kinds (hits,
+    // carved sections, ...) get neither a copy-into-create button nor an upload flow,
+    // so the next machine-written kind stays suppressed without extending a kind list
+    const creatable = getCreatePathByEntity(entity.kind) !== undefined;
 
     return (
       <div className={`d-flex justify-content-center ${className}`}>
         <EditButton disabled={!canModify} />
         <DeleteButton disabled={!canModify} />
-        <CreateButton disabled={!canCreate} />
-        <UploadFileButton disabled={!canCreate} />
+        {creatable && (
+          <>
+            <CreateButton disabled={!canCreate} />
+            <UploadFileButton disabled={!canCreate} />
+          </>
+        )}
         <BuildDashboardButton
           className="mx-1"
           resource={BuildDashboardResource.Entity}
@@ -403,6 +482,15 @@ export function createEntityDetailsPage<T extends keyof EntityTypeMap>(config: E
 
         {entity.kind === Entities.Collection && entity.metadata.Collection.collection_kind === CollectionKind.Files && (
           <ListCollectionButton collection={entity} />
+        )}
+
+        {entity.kind === Entities.Hunt && (
+          <>
+            {/* the full hit browse keeps the omnibar/time filtering the inline findings
+                panel skips; the button self-hides for blank hunts and unknown engines */}
+            <ListHuntHitsButton hunt={entity} />
+            <CancelHuntButton hunt={entity} setError={setError} onCancelled={refreshEntity} />
+          </>
         )}
       </div>
     );
@@ -454,8 +542,32 @@ export function createEntityDetailsPage<T extends keyof EntityTypeMap>(config: E
     const [clearGraphic, setClearGraphic] = useState(false);
     const [existingImageUrl, setExistingImageUrl] = useState<string | null>(null);
     const [existingImageIsSvg, setExistingImageIsSvg] = useState(false);
+    // set once a background refetch learns the entity no longer exists (deleted elsewhere):
+    // it gates the auto-refresh interval off so the page stops refiring a doomed request
+    const [entityGone, setEntityGone] = useState(false);
     // graphic upload is on for every entity by default; a config may set supportsGraphic:false to opt out
     const supportsGraphic = config.supportsGraphic ?? true;
+    // live mirrors of edit/mount state for background responses: refreshEntity reads these at
+    // response time, so an edit begun (or an unmount) after the request fired still blocks the update
+    const editingRef = useRef(editing);
+    const mountedRef = useRef(true);
+    // the banner text raised by the last failed poll tick, so the next successful tick clears
+    // only its own noise and never an error a user action surfaced in between
+    const lastPollErrorRef = useRef<string | null>(null);
+
+    useEffect(() => {
+      // keep the edit-mode mirror current for responses already in flight
+      editingRef.current = editing;
+    }, [editing]);
+
+    useEffect(() => {
+      // mark mounted for the page's lifetime (re-marking on a StrictMode remount) so
+      // refresh responses landing after teardown can be dropped
+      mountedRef.current = true;
+      return () => {
+        mountedRef.current = false;
+      };
+    }, []);
 
     const toggleEditMode = () => {
       setEditing((prev) => {
@@ -473,10 +585,24 @@ export function createEntityDetailsPage<T extends keyof EntityTypeMap>(config: E
       setPendingEntity(updates);
     }
 
-    const handleEntityUpdate = (newEntity: EntityTypeMap[T]) => {
+    const handleEntityUpdate = useCallback((newEntity: EntityTypeMap[T]) => {
       setEntity(newEntity);
       setPendingEntity(newEntity);
-    };
+    }, []);
+
+    // re-fetch the entity on demand (kind-gated action buttons use this after a mutation);
+    // guarded like the poll below: responses are dropped after unmount and never overwrite
+    // pendingEntity once edit mode is open, even when editing started mid-flight
+    const refreshEntity = useCallback(() => {
+      if (entityID) {
+        config.getEntityDetails(entityID, setError, (newEntity: EntityTypeMap[T]) => {
+          // drop stale responses instead of clobbering pending edits or an unmounted page
+          if (mountedRef.current && !editingRef.current) {
+            handleEntityUpdate(newEntity);
+          }
+        });
+      }
+    }, [entityID, handleEntityUpdate]);
 
     const applyEntityUpdates = async (entity: EntityTypeMap[T], pendingEntity: EntityTypeMap[T]) => {
       if (entityID) {
@@ -498,6 +624,9 @@ export function createEntityDetailsPage<T extends keyof EntityTypeMap>(config: E
 
     useEffect(() => {
       if (entityID) {
+        // a new entity id starts with a fresh verdict for the refetch gate below
+        setEntityGone(false);
+        lastPollErrorRef.current = null;
         config.getEntityDetails(entityID, setError, handleEntityUpdate);
         if (supportsGraphic) {
           void fetchEntityImage(entityID).then((img) => {
@@ -506,9 +635,51 @@ export function createEntityDetailsPage<T extends keyof EntityTypeMap>(config: E
           });
         }
       }
-    }, [entityID, supportsGraphic]);
+    }, [entityID, supportsGraphic, handleEntityUpdate]);
+
+    // opt-in auto-refresh: a primitive interval derived from the freshly fetched entity, so
+    // the effect only re-runs when the derived value changes (e.g. 10s while a hunt is
+    // active, null once terminal) and never while an edit is in flight — a landing refetch
+    // would clobber pendingEntity. A deleted entity is terminal too: its stale status would
+    // otherwise ask for polling forever, so the gone flag forces the interval off
+    const refetchMs = !entityGone && config.refetchIntervalMs ? config.refetchIntervalMs(entity) : null;
+    useEffect(() => {
+      if (!entityID || editing || refetchMs == null) {
+        return;
+      }
+      // drop any poll response landing after teardown: a fetch in flight when editing
+      // starts would otherwise reset pendingEntity mid-edit
+      let active = true;
+      const guardedUpdate = (newEntity: EntityTypeMap[T]) => {
+        if (active) {
+          // a good tick heals the banner a previous failed tick raised (and only that one)
+          setError((current) => nextErrorAfterPollSuccess(current, lastPollErrorRef.current));
+          lastPollErrorRef.current = null;
+          handleEntityUpdate(newEntity);
+        }
+      };
+      // surface poll failures, remembering the message so the next good tick can clear it;
+      // an entity-gone failure stops the polling for good and leaves one clear banner
+      const guardedError = (err: string) => {
+        if (active) {
+          lastPollErrorRef.current = err;
+          setError(err);
+          if (isEntityGoneError(err)) {
+            setEntityGone(true);
+          }
+        }
+      };
+      const intervalId = setInterval(() => config.getEntityDetails(entityID, guardedError, guardedUpdate), refetchMs);
+      return () => {
+        active = false;
+        clearInterval(intervalId);
+      };
+    }, [entityID, editing, refetchMs, handleEntityUpdate]);
 
     const associationInitial = useMemo(() => ({ entities: entityID ? [entityID] : [] }), [entityID]);
+
+    // a kind config may replace the default associations graph card with its own section
+    const AssociationsSection = config.AssociationsSection;
 
     return (
       <EntityDetailsContext.Provider
@@ -520,6 +691,7 @@ export function createEntityDetailsPage<T extends keyof EntityTypeMap>(config: E
           editing,
           applyEntityUpdates,
           toggleEditMode,
+          refreshEntity,
           error,
           setError,
           supportsGraphic,
@@ -536,18 +708,22 @@ export function createEntityDetailsPage<T extends keyof EntityTypeMap>(config: E
           <EntityButtons className="py-3" />
           {error !== '' && <AlertBanner className="mb-3">{error}</AlertBanner>}
           <EntityInfo />
-          {entityID && (
-            <GraphDataProvider initial={associationInitial}>
-              <Card className="panel mt-4">
-                <Card.Body>
-                  <div className="d-flex justify-content-center">
-                    <Subtitle>Associations</Subtitle>
-                  </div>
-                  <AssociationGraph inView bordered={false} />
-                </Card.Body>
-              </Card>
-            </GraphDataProvider>
-          )}
+          {entityID &&
+            (AssociationsSection ? (
+              // the kind-specific section owns the whole card and skips graph data fetching
+              <AssociationsSection entity={entity} editing={editing} />
+            ) : (
+              <GraphDataProvider initial={associationInitial}>
+                <Card className="panel mt-4">
+                  <Card.Body>
+                    <div className="d-flex justify-content-center">
+                      <Subtitle>Associations</Subtitle>
+                    </div>
+                    <AssociationGraph inView bordered={false} />
+                  </Card.Body>
+                </Card>
+              </GraphDataProvider>
+            ))}
         </Page>
       </EntityDetailsContext.Provider>
     );

@@ -13,8 +13,8 @@ cfg_if::cfg_if! {
 
         use crate::models::{
             Association, Commitish, CommitishDetails, ElasticDoc, Entity, EntityListLine,
-            GrepMatches, GrepStats, NetworkPolicy, NetworkPolicyListLine, Node, NodeListLine,
-            Repo, RepoListLine, Sample, SampleListLine,
+            GrepMatches, GrepStats, HuntRuleLine, NetworkPolicy, NetworkPolicyListLine, Node,
+            NodeListLine, Repo, RepoListLine, Sample, SampleListLine,
         };
 
         /// Attaches optional page level metadata to the data an [`ApiCursor`] returns
@@ -45,8 +45,8 @@ cfg_if::cfg_if! {
         // every cursor data type except grep matches never carries page metadata
         no_cursor_metadata!(
             Association, Commitish, CommitishDetails, ElasticDoc, Entity, EntityListLine,
-            NetworkPolicy, NetworkPolicyListLine, Node, NodeListLine, Repo, RepoListLine,
-            Sample, SampleListLine, String,
+            HuntRuleLine, NetworkPolicy, NetworkPolicyListLine, Node, NodeListLine, Repo,
+            RepoListLine, Sample, SampleListLine, String,
         );
 
         impl CursorMetadataSupport for GrepMatches {

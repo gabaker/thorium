@@ -9,7 +9,7 @@ use crate::models::{
     EntityMetadata, EntityMetadataRequest, EntityMetadataUpdate, EntityRequest, EntityUpdate,
     Group, GroupRequest, Image, ImageRequest, NetworkPolicy, NetworkPolicyRequest,
     NetworkPolicyRule, NetworkPolicyRuleRaw, NetworkPolicyUpdate, Pipeline, PipelineRequest,
-    VendorEntity, VendorEntityRequest,
+    RuleSet, RuleSetRequest, VendorEntity, VendorEntityRequest,
 };
 use crate::{
     matches_adds, matches_adds_iter, matches_clear, matches_clear_vec_opt, matches_removes,
@@ -262,6 +262,19 @@ fn device_matches(resp: &DeviceEntity, req: &DeviceEntityRequest) -> bool {
     resp_ids == req_ids
 }
 
+/// Check that a [`RuleSet`] corresponds to a [`RuleSetRequest`]
+///
+/// # Arguments
+///
+/// * `resp` - The rule set entity to compare against
+/// * `req` - The rule set request to compare against
+fn ruleset_matches(resp: &RuleSet, req: &RuleSetRequest) -> bool {
+    // the response contains full member rule entities, so compare them by their ids
+    let resp_ids: BTreeSet<Uuid> = resp.rules.iter().map(|rule| rule.id).collect();
+    let req_ids: BTreeSet<Uuid> = req.rules.iter().copied().collect();
+    resp_ids == req_ids
+}
+
 /// Check that a [`CollectionEntity`] corresponds to a [`CollectionEntityRequest`]
 ///
 /// # Arguments
@@ -337,6 +350,9 @@ impl PartialEq<EntityRequest> for Entity {
             (EntityMetadata::Device(resp), EntityMetadataRequest::Device(req)) => {
                 device_matches(resp, req)
             }
+            (EntityMetadata::RuleSet(resp), EntityMetadataRequest::RuleSet(req)) => {
+                ruleset_matches(resp, req)
+            }
             (EntityMetadata::Collection(resp), EntityMetadataRequest::Collection(req)) => {
                 collection_matches(resp, req)
             }
@@ -365,6 +381,9 @@ impl PartialEq<EntityRequest> for Entity {
                 json_eq(resp, req)
             }
             (EntityMetadata::SigmaRule(resp), EntityMetadataRequest::SigmaRule(req)) => {
+                json_eq(resp, req)
+            }
+            (EntityMetadata::YaraRule(resp), EntityMetadataRequest::YaraRule(req)) => {
                 json_eq(resp, req)
             }
             (EntityMetadata::Flag(resp), EntityMetadataRequest::Flag(req)) => json_eq(resp, req),
@@ -797,6 +816,65 @@ impl PartialEq<EntityUpdate> for Entity {
                     }
                     // actions have no PartialEq; they were created empty so must json-match the adds
                     if !add_actions.is_empty() && !json_eq(&rule.actions, add_actions) {
+                        return false;
+                    }
+                }
+                (
+                    EntityMetadataUpdate::YaraRule {
+                        yara_rule,
+                        score,
+                        add_applies_to,
+                        remove_applies_to,
+                        add_actions,
+                        remove_actions: _,
+                    },
+                    EntityMetadata::YaraRule(rule),
+                ) => {
+                    if let Some(val) = yara_rule {
+                        if &rule.rule != val {
+                            return false;
+                        }
+                    }
+                    if let Some(val) = score {
+                        if rule.score != *val {
+                            return false;
+                        }
+                    }
+                    if !add_applies_to
+                        .iter()
+                        .all(|applies| rule.applies_to.contains(applies))
+                    {
+                        return false;
+                    }
+                    if remove_applies_to
+                        .iter()
+                        .any(|applies| rule.applies_to.contains(applies))
+                    {
+                        return false;
+                    }
+                    // actions have no PartialEq; they were created empty so must json-match the adds
+                    if !add_actions.is_empty() && !json_eq(&rule.actions, add_actions) {
+                        return false;
+                    }
+                }
+                (
+                    EntityMetadataUpdate::RuleSet {
+                        add_rules,
+                        remove_rules,
+                    },
+                    EntityMetadata::RuleSet(ruleset),
+                ) => {
+                    // the hydrated members carry full entities so compare by id
+                    let member_ids: BTreeSet<Uuid> =
+                        ruleset.rules.iter().map(|rule| rule.id).collect();
+                    // added members present, removed members absent
+                    if !add_rules.iter().all(|rule_id| member_ids.contains(rule_id)) {
+                        return false;
+                    }
+                    if remove_rules
+                        .iter()
+                        .any(|rule_id| member_ids.contains(rule_id))
+                    {
                         return false;
                     }
                 }

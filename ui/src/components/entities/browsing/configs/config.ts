@@ -19,6 +19,10 @@ import PeSectionBrowsingConfig from './PeSectionBrowsingConfig';
 import PeImportBrowsingConfig from './PeImportBrowsingConfig';
 import { createEntityBrowsingPage } from '../EntityBrowsing';
 import SigmaRulesBrowsingConfig from './SigmaRuleBrowsingConfig';
+import YaraRulesBrowsingConfig from './YaraRuleBrowsingConfig';
+import YaraRuleHitBrowsingConfig from './YaraRuleHitBrowsingConfig';
+import RuleSetBrowsingConfig from './RuleSetBrowsingConfig';
+import HuntBrowsingConfig from './HuntBrowsingConfig';
 import { EntityBrowseConfig } from './entityFetcher';
 
 // `EntityBrowseConfig` and `makeEntityFetcher` live in `./entityFetcher` (which imports no config files) to
@@ -42,6 +46,10 @@ export const EntityBrowsingConfig: EntityConfigMap = {
   [Entities.Repo]: RepoBrowsingConfig,
   [Entities.FileSystem]: FileSystemBrowsingConfig,
   [Entities.SigmaRule]: SigmaRulesBrowsingConfig,
+  [Entities.YaraRule]: YaraRulesBrowsingConfig,
+  [Entities.YaraRuleHit]: YaraRuleHitBrowsingConfig,
+  [Entities.RuleSet]: RuleSetBrowsingConfig,
+  [Entities.Hunt]: HuntBrowsingConfig,
   [Entities.Vendor]: VendorBrowsingConfig,
   [Entities.WindowsProcessTree]: WindowsProcessTreeBrowsingConfig,
   [Entities.WindowsProcess]: WindowsProcessBrowsingConfig,
@@ -65,6 +73,10 @@ export const EntityBrowsingPages = {
   [Entities.Other]: createEntityBrowsingPage(OthersBrowsingConfig),
   [Entities.Flag]: createEntityBrowsingPage(FlagBrowsingConfig),
   [Entities.SigmaRule]: createEntityBrowsingPage(SigmaRulesBrowsingConfig),
+  [Entities.YaraRule]: createEntityBrowsingPage(YaraRulesBrowsingConfig),
+  [Entities.YaraRuleHit]: createEntityBrowsingPage(YaraRuleHitBrowsingConfig),
+  [Entities.RuleSet]: createEntityBrowsingPage(RuleSetBrowsingConfig),
+  [Entities.Hunt]: createEntityBrowsingPage(HuntBrowsingConfig),
   [Entities.Vendor]: createEntityBrowsingPage(VendorBrowsingConfig),
   [Entities.Repo]: createEntityBrowsingPage(RepoBrowsingConfig),
   [Entities.WindowsProcessTree]: createEntityBrowsingPage(WindowsProcessTreeBrowsingConfig),

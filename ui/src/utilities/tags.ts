@@ -201,20 +201,31 @@ export function requestTagsToTagEntryList(tags: RequestTags): TagEntry[] {
 /**
  * Conversion function between TagEntry[] and RequestTags
  * @param {TagEntry[]} tagEntry
+ * @param {boolean} trim - opt-in: trim each key/value and skip pairs with a blank side
  * @returns {RequestTags}
  *
  * Conversion function from TagEntry[] to RequestTags object. Useful for TagSelect
- * component
+ * component. When `trim` is set each pair is trimmed and pairs left with an empty
+ * key or value are skipped; the default keeps every pair verbatim for existing callers.
  **/
-export function tagEntriesToRequestTags(tagEntry: TagEntry[]): RequestTags {
+export function tagEntriesToRequestTags(tagEntry: TagEntry[], trim: boolean = false): RequestTags {
   const newTags: RequestTags = {};
   tagEntry.forEach((tag) => {
-    if (tag.key in newTags) {
-      if (!newTags[tag.key].includes(tag.value)) {
-        newTags[tag.key].push(tag.value);
+    // optionally trim the pair and drop it when either side is blank after trimming
+    const key = trim ? tag.key.trim() : tag.key;
+    const value = trim ? tag.value.trim() : tag.value;
+    if (trim && (key === '' || value === '')) {
+      return;
+    }
+    // own-property check: tag keys are arbitrary user strings, and an `in` check would
+    // resolve prototype names like `toString` to the inherited member, skipping
+    // initialization and crashing the `includes` call below
+    if (Object.hasOwn(newTags, key)) {
+      if (!newTags[key].includes(value)) {
+        newTags[key].push(value);
       }
     } else {
-      newTags[tag.key] = [tag.value];
+      newTags[key] = [value];
     }
   });
   return newTags;
@@ -244,9 +255,11 @@ export function diffTagUpdate(
   const toAdd: RequestTags = {};
   const toDelete: RequestTags = {};
   for (const k of keys) {
-    // get the set of values from current/pending, or default to empty set
-    const currentValues = new Set(current[k] ?? []);
-    const pendingValues = new Set(pending[k] ?? []);
+    // get the set of values from current/pending, or default to empty set; own-property
+    // checks because a user-typed prototype key like `toString` present in only one map
+    // would otherwise resolve to the inherited member on the other map
+    const currentValues = new Set(Object.hasOwn(current, k) ? current[k] : []);
+    const pendingValues = new Set(Object.hasOwn(pending, k) ? pending[k] : []);
     // values to add are everything in pending that's not in current
     const valuesToAdd = [...pendingValues].filter((v) => !currentValues.has(v));
     // values to delete are everything in current that's not in pending

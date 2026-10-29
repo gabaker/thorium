@@ -15,6 +15,7 @@ use self::{
     files::Files,
     grep::Grep,
     groups::Groups,
+    hunts::Hunts,
     images::Images,
     instances::Instances,
     models::Models,
@@ -23,6 +24,8 @@ use self::{
     reactions::Reactions,
     repos::Repos,
     results::Results,
+    rules::Rules,
+    rulesets::Rulesets,
     run::RootRun,
     runs::Runs,
     tags::Tags,
@@ -45,6 +48,7 @@ pub mod files;
 pub mod grep;
 pub mod groups;
 pub mod helpers;
+pub mod hunts;
 pub mod images;
 pub mod instances;
 pub mod models;
@@ -53,6 +57,8 @@ pub mod pipelines;
 pub mod reactions;
 pub mod repos;
 pub mod results;
+pub mod rules;
+pub mod rulesets;
 pub mod run;
 pub mod runs;
 pub mod tags;
@@ -210,6 +216,15 @@ Examples:
     /// Perform network policy related tasks
     #[clap(version, author, subcommand, visible_alias = "netpols")]
     NetworkPolicies(NetworkPolicies),
+    /// Perform YARA/Sigma detection rule related tasks
+    #[clap(version, author, subcommand, visible_alias = "rule")]
+    Rules(Rules),
+    /// Perform rule set related tasks
+    #[clap(version, author, subcommand, visible_alias = "ruleset")]
+    Rulesets(Rulesets),
+    /// Perform hunt related tasks
+    #[clap(version, author, subcommand, visible_alias = "hunt")]
+    Hunts(Hunts),
     /// Create, publish, and inspect tools and their versions
     #[clap(version, author, subcommand, alias = "tool")]
     Tools(Tools),
@@ -281,6 +296,19 @@ impl TryFrom<&String> for Mode {
             }
         }
     }
+}
+
+/// Provide the help message for an editor arg
+///
+/// # Arguments
+///
+/// * `target` - What the editor will be editing (e.g. "image", "rule")
+pub(crate) fn editor_help(target: &str) -> String {
+    format!(
+        "The editor to use when editing the {target} ('{}' by default); the default can be modified using \
+    'thorctl config --default-editor', but this flag overrides any set defaults",
+        thorium::client::conf::default_default_editor()
+    )
 }
 
 #[derive(clap::Args, Debug, Clone)]

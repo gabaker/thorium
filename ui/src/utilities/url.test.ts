@@ -6,12 +6,21 @@ import { getApiUrl } from './url';
 /**
  * Stub `window.location` as a browser reports it for a page URL.
  *
+ * `getApiUrl` reads `window.location` at call time and the node test environment has no global
+ * `window`, so stub a browser-like one with the location fields a real page exposes.
+ *
  * @param url - The page URL to describe.
  */
 function servePageFrom(url: string): void {
   const parsed = new URL(url);
   vi.stubGlobal('window', {
-    location: { protocol: parsed.protocol, hostname: parsed.hostname, port: parsed.port, origin: parsed.origin },
+    location: {
+      protocol: parsed.protocol,
+      hostname: parsed.hostname,
+      host: parsed.host,
+      port: parsed.port,
+      origin: parsed.origin,
+    },
   });
 }
 
@@ -56,5 +65,43 @@ describe('getApiUrl', () => {
     servePageFrom('https://thorium.example.com:8443/');
     vi.stubEnv('THORIUM_API_URL', 'http://localhost:18080');
     expect(getApiUrl()).toBe('https://thorium.example.com:8443/api');
+  });
+
+  it('keeps a non-standard port so tunneled UIs still reach the API', () => {
+    servePageFrom('http://thorium.example.com:8000/');
+    expect(getApiUrl()).toBe('http://thorium.example.com:8000/api');
+  });
+
+  it('omits the port on standard ports', () => {
+    servePageFrom('https://thorium.example.com/');
+    expect(getApiUrl()).toBe('https://thorium.example.com/api');
+  });
+
+  it('honors THORIUM_API_URL on localhost and strips trailing slashes', () => {
+    servePageFrom('http://localhost:8000/');
+    vi.stubEnv('THORIUM_API_URL', 'http://localhost:8080///');
+    expect(getApiUrl()).toBe('http://localhost:8080/api');
+  });
+
+  it('honors THORIUM_API_URL on 127.0.0.1', () => {
+    servePageFrom('http://127.0.0.1:8000/');
+    vi.stubEnv('THORIUM_API_URL', 'http://127.0.0.1:8080');
+    expect(getApiUrl()).toBe('http://127.0.0.1:8080/api');
+  });
+
+  it('falls back to the page location on localhost without an override', () => {
+    servePageFrom('http://localhost:8000/');
+    vi.stubEnv('THORIUM_API_URL', '');
+    expect(getApiUrl()).toBe('http://localhost:8000/api');
+  });
+
+  it('ignores THORIUM_API_URL away from localhost', () => {
+    servePageFrom('https://thorium.example.com:8443/');
+    vi.stubEnv('THORIUM_API_URL', 'http://localhost:8080');
+    expect(getApiUrl()).toBe('https://thorium.example.com:8443/api');
+  });
+
+  it('returns a relative path outside of a browser', () => {
+    expect(getApiUrl()).toBe('/api');
   });
 });

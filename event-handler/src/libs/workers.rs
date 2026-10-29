@@ -5,7 +5,7 @@ use futures::lock::Mutex;
 use futures::stream::{self, StreamExt};
 use kanal::{AsyncReceiver, AsyncSender};
 use linearize::Linearize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::AddAssign;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,6 +21,9 @@ pub mod reaction_triggers;
 
 pub use ai::AiWorker;
 pub use hunts::sigma::{SigmaRuleContext, SigmaRuleWorker};
+pub use hunts::yara::hunter::YaraHuntWorker;
+pub use hunts::yara::writer::GroupAllowances;
+pub use hunts::yara::{YaraRuleContext, YaraScannerWorker};
 pub use reaction_triggers::ReactionTriggerWorker;
 
 use crate::libs::EventWorkerCache;
@@ -32,15 +35,19 @@ use crate::libs::stats::EventWorkerStatChannels;
 #[strum_discriminants(name(WorkerCacheUpdateKinds))]
 #[allow(
     clippy::large_enum_variant,
-    reason = "boxing a variant changes how every worker builds and matches cache updates"
+    reason = "the sigma context is already boxed; boxing more variants changes how every worker builds and matches cache updates"
 )]
 pub enum WorkerCacheUpdates {
     /// An updated reaction trigger cache
     ReactionTriggers(TriggerCache),
     /// An updated sigma rule context
-    SigmaRulesContext(SigmaRuleContext),
+    SigmaRulesContext(Box<SigmaRuleContext>),
     /// There has been an update to users in thorium
     Users(HashMap<String, ScrubbedUser>),
+    /// An updated yara rule context
+    YaraRulesContext(YaraRuleContext),
+    /// An updated per group allowability snapshot
+    GroupAllowances(HashMap<String, GroupAllowances>),
 }
 
 impl WorkerCacheUpdates {
@@ -52,9 +59,13 @@ impl WorkerCacheUpdates {
                 Self::ReactionTriggers(cache.triggers.clone())
             }
             WorkerCacheUpdateKinds::SigmaRulesContext => {
-                Self::SigmaRulesContext(cache.sigma.clone())
+                Self::SigmaRulesContext(Box::new(cache.sigma.clone()))
             }
             WorkerCacheUpdateKinds::Users => Self::Users(cache.users.clone()),
+            WorkerCacheUpdateKinds::YaraRulesContext => Self::YaraRulesContext(cache.yara.clone()),
+            WorkerCacheUpdateKinds::GroupAllowances => {
+                Self::GroupAllowances(cache.allowances.clone())
+            }
         }
     }
 }
@@ -64,6 +75,8 @@ impl WorkerCacheUpdates {
 pub enum WorkerMsg {
     /// This worker should updates its cached info
     Update(WorkerCacheUpdates),
+    /// This worker should finish and clear its current page then stop cleanly
+    Stop,
 }
 
 /// The core trait that the different kind of event works need to support
@@ -79,10 +92,21 @@ pub trait EventWorkerSupportCore {
     ///
     /// * `cache` - A cache of all info a worker may need to be created
     /// * `thorium` - A Thorium client
-    async fn new(cache: &EventWorkerCache, thorium: &Arc<Thorium>) -> Self;
+    /// * `worker` - The identity of this event handler process
+    async fn new(cache: &EventWorkerCache, thorium: &Arc<Thorium>, worker: &str) -> Self;
 
     /// The types of events this worker handles, in the order they're popped on each pass
     fn event_kinds() -> Vec<EventType>;
+
+    /// The max number of events this worker pops per page
+    ///
+    /// Most workers want big pages to cut pop round trips; workers whose
+    /// events are minutes of work each (hunt chunks) override this so claimed
+    /// events never age toward the in flight backstop while queued behind
+    /// their page siblings.
+    fn pop_limit() -> usize {
+        1000
+    }
 
     /// The types of cache updates this worker subscribes too
     fn cache_subscriptions() -> Vec<WorkerCacheUpdateKinds>;
@@ -96,6 +120,16 @@ pub trait EventWorkerSupportCore {
 
     /// Report our latest stats in an event
     fn stats(stats: &Self::Stats, prior: &Self::Stats);
+
+    /// Flatten this worker kinds stats into cumulative counters for publishing
+    ///
+    /// Flat stats key by field name while nested stats flatten to dotted paths
+    /// (`total.scanned`, `by_entity.{kind}.scanned`).
+    ///
+    /// # Arguments
+    ///
+    /// * `stats` - The stats to flatten
+    fn counter_map(stats: &Self::Stats) -> BTreeMap<String, u64>;
 }
 
 /// The trait that the different kind of event workers need to handle
@@ -113,6 +147,10 @@ pub enum EventWorkerKinds {
     ReactionTriggers,
     /// A sigma scanner worker,
     SigmaScanner,
+    /// A yara scanner worker
+    YaraScanner,
+    /// A yara hunt chunk worker
+    YaraHunter,
     /// The AI worker that builds workflow instances
     Ai,
 }
@@ -128,6 +166,8 @@ impl EventWorkerKinds {
         let subscribed = match self {
             Self::ReactionTriggers => ReactionTriggerWorker::cache_subscriptions(),
             Self::SigmaScanner => SigmaRuleWorker::cache_subscriptions(),
+            Self::YaraScanner => YaraScannerWorker::cache_subscriptions(),
+            Self::YaraHunter => YaraHuntWorker::cache_subscriptions(),
             Self::Ai => AiWorker::cache_subscriptions(),
         };
         // check if this is something we are subscribed too
@@ -141,11 +181,13 @@ impl EventWorkerKinds {
     /// * `cache` - A cache of info for all event worker kinds
     /// * `stats_channels` - The channels to send stats updates to our controller over
     /// * `thorium` - A Thorium client
+    /// * `worker` - The identity of this event handler process
     pub async fn spawn(
         &self,
         cache: &EventWorkerCache,
         stats_channels: &EventWorkerStatChannels,
         thorium: &Arc<Thorium>,
+        worker: &str,
     ) -> (AsyncSender<WorkerMsg>, JoinHandle<Result<(), Error>>) {
         // create a new challen for this worker
         let (msg_tx, msg_rx) = kanal::unbounded_async();
@@ -156,7 +198,7 @@ impl EventWorkerKinds {
                 let stats_tx = &stats_channels.reaction_trigger.0;
                 // build a worker for reaction triggers rules
                 let worker = EventWorkerMutable::<ReactionTriggerWorker>::new(
-                    cache, thorium, &msg_rx, stats_tx,
+                    cache, thorium, &msg_rx, stats_tx, worker,
                 )
                 .await;
                 // spawn this sigma worker
@@ -167,8 +209,34 @@ impl EventWorkerKinds {
                 let stats_tx = &stats_channels.sigma_rules.0;
                 // build a worker for sigma rules
                 let worker =
-                    EventWorker::<SigmaRuleWorker>::new(cache, thorium, &msg_rx, stats_tx).await;
+                    EventWorker::<SigmaRuleWorker>::new(cache, thorium, &msg_rx, stats_tx, worker)
+                        .await;
                 // spawn this sigma worker
+                tokio::task::spawn(worker.start())
+            }
+            EventWorkerKinds::YaraScanner => {
+                // get the send side of our states channel
+                let stats_tx = &stats_channels.yara_scans.0;
+                // build a worker that scans samples with yara rules; the
+                // mutable wrapper is used so pages can be coalesced by sha256
+                let worker = EventWorkerMutable::<YaraScannerWorker>::new(
+                    cache, thorium, &msg_rx, stats_tx, worker,
+                )
+                .await;
+                // spawn this yara worker
+                tokio::task::spawn(worker.start())
+            }
+            EventWorkerKinds::YaraHunter => {
+                // get the send side of our states channel
+                let stats_tx = &stats_channels.yara_hunts.0;
+                // build a worker that walks hunts over historical samples one
+                // paced chunk at a time; the mutable wrapper is used so the
+                // subset LRU and budget live across a page
+                let worker = EventWorkerMutable::<YaraHuntWorker>::new(
+                    cache, thorium, &msg_rx, stats_tx, worker,
+                )
+                .await;
+                // spawn this yara hunt worker
                 tokio::task::spawn(worker.start())
             }
             EventWorkerKinds::Ai => {
@@ -176,7 +244,8 @@ impl EventWorkerKinds {
                 let stats_tx = &stats_channels.ai.0;
                 // build the AI worker, which handles each batch as a whole
                 let worker =
-                    EventWorkerMutable::<AiWorker>::new(cache, thorium, &msg_rx, stats_tx).await;
+                    EventWorkerMutable::<AiWorker>::new(cache, thorium, &msg_rx, stats_tx, worker)
+                        .await;
                 // spawn the AI worker
                 tokio::task::spawn(worker.start())
             }
@@ -192,6 +261,8 @@ impl EventWorkerKinds {
 pub struct EventWorker<W: EventWorkerSupport> {
     /// A client for Thorium
     thorium: Arc<Thorium>,
+    /// The identity of this event handler process that owns our popped events
+    worker: String,
     /// A channel for messages to this worker from our controller
     msg_rx: AsyncReceiver<WorkerMsg>,
     /// A channel to send stats updates over for unified reporting across workers
@@ -207,8 +278,8 @@ pub struct EventWorker<W: EventWorkerSupport> {
 /// Pick the events to clear from the in-flight queue after [`EventWorker`] processes a page
 ///
 /// Successfully processed events are cleared so they do not stay in the in-flight queue forever
-/// and get replayed by every `reset_all`. Failed events are left in flight so `reset_all` can
-/// retry them.
+/// and get replayed by every reset of this workers in flight events. Failed events are left in
+/// flight so the scoped reset can retry them.
 ///
 /// # Arguments
 ///
@@ -222,6 +293,43 @@ fn processed_event_clears(results: &[(Uuid, Result<(), Error>)]) -> Vec<Uuid> {
         .collect()
 }
 
+/// Reset this workers own in flight events, tolerating an old API
+///
+/// The scoped reset route 404s on an old API without worker aware in flight
+/// tracking; the reset is then skipped with a warning instead of falling back
+/// to the legacy whole kind reset, because a whole kind reset from one replica
+/// replays every peer replicas in flight events. Any leftovers are recovered
+/// by the reaper's legacy age backstop once the API upgrades.
+///
+/// # Arguments
+///
+/// * `thorium` - A Thorium client
+/// * `kind` - The kind of events to reset
+/// * `worker` - The worker whose in flight events should be reset
+async fn reset_worker_scoped(
+    thorium: &Thorium,
+    kind: EventType,
+    worker: &str,
+) -> Result<(), Error> {
+    // try to reset only this workers own in flight events
+    match thorium.events.reset_worker(kind, worker).await {
+        // this workers in flight events were reset
+        Ok(_) => Ok(()),
+        // an old API without the scoped reset route is warned about and skipped
+        Err(error) if error.status() == Some(reqwest::StatusCode::NOT_FOUND) => {
+            // warn that this API cannot reset a single workers in flight events
+            event!(
+                Level::WARN,
+                msg = "Scoped reset route missing; skipping reset until the API upgrades",
+                worker = worker,
+            );
+            Ok(())
+        }
+        // any other error is a real failure
+        Err(error) => Err(error),
+    }
+}
+
 impl<W: EventWorkerSupport> EventWorker<W> {
     /// Create a new worker
     ///
@@ -231,17 +339,20 @@ impl<W: EventWorkerSupport> EventWorker<W> {
     /// * `thorium` - A Thorium client
     /// * `msg_rx` - A channel to listen for messages from our controller on
     /// * `stats_tx` - A channel to send stats updates over
+    /// * `worker` - The identity of this event handler process
     pub async fn new(
         cache: &EventWorkerCache,
         thorium: &Arc<Thorium>,
         msg_rx: &AsyncReceiver<WorkerMsg>,
         stats_tx: &AsyncSender<W::Stats>,
+        worker: &str,
     ) -> Self {
         // build our new internal worker
-        let internal = W::new(cache, thorium).await;
+        let internal = W::new(cache, thorium, worker).await;
         // build our worker wrapper
         EventWorker {
             thorium: thorium.clone(),
+            worker: worker.to_owned(),
             msg_rx: msg_rx.clone(),
             stats_tx: stats_tx.clone(),
             retry_ts: None,
@@ -251,16 +362,21 @@ impl<W: EventWorkerSupport> EventWorker<W> {
     }
 
     /// Handle any messages from our controller
-    async fn handle_messages(&mut self) -> Result<(), Error> {
-        // try to get a message from our controller
+    ///
+    /// Returns true if our controller asked this worker to stop so the caller
+    /// can exit cleanly between pages.
+    async fn handle_messages(&mut self) -> Result<bool, Error> {
+        // drain every pending message from our controller
         // this doesn't wait on the waitlist so we may not get messages immediately but eventually we will
-        if let Some(msg) = self.msg_rx.try_recv()? {
+        while let Some(msg) = self.msg_rx.try_recv()? {
             // Handle the message from our controller
             match msg {
                 WorkerMsg::Update(update) => self.internal.apply_cache_update(update),
+                // our controller asked this worker to stop cleanly
+                WorkerMsg::Stop => return Ok(true),
             }
         }
-        Ok(())
+        Ok(false)
     }
 
     /// The hot loop for an event handler worker
@@ -277,10 +393,11 @@ impl<W: EventWorkerSupport> EventWorker<W> {
             // check if its time to retry errors
             if Utc::now() > retry_ts {
                 // log that we are resetting events
-                event!(Level::INFO, msg = "Resetting in flight events");
-                // reset any still in flight events of each kind
+                event!(Level::INFO, msg = "Resetting our in flight events");
+                // reset only this workers still in flight events of each kind
+                // so peers never have their in flight work replayed
                 for kind in W::event_kinds() {
-                    self.thorium.events.reset_all(kind).await?;
+                    reset_worker_scoped(&self.thorium, kind, &self.worker).await?;
                 }
                 // reset our retry timestamp
                 self.retry_ts = None;
@@ -338,11 +455,11 @@ impl<W: EventWorkerSupport> EventWorker<W> {
                     }
                 }
             }
-            // clear any processed events from the in-flight queue
+            // clear any processed events from our own in-flight queue
             if !clears.is_empty() {
                 self.thorium
                     .events
-                    .clear(kind, &EventIds::from(clears))
+                    .clear(kind, &EventIds::from(clears), Some(&self.worker))
                     .await?;
             }
             Ok(true)
@@ -351,16 +468,22 @@ impl<W: EventWorkerSupport> EventWorker<W> {
 
     /// Start scanning and handling events
     pub async fn start(mut self) -> Result<(), Error> {
-        // Get at most 1000 events at a time
-        let opts = EventPopOpts::default().limit(1000);
-        // resest any tasks from a previous worker
+        // get at most a page of events at a time and claim them under our identity
+        let opts = EventPopOpts::default()
+            .limit(W::pop_limit())
+            .worker(&self.worker);
+        // reset any events this exact worker left in flight for each kind; peers
+        // in flight events are reclaimed by the reaper, never by our startup
         for kind in W::event_kinds() {
-            self.thorium.events.reset_all(kind).await?;
+            reset_worker_scoped(&self.thorium, kind, &self.worker).await?;
         }
         // keep looping and handling results
         loop {
-            // check if we have any messages from our controller
-            self.handle_messages().await?;
+            // check for messages from our controller and stop cleanly between
+            // pages if asked to so our last pages clears are already complete
+            if self.handle_messages().await? {
+                return Ok(());
+            }
             // try to get any events and evaluate them
             let got_events = self.process(&opts).await?;
             // if we got some events then handle them otherwise sleep for 3 seconds
@@ -412,6 +535,8 @@ pub trait EventWorkerMutableSupport: EventWorkerSupportCore {
 pub struct EventWorkerMutable<W: EventWorkerMutableSupport> {
     /// A client for Thorium
     thorium: Arc<Thorium>,
+    /// The identity of this event handler process that owns our popped events
+    worker: String,
     /// A channel for messages to this worker from our controller
     msg_rx: AsyncReceiver<WorkerMsg>,
     /// A channel to send stats updates over for unified reporting across workers
@@ -433,17 +558,20 @@ impl<W: EventWorkerMutableSupport> EventWorkerMutable<W> {
     /// * `thorium` - A Thorium client
     /// * `msg_rx` - A channel to listen for messages from our controller on
     /// * `stats_tx` - A channel to send stats updates over
+    /// * `worker` - The identity of this event handler process
     pub async fn new(
         cache: &EventWorkerCache,
         thorium: &Arc<Thorium>,
         msg_rx: &AsyncReceiver<WorkerMsg>,
         stats_tx: &AsyncSender<W::Stats>,
+        worker: &str,
     ) -> Self {
         // build our new internal worker
-        let internal = W::new(cache, thorium).await;
+        let internal = W::new(cache, thorium, worker).await;
         // build our worker wrapper
         EventWorkerMutable {
             thorium: thorium.clone(),
+            worker: worker.to_owned(),
             msg_rx: msg_rx.clone(),
             stats_tx: stats_tx.clone(),
             retry_ts: None,
@@ -453,16 +581,21 @@ impl<W: EventWorkerMutableSupport> EventWorkerMutable<W> {
     }
 
     /// Handle any messages from our controller
-    async fn handle_messages(&mut self) -> Result<(), Error> {
-        // try to get a message from our controller
+    ///
+    /// Returns true if our controller asked this worker to stop so the caller
+    /// can exit cleanly between pages.
+    async fn handle_messages(&mut self) -> Result<bool, Error> {
+        // drain every pending message from our controller
         // this doesn't wait on the waitlist so we may not get messages immediately but eventually we will
-        if let Some(msg) = self.msg_rx.try_recv()? {
+        while let Some(msg) = self.msg_rx.try_recv()? {
             // Handle the message from our controller
             match msg {
                 WorkerMsg::Update(update) => self.internal.apply_cache_update(update),
+                // our controller asked this worker to stop cleanly
+                WorkerMsg::Stop => return Ok(true),
             }
         }
-        Ok(())
+        Ok(false)
     }
 
     /// The hot loop for an event handler worker
@@ -479,10 +612,11 @@ impl<W: EventWorkerMutableSupport> EventWorkerMutable<W> {
             // check if its time to retry errors
             if Utc::now() > retry_ts {
                 // log that we are resetting events
-                event!(Level::INFO, msg = "Resetting in flight events");
-                // reset any still in flight events of each kind
+                event!(Level::INFO, msg = "Resetting our in flight events");
+                // reset only this workers still in flight events of each kind
+                // so peers never have their in flight work replayed
                 for kind in W::event_kinds() {
-                    self.thorium.events.reset_all(kind).await?;
+                    reset_worker_scoped(&self.thorium, kind, &self.worker).await?;
                 }
                 // reset our retry timestamp
                 self.retry_ts = None;
@@ -513,16 +647,22 @@ impl<W: EventWorkerMutableSupport> EventWorkerMutable<W> {
 
     /// Start scanning and handling events
     pub async fn start(mut self) -> Result<(), Error> {
-        // Get at most 1000 events at a time
-        let opts = EventPopOpts::default().limit(1000);
-        // resest any tasks from a previous worker
+        // get at most a page of events at a time and claim them under our identity
+        let opts = EventPopOpts::default()
+            .limit(W::pop_limit())
+            .worker(&self.worker);
+        // reset any events this exact worker left in flight for each kind; peers
+        // in flight events are reclaimed by the reaper, never by our startup
         for kind in W::event_kinds() {
-            self.thorium.events.reset_all(kind).await?;
+            reset_worker_scoped(&self.thorium, kind, &self.worker).await?;
         }
         // keep looping and handling results
         loop {
-            // check if we have any messages from our controller
-            self.handle_messages().await?;
+            // check for messages from our controller and stop cleanly between
+            // pages if asked to so our last pages clears are already complete
+            if self.handle_messages().await? {
+                return Ok(());
+            }
             // try to get any events and evaluate them
             let got_events = self.process(&opts).await?;
             // if we got some events then handle them otherwise sleep for 3 seconds
@@ -546,10 +686,10 @@ mod tests {
     use super::*;
 
     /// The immutable [`EventWorker`] wrapper (used only by `SigmaRuleWorker`) pops events into
-    /// the Redis in-flight map/queue and selects the ids of successfully processed events to be
-    /// cleared. This keeps the in-flight queue from growing without bound and every `reset_all`
-    /// (on startup and 3 minutes after any single error) from replaying the entire sigma-event
-    /// history.
+    /// its own Redis in-flight map/queue and selects the ids of successfully processed events to
+    /// be cleared. This keeps the in-flight queue from growing without bound and every scoped
+    /// reset (on startup and 3 minutes after any single error) from replaying the entire
+    /// sigma-event history.
     #[test]
     fn sigma_worker_clears_processed_events() {
         // one event processed successfully and one failed
@@ -569,8 +709,8 @@ mod tests {
         );
     }
 
-    /// An event that failed processing is not cleared, so it stays in-flight and `reset_all`
-    /// can retry it.
+    /// An event that failed processing is not cleared, so it stays in-flight and this workers
+    /// scoped reset can retry it.
     #[test]
     fn sigma_worker_keeps_failed_events_in_flight() {
         // a single event that failed processing

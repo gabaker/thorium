@@ -1,13 +1,35 @@
 //! The events in Thorium for triggers and other things to act on
 
 use chrono::prelude::*;
+use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::str::FromStr;
+use std::sync::LazyLock;
 use uuid::Uuid;
 
 use crate::models::{AssociationKind, ModelConfigRef, OutputKey, SigmaRuleAppliesTo};
 
 use super::TagType;
+
+/// A [`Regex`] matching only valid event handler worker ids
+///
+/// Worker ids are embedded in Redis key names so they are restricted to a
+/// short list of safe characters and a bounded length.
+static WORKER_ID_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\A[A-Za-z0-9._-]{1,128}\z").unwrap());
+
+/// Check whether an event handler worker id is valid
+///
+/// Worker ids must fully match `^[A-Za-z0-9._-]{1,128}$` since they are
+/// embedded in Redis key names.
+///
+/// # Arguments
+///
+/// * `worker` - The worker id to validate
+pub fn valid_worker_id(worker: &str) -> bool {
+    // make sure this worker id only contains key safe characters
+    WORKER_ID_REGEX.is_match(worker)
+}
 
 /// The different types of events
 #[derive(
@@ -22,6 +44,7 @@ use super::TagType;
     strum::Display,
     strum::EnumString,
     strum::AsRefStr,
+    strum::EnumIter,
 )]
 #[cfg_attr(feature = "scylla-utils", derive(thorium_derive::ScyllaStoreAsStr))]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
@@ -30,6 +53,13 @@ pub enum EventType {
     ReactionTrigger,
     /// A result with new entities was added and can be scanned by a sigma rule
     SigmaScannableResults,
+    /// A samples bytes became visible to new groups and can be scanned by yara rules
+    YaraScannableSample,
+    /// A chunk of a yara hunt is ready to advance one lane
+    ///
+    /// Each engine gets its own chunk event kind so engines keep separate
+    /// queues, workers, budgets, and depth gauges while sharing one chassis.
+    YaraHuntChunk,
     /// A change that may require new workflow or toolset instances to be created
     WorkflowGraph,
     /// A model endpoint or credential whose models should be listed and checked
@@ -41,6 +71,15 @@ impl EventType {
     #[must_use]
     pub fn as_str(&self) -> &str {
         self.as_ref()
+    }
+
+    /// Whether this event kind carries paced hunt chunk work
+    ///
+    /// Today exactly `YaraHuntChunk`; a future engines chunk kind joins the
+    /// hunt backlog views for free by matching here.
+    #[must_use]
+    pub fn is_hunt_chunk(&self) -> bool {
+        matches!(self, EventType::YaraHuntChunk)
     }
 }
 
@@ -55,10 +94,44 @@ impl From<&EventData> for EventType {
             EventData::NewSample { .. } => EventType::ReactionTrigger,
             EventData::NewTags { .. } => EventType::ReactionTrigger,
             EventData::SigmaScannableResults { .. } => EventType::SigmaScannableResults,
+            EventData::YaraScannableSample { .. } => EventType::YaraScannableSample,
+            EventData::YaraHuntChunk { .. } => EventType::YaraHuntChunk,
             EventData::WorkflowGraph(_) => EventType::WorkflowGraph,
             EventData::ModelRefresh(_) => EventType::ModelRefresh,
         }
     }
+}
+
+/// What caused a yara scan event to be emitted
+///
+/// Historical scans are covered by user-created hunts on their own chunk
+/// queue, so there is deliberately no backscan trigger variant here.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub enum YaraScanTrigger {
+    /// A new submission made this sample visible to a set of groups
+    NewSubmission,
+    /// Groups were added to an existing submission
+    GroupsAdded,
+    /// Groups were removed from a submission or a submission was deleted
+    GroupsRemoved,
+}
+
+/// An event for a sample that yara rules can scan
+///
+/// The originating trigger depth rides on the enclosing [`Event`]'s `depth`
+/// field so the loop breaking max depth guard applies to tags written for
+/// hits on this sample.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "scylla-utils", derive(thorium_derive::ScyllaStoreJson))]
+pub struct YaraSampleScanEvent {
+    /// The sha256 of the sample to scan
+    pub sha256: String,
+    /// The groups whose visibility of this sample just changed
+    pub groups: Vec<String>,
+    /// What caused this scan event to be emitted
+    pub trigger: YaraScanTrigger,
 }
 
 /// An event for a sigma scannable result
@@ -74,6 +147,23 @@ pub struct SigmaScannableResultsEvent {
     pub applies_to: Vec<SigmaRuleAppliesTo>,
     /// The tool that created these results/entities
     pub tool: String,
+}
+
+/// An event advancing one lane of a hunt by one chunk
+///
+/// Each engine's [`EventType`] variant carries this same payload (M4 ships
+/// `EventType::YaraHuntChunk`), so engines keep separate queues, workers,
+/// budgets, and depth gauges while sharing one chassis.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "scylla-utils", derive(thorium_derive::ScyllaStoreJson))]
+pub struct HuntChunkEvent {
+    /// The hunt entity id
+    pub hunt: Uuid,
+    /// The lane index this chunk advances
+    pub lane: u32,
+    /// The checkpoint sequence this chunk will try to commit
+    pub seq: u64,
 }
 
 /// The data for an event
@@ -96,6 +186,10 @@ pub enum EventData {
     },
     /// A result with sigma scannable entities was added
     SigmaScannableResults(SigmaScannableResultsEvent),
+    /// A samples bytes became visible to new groups and can be scanned by yara rules
+    YaraScannableSample(YaraSampleScanEvent),
+    /// A chunk of a yara hunt is ready to advance one lane
+    YaraHuntChunk(HuntChunkEvent),
     /// A change that may require new workflow or toolset instances to be created
     WorkflowGraph(WorkflowGraphEvent),
     /// A model endpoint or credential whose models should be listed and checked
@@ -281,12 +375,8 @@ impl Event {
     ///
     /// Unlike `check_tag_trigger`, this returns a plain yes or no instead of a trigger potential
     #[must_use]
-    #[allow(
-        clippy::ptr_arg,
-        reason = "public thorium API used by the event handler; changing the parameter type is an API change"
-    )]
     pub fn check_all_tag_trigger(
-        visible: &Vec<String>,
+        visible: &[String],
         tags: &HashMap<String, HashMap<String, HashSet<String>>>,
         required: &HashMap<String, Vec<String>>,
         not: &HashMap<String, Vec<String>>,
@@ -390,6 +480,10 @@ impl Event {
             (EventData::NewSample { .. }, EventTrigger::Tag { .. }) => TriggerPotential::CanNot,
             (EventData::NewTags { .. }, EventTrigger::NewSample) => TriggerPotential::CanNot,
             (EventData::SigmaScannableResults { .. }, _) => TriggerPotential::CanNot,
+            // yara scan events are consumed by the yara scanner, never by reaction triggers
+            (EventData::YaraScannableSample { .. }, _) => TriggerPotential::CanNot,
+            // hunt chunk events are consumed by hunt workers, never by reaction triggers
+            (EventData::YaraHuntChunk { .. }, _) => TriggerPotential::CanNot,
             // workflow graph changes only rebuild instances and never start reactions
             (EventData::WorkflowGraph(_), _) => TriggerPotential::CanNot,
             // model refreshes only update model catalogs and never start reactions
@@ -444,6 +538,13 @@ pub struct EventPopOpts {
     /// The max number of events to pop and return
     #[serde(default = "default_event_pop_limit")]
     pub limit: usize,
+    /// The worker that will own the popped events
+    ///
+    /// Owned pops land in this workers own in flight keys so its events can be
+    /// reclaimed if it dies; owner-less pops keep the legacy shared in flight
+    /// keys for older clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker: Option<String>,
 }
 
 impl Default for EventPopOpts {
@@ -451,6 +552,7 @@ impl Default for EventPopOpts {
     fn default() -> Self {
         EventPopOpts {
             limit: default_event_pop_limit(),
+            worker: None,
         }
     }
 }
@@ -464,6 +566,18 @@ impl EventPopOpts {
     #[must_use]
     pub fn limit(mut self, limit: usize) -> Self {
         self.limit = limit;
+        self
+    }
+
+    /// Set the worker that will own the popped events
+    ///
+    /// # Arguments
+    ///
+    /// * `worker` - The worker id to own the popped events
+    #[must_use]
+    pub fn worker<T: Into<String>>(mut self, worker: T) -> Self {
+        // set the worker that will own the popped events
+        self.worker = Some(worker.into());
         self
     }
 }
@@ -535,11 +649,207 @@ pub struct EventMarks {
 }
 
 /// The current status of our event cache
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+///
+/// Each component of the event handlers cache has its own staleness flag so a
+/// change to one component (e.g. a new yara rule) only rebuilds that component.
+/// All fields default to false so an older API that only wrote the legacy
+/// single flag deserializes safely during a rolling upgrade.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct EventCacheStatus {
     /// Whether we need to refresh our triggers cache
+    #[serde(default)]
     pub triggers: bool,
+    /// Whether we need to refresh our users cache
+    #[serde(default)]
+    pub users: bool,
+    /// Whether we need to refresh our sigma rules cache
+    #[serde(default)]
+    pub sigma_rules: bool,
+    /// Whether we need to refresh our yara rules cache
+    #[serde(default)]
+    pub yara_rules: bool,
+    /// The monotonic generation counter for the triggers cache
+    ///
+    /// Unlike the staleness flags generation counters are never cleared so any
+    /// number of replicas can poll them without consuming each others updates.
+    #[serde(default)]
+    pub triggers_gen: u64,
+    /// The monotonic generation counter for the users cache
+    #[serde(default)]
+    pub users_gen: u64,
+    /// The monotonic generation counter for the sigma rules cache
+    #[serde(default)]
+    pub sigma_rules_gen: u64,
+    /// The monotonic generation counter for the yara rules cache
+    #[serde(default)]
+    pub yara_rules_gen: u64,
+}
+
+/// The queue depths for a single kind of event
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct KindDepth {
+    /// The number of events waiting in the pending queue
+    pub queued: u64,
+    /// The number of events currently in flight across all owners and the
+    /// legacy un-owned in flight queue
+    pub in_flight: u64,
+}
+
+/// The queue depths for every kind of event plus the live worker count
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct EventDepths {
+    /// The queue depths for each kind of event
+    pub kinds: HashMap<EventType, KindDepth>,
+    /// The number of event handler workers with a live heartbeat
+    pub workers: u64,
+}
+
+/// A summary of a single reap pass over the event handler worker registry
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct ReapSummary {
+    /// The number of dead workers that were removed from the registry
+    pub dead_workers: u64,
+    /// The number of events reclaimed from dead workers
+    pub reclaimed: u64,
+    /// The number of events reclaimed from live workers by the age backstop
+    pub backstopped: u64,
+    /// The number of events reclaimed from the legacy un-owned in flight keys
+    pub legacy_reclaimed: u64,
+}
+
+/// One workers cumulative counters for one event kind
+///
+/// Counters are cumulative since process start: a worker restart resets them
+/// to zero and event replay after a crash can inflate them, so consumers
+/// derive rates between readings and clamp negative deltas to zero. Flat
+/// stats key by field name while nested stats flatten to dotted paths
+/// (`total.scanned`, `by_entity.{kind}.scanned`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct WorkerStatsReport {
+    /// Flat counter map (stats-struct field name -> cumulative count)
+    pub counters: BTreeMap<String, u64>,
+    /// When the worker took this reading
+    pub reported_at: DateTime<Utc>,
+}
+
+impl WorkerStatsReport {
+    /// The max number of counters one report may carry
+    pub const MAX_COUNTERS: usize = 256;
+    /// The max length of a single counter name in bytes
+    pub const MAX_COUNTER_NAME_LEN: usize = 128;
+}
+
+/// Point-in-time stats for one kind of event
+///
+/// Counters are cumulative sums across this kinds live workers so they inherit
+/// the [`WorkerStatsReport`] caveats: a worker restart drops its contribution
+/// back to zero and event replay after a crash can inflate them. Consumers
+/// derive rates between readings and clamp negative deltas to zero.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct KindStats {
+    /// The number of events waiting in the pending queue
+    pub queued: u64,
+    /// The number of events currently in flight across all owners and the
+    /// legacy un-owned in flight queue
+    pub in_flight: u64,
+    /// Cumulative counters summed across this kinds live workers
+    pub counters: BTreeMap<String, u64>,
+}
+
+/// One persisted row of the scan stats time series
+///
+/// Snapshots persist only anonymous aggregates: numeric counters and gauges
+/// keyed by [`EventType`] plus a live worker count — never the per worker
+/// breakdown, worker ids, usernames, hunt names or ids, or group names. The
+/// rows are still admin-only telemetry though, since what the numbers reveal
+/// (system-wide activity levels) is admin-only data today.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct ScanStatsSnapshot {
+    /// The quantized instant this row covers (the clustering key)
+    pub snapshot_at: DateTime<Utc>,
+    /// How many live workers were registered when this snapshot was taken
+    pub workers: u64,
+    /// The per kind depths and summed counters
+    pub kinds: HashMap<EventType, KindStats>,
+}
+
+/// The live scan stats aggregate (`GET /api/events/stats/`)
+///
+/// Assembled at read time by intersecting the worker registry with the TTL'd
+/// per worker counter reports plus the queue depths; nothing here is ever
+/// persisted. Every event kind is always present so consumers see a stable
+/// key set even when no worker has published counters for a kind yet.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct EventStats {
+    /// When this aggregate was assembled
+    pub taken_at: DateTime<Utc>,
+    /// The number of event handler workers with a live heartbeat
+    pub workers: u64,
+    /// The per kind depths and summed counters
+    pub kinds: HashMap<EventType, KindStats>,
+    /// The per worker reports behind the per kind sums
+    ///
+    /// A wedged-but-still-beating worker shows up here with frozen counters,
+    /// which is exactly the case this breakdown exists to make debuggable.
+    pub per_worker: HashMap<String, HashMap<EventType, WorkerStatsReport>>,
+}
+
+/// The query params for reading the scan stats history
+///
+/// The range is half open (`start <= snapshot_at < end`) so pages tile with
+/// zero overlap. Responses are downsampled to the newest row per `step_secs`
+/// stride, capped around 5,000 points, and returned oldest first.
+#[derive(Deserialize, Serialize, Debug)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
+pub struct StatsHistoryParams {
+    /// The oldest instant to return rows from (inclusive)
+    pub start: DateTime<Utc>,
+    /// The newest instant to return rows up to (exclusive)
+    pub end: DateTime<Utc>,
+    /// The stride to downsample rows to in seconds
+    ///
+    /// Defaults to roughly 1,000 points across the range; floored at the
+    /// snapshot cadence and clamped so a response never exceeds the point cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_secs: Option<u64>,
+}
+
+/// The query params for scoping an event queue operation to a single worker
+///
+/// Clears and resets with a worker set act only on that workers own in flight
+/// keys; without one they keep acting on the legacy shared in flight keys.
+#[derive(Deserialize, Serialize, Debug, Default)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
+pub struct EventWorkerOpts {
+    /// The worker whose in flight events this operation applies to
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker: Option<String>,
+}
+
+impl EventWorkerOpts {
+    /// Set the worker this operation applies to
+    ///
+    /// # Arguments
+    ///
+    /// * `worker` - The worker id this operation applies to
+    #[must_use]
+    pub fn worker<T: Into<String>>(mut self, worker: T) -> Self {
+        // set the worker this operation applies to
+        self.worker = Some(worker.into());
+        self
+    }
 }
 
 /// The query params for getting the event cache status
@@ -825,6 +1135,239 @@ mod tests {
         );
     }
 
+    /// Build a yara scan event for trigger tests
+    ///
+    /// # Arguments
+    ///
+    /// * `depth` - The trigger depth to set on this event
+    fn yara_event(depth: u8) -> Event {
+        Event {
+            id: Uuid::new_v4(),
+            timestamp: Utc::now(),
+            parent: None,
+            user: "mcarson".to_owned(),
+            data: EventData::YaraScannableSample(YaraSampleScanEvent {
+                sha256: "a".repeat(64),
+                groups: vec!["corn".to_owned()],
+                trigger: YaraScanTrigger::NewSubmission,
+            }),
+            depth,
+        }
+    }
+
+    /// Yara scan events must never fire reaction triggers of any kind
+    #[test]
+    fn yara_event_could_trigger_cannot() {
+        // build a yara scan event
+        let event = yara_event(0);
+        // a yara scan event can never confirm a new sample trigger
+        assert!(matches!(
+            event.could_trigger(&EventTrigger::NewSample),
+            TriggerPotential::CanNot
+        ));
+        // a yara scan event can never confirm a tag trigger either
+        let tag_trigger = EventTrigger::Tag {
+            tag_types: vec![TagType::Files],
+            required: HashMap::default(),
+            not: HashMap::default(),
+        };
+        assert!(matches!(
+            event.could_trigger(&tag_trigger),
+            TriggerPotential::CanNot
+        ));
+    }
+
+    /// Yara scan event data must route to the yara event queue
+    #[test]
+    fn event_type_from_yara_data() {
+        // build a yara scan event
+        let event = yara_event(3);
+        // make sure this events data maps to the yara scannable sample queue
+        assert_eq!(EventType::from(&event.data), EventType::YaraScannableSample);
+        // make sure the originating trigger depth rides on the event itself
+        assert_eq!(event.depth, 3);
+    }
+
+    /// Build a yara hunt chunk event for hunt chunk tests
+    ///
+    /// # Arguments
+    ///
+    /// * `lane` - The lane index to set on this chunk event
+    fn hunt_chunk_event(lane: u32) -> Event {
+        Event {
+            id: Uuid::new_v4(),
+            timestamp: Utc::now(),
+            parent: None,
+            user: "mcarson".to_owned(),
+            data: EventData::YaraHuntChunk(HuntChunkEvent {
+                hunt: Uuid::new_v4(),
+                lane,
+                seq: 0,
+            }),
+            depth: 0,
+        }
+    }
+
+    /// Yara hunt chunk event data must route to the yara hunt chunk queue
+    #[test]
+    fn event_type_from_hunt_chunk_data() {
+        // build a yara hunt chunk event
+        let event = hunt_chunk_event(2);
+        // make sure this events data maps to the yara hunt chunk queue
+        assert_eq!(EventType::from(&event.data), EventType::YaraHuntChunk);
+    }
+
+    /// Hunt chunk events must never fire reaction triggers
+    #[test]
+    fn hunt_chunk_could_trigger_cannot() {
+        // build a yara hunt chunk event
+        let event = hunt_chunk_event(0);
+        // a hunt chunk event can never confirm a new sample trigger
+        assert!(matches!(
+            event.could_trigger(&EventTrigger::NewSample),
+            TriggerPotential::CanNot
+        ));
+        // a hunt chunk event can never confirm a tag trigger either
+        let tag_trigger = EventTrigger::Tag {
+            tag_types: vec![TagType::Files],
+            required: HashMap::default(),
+            not: HashMap::default(),
+        };
+        assert!(matches!(
+            event.could_trigger(&tag_trigger),
+            TriggerPotential::CanNot
+        ));
+    }
+
+    /// Hunt chunk event payloads must round trip through serde
+    #[test]
+    fn hunt_chunk_serde_round_trip() {
+        // build a hunt chunk payload with distinctive values
+        let chunk = HuntChunkEvent {
+            hunt: Uuid::new_v4(),
+            lane: 3,
+            seq: 42,
+        };
+        // serialize and deserialize the payload
+        let raw = serde_json::to_string(&chunk).expect("failed to serialize hunt chunk");
+        let round: HuntChunkEvent =
+            serde_json::from_str(&raw).expect("failed to deserialize hunt chunk");
+        // the payload must survive the round trip unchanged
+        assert_eq!(chunk, round);
+    }
+
+    /// Missing cache status fields must deserialize to false
+    ///
+    /// This guards rolling upgrades where an older API only wrote some of the
+    /// per component staleness flags or none of the generation counters.
+    #[test]
+    fn cache_status_serde_defaults() {
+        // deserialize a cache status that only carries the legacy triggers flag
+        let status: EventCacheStatus = serde_json::from_str(r#"{"triggers":true}"#)
+            .expect("failed to deserialize a partial cache status");
+        // the triggers flag must be set
+        assert!(status.triggers);
+        // every missing per component flag must default to false
+        assert!(!status.users);
+        assert!(!status.sigma_rules);
+        assert!(!status.yara_rules);
+        // every missing generation counter must default to 0
+        assert_eq!(status.triggers_gen, 0);
+        assert_eq!(status.users_gen, 0);
+        assert_eq!(status.sigma_rules_gen, 0);
+        assert_eq!(status.yara_rules_gen, 0);
+        // a cache status with generation counters must round trip them
+        let status: EventCacheStatus =
+            serde_json::from_str(r#"{"yara_rules":true,"yara_rules_gen":7,"users_gen":2}"#)
+                .expect("failed to deserialize a cache status with generations");
+        // the set generation counters must be preserved
+        assert_eq!(status.yara_rules_gen, 7);
+        assert_eq!(status.users_gen, 2);
+        // the unset generation counters must still default to 0
+        assert_eq!(status.triggers_gen, 0);
+        assert_eq!(status.sigma_rules_gen, 0);
+    }
+
+    /// Worker ids that only use key safe characters must be accepted
+    #[test]
+    fn worker_id_validation_accepts_safe_ids() {
+        // every id below only uses key safe characters within the length bound
+        for worker in [
+            "event-handler-7f3a9b2c",
+            "pod.name_0",
+            "A",
+            &"a".repeat(128),
+        ] {
+            assert!(valid_worker_id(worker), "{worker} should be valid");
+        }
+    }
+
+    /// Worker ids that could break out of a Redis key must be rejected
+    #[test]
+    fn worker_id_validation_rejects_unsafe_ids() {
+        // every id below is either empty, too long, or carries unsafe characters
+        for worker in [
+            "",
+            &"a".repeat(129) as &str,
+            "with:colon",
+            "with space",
+            "with/slash",
+            "with*glob",
+            "newline\nin-id",
+            "tab\tin-id",
+            "unicode-𝕏",
+        ] {
+            assert!(!valid_worker_id(worker), "{worker:?} should be invalid");
+        }
+    }
+
+    /// Reap summaries must round trip through serde unchanged
+    #[test]
+    fn reap_summary_serde_round_trip() {
+        // build a reap summary with every field set to a distinct value
+        let summary = ReapSummary {
+            dead_workers: 1,
+            reclaimed: 2,
+            backstopped: 3,
+            legacy_reclaimed: 4,
+        };
+        // serialize and deserialize this summary
+        let serialized = serde_json::to_string(&summary).expect("failed to serialize summary");
+        let round_tripped: ReapSummary =
+            serde_json::from_str(&serialized).expect("failed to deserialize summary");
+        // the round tripped summary must match the original
+        assert_eq!(summary, round_tripped);
+    }
+
+    /// Event depths must round trip through serde unchanged
+    #[test]
+    fn event_depths_serde_round_trip() {
+        // build the per kind depths for every event type
+        let mut kinds = HashMap::default();
+        kinds.insert(
+            EventType::ReactionTrigger,
+            KindDepth {
+                queued: 5,
+                in_flight: 1,
+            },
+        );
+        kinds.insert(
+            EventType::YaraScannableSample,
+            KindDepth {
+                queued: 0,
+                in_flight: 9,
+            },
+        );
+        // build the full depths object
+        let depths = EventDepths { kinds, workers: 2 };
+        // serialize and deserialize these depths
+        let serialized = serde_json::to_string(&depths).expect("failed to serialize depths");
+        let round_tripped: EventDepths =
+            serde_json::from_str(&serialized).expect("failed to deserialize depths");
+        // the round tripped depths must match the original
+        assert_eq!(depths, round_tripped);
+    }
+
     /// When the required value IS present and visible, the trigger fires. This pins the positive
     /// case so the required-value check can't regress into never firing.
     #[test]
@@ -843,5 +1386,92 @@ mod tests {
             Event::check_all_tag_trigger(&visible, &tags, &required, &not),
             "a trigger requiring family=emotet must fire on a sample tagged family=emotet"
         );
+    }
+
+    /// Recursively collect every object key a json value carries
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The json value to walk
+    /// * `keys` - The set collecting every object key seen
+    fn collect_keys(value: &serde_json::Value, keys: &mut std::collections::BTreeSet<String>) {
+        match value {
+            // collect this objects keys then recurse into its values
+            serde_json::Value::Object(map) => {
+                for (key, nested) in map {
+                    keys.insert(key.clone());
+                    collect_keys(nested, keys);
+                }
+            }
+            // recurse into array items
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    collect_keys(item, keys);
+                }
+            }
+            // scalars carry no keys
+            _ => (),
+        }
+    }
+
+    /// Pin that a persisted snapshot serializes with no identifier fields
+    ///
+    /// `scan_stats` rows are the exact serialization of [`ScanStatsSnapshot`],
+    /// so pinning the recursive key set here pins what the time series can
+    /// ever leak: numeric counters and gauges keyed by [`EventType`] plus a
+    /// worker count — never the per worker breakdown, worker ids, usernames,
+    /// hunt names or ids, or group names. Growing this struct means
+    /// consciously editing this pin.
+    #[test]
+    fn scan_stats_snapshot_pins_no_identifiers() {
+        // build a populated snapshot like the writer persists
+        let kind_stats = KindStats {
+            queued: 3,
+            in_flight: 1,
+            counters: BTreeMap::from([("scanned".to_owned(), 9), ("total.scanned".to_owned(), 2)]),
+        };
+        let snapshot = ScanStatsSnapshot {
+            snapshot_at: Utc::now(),
+            workers: 2,
+            kinds: HashMap::from([(EventType::YaraScannableSample, kind_stats)]),
+        };
+        // serialize exactly like the scan_stats writer does
+        let serialized = serde_json::to_value(&snapshot).expect("snapshot must serialize");
+        // collect every object key the persisted shape carries
+        let mut keys = std::collections::BTreeSet::new();
+        collect_keys(&serialized, &mut keys);
+        // the full key set is pinned: struct fields, the kind, and counter names
+        let expected: std::collections::BTreeSet<String> = [
+            "snapshot_at",
+            "workers",
+            "kinds",
+            "YaraScannableSample",
+            "queued",
+            "in_flight",
+            "counters",
+            "scanned",
+            "total.scanned",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        assert_eq!(
+            keys, expected,
+            "persisted snapshots grew a field; make sure it carries no identifiers"
+        );
+        // belt and braces: the fields a snapshot must never carry stay absent
+        for forbidden in [
+            "per_worker",
+            "worker",
+            "submitter",
+            "username",
+            "name",
+            "groups",
+        ] {
+            assert!(
+                !keys.contains(forbidden),
+                "persisted snapshots must never carry {forbidden}"
+            );
+        }
     }
 }

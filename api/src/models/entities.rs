@@ -1,5 +1,9 @@
 //! Structures related to Thorium "Entities"
 
+// allow clone on copy lints when building python bindings since pyo3's
+// from_py_object impl clones the Copy EntityKinds enum internally
+#![cfg_attr(feature = "python", allow(clippy::clone_on_copy))]
+
 use chrono::{DateTime, Utc};
 use gxhash::GxHasher;
 use linearize::Linearize;
@@ -24,12 +28,15 @@ pub mod digests;
 pub mod filesystem;
 pub mod flags;
 pub mod functions;
+pub mod hits;
+pub mod hunts;
 pub mod incident;
 pub mod models;
 pub mod network_activity;
 pub mod pe;
 pub mod processes;
 pub mod rules;
+pub mod rulesets;
 pub mod shared;
 pub mod tools;
 pub mod toolsets;
@@ -42,6 +49,8 @@ use filesystem::{FileSystemEntity, FileSystemFolderEntity};
 use flags::Confidence;
 use flags::Flag;
 use functions::{CompiledFunction, CompiledInstruction, DecompiledFunction};
+use hits::YaraRuleHit;
+use hunts::Hunt;
 use incident::{Incident, IncidentRequest};
 use models::{
     ModelCredentialEntity, ModelCredentialEntityRequest, ModelEndpointEntity,
@@ -50,7 +59,8 @@ use models::{
 use network_activity::NetworkConnection;
 use pe::{PeImportEntity, PeSectionEntity};
 use processes::{WindowsProcessEntity, WindowsProcessTreeEntity};
-use rules::{SigmaRule, SigmaRuleAppliesTo};
+use rules::{SigmaRule, SigmaRuleAppliesTo, YaraRule, YaraRuleAppliesTo};
+use rulesets::{RuleSet, RuleSetRequest};
 use tools::{ToolEntity, ToolEntityRequest, ToolInstanceEntity, ToolInstanceEntityRequest};
 use toolsets::{ToolSetEntity, ToolSetEntityRequest, ToolSetInstanceEntityRequest};
 use workflows::{
@@ -77,7 +87,7 @@ cfg_if::cfg_if! {
         use chrono::TimeZone;
 
         use network_activity::{NetConState, TransportLayerProtocol};
-        use rules::SigmaActionToTake;
+        use rules::{SigmaActionToTake, YaraActionToTake};
         use shared::CriticalSector;
         use super::{TagRequest, User, TagDeleteRequest, Group, GroupAllowAction, UnhashedTreeBranch};
         use crate::utils::{ApiError, Shared};
@@ -130,6 +140,35 @@ cfg_if::cfg_if! {
             pub sigma_applies_to: Vec<SigmaRuleAppliesTo>,
             /// The action to take when a sigma rule hits
             pub sigma_actions: Vec<SigmaActionToTake>,
+            /// A yara rule source document
+            pub yara_rule: Option<String>,
+            /// What this yara rule applies too
+            pub yara_applies_to: Vec<YaraRuleAppliesTo>,
+            /// The action to take when a yara rule hits
+            pub yara_actions: Vec<YaraActionToTake>,
+            /// The rule entity id half of a yara hits identity
+            pub yara_hit_rule_id: Option<Uuid>,
+            /// The sample sha256 half of a yara hits identity
+            pub yara_hit_sha256: Option<String>,
+            /// The name of the yara rule entity at scan time
+            pub yara_hit_rule_name: Option<String>,
+            /// The content hash of the rule source that fired
+            pub yara_hit_rule_hash: Option<String>,
+            /// The hash of the compiled ruleset build the hit came from
+            pub yara_hit_ruleset_hash: Option<String>,
+            /// The yara engine version that evaluated the rule
+            pub yara_hit_engine_version: Option<String>,
+            /// When the hit was produced
+            pub yara_hit_scanned_at: Option<chrono::DateTime<chrono::Utc>>,
+            /// The matched rule info for the hit
+            pub yara_hit_matched: Vec<hits::MatchedRule>,
+            /// The ids of the rule entities that are members of a rule set
+            pub ruleset_rules: Vec<Uuid>,
+            /// Hunt metadata built server side by the dedicated hunt create route
+            ///
+            /// No multipart parser arm ever sets this field: hunts cannot be
+            /// created through the generic multipart surface.
+            pub hunt: Option<Hunt>,
             /// The score that a rule applies
             pub score: Option<i64>,
             /// How suspicious this flag is where higher numbers are more suspicious
@@ -368,6 +407,20 @@ cfg_if::cfg_if! {
             pub add_sigma_actions: Vec<SigmaActionToTake>,
             /// The actions to remove by their index in this vec
             pub remove_sigma_actions: BTreeSet<usize>,
+            /// A yara rule source document
+            pub yara_rule: Option<String>,
+            /// The new things this yara rule should apply too
+            pub add_yara_applies_to: Vec<YaraRuleAppliesTo>,
+            /// The things this yara rule should no longer apply too
+            pub remove_yara_applies_to: Vec<YaraRuleAppliesTo>,
+            /// The new actions to take when a yara rule hits
+            pub add_yara_actions: Vec<YaraActionToTake>,
+            /// The actions to remove by their index in this vec
+            pub remove_yara_actions: BTreeSet<usize>,
+            /// The rule entity ids to add to a rule set
+            pub add_ruleset_rules: Vec<Uuid>,
+            /// The rule entity ids to remove from a rule set
+            pub remove_ruleset_rules: Vec<Uuid>,
             /// The score that a rule applies
             pub score: Option<i64>,
             /// How suspicious this flag is where higher numbers are more suspicious
@@ -753,6 +806,14 @@ impl KeySupport for Entity {
 }
 
 #[cfg(any(feature = "api", feature = "client"))]
+impl crate::models::backends::NotificationSupport for Entity {
+    /// Provide the entity notification type
+    fn notification_type() -> crate::models::NotificationType {
+        crate::models::NotificationType::Entities
+    }
+}
+
+#[cfg(any(feature = "api", feature = "client"))]
 impl TagSupport for Entity {
     /// Get the tag kind to write to the DB
     fn tag_kind() -> TagType {
@@ -822,7 +883,10 @@ impl TagSupport for Entity {
             )
             .await?;
         }
-        Ok(())
+        // tags on rule kind entities feed the event handlers rule caches (e.g.
+        // quarantine status tags) so mark the matching rule cache as stale;
+        // this is a no-op for every other entity kind
+        super::backends::db::events::set_rules_stale(self.kind, shared).await
     }
 
     /// Delete some tags from this entity
@@ -893,7 +957,10 @@ impl TagSupport for Entity {
             )
             .await?;
         }
-        Ok(())
+        // tag deletes on rule kind entities also change what the event handlers
+        // rule caches should contain so mark the matching rule cache as stale;
+        // this is a no-op for every other entity kind
+        super::backends::db::events::set_rules_stale(self.kind, shared).await
     }
 
     /// Gets tags for a specific entity
@@ -1016,6 +1083,27 @@ pub enum EntityMetadata {
     ModelProfile(ModelProfileEntity),
     /// A credential model endpoints authenticate with
     ModelCredential(ModelCredentialEntity),
+    /// A yara rule to apply to data
+    ///
+    /// This is appended at the end to keep the discriminant order of the
+    /// existing variants stable for rkyv archived backups
+    YaraRule(YaraRule),
+    /// A yara rule hit against a sample
+    ///
+    /// This is appended at the end to keep the discriminant order of the
+    /// existing variants stable for rkyv archived backups
+    YaraRuleHit(YaraRuleHit),
+    /// A named group of associated rules of any engine
+    ///
+    /// This is appended at the end to keep the discriminant order of the
+    /// existing variants stable for rkyv archived backups
+    RuleSet(RuleSet),
+    /// A user-created, bounded, paced pass of a frozen rule snapshot over
+    /// historical data
+    ///
+    /// This is appended at the end to keep the discriminant order of the
+    /// existing variants stable for rkyv archived backups
+    Hunt(Hunt),
 }
 
 impl EntityMetadata {
@@ -1092,6 +1180,16 @@ pub enum EntityMetadataRequest {
     ModelCredential(ModelCredentialEntityRequest),
     /// An entity that can't be described by any of the other variants
     Other,
+    /// A yara rule to apply to data
+    ///
+    /// This is appended after `Other` to mirror [`EntityMetadata`]'s variant order
+    YaraRule(YaraRule),
+    /// A yara rule hit against a sample
+    YaraRuleHit(YaraRuleHit),
+    /// A named group of associated rules of any engine
+    ///
+    /// This is appended at the end to mirror [`EntityMetadata`]'s variant order
+    RuleSet(RuleSetRequest),
 }
 
 impl serde::Serialize for EntityMetadataRequest {
@@ -1202,6 +1300,9 @@ impl EntityMetadataRequest {
             EntityMetadataRequest::ModelCredential(credential) => credential.add_to_form(form),
             // just set our kind to other
             EntityMetadataRequest::Other => Ok(form.text("kind", EntityKinds::Other.as_str())),
+            EntityMetadataRequest::YaraRule(rule) => rule.add_to_form(form),
+            EntityMetadataRequest::YaraRuleHit(hit) => hit.add_to_form(form),
+            EntityMetadataRequest::RuleSet(ruleset) => ruleset.add_to_form(form),
         }
     }
 
@@ -1235,6 +1336,9 @@ impl EntityMetadataRequest {
             EntityMetadataRequest::ModelProfile(_) => EntityKinds::ModelProfile,
             EntityMetadataRequest::ModelCredential(_) => EntityKinds::ModelCredential,
             EntityMetadataRequest::Other => EntityKinds::Other,
+            EntityMetadataRequest::YaraRule(_) => EntityKinds::YaraRule,
+            EntityMetadataRequest::YaraRuleHit(_) => EntityKinds::YaraRuleHit,
+            EntityMetadataRequest::RuleSet(_) => EntityKinds::RuleSet,
         }
     }
 
@@ -1287,6 +1391,9 @@ impl EntityMetadataRequest {
             | Self::ModelEndpoint(_)
             | Self::ModelProfile(_)
             | Self::ModelCredential(_)
+            | Self::YaraRule(_)
+            | Self::YaraRuleHit(_)
+            | Self::RuleSet(_)
             | Self::Other => Ok(None),
         }
     }
@@ -1337,6 +1444,10 @@ pub enum IdentifyingEntityInfo<'a> {
     },
     /// A sigma rule to apply to data
     SigmaRule { rule: &'a String },
+    /// A yara rule to apply to data
+    YaraRule { rule: &'a String },
+    /// A yara rule hit against a sample
+    YaraRuleHit { rule_id: Uuid, sha256: &'a String },
     /// A flag on some suspicious data
     Flag {
         suspicion: i64,
@@ -1383,6 +1494,11 @@ impl<'a> From<&'a EntityMetadata> for IdentifyingEntityInfo<'a> {
                 destination_port: conn.destination_port,
             },
             EntityMetadata::SigmaRule(rule) => Self::SigmaRule { rule: &rule.rule },
+            EntityMetadata::YaraRule(rule) => Self::YaraRule { rule: &rule.rule },
+            EntityMetadata::YaraRuleHit(hit) => Self::YaraRuleHit {
+                rule_id: hit.rule_id,
+                sha256: &hit.sha256,
+            },
             EntityMetadata::Flag(flag) => Self::Flag {
                 suspicion: flag.suspicion,
                 confidence: flag.confidence,
@@ -1416,6 +1532,8 @@ impl<'a> From<&'a EntityMetadata> for IdentifyingEntityInfo<'a> {
             | EntityMetadata::ModelEndpoint(_)
             | EntityMetadata::ModelProfile(_)
             | EntityMetadata::ModelCredential(_)
+            | EntityMetadata::RuleSet(_)
+            | EntityMetadata::Hunt(_)
             | EntityMetadata::Other => Self::Unidentifiable,
         }
     }
@@ -1443,6 +1561,11 @@ impl<'a> From<&'a EntityMetadataRequest> for IdentifyingEntityInfo<'a> {
                 destination_port: conn.destination_port,
             },
             EntityMetadataRequest::SigmaRule(rule) => Self::SigmaRule { rule: &rule.rule },
+            EntityMetadataRequest::YaraRule(rule) => Self::YaraRule { rule: &rule.rule },
+            EntityMetadataRequest::YaraRuleHit(hit) => Self::YaraRuleHit {
+                rule_id: hit.rule_id,
+                sha256: &hit.sha256,
+            },
             EntityMetadataRequest::Flag(flag) => Self::Flag {
                 suspicion: flag.suspicion,
                 confidence: flag.confidence,
@@ -1474,6 +1597,7 @@ impl<'a> From<&'a EntityMetadataRequest> for IdentifyingEntityInfo<'a> {
             | EntityMetadataRequest::ModelEndpoint(_)
             | EntityMetadataRequest::ModelProfile(_)
             | EntityMetadataRequest::ModelCredential(_)
+            | EntityMetadataRequest::RuleSet(_)
             | EntityMetadataRequest::Other => Self::Unidentifiable,
         }
     }
@@ -1484,6 +1608,15 @@ impl EntityKinds {
     #[must_use]
     pub fn as_str(&self) -> &str {
         self.as_ref()
+    }
+
+    /// Whether this entity kind is a rule for some scan engine
+    ///
+    /// Rule sets accept members of any rule kind so this must cover every
+    /// engine's rule kind as engines are added.
+    #[must_use]
+    pub fn is_rule(&self) -> bool {
+        matches!(self, EntityKinds::SigmaRule | EntityKinds::YaraRule)
     }
 
     /// Convert this entity kind to a [`SigmaRuleAppliesTo`] if possible
@@ -1506,6 +1639,10 @@ impl EntityKinds {
             | Self::PeSection
             | Self::PeImport
             | Self::SigmaRule
+            | Self::YaraRule
+            | Self::YaraRuleHit
+            | Self::RuleSet
+            | Self::Hunt
             | Self::Flag
             | Self::Incident
             | Self::Tool
@@ -1551,6 +1688,10 @@ impl EntityKinds {
             | Self::WindowsProcess
             | Self::NetworkConnection
             | Self::SigmaRule
+            | Self::YaraRule
+            | Self::YaraRuleHit
+            | Self::RuleSet
+            | Self::Hunt
             | Self::Flag
             | Self::Incident
             | Self::CompiledFunction
@@ -1580,6 +1721,8 @@ impl EntityKinds {
             | Self::PeSection
             | Self::PeImport
             | Self::SigmaRule
+            | Self::YaraRule
+            | Self::YaraRuleHit
             | Self::Flag
             | Self::Incident
             | Self::CompiledFunction
@@ -1594,6 +1737,8 @@ impl EntityKinds {
             | Self::ModelEndpoint
             | Self::ModelProfile
             | Self::ModelCredential
+            | Self::RuleSet
+            | Self::Hunt
             | Self::Other => &[],
         }
     }
@@ -1738,6 +1883,8 @@ impl EntityRequest {
             | EntityMetadataRequest::PeSection(_)
             | EntityMetadataRequest::PeImport(_)
             | EntityMetadataRequest::SigmaRule(_)
+            | EntityMetadataRequest::YaraRule(_)
+            | EntityMetadataRequest::YaraRuleHit(_)
             | EntityMetadataRequest::Flag(_)
             | EntityMetadataRequest::Incident(_)
             | EntityMetadataRequest::CompiledFunction(_)
@@ -1752,6 +1899,7 @@ impl EntityRequest {
             | EntityMetadataRequest::ModelEndpoint(_)
             | EntityMetadataRequest::ModelProfile(_)
             | EntityMetadataRequest::ModelCredential(_)
+            | EntityMetadataRequest::RuleSet(_)
             | EntityMetadataRequest::Other => None,
         }
     }
@@ -2053,6 +2201,19 @@ impl EntityListParams {
             },
         }
     }
+}
+
+/// The query params for looking entities up by their exact name
+#[derive(Deserialize, Debug)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
+pub struct EntityByNameParams {
+    /// The exact name to look up
+    pub name: String,
+    /// The entity kinds to include (defaults to all kinds)
+    #[serde(default = "default_entity_kinds")]
+    pub kinds: Vec<EntityKinds>,
 }
 
 // A single entity line missing supplementary data like name and kind
@@ -2558,6 +2719,28 @@ pub enum EntityMetadataUpdate {
         /// Bans to add to or remove from this credential
         bans: models::ModelBanUpdate,
     },
+    /// Updates for a yara rule entity
+    YaraRule {
+        /// The new yara rule to set
+        yara_rule: Option<String>,
+        /// The new score to set
+        score: Option<i64>,
+        /// The things this rule should also apply to
+        add_applies_to: Vec<YaraRuleAppliesTo>,
+        /// The things this rule should no longer apply to
+        remove_applies_to: Vec<YaraRuleAppliesTo>,
+        /// The actions to add to this rule
+        add_actions: Vec<rules::YaraActionToTake>,
+        /// The action indices to remove from this rule
+        remove_actions: std::collections::BTreeSet<usize>,
+    },
+    /// Updates for a rule set entity
+    RuleSet {
+        /// The rule entity ids to add to this rule set
+        add_rules: Vec<Uuid>,
+        /// The rule entity ids to remove from this rule set
+        remove_rules: Vec<Uuid>,
+    },
 }
 
 impl EntityMetadataUpdate {
@@ -3016,6 +3199,48 @@ impl EntityMetadataUpdate {
                 form = models::update_form_fields(&update)?
                     .into_iter()
                     .fold(form, |form, (name, value)| form.text(name, value));
+            }
+            EntityMetadataUpdate::YaraRule {
+                mut yara_rule,
+                score,
+                mut add_applies_to,
+                mut remove_applies_to,
+                add_actions,
+                remove_actions,
+            } => {
+                // set the rule body and score
+                form = crate::multipart_text!(form, "metadata[yara_rule]", yara_rule);
+                form = crate::multipart_text_to_string!(form, "metadata[score]", score);
+                // add/remove what this rule applies to (sent as their string representation)
+                form = crate::multipart_list_conv!(
+                    form,
+                    "metadata[add_yara_applies_to][]",
+                    add_applies_to
+                );
+                form = crate::multipart_list_conv!(
+                    form,
+                    "metadata[remove_yara_applies_to][]",
+                    remove_applies_to
+                );
+                // yara actions are serialized to json per element
+                crate::multipart_list_serialize!(form, "metadata[add_yara_actions][]", add_actions);
+                // action indices to remove are sent as plain integers
+                for index in remove_actions {
+                    form = form.text("metadata[remove_yara_actions][]", index.to_string());
+                }
+            }
+            EntityMetadataUpdate::RuleSet {
+                mut add_rules,
+                mut remove_rules,
+            } => {
+                // add/remove this rule sets member rules by their entity ids
+                form =
+                    crate::multipart_list_conv!(form, "metadata[add_ruleset_rules][]", add_rules);
+                form = crate::multipart_list_conv!(
+                    form,
+                    "metadata[remove_ruleset_rules][]",
+                    remove_rules
+                );
             }
         }
         Ok(form)

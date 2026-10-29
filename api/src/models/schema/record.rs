@@ -1173,8 +1173,11 @@ pub async fn read_job_result(
         .map(|JsonText(result)| result))
 }
 
-/// Whether an object is one of the two registered legacy objects older releases created and the
-/// registry no longer declares
+/// Whether an object is one older releases created that revisions in the support window don't
+/// declare, so a seed tolerates it as a live extra
+///
+/// The `entities_by_name` view is declared again by this build, but the revisions whose snapshots
+/// a seed can compare with retired it, so a live keyspace holding it is still expected.
 ///
 /// # Arguments
 ///

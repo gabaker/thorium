@@ -99,7 +99,18 @@ fn canned_scylla_rows_normalize_to_the_declared_forms() {
     for (name, text) in CAPTURED_ROWS {
         // every declared object observes exactly as declared
         let observed = by_name(rows(text).objects().expect("the rows canonicalize"));
+        // the captures predate yara scanning's objects: both lack its scan stats table, and
+        // only the older keyspace holds the entities_by_name view it was created with
+        let predates: &[&str] = if name.ends_with("legacy") {
+            &["scan_stats"]
+        } else {
+            &["scan_stats", "entities_by_name"]
+        };
         for (object, expected) in &declared {
+            // skip the declared objects this capture predates
+            if predates.contains(&object.as_str()) {
+                continue;
+            }
             let found = observed.get(object);
             assert_eq!(found, Some(expected), "{name}: {object}");
         }
@@ -110,7 +121,7 @@ fn canned_scylla_rows_normalize_to_the_declared_forms() {
             .cloned()
             .collect::<Vec<_>>();
         let expected_extra: &[&str] = if name.ends_with("legacy") {
-            &["entities_by_name", "events"]
+            &["events"]
         } else {
             &[]
         };

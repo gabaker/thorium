@@ -286,6 +286,7 @@ const EXPECTED_CLASSES: &[(Store, &str, DataClass)] = &[
     (Store::ScyllaTable, "notifications", DataClass::Core),
     (Store::ScyllaTable, "nodes", DataClass::Core),
     (Store::ScyllaTable, "logs", DataClass::Runtime),
+    (Store::ScyllaTable, "scan_stats", DataClass::Runtime),
     (Store::ScyllaTable, "events", DataClass::Runtime),
     (Store::ScyllaTable, "schema_migrations", DataClass::Core),
     (
@@ -384,6 +385,7 @@ const EXPECTED_CLASSES: &[(Store, &str, DataClass)] = &[
     (Store::S3, "graphics", DataClass::Core),
     (Store::S3, "ephemeral", DataClass::Runtime),
     (Store::S3, "reaction_cache", DataClass::Runtime),
+    (Store::S3, "yara_rulesets", DataClass::Derived),
 ];
 
 /// The class every Redis layout family is expected to carry, in `REDIS_FAMILIES` order

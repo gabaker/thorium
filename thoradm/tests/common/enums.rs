@@ -107,6 +107,10 @@ pub fn entity_kinds() -> Vec<EntityKinds> {
         EntityKinds::ModelEndpoint,
         EntityKinds::ModelProfile,
         EntityKinds::ModelCredential,
+        EntityKinds::YaraRule,
+        EntityKinds::YaraRuleHit,
+        EntityKinds::RuleSet,
+        EntityKinds::Hunt,
     ]
 }
 
@@ -145,6 +149,10 @@ pub fn entity_kind_index(value: &EntityKinds) -> usize {
         EntityKinds::ModelEndpoint => 23,
         EntityKinds::ModelProfile => 24,
         EntityKinds::ModelCredential => 25,
+        EntityKinds::YaraRule => 26,
+        EntityKinds::YaraRuleHit => 27,
+        EntityKinds::RuleSet => 28,
+        EntityKinds::Hunt => 29,
     }
 }
 
@@ -201,6 +209,7 @@ pub fn notification_types() -> Vec<NotificationType> {
         NotificationType::ModelProfiles,
         NotificationType::ModelCredentials,
         NotificationType::Users,
+        NotificationType::Entities,
     ]
 }
 
@@ -219,6 +228,7 @@ pub fn notification_type_index(value: &NotificationType) -> usize {
         NotificationType::ModelProfiles => 3,
         NotificationType::ModelCredentials => 4,
         NotificationType::Users => 5,
+        NotificationType::Entities => 6,
     }
 }
 
@@ -306,6 +316,9 @@ pub fn association_kinds() -> Vec<AssociationKind> {
         AssociationKind::BuiltFrom,
         AssociationKind::Includes,
         AssociationKind::Provides,
+        AssociationKind::YaraRuleHit,
+        AssociationKind::RuleSetMember,
+        AssociationKind::HuntHit,
     ]
 }
 
@@ -353,6 +366,9 @@ pub fn association_kind_index(value: &AssociationKind) -> usize {
         AssociationKind::BuiltFrom => 32,
         AssociationKind::Includes => 33,
         AssociationKind::Provides => 34,
+        AssociationKind::YaraRuleHit => 35,
+        AssociationKind::RuleSetMember => 36,
+        AssociationKind::HuntHit => 37,
     }
 }
 

@@ -1,0 +1,20 @@
+[book]
+authors = ["Michael Carson", "Gavin Baker", "Jake Hamzawi"]
+language = "en"
+src = "src"
+title = "Thorium Developer Docs"
+
+[build]
+create-missing = true
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
+
+[output.html.fold]
+enable = true
+level = 1

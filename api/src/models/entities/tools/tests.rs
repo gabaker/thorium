@@ -30,8 +30,9 @@ mod model_api;
 ///
 /// * `properties` - The schema of each top-level property
 fn schema(properties: &Value) -> serde_json::Map<String, Value> {
-    // build an object schema with these properties
-    let value = json!({"type": "object", "properties": properties});
+    // keys are inserted in the alphabetical order stored specs were serialized with, since
+    // yara-x enables serde_json's preserve_order and maps now serialize in insertion order
+    let value = json!({"properties": properties, "type": "object"});
     value.as_object().unwrap().clone()
 }
 

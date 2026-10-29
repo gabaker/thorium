@@ -270,12 +270,13 @@ operator:
 ```
 
 Thorium's buckets are named after the Thorium namespace by default: `<namespace>-files`,
-`-repos`, `-attachments`, `-results`, `-ephemeral`, `-graphics`, and `-reaction-cache-files`,
-so the `thorium` namespace uses `thorium-files` and so on, and `dev-thorium` gets
-`dev-thorium-files` and so on. Two Thorium namespaces sharing an S3 endpoint must not share
+`-repos`, `-attachments`, `-results`, `-ephemeral`, `-graphics`, `-reaction-cache-files`, and
+`-yara-rulesets`, so the `thorium` namespace uses `thorium-files` and so on, and `dev-thorium`
+gets `dev-thorium-files` and so on. Two Thorium namespaces sharing an S3 endpoint must not share
 buckets. To use other names, set `operator.cluster.config.thorium.<kind>.bucket` (for example
-`thorium.files.bucket`); names set there win over the defaults, and a deployment converted from
-the pre-Helm scripts keeps the names it had.
+`thorium.files.bucket`; the yara ruleset cache's key is `thorium.yara.cache_bucket`); names set
+there win over the defaults, and a deployment converted from the pre-Helm scripts keeps the names
+it had.
 
 Development builds of the chart before these defaults named every namespace's buckets
 `thorium-*` (and left the reaction cache at `thorium-reaction-cache-files`). A chart install from
@@ -302,6 +303,8 @@ operator:
           bucket: thorium-graphics
         reaction_cache:
           bucket: thorium-reaction-cache-files
+        yara:
+          cache_bucket: thorium-yara-rulesets
 ```
 
 Installs in the `thorium` namespace and deployments converted from the pre-Helm scripts keep their

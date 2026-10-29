@@ -19,7 +19,7 @@ api = [
   "axum", "http", "tower", "axum-macros", "tower-http", "tokio-stream", "generic-array", "futures-util", "tokio-util", "serde_qs",
   "aws-sdk-s3", "aws-types", "aws-smithy-http", "aws-credential-types", "scylla-utils", "http-body", "axum-extra", "once_cell", "utoipa",
   "utoipa-swagger-ui", "lettre", "headers", "percent-encoding", "dashmap", "scc", "mime", "rmcp", "openidconnect", "humantime",
-  "grep", "constant_time_eq", "serde_json_canonicalizer", "jsonschema", "client", "trace"
+  "grep", "constant_time_eq", "serde_json_canonicalizer", "jsonschema", "client", "trace", "yara-x"
   ]
 
 # include scylla utility functions
@@ -167,6 +167,7 @@ scc = { version = "3.7", optional = true }
 mime = { version = "0.3", optional = true }
 bytesize = { version = "2.1.0", features = ["serde"] }
 sigma-rust = { workspace = true }
+yara-x = { workspace = true, optional = true }
 openidconnect = { version = "4", features = ["reqwest"], optional = true }
 humantime = { version = "2.3", optional = true }
 grep = { version = "0.4", optional = true }
@@ -236,6 +237,10 @@ name = "entities_other"
 path = "tests/entities/other.rs"
 
 [[test]]
+name = "entities_by_name"
+path = "tests/entities/by_name.rs"
+
+[[test]]
 name = "entities_vendor"
 path = "tests/entities/vendor.rs"
 
@@ -250,6 +255,22 @@ path = "tests/entities/flag.rs"
 [[test]]
 name = "entities_sigma"
 path = "tests/entities/sigma.rs"
+
+[[test]]
+name = "entities_yara"
+path = "tests/entities/yara.rs"
+
+[[test]]
+name = "entities_yara_hit"
+path = "tests/entities/yara_hit.rs"
+
+[[test]]
+name = "entities_ruleset"
+path = "tests/entities/ruleset.rs"
+
+[[test]]
+name = "entities_hunt"
+path = "tests/entities/hunt.rs"
 
 [[test]]
 name = "entities_network_connection"

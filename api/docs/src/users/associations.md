@@ -23,7 +23,11 @@ it. When listing, the direction is shown relative to the object you are listing:
 The available association kinds are: `FileFor`, `DocumentationFor`, `FirmwareFor`, `AssociatedWith`,
 `DevelopedBy`, `ContainsCVE`, `ContainsCWE`, `BasedIn`, `EmployedBy`, `ParentCompanyOf`, `UsedBy`, `UsedIn`,
 `PerformedBy`, `FileSystemIn`, `FolderIn`, `FileIn`, `ProcessTreeIn`, `ChildProcess`, `HasNetworkConnection`,
-`SectionIn`, `ImportIn`, `FlagFor`, `CreatedBy`, `SigmaRuleHit`, and `InvolvedIn`.
+`SectionIn`, `ImportIn`, `FlagFor`, `CreatedBy`, `SigmaRuleHit`, `YaraRuleHit`, `HuntHit`, `RuleSetMember`,
+and `InvolvedIn`.
+
+> The `YaraRuleHit`, `HuntHit`, and `RuleSetMember` kinds are written automatically by
+> [rule scanning](./yara_rules.md), [hunts](./hunts.md), and [rule sets](./rule_sets.md).
 
 ## Creating Associations (Thorctl)
 ---

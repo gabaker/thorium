@@ -86,6 +86,7 @@ const PeImportColor = '#4895ef';
 const WindowsProcessTreeColor = '#808000';
 // grown windows processes share the yellow/olive process-tree color
 const WindowsProcessColor = WindowsProcessTreeColor;
+const HuntColor = '#2a6f97';
 
 const NODE_COLORS: Record<NodeType, Record<VisualState, string>> = {
   Collection: { basic: CollectionColor, growable: GrowableNodeColor, initial: InitialNodeColor },
@@ -103,6 +104,10 @@ const NODE_COLORS: Record<NodeType, Record<VisualState, string>> = {
   Other: { basic: OtherColor, growable: GrowableNodeColor, initial: InitialNodeColor },
   Repo: { basic: RepoColor, growable: GrowableNodeColor, initial: InitialNodeColor },
   SigmaRule: { basic: RuleColor, growable: GrowableNodeColor, initial: InitialNodeColor },
+  YaraRule: { basic: RuleColor, growable: GrowableNodeColor, initial: InitialNodeColor },
+  YaraRuleHit: { basic: RuleColor, growable: GrowableNodeColor, initial: InitialNodeColor },
+  RuleSet: { basic: RuleColor, growable: GrowableNodeColor, initial: InitialNodeColor },
+  Hunt: { basic: HuntColor, growable: GrowableNodeColor, initial: InitialNodeColor },
   Tag: { basic: TagColor, growable: GrowableNodeColor, initial: InitialNodeColor },
   Vendor: { basic: VendorColor, growable: GrowableNodeColor, initial: InitialNodeColor },
   WindowsProcess: { basic: WindowsProcessColor, growable: GrowableNodeColor, initial: InitialNodeColor },
@@ -131,6 +136,11 @@ const RAW_SVG_MAP: Record<NodeType, Record<VisualState, string>> = {
   Other: { basic: OtherSVG, growable: OtherGrowableSVG, initial: OtherSVG },
   Repo: { basic: RepoSVG, growable: RepoGrowableSVG, initial: RepoSVG },
   SigmaRule: { basic: SigmaSVG, growable: SigmaGrowableSVG, initial: SigmaSVG },
+  YaraRule: { basic: SigmaSVG, growable: SigmaGrowableSVG, initial: SigmaSVG },
+  YaraRuleHit: { basic: FlagSVG, growable: FlagGrowableSVG, initial: FlagSVG },
+  RuleSet: { basic: CollectionSVG, growable: CollectionGrowableSVG, initial: CollectionSVG },
+  // hunts share the rule-engine glyph with their own color, like the rule kinds share it
+  Hunt: { basic: SigmaSVG, growable: SigmaGrowableSVG, initial: SigmaSVG },
   Tag: { basic: TagSVG, growable: TagGrowableSVG, initial: TagSVG },
   Vendor: { basic: VendorSVG, growable: VendorGrowableSVG, initial: VendorSVG },
   WindowsProcess: { basic: CubeSVG, growable: CubeGrowableSVG, initial: CubeSVG },

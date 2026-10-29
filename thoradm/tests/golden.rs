@@ -87,8 +87,9 @@ const GOLDEN_LOSSES: &[GoldenLoss] = &[
     },
 ];
 
-/// The views the goldens' source namespaces held that the API's setup no longer creates, so a
-/// restore target holds them only when an older release created them there
+/// The views a golden's source namespace held that a restore target may lack:
+/// `entities_by_name` was retired for a time before yara's exact-name reads declared it again,
+/// so only a target an intermediate release created holds no copy to compare
 const UNCREATED_VIEWS: &[&str] = &["entities_by_name"];
 
 /// Returns the harness admin's login, reading it the first time, before any golden is restored

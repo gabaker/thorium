@@ -80,19 +80,25 @@ pub fn sort_set_fields(value: &mut serde_json::Value, paths: &[&[&str]]) {
     }
 }
 
-/// Convert a value to a `serde_json::Value` with its image set-valued arrays sorted
+/// Convert a value to a `serde_json::Value` with every object's keys sorted and its
+/// image set-valued arrays sorted
 ///
-/// Objects in a `serde_json::Value` are sorted maps, so the result is fully
-/// order-stable: two equal configs always produce equal values.
+/// The result is fully order-stable: two equal configs always produce equal values.
+/// The object sort must be explicit because serde_json's map type is
+/// feature-dependent: workspace builds unify yara-x's `preserve_order` feature,
+/// swapping the sorted `BTreeMap` for an insertion-ordered `IndexMap`.
 ///
 /// # Arguments
 ///
 /// * `value` - The value to convert
 /// * `format` - The output format named in the error message on failure
 fn to_stable_value<T: Serialize>(value: &T, format: &str) -> Result<serde_json::Value, Error> {
-    // serialize into a sorted-map value
+    // route through a serde_json value so object keys can be sorted
     let mut json = serde_json::to_value(value)
         .map_err(|err| Error::new(format!("Failed to serialize to {format}: {err}")))?;
+    // sort every object, nested and inside arrays, so output never depends on
+    // which map backend serde_json was built with (a no-op in `BTreeMap` builds)
+    json.sort_all_objects();
     // sort the set-valued arrays that serialize in hash order
     sort_set_fields(&mut json, IMAGE_SET_FIELDS);
     Ok(json)
@@ -102,10 +108,12 @@ fn to_stable_value<T: Serialize>(value: &T, format: &str) -> Result<serde_json::
 ///
 /// `HashMap`/`HashSet` fields (e.g. an image's `env`, a pipeline's `triggers`)
 /// serialize in a random, per-run order, which makes otherwise-identical configs
-/// byte-differ between runs. Routing through `serde_json::Value` (a sorted
-/// `BTreeMap`) yields a canonical, order-stable form so equality and diff
-/// comparisons treat reordered maps as identical. Image set-valued arrays are
-/// sorted too (see [`IMAGE_SET_FIELDS`]).
+/// byte-differ between runs. Routing through `serde_json::Value` and explicitly
+/// sorting every object yields a canonical, order-stable form so equality and diff
+/// comparisons treat reordered maps as identical. The sort must be explicit because
+/// serde_json's map type is feature-dependent: workspace builds unify yara-x's
+/// `preserve_order` feature, swapping the sorted `BTreeMap` for an insertion-ordered
+/// `IndexMap`. Image set-valued arrays are sorted too (see [`IMAGE_SET_FIELDS`]).
 ///
 /// # Arguments
 ///
@@ -182,15 +190,15 @@ pub fn curated_json<T: Serialize>(value: &T, order: &[&str]) -> Result<String, E
     use serde::ser::{SerializeMap, Serializer};
     // convert to an order-stable value
     let json = to_stable_value(value, "JSON")?;
-    // only objects have a key order to curate; anything else serializes as-is
+    // only objects have a key order to curate; anything else falls back to canonical
     let serde_json::Value::Object(map) = json else {
-        return serde_json::to_string_pretty(&json)
-            .map_err(|err| Error::new(format!("Failed to serialize to JSON: {err}")));
+        return canonical_json(value);
     };
     // put the top-level keys in curated order
     let entries = curated_entries(map, order);
-    // drive the serializer's map directly so the (insertion) order we feed is the
-    // emitted order — `serde_json::Value`'s own `BTreeMap` would re-sort it
+    // drive the serializer's map directly so the exact order we feed is the emitted
+    // order — rebuilding a `serde_json::Map` would not keep our curated order
+    // (`BTreeMap` builds re-sort it)
     let mut ser = serde_json::Serializer::pretty(Vec::new());
     let mut map_ser = ser
         .serialize_map(Some(entries.len()))
@@ -213,7 +221,7 @@ pub fn curated_json<T: Serialize>(value: &T, order: &[&str]) -> Result<String, E
 ///
 /// # Arguments
 ///
-/// * `map` - The object's entries (a `serde_json` `BTreeMap`, so leftovers stay sorted)
+/// * `map` - The object's entries, already deep-sorted by the caller
 /// * `order` - The curated top-level key order (plain names; `*name*` also matches)
 fn curated_entries(
     mut map: serde_json::Map<String, serde_json::Value>,
@@ -228,14 +236,20 @@ fn curated_entries(
             }
         }
     }
-    // append whatever's left; a `serde_json::Map` iterates sorted, so unlisted keys
-    // land at the end in a stable order
+    // re-sort the leftovers: with serde_json's `preserve_order` feature (unified in
+    // by yara-x in workspace builds) the removals above swap entries out of place
+    // and iteration follows insertion order, so sort explicitly before appending
+    // (a no-op in `BTreeMap` builds)
+    map.sort_keys();
+    // append whatever's left; the map was just sorted, so unlisted keys land at
+    // the end in a stable order
     entries.extend(map);
     entries
 }
 
 pub mod banner;
 pub mod diff;
+pub mod entities;
 pub mod fs;
 pub mod groups;
 pub mod images;
@@ -724,6 +738,28 @@ pub fn warn_insecure_conf(conf: &CtlConf) -> Result<(), Error> {
     )
 }
 
+/// Extract the human readable text from an API error
+///
+/// API error bodies are JSON like `{"error": "...", "trace": "..."}`; pull the
+/// `error` field out so users see the message instead of an escaped JSON blob,
+/// falling back to the raw body when it isn't that shape.
+///
+/// # Arguments
+///
+/// * `error` - The API error to extract readable text from
+pub fn api_error_text(error: &Error) -> Option<String> {
+    // get this error's raw body if one exists
+    let msg = error.msg()?;
+    // try to pull the error field out of a JSON error body
+    match serde_json::from_str::<serde_json::Value>(&msg) {
+        Ok(body) => match body.get("error").and_then(|text| text.as_str()) {
+            Some(text) => Some(text.to_owned()),
+            None => Some(msg),
+        },
+        Err(_) => Some(msg),
+    }
+}
+
 /// Matches the first SI/binary unit prefix in a storage value, used to split the
 /// numeric amount from its unit. Compiled once: the same pattern is reused on
 /// every call, so a per-call `Regex::new` would re-pay the compile cost.
@@ -929,8 +965,9 @@ mod tests {
             keys,
             ["name", "scaler", "*creator*", "alpha", "nested", "zeta"]
         );
-        // nested maps stay sorted (a before b)
-        assert!(yaml.find("a: 2").unwrap() < yaml.find("b: 1").unwrap());
+        // nested maps stay sorted (a before b); match the indented form so the
+        // top-level `alpha: 2` line (whose tail is `a: 2`) can't satisfy this
+        assert!(yaml.find("  a: 2").unwrap() < yaml.find("  b: 1").unwrap());
     }
 
     /// `curated_json` mirrors `curated_yaml`'s ordering: curated keys first (matching
@@ -959,6 +996,33 @@ mod tests {
         );
         // nested objects stay sorted (a before b)
         assert!(json.find("\"a\"").unwrap() < json.find("\"b\"").unwrap());
+    }
+
+    /// canonical_json/canonical_yaml sort object keys at every level — top-level,
+    /// nested, and inside arrays — so output never depends on serde_json's map
+    /// backend. In `BTreeMap` builds `json!` pre-sorts the literal so this can't
+    /// fail; it guards the workspace (`preserve_order`) graph that CI tests.
+    #[test]
+    fn canonical_output_sorts_all_objects() {
+        let value = serde_json::json!({
+            "zeta": true,
+            "alpha": { "b": 1, "a": 2 },
+            "list": [{ "d": 4, "c": 3 }],
+        });
+        let json = super::canonical_json(&value).unwrap();
+        // top-level keys emit sorted
+        assert!(json.find("\"alpha\"").unwrap() < json.find("\"list\"").unwrap());
+        assert!(json.find("\"list\"").unwrap() < json.find("\"zeta\"").unwrap());
+        // nested keys emit sorted
+        assert!(json.find("\"a\"").unwrap() < json.find("\"b\"").unwrap());
+        // keys inside array elements emit sorted
+        assert!(json.find("\"c\"").unwrap() < json.find("\"d\"").unwrap());
+        let yaml = super::canonical_yaml(&value).unwrap();
+        // the YAML form sorts identically
+        assert!(yaml.find("alpha:").unwrap() < yaml.find("list:").unwrap());
+        assert!(yaml.find("list:").unwrap() < yaml.find("zeta:").unwrap());
+        assert!(yaml.find("a: 2").unwrap() < yaml.find("b: 1").unwrap());
+        assert!(yaml.find("c: 3").unwrap() < yaml.find("d: 4").unwrap());
     }
 
     /// With no filter or skip patterns, every string is accepted

@@ -1763,11 +1763,21 @@ where
 
     /// Saves this cursor to Redis
     ///
+    /// A new cursor that exhausted on its first page is never saved: every
+    /// id hand-off gates on `exhausted()` (the `ApiCursor` conversions and
+    /// the associations `TryFrom`), so no caller can ever present that id
+    /// again and the write would just orphan an 8 hour TTL'd key — one per
+    /// poll on bounded aggregate readers like the hunt census.
+    ///
     /// # Arguments
     ///
     /// * `shared` - Shared Thorium objects
     #[instrument(name = "ScyllaCursor::save", skip_all, err(Debug))]
     pub async fn save(&self, shared: &Shared) -> Result<(), ApiError> {
+        // skip the write when this cursors id could never be presented again
+        if self.new && self.exhausted() {
+            return Ok(());
+        }
         // serialize our retained data
         let data = serialize!(&self.retain);
         // build the key to save this cursor data too scoped to the creating user
