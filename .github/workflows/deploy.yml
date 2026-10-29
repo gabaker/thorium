@@ -55,22 +55,31 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+    env:
+      # Node 26.12.1 on Alpine, the image GitLab's UI jobs use. To move it, resolve the new
+      # tag's multi-arch index digest from Docker Hub and update the tag and the digest together
+      NODE_IMAGE: docker.io/library/node:26.12.1-alpine@sha256:40cd011b55415bc894e45b02fdd5a5dfde056921b7d23a64c74f80497af48797
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # the UI installs, checks and builds in the pinned Node image rather than with the
+      # runner's preinstalled Node, which changes with the runner image
       - name: Install UI Dependencies
-        working-directory: ui
-        run: npm ci
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            -v "${GITHUB_WORKSPACE}/ui:/ui" -w /ui "$NODE_IMAGE" npm ci
       # style problems only warn so they never block a UI build
       - name: Check UI Style
-        working-directory: ui
         continue-on-error: true
         run: |
-          npm run validate-style || echo "::warning title=UI style::prettier found style issues; run 'npm run format' in ui/"
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            -v "${GITHUB_WORKSPACE}/ui:/ui" -w /ui "$NODE_IMAGE" npm run validate-style ||
+            echo "::warning title=UI style::prettier found style issues; run 'npm run format' in ui/"
       - name: Build UI Bundle
-        working-directory: ui
-        run: npm run build
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            -v "${GITHUB_WORKSPACE}/ui:/ui" -w /ui "$NODE_IMAGE" npm run build
       - name: Upload UI Bundle Artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
