@@ -1027,6 +1027,7 @@ impl Reaction {
     ///
     /// Replacing an ephemeral file the reaction already lists needs the Developer role for the
     /// scaler of every stage whose options override its command, positionals, or kwargs.
+    /// A tag the reaction already has is not added again.
     ///
     /// # Arguments
     ///
@@ -1089,8 +1090,13 @@ impl Reaction {
         }
         // update our reaction
         self.tags.retain(|tag| !update.remove_tags.contains(tag));
-        // add new tags
-        self.tags.extend(update.add_tags.clone());
+        // add each new tag this reaction doesn't already have, so a tag added again (or twice in
+        // one update) is stored once
+        for tag in &update.add_tags {
+            if !self.tags.contains(tag) {
+                self.tags.push(tag.clone());
+            }
+        }
         // a run's generated files are written only when the run is created, so a harness never
         // reads files someone else wrote under its run's name
         let generated = [
