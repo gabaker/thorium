@@ -2852,6 +2852,43 @@ async fn a_batch_that_fails_at_flush_is_counted_as_discarded() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// An archive whose map file can't be created leaves no data file behind and is not listed, so a
+/// backup never holds a data file without its map
+#[tokio::test]
+async fn an_archive_whose_map_file_fails_to_open_leaves_no_data_file() {
+    // a writer over a sink that can't create map files and that lists its archives in a tally
+    let dir = scratch("discard-map-create");
+    std::fs::create_dir_all(dir.join("data")).unwrap();
+    std::fs::create_dir_all(dir.join("maps")).unwrap();
+    let faulty = Arc::new(FaultySink::new());
+    faulty.add_fault("*.thoriummap", SinkFault::TooManyFiles);
+    let sinks: Arc<dyn SinkFactory> = faulty.clone();
+    let tally = Arc::new(Mutex::new(thoradm::backup::TableTally::default()));
+    let mut writer = thoradm::backup::ArchiveWriter::new(
+        &dir.join("data"),
+        &dir.join("maps"),
+        indicatif::ProgressBar::hidden(),
+        &sinks,
+    )
+    .with_tally(&tally);
+    let (mut updates, _receiver) = kanal::unbounded_async();
+    // the archive's data file opens but its map file doesn't, so the write fails
+    let buffer = rkyv::to_bytes::<_, 1024>(&vec![1_u8; 64]).unwrap();
+    writer.add(1, 5, "a".repeat(64), buffer);
+    assert!(writer.archive(&mut updates).await.is_err());
+    // the worker's error path drops the batch
+    let (rows, _cut) = writer.discard_pending().await;
+    assert_eq!(rows, 5);
+    // no archive is listed and no data file is left without its map
+    assert!(
+        tally.lock().unwrap().archives.is_empty(),
+        "an archive without a map file must not be listed"
+    );
+    let data_files = std::fs::read_dir(dir.join("data")).unwrap().count();
+    assert_eq!(data_files, 0, "the data file must be removed with its map");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// A batch whose monitor update fails after it was flushed stays listed in the archive rather
 /// than being counted as discarded
 #[tokio::test]

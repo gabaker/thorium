@@ -332,7 +332,10 @@ impl ArchiveWriter {
         self.pending_bytes > 1_048_576
     }
 
-    /// Open a file handle to our data file
+    /// Open file handles to our data file and its map file
+    ///
+    /// When the map file can't be created the data file is closed and removed again, so the
+    /// writer never holds (or leaves on disk) a data file without its map.
     async fn open_handles(&mut self) -> Result<(), Error> {
         // loop until we have found an unused id
         loop {
@@ -351,7 +354,24 @@ impl ArchiveWriter {
             self.data_file = Some(self.sinks.create(&data_path, ARCHIVE_MODE).await?);
             // open a file handle to the map file beside it in the map directory
             let map_path = self.map_path.join(format!("{id}.thoriummap"));
-            self.map_file = Some(self.sinks.create(&map_path, ARCHIVE_MODE).await?);
+            match self.sinks.create(&map_path, ARCHIVE_MODE).await {
+                Ok(map_file) => self.map_file = Some(map_file),
+                Err(err) => {
+                    // close the data file and remove it, since an archive without a map can't
+                    // be restored; a data file that is already gone needs no removal
+                    self.data_file = None;
+                    if let Err(remove_err) = tokio::fs::remove_file(&data_path).await
+                        && remove_err.kind() != std::io::ErrorKind::NotFound
+                    {
+                        // note the leftover data file above the progress bar, but report the
+                        // map file's error
+                        let path = data_path.display();
+                        self.progress
+                            .println(format!("Failed to remove data file {path}: {remove_err}"));
+                    }
+                    return Err(err.into());
+                }
+            }
             // we have opened our file handles
             break;
         }
@@ -370,7 +390,8 @@ impl ArchiveWriter {
     ///
     /// The archive is closed too, so the next write starts a fresh archive instead of appending
     /// after a partial one. Its data and map files are cut back to the lengths its listing
-    /// gives, so bytes of the failed batch that already reached them don't outlive it.
+    /// gives, so bytes of the failed batch that already reached them don't outlive it. The
+    /// archive is listed only when both its data and map files were opened.
     pub async fn discard_pending(&mut self) -> (usize, std::io::Result<()>) {
         // count the rows that will never reach disk
         let rows = self.pending.iter().map(|archive| archive.rows).sum();
@@ -391,7 +412,7 @@ impl ArchiveWriter {
             cut = cut.and(map_cut);
         }
         // close the archive, listing what was flushed, so a partial one is never extended
-        let opened = self.data_file.is_some() || self.map_file.is_some();
+        let opened = self.data_file.is_some() && self.map_file.is_some();
         self.finish_archive(opened);
         (rows, cut)
     }
