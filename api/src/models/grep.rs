@@ -45,7 +45,7 @@ impl std::fmt::Display for GrepSource {
     /// Write our grep source as its serde variant name
     ///
     /// This must stay in sync with serde's variant names since the client uses
-    /// it to build `sources[]` query params that serde_qs deserializes.
+    /// it to build `sources[]` query params that `serde_qs` deserializes.
     ///
     /// # Arguments
     ///
@@ -855,11 +855,11 @@ mod tests {
         // make sure the serde defaults were applied
         assert!(!params.case_insensitive);
         assert!(!params.multi_line);
-        assert!(params.groups.is_empty());
+        assert_eq!(params.groups, [] as [String; 0]);
         assert!(params.cursor.is_none());
         assert_eq!(params.limit, default_grep_limit());
         assert_eq!(params.sources, default_grep_sources());
-        assert!(params.tools.is_empty());
+        assert_eq!(params.tools, [] as [String; 0]);
         assert!(params.max_matches.is_none());
         assert!(params.scan_time.is_none());
         assert!(params.scan_idle.is_none());

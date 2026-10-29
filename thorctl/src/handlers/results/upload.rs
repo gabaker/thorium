@@ -9,6 +9,7 @@ use thorium::models::{OnDiskFile, OutputRequest, Sample};
 use thorium::{Error, Thorium};
 
 use crate::args::results::UploadResults;
+use crate::utils::is_sha256;
 
 /// prints out a single downloaded result line
 macro_rules! upload_print {
@@ -75,16 +76,6 @@ macro_rules! upload {
             }
         }
     };
-}
-
-/// Returns true if the string is a valid SHA256 (is 64 ASCII hex digits)
-///
-/// # Arguments
-///
-/// * `s` - The string to check if it's probably a SHA256
-fn is_sha256<T: AsRef<str>>(s: T) -> bool {
-    let s = s.as_ref();
-    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Uploads results for a file based on tool sub-directories
@@ -408,7 +399,7 @@ pub async fn upload(thorium: &Thorium, cmd: &UploadResults) -> Result<(), Error>
 
 #[cfg(test)]
 mod tests {
-    use super::is_sha256;
+    use crate::utils::is_sha256;
 
     #[test]
     fn test_is_sha256_valid() {

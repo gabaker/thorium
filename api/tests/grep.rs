@@ -669,7 +669,7 @@ async fn grep_sample_respects_groups() -> Result<(), Error> {
     let visible = seed_sample(&client, &other_group).await?;
     // build a second user that is only in the other group so their corpus grep
     // exercises real listing and scoping instead of the no groups short circuit
-    let other = generators::client_in_groups(&client, &[other_group.clone()]).await?;
+    let other = generators::client_in_groups(&client, std::slice::from_ref(&other_group)).await?;
     // make sure this user cannot grep a sample they cannot see
     let check = other.files.grep_key(&hidden, GrepOpts::new(PATTERN)).await;
     fail!(check, 404);
@@ -1832,7 +1832,7 @@ async fn grep_repo_respects_groups() -> Result<(), Error> {
     client.repos.create(&req).await?;
     // build a second user that is only in the other group so their corpus grep
     // exercises real listing and scoping instead of the no groups short circuit
-    let other = generators::client_in_groups(&client, &[other_group.clone()]).await?;
+    let other = generators::client_in_groups(&client, std::slice::from_ref(&other_group)).await?;
     // make sure this user cannot grep a repo they cannot see
     let check = other.repos.grep_key(&hidden, GrepOpts::new(PATTERN)).await;
     fail!(check, 404);
@@ -1858,7 +1858,7 @@ async fn grep_repo_groups_scope_sources() -> Result<(), Error> {
     client.repos.create(&req).await?;
     // submit this repo to the other group as a randomly named user, so the repo
     // has one submission chunk per group with distinct creators
-    let other = generators::client_in_groups(&client, &[other_group.clone()]).await?;
+    let other = generators::client_in_groups(&client, std::slice::from_ref(&other_group)).await?;
     let req = RepoRequest::new(&url, vec![other_group.clone()], None);
     other.repos.create(&req).await?;
     // a grep scoped to the other group must not see the admins creator submission
@@ -2112,7 +2112,7 @@ async fn grep_entity_respects_groups() -> Result<(), Error> {
     let visible = client.entities.create(req).await?.id.to_string();
     // build a second user that is only in the other group so their corpus grep
     // exercises real listing and scoping instead of the no groups short circuit
-    let other = generators::client_in_groups(&client, &[other_group.clone()]).await?;
+    let other = generators::client_in_groups(&client, std::slice::from_ref(&other_group)).await?;
     // make sure this user cannot grep an entity they cannot see
     let check = other
         .entities

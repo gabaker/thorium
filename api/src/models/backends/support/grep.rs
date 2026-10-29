@@ -456,9 +456,8 @@ cfg_if::cfg_if! {
             #[tracing::instrument(name = "GrepSupport<Entity>::get_greppable", skip(user, shared), err(Debug))]
             async fn get_greppable(user: &User, key: &str, shared: &Shared) -> Result<Self, ApiError> {
                 // try to parse this key as an entity id
-                let id = match Uuid::parse_str(key) {
-                    Ok(id) => id,
-                    Err(_) => return crate::bad!(format!("{key} is not a valid entity id")),
+                let Ok(id) = Uuid::parse_str(key) else {
+                    return crate::bad!(format!("{key} is not a valid entity id"));
                 };
                 // get this entity, which authorizes that this user can see it
                 Entity::get(user, id, shared).await

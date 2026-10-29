@@ -3684,9 +3684,8 @@ impl GrepCursor {
         // get the end timestamp for this cursor or a sane default
         let end = params.end(earliest)?;
         // get the budget of matches this query can return
-        let max_matches = match params.max_matches {
-            Some(max_matches) => max_matches,
-            None => return internal_err!("grep params were not clamped".to_owned()),
+        let Some(max_matches) = params.max_matches else {
+            return internal_err!("grep params were not clamped".to_owned());
         };
         // get the time budgets for this page
         let (scan_time, scan_idle) = grep_scan_budgets(&params)?;
@@ -3743,9 +3742,8 @@ impl GrepCursor {
         // get our cursor from redis
         let data: Option<String> = query!(cmd("get").arg(key), shared).await?;
         // get the budget of matches this query can return
-        let max_matches = match params.max_matches {
-            Some(max_matches) => max_matches,
-            None => return internal_err!("grep params were not clamped".to_owned()),
+        let Some(max_matches) = params.max_matches else {
+            return internal_err!("grep params were not clamped".to_owned());
         };
         // get the time budgets for this page
         let (scan_time, scan_idle) = grep_scan_budgets(&params)?;

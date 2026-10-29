@@ -50,7 +50,7 @@ impl TryFrom<&String> for GrepTarget {
     /// * `target` - The target to detect the kind of
     fn try_from(target: &String) -> Result<Self, Self::Error> {
         // treat 64 hex characters as a file SHA256
-        if target.len() == 64 && target.chars().all(|c| c.is_ascii_hexdigit()) {
+        if utils::is_sha256(target) {
             return Ok(GrepTarget::File);
         }
         // treat anything that parses as a UUID as an entity id
@@ -542,7 +542,7 @@ impl Renderer {
         match self.format {
             GrepFormat::Heading => self.render_heading(matches, out),
             GrepFormat::Flat => self.render_flat(matches, out),
-            GrepFormat::Json => self.render_json(matches, out),
+            GrepFormat::Json => Self::render_json(matches, out),
         }
     }
 
@@ -671,7 +671,7 @@ impl Renderer {
     ///
     /// * `matches` - The item's matches to render
     /// * `out` - The writer to render to
-    fn render_json(&self, matches: &GrepMatches, out: &mut dyn Write) -> Result<(), Error> {
+    fn render_json(matches: &GrepMatches, out: &mut dyn Write) -> Result<(), Error> {
         // clone this item so we can sanitize snippets without touching the original
         let mut clean = matches.clone();
         // sanitize the inline result snippets
@@ -1111,6 +1111,7 @@ mod tests {
         String::from_utf8(buffer).unwrap()
     }
 
+    /// Heading output orders sources in a fixed order and sorts the keys within each source
     #[test]
     fn heading_orders_sources_and_sorts_keys() {
         // render the full fixture without styling
@@ -1137,6 +1138,7 @@ mod tests {
         assert_eq!(rendered, expected);
     }
 
+    /// A highlight that ends inside a multi byte char is clamped to the char boundary
     #[test]
     fn heading_highlight_clamps_to_char_boundary() {
         // build a match whose length lands in the middle of a multi byte char
@@ -1152,6 +1154,7 @@ mod tests {
         assert_eq!(rendered, "\u{1b}[1m\u{1b}[91mh\u{1b}[39m\u{1b}[0méllo");
     }
 
+    /// Sanitizing a snippet replaces C0, C1, and newline controls but keeps tabs
     #[test]
     fn sanitize_neutralizes_escapes() {
         // sanitize a snippet with C0, C1, and newline controls plus a tab
@@ -1159,6 +1162,7 @@ mod tests {
         assert_eq!(cleaned, "evil\u{fffd}[31mred\u{fffd}X\u{fffd}next\tok");
     }
 
+    /// Flat rows carry every provenance level of their document
     #[test]
     fn flat_rows_carry_full_provenance() {
         // render the full fixture as flat rows
@@ -1174,6 +1178,7 @@ mod tests {
         assert!(rendered.contains(&format!("{key}:tags:plant:corn9000:1:corn9000\n")));
     }
 
+    /// A truncated document without matches prints only its truncation note
     #[test]
     fn hitless_truncated_doc_prints_note_only() {
         // build an item with one hit-less truncated document
@@ -1192,9 +1197,10 @@ mod tests {
         assert!(rendered.contains("    [truncated: match budget hit — raise --max-matches]\n"));
         // flat output sends the note to stderr leaving stdout empty
         let rendered = render(&matches, GrepFormat::Flat, false);
-        assert!(rendered.is_empty());
+        assert_eq!(rendered, "");
     }
 
+    /// Escape sequences in provenance paths are neutralized in heading and flat output
     #[test]
     fn provenance_paths_are_sanitized() {
         // build an item with an escape injection attempt in a tag value
@@ -1212,6 +1218,7 @@ mod tests {
         assert!(rendered.contains(":tags:plant:evil\u{fffd}[31mcorn:"));
     }
 
+    /// JSON output is one line per item with sanitized snippets
     #[test]
     fn json_sanitizes_snippets() {
         // build an item with an escape injection attempt in its snippet
@@ -1232,12 +1239,14 @@ mod tests {
         assert!(!snippet.contains('\u{1b}'));
     }
 
+    /// Counting matches sums the matches from every source
     #[test]
     fn count_matches_sums_every_source() {
         // the fixture has one match in each of its seven documents
         assert_eq!(count_matches(&fixture()), 7);
     }
 
+    /// An item the match budget splits across pages is counted once
     #[test]
     fn budget_split_items_count_once_across_pages() {
         // build two pages where the match budget split one item across them
@@ -1254,6 +1263,7 @@ mod tests {
         assert_eq!(count_new_items(&[rest, fresh], &mut boundary), 1);
     }
 
+    /// A split item without matches in its first slice is counted when its matches arrive
     #[test]
     fn hitless_boundary_item_counts_when_its_matches_arrive() {
         // build a split item whose first slice had no matches
@@ -1275,6 +1285,7 @@ mod tests {
         assert_eq!(count_new_items(&[rest], &mut boundary), 1);
     }
 
+    /// Grep targets are inferred as files, entities, or repos from their shape
     #[test]
     fn target_inference_three_ways() {
         // 64 hex chars are a file sha256
@@ -1302,6 +1313,7 @@ mod tests {
         );
     }
 
+    /// An explicitly requested output format is always used
     #[test]
     fn explicit_format_is_used() {
         // an explicitly requested format is always used
