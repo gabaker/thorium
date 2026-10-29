@@ -65,4 +65,24 @@ describe('SearchPicker', () => {
     expect(markup).toContain('3 available, 1 chosen');
     expect(markup).toContain('data-testid="run-tool-33333333-cccc" data-entity-id="33333333-cccc" checked=""');
   });
+  it('shows and filters by the search text a parent keeps for it', () => {
+    const markup = renderToStaticMarkup(
+      <SearchPicker
+        label="Tools"
+        testId="run-tool"
+        options={[
+          { value: 'a', text: 'strings' },
+          { value: 'b', text: 'yara' },
+        ]}
+        selected={[]}
+        onChange={() => undefined}
+        search="yar"
+        onSearch={() => undefined}
+      />,
+    );
+    expect(markup).toContain('value="yar"');
+    expect(markup).toContain('1 of 2, 0 chosen');
+    expect(markup).toContain('data-testid="run-tool-b"');
+    expect(markup).not.toContain('data-testid="run-tool-a"');
+  });
 });

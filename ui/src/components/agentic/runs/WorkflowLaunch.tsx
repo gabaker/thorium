@@ -17,10 +17,14 @@ interface WorkflowLaunchProps {
   selected: string[];
   /** Called with the ids of the chosen workflows */
   onSelect: (ids: string[]) => void;
+  /** The picker's search text, kept by the page so a tab switch doesn't clear it */
+  search: string;
+  /** Called with the search text as typed */
+  onSearch: (search: string) => void;
 }
 
 /** The Workflows tab: a searchable list of the preconfigured workflows to add to the runs to launch. */
-export const WorkflowLaunch: FC<WorkflowLaunchProps> = ({ workflows, selected, onSelect }) => (
+export const WorkflowLaunch: FC<WorkflowLaunchProps> = ({ workflows, selected, onSelect, search, onSearch }) => (
   <LaunchSection>
     <h2>Choose workflows</h2>
     {/* the picker decides what can be run, so a failed or cut-off workflow listing is shown with it */}
@@ -47,6 +51,8 @@ export const WorkflowLaunch: FC<WorkflowLaunchProps> = ({ workflows, selected, o
         options={entityOptions(workflows.items)}
         selected={selected}
         onChange={onSelect}
+        search={search}
+        onSearch={onSearch}
       />
     )}
   </LaunchSection>

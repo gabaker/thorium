@@ -16,10 +16,14 @@ interface ToolLaunchProps {
   selected: string[];
   /** Called with the ids of the chosen tools */
   onSelect: (ids: string[]) => void;
+  /** The picker's search text, kept by the page so a tab switch doesn't clear it */
+  search: string;
+  /** Called with the search text as typed */
+  onSearch: (search: string) => void;
 }
 
 /** The Tools tab: a searchable list of the tools to run directly, each added to the runs to launch. */
-export const ToolLaunch: FC<ToolLaunchProps> = ({ tools, selected, onSelect }) => {
+export const ToolLaunch: FC<ToolLaunchProps> = ({ tools, selected, onSelect, search, onSearch }) => {
   // Harness tools can't be run directly
   const runnable = tools.items.filter((tool) => tool.metadata.Tool.kind !== ToolKind.Harness);
   return (
@@ -41,6 +45,8 @@ export const ToolLaunch: FC<ToolLaunchProps> = ({ tools, selected, onSelect }) =
           selected={selected}
           onChange={onSelect}
           emptyText="No tools can be run directly."
+          search={search}
+          onSearch={onSearch}
         />
       )}
     </LaunchSection>

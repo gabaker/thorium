@@ -35,6 +35,18 @@ test.describe('tool launch form', () => {
     await expect(page.getByTestId('launch-error')).toHaveCount(0);
   });
 
+  test('the tool search text stays when another tab is shown and the tools tab is shown again', async ({ page }) => {
+    await setupMockAuth(page);
+    await mockEntityList(page, [RETIRED]);
+    await page.goto('/launch?tab=tool');
+    await page.getByTestId('run-tool-search').fill('retir');
+    await page.getByTestId('launch-tab-workflow').click();
+    await expect(page.getByTestId('run-tool-search')).toHaveCount(0);
+    await page.getByTestId('launch-tab-tool').click();
+    await expect(page.getByTestId('run-tool-search')).toHaveValue('retir');
+    await expect(page.getByTestId('run-tool-count')).toContainText('1 of 1');
+  });
+
   test('a failed tool list is shown above the picker and is not taken for a launch error', async ({ page }) => {
     await setupMockAuth(page);
     await page.route('**/api/entities/details/**', (route) => fulfillJson(route, { error: 'tool list unavailable' }, 500));

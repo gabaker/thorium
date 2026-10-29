@@ -31,10 +31,14 @@ interface PipelineLaunchProps {
   selected: string[];
   /** Called with the chosen pipelines */
   onSelect: (keys: string[]) => void;
+  /** The picker's search text, kept by the page so a tab switch doesn't clear it */
+  search: string;
+  /** Called with the search text as typed */
+  onSearch: (search: string) => void;
 }
 
 /** The Pipelines tab: a searchable list of the static pipelines to add to the runs to launch. */
-export const PipelineLaunch: FC<PipelineLaunchProps> = ({ pipelines, selected, onSelect }) => (
+export const PipelineLaunch: FC<PipelineLaunchProps> = ({ pipelines, selected, onSelect, search, onSearch }) => (
   <LaunchSection>
     <h2>Choose pipelines</h2>
     {pipelines.errors.length > 0 && (
@@ -52,6 +56,8 @@ export const PipelineLaunch: FC<PipelineLaunchProps> = ({ pipelines, selected, o
         selected={selected}
         onChange={onSelect}
         emptyText="No pipelines in your groups."
+        search={search}
+        onSearch={onSearch}
       />
     )}
   </LaunchSection>

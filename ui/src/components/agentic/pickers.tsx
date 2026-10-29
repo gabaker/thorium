@@ -183,11 +183,33 @@ interface SearchPickerProps {
   onChange: (selected: string[]) => void;
   /** What the list says when there is nothing to choose from */
   emptyText?: string;
+  /** The search text, for a parent that keeps it while the picker is unmounted; the picker keeps its own when unset */
+  search?: string;
+  /** Called with the search text as typed, alongside `search` */
+  onSearch?: (search: string) => void;
 }
 
-/** A labelled multi-select: a search box above a list of checkboxes, with a count of the choices shown. */
-export const SearchPicker: FC<SearchPickerProps> = ({ label, hint, testId, options, selected, onChange, emptyText = 'none' }) => {
-  const [query, setQuery] = useState('');
+/**
+ * A labelled multi-select: a search box above a list of checkboxes, with a count of the choices shown.
+ *
+ * The search text is the picker's own unless the parent passes `search` and `onSearch`, which keeps it across a remount
+ * such as a tab switch.
+ */
+export const SearchPicker: FC<SearchPickerProps> = ({
+  label,
+  hint,
+  testId,
+  options,
+  selected,
+  onChange,
+  emptyText = 'none',
+  search,
+  onSearch,
+}) => {
+  const [ownQuery, setOwnQuery] = useState('');
+  const query = search ?? ownQuery;
+  // tell the parent that keeps the text, or keep it here
+  const setQuery = (next: string) => (onSearch ? onSearch(next) : setOwnQuery(next));
   const shown = filterOptions(options, query);
   return (
     <Field as="div">

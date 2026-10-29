@@ -39,6 +39,9 @@ import { AgenticKinds } from '@models/agentic';
 import { Tool } from '@models/tools';
 import { Workflow, WorkflowInstance } from '@models/workflows';
 
+/** No search text on any tab's picker. */
+const EMPTY_SEARCHES: Record<LaunchTab, string> = { [LaunchTab.Workflow]: '', [LaunchTab.Tool]: '', [LaunchTab.Pipeline]: '' };
+
 /**
  * Launch several runs at once: workflows, tools, and pipelines chosen on their tabs, all on the same prompt, files,
  * samples, or repo.
@@ -111,6 +114,12 @@ const LaunchRun: FC = () => {
     [],
   );
   const onRemove = useCallback((key: string) => dispatch({ type: LaunchActionType.Remove, key }), []);
+  // each tab's picker search, kept here because only the shown tab's picker is mounted
+  const [searches, setSearches] = useState<Record<LaunchTab, string>>(EMPTY_SEARCHES);
+  const searchOf = (kind: LaunchTab) => ({
+    search: searches[kind],
+    onSearch: (search: string) => setSearches((current) => ({ ...current, [kind]: search })),
+  });
   const refsOf = (kind: LaunchTab) => state.items.filter((item) => item.kind === kind).map((item) => item.ref);
   const select = (kind: LaunchTab) => (refs: string[]) => {
     // a newly chosen tool starts on its latest version
@@ -140,13 +149,25 @@ const LaunchRun: FC = () => {
           testId: `launch-tab-${key}`,
         }))}
       />
-      {/* only the shown tab's picker is mounted; the chosen runs live in the page state, so switching tabs keeps them */}
+      {/* only the shown tab's picker is mounted; the chosen runs and searches live in the page state, so switching tabs keeps them */}
       {tab === LaunchTab.Workflow && (
-        <WorkflowLaunch workflows={workflows} selected={refsOf(LaunchTab.Workflow)} onSelect={select(LaunchTab.Workflow)} />
+        <WorkflowLaunch
+          workflows={workflows}
+          selected={refsOf(LaunchTab.Workflow)}
+          onSelect={select(LaunchTab.Workflow)}
+          {...searchOf(LaunchTab.Workflow)}
+        />
       )}
-      {tab === LaunchTab.Tool && <ToolLaunch tools={tools} selected={refsOf(LaunchTab.Tool)} onSelect={select(LaunchTab.Tool)} />}
+      {tab === LaunchTab.Tool && (
+        <ToolLaunch tools={tools} selected={refsOf(LaunchTab.Tool)} onSelect={select(LaunchTab.Tool)} {...searchOf(LaunchTab.Tool)} />
+      )}
       {tab === LaunchTab.Pipeline && (
-        <PipelineLaunch pipelines={pipelines} selected={refsOf(LaunchTab.Pipeline)} onSelect={select(LaunchTab.Pipeline)} />
+        <PipelineLaunch
+          pipelines={pipelines}
+          selected={refsOf(LaunchTab.Pipeline)}
+          onSelect={select(LaunchTab.Pipeline)}
+          {...searchOf(LaunchTab.Pipeline)}
+        />
       )}
       <RunsToLaunch
         views={views}
