@@ -6,7 +6,7 @@ import { JSONTree } from 'react-json-tree';
 import ResultAlerts from './ResultAlerts';
 import { useResultAlerts } from './useResultAlerts';
 import { ResultRenderProps } from '../props';
-import { OceanJsonTheme, useJsonTreeInvert } from '@components/shared/renderers/jsonTheme';
+import { OceanJsonTheme } from '@components/shared/renderers/jsonTheme';
 import { getResultsFile } from '@thorpi/results';
 import { useResultsOnRepo } from '@components/tools/ResultSourceContext';
 import { useAuth } from '@utilities/auth';
