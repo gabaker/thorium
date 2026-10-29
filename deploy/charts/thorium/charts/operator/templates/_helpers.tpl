@@ -241,6 +241,8 @@ thorium:
     bucket: {{ printf "%s-graphics" .Release.Namespace | quote }}
   reaction_cache:
     bucket: {{ printf "%s-reaction-cache-files" .Release.Namespace | quote }}
+  yara:
+    cache_bucket: {{ printf "%s-yara-rulesets" .Release.Namespace | quote }}
   s3:
     endpoint: {{ $s3Endpoint | quote }}
     region: {{ $b.s3.region | quote }}

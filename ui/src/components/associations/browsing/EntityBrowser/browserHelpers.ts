@@ -639,7 +639,7 @@ function blankFlagStat(): FlagStat {
  */
 function isFlagOrRule(node: TreeNode | undefined): boolean {
   const kind = node?.[TreeNodeKey.Entity]?.kind;
-  return kind === Entities.Flag || kind === Entities.SigmaRule;
+  return kind === Entities.Flag || kind === Entities.SigmaRule || kind === Entities.YaraRule;
 }
 
 /**

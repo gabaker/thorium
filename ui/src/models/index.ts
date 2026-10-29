@@ -1,6 +1,7 @@
 export * from './associations';
 export * from './components';
 export * from './entities/index';
+export * from './events';
 export * from './groups';
 export * from './images';
 export * from './oauth';

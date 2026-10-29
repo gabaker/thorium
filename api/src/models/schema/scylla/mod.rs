@@ -10,10 +10,11 @@ mod notifications;
 mod repos;
 mod results;
 mod samples;
+mod scan_stats;
 mod tags;
 
 pub use associations::{AssociationsTable, AssociationsTableRef};
-pub use entities::{EntitiesByIdView, EntitiesTable, EntitiesTableRef};
+pub use entities::{EntitiesByIdView, EntitiesByNameView, EntitiesTable, EntitiesTableRef};
 pub use logs::{LogsTable, LogsTableRef};
 pub use migrations::{
     MIGRATION_STATE_TABLES, SchemaMigrationIssueRow, SchemaMigrationIssuesTable,
@@ -39,6 +40,7 @@ pub use samples::{
     CommentsByIdView, CommentsTable, CommentsTableRef, S3IdsTable, S3IdsTableRef, S3Sha256sView,
     SamplesListTable, SamplesListTableRef, SamplesView,
 };
+pub use scan_stats::{ScanStatsTable, ScanStatsTableRef};
 pub use tags::{TagsByItemView, TagsCaseInsensitiveView, TagsTable, TagsTableRef};
 
 /// Every Scylla object Thorium declares, in creation order
@@ -57,6 +59,8 @@ pub struct ThoriumKeyspace {
     entities: EntitiesTable,
     /// The entities by id view
     entities_by_id: EntitiesByIdView,
+    /// The entities by name view
+    entities_by_name: EntitiesByNameView,
     /// The comments table
     comments: CommentsTable,
     /// The comments by id view
@@ -101,6 +105,8 @@ pub struct ThoriumKeyspace {
     samples_list: SamplesListTable,
     /// The samples view
     samples: SamplesView,
+    /// The scan stats table
+    scan_stats: ScanStatsTable,
     /// The tags table
     tags: TagsTable,
     /// The tags by item view

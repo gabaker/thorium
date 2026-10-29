@@ -99,7 +99,8 @@ pub use apply::{
     member_build, redact_trigger_key, render, table_cql, view_build_statuses, view_cql,
     views_built,
 };
-pub use baseline::BASELINE_REVISIONS;
+pub(crate) use baseline::object_added_later;
+pub use baseline::{ADDED_OBJECTS, BASELINE_REVISIONS};
 pub use changes::{ChangeClass, ChangeKind, SchemaChange, ViewChange, rebuilds, views_read};
 pub use check::{SchemaCheckError, SchemaCheckPass, check_startup, judge_applied};
 pub use classes::{

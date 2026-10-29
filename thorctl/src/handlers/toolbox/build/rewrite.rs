@@ -166,8 +166,12 @@ fn rewrite_build(source: &str) -> String {
 ///
 /// * `spec` - The spec
 pub(in crate::handlers::toolbox) fn spec_json(spec: &serde_json::Value) -> Result<String, Error> {
+    // sort the spec's maps first: yara-x's preserve_order feature makes serde_json maps
+    // insertion-ordered, and committed spec files keep their keys sorted
+    let mut sorted = spec.clone();
+    sorted.sort_all_objects();
     // two-space pretty JSON with sorted keys, ending in a newline like the other JSON files
-    serde_json::to_string_pretty(spec)
+    serde_json::to_string_pretty(&sorted)
         .map(|text| format!("{text}\n"))
         .map_err(|err| Error::new(format!("Failed to write a spec as JSON: {err}")))
 }

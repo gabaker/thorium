@@ -43,6 +43,7 @@ const EmailVerify = lazy(async () => await import('./pages/users/EmailVerify'));
 const EmailVerified = lazy(async () => await import('./pages/users/EmailVerified'));
 const Profile = lazy(async () => await import('./pages/users/UserProfile'));
 const SystemStats = lazy(async () => await import('./pages/system/SystemStats'));
+const HuntStatus = lazy(async () => await import('./pages/system/HuntStatus'));
 const SystemSettings = lazy(async () => await import('./pages/system/SystemSettings'));
 // test pages
 const SigmaTest = lazy(() => import('./pages/test/code/SigmaTest'));
@@ -94,6 +95,7 @@ const Resources = () => (
     // Users
     <Route path="/profile" element={<PageWrapper Contents={Profile} />} />
     <Route path="/users" element={<PageWrapper admin Contents={Users} />} />
+    <Route path="/hunt-status" element={<PageWrapper admin Contents={HuntStatus} />} />
     <Route path="/groups" element={<PageWrapper Contents={Groups} />} />
     <Route path="/auth" element={<PageWrapper auth={false} Contents={Login} />} />
     <Route path="/register" element={<PageWrapper auth={false} Contents={UserRegistration} />} />

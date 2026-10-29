@@ -224,33 +224,34 @@ fn registered_legacy_objects_are_expected_extras() {
         "partition_key": ["id"], "clustering_key": [], "static": []
     });
     let mut expected = snapshot();
-    expected.objects.push(SnapshotObject {
+    let absent = edited(
+        &SnapshotObject {
+            backend: SchemaBackend::Scylla,
+            name: "tool_runs".to_owned(),
+            fingerprint: Fingerprint::of(&old),
+            canonical: old.clone(),
+        },
+        |form| form["name"] = json!("tool_runs"),
+    );
+    expected.objects.push(absent);
+    let mut live = SnapshotObject::declared().to_vec();
+    let other = SnapshotObject {
         backend: SchemaBackend::Scylla,
         name: "events".to_owned(),
         fingerprint: Fingerprint::of(&old),
-        canonical: old.clone(),
-    });
-    let mut live = SnapshotObject::declared().to_vec();
-    let other = edited(
-        &SnapshotObject {
-            backend: SchemaBackend::Scylla,
-            name: "entities_by_name".to_owned(),
-            fingerprint: Fingerprint::of(&old),
-            canonical: old,
-        },
-        |form| form["name"] = json!("entities_by_name"),
-    );
+        canonical: old,
+    };
     live.push(other.clone());
     let observed = observe(live);
     // registered, the absent one is expected and the present one acknowledged
     let legacy = |backend: SchemaBackend, name: &str| {
-        backend == SchemaBackend::Scylla && matches!(name, "events" | "entities_by_name")
+        backend == SchemaBackend::Scylla && matches!(name, "events" | "tool_runs")
     };
     let report = DriftReport::compare(&expected, &observed, &legacy);
     let scylla = &report.backends[&SchemaBackend::Scylla];
     assert_eq!(scylla.status, BackendSchemaStatus::Ok);
     assert_eq!(scylla.objects.len(), 1, "{:?}", scylla.objects);
-    assert_eq!(scylla.objects[0].object, "entities_by_name");
+    assert_eq!(scylla.objects[0].object, "events");
     assert_eq!(scylla.objects[0].kind, DriftKind::Unexpected);
     assert!(scylla.objects[0].acknowledged);
     assert_eq!(scylla.objects[0].fingerprint, Some(other.fingerprint));
@@ -266,20 +267,20 @@ fn registered_legacy_objects_are_expected_extras() {
     assert_eq!(
         kinds,
         [
-            ("entities_by_name", DriftKind::Unexpected, false),
-            ("events", DriftKind::Missing, false),
+            ("events", DriftKind::Unexpected, false),
+            ("tool_runs", DriftKind::Missing, false),
         ]
     );
 }
 
-/// The dead `events` table and `entities_by_name` view an older release created are unexpected
-/// but acknowledged by the legacy registry against a snapshot that doesn't list them, so they
-/// raise no condition; against the `2026-10-v01` and `2026-10-v02` snapshots they match; absent
-/// from a keyspace this release created they aren't missing; and the registry holds 18 tables and
-/// 12 views and declares neither
+/// The dead `events` table an older release created is unexpected but acknowledged by the
+/// legacy registry against a snapshot that doesn't list it, so it raises no condition; against
+/// the `2026-10-v01` and `2026-10-v02` snapshots the dead objects match; absent from a keyspace
+/// this release created they aren't missing; and the registry holds 19 tables and 13 views,
+/// declaring the `entities_by_name` view that came back but never the `events` table
 #[test]
 fn the_dead_objects_are_acknowledged_extras_and_never_declared() {
-    // the derives declare 18 tables and 12 views, and neither dead object
+    // the derives declare 19 tables and 13 views, and never the dead events table
     let declared = SnapshotObject::declared();
     let count = |kind: &str| {
         declared
@@ -289,12 +290,19 @@ fn the_dead_objects_are_acknowledged_extras_and_never_declared() {
             })
             .count()
     };
-    assert_eq!((count("table"), count("view")), (18, 12));
+    assert_eq!((count("table"), count("view")), (19, 13));
     assert!(
         declared
             .iter()
             .filter(|object| object.backend == SchemaBackend::Scylla)
-            .all(|object| !matches!(object.name.as_str(), "events" | "entities_by_name"))
+            .all(|object| object.name != "events")
+    );
+    // the view yara's exact-name reads brought back is declared again
+    assert!(
+        declared
+            .iter()
+            .any(|object| object.backend == SchemaBackend::Scylla
+                && object.name == "entities_by_name")
     );
     // a keyspace an older release created holds both, as the older snapshots list them
     let committed = |revision: &str| {
@@ -306,17 +314,14 @@ fn the_dead_objects_are_acknowledged_extras_and_never_declared() {
     let dead = v02
         .objects
         .iter()
-        .filter(|object| {
-            object.backend == SchemaBackend::Scylla
-                && matches!(object.name.as_str(), "events" | "entities_by_name")
-        })
+        .filter(|object| object.backend == SchemaBackend::Scylla && object.name == "events")
         .cloned()
         .collect::<Vec<_>>();
-    assert_eq!(dead.len(), 2);
+    assert_eq!(dead.len(), 1);
     let mut live = declared.to_vec();
     live.extend(dead);
     let older = observe(live);
-    // against the current snapshot, both are unexpected and acknowledged by the registry
+    // against the current snapshot, the dead table is unexpected and acknowledged
     let report = DriftReport::compare(&snapshot(), &older, &crate::models::upgrades::is_legacy);
     let scylla = &report.backends[&SchemaBackend::Scylla];
     assert_eq!(scylla.status, BackendSchemaStatus::Ok);
@@ -325,13 +330,7 @@ fn the_dead_objects_are_acknowledged_extras_and_never_declared() {
         .iter()
         .map(|object| (object.object.as_str(), object.kind, object.acknowledged))
         .collect::<Vec<_>>();
-    assert_eq!(
-        found,
-        [
-            ("entities_by_name", DriftKind::Unexpected, true),
-            ("events", DriftKind::Unexpected, true),
-        ]
-    );
+    assert_eq!(found, [("events", DriftKind::Unexpected, true)]);
     assert!(!report.summary(&[]).holds());
     // against the older snapshots, which list them, they match whether or not they are registered
     for revision in ["2026-10-v01", "2026-10-v02"] {

@@ -11,7 +11,9 @@
 //! A change to the declared schema that moves this baseline keeps the released definition here
 //! instead: the committed snapshots of released revisions never change. A revision released after
 //! the registry existed whose layouts the declared schema has since moved on from keeps the
-//! layouts it wrote in [`RELEASED_LAYOUTS`], and [`RevisionSnapshot::released`] builds its snapshot.
+//! layouts it wrote in [`RELEASED_LAYOUTS`], an object the declared schema has since gained is
+//! listed with the revision that added it in [`ADDED_OBJECTS`], and
+//! [`RevisionSnapshot::released`] builds each revision's snapshot.
 
 use super::cql_type::{CqlDesc, CqlNative};
 use super::definition::{
@@ -28,6 +30,37 @@ pub const BASELINE_REVISIONS: &[&str] = &["2026-10-v01", "2026-10-v02"];
 /// schema has since moved to another layout, as `(revision, family, layout)`; every other object of
 /// such a revision is the declared one
 pub const RELEASED_LAYOUTS: &[(&str, &str, u32)] = &[("2026-10-v03", "pipelines", 1)];
+
+/// The declared objects a revision added after older revisions were released, as `(the revision
+/// that added it, backend, name)`; the snapshot of a revision before that one leaves the object
+/// out, since that revision's schema never created it
+///
+/// The yara scanning revision adds the scan stats table, re-declares the `entities_by_name` view
+/// the baseline created (its own frozen definition stays in this module), and adds the yara
+/// ruleset cache's bucket role.
+pub const ADDED_OBJECTS: &[(&str, SchemaBackend, &str)] = &[
+    ("2026-10-v05", SchemaBackend::Scylla, "entities_by_name"),
+    ("2026-10-v05", SchemaBackend::Scylla, "scan_stats"),
+    ("2026-10-v05", SchemaBackend::S3, "yara_rulesets"),
+];
+
+/// Whether a declared object was added by a revision after older revisions were released
+///
+/// A probe comparing a live schema with an older revision's snapshot treats such an object as
+/// an expected extra rather than drift: a snapshot that lists the object raises no extra at
+/// all, so an extra only arises against snapshots that predate the object.
+///
+/// # Arguments
+///
+/// * `backend` - The object's backend
+/// * `name` - The object's name
+#[must_use]
+pub fn object_added_later(backend: SchemaBackend, name: &str) -> bool {
+    // membership is enough, since only older snapshots can raise the extra
+    ADDED_OBJECTS
+        .iter()
+        .any(|(_, added_backend, added)| *added_backend == backend && *added == name)
+}
 
 /// Every declared Scylla object the baseline's setup statements created, in their order; the
 /// statements are kept in `goldens/legacy_ddl.cql`, and the declared definitions are held to them
@@ -119,8 +152,9 @@ pub(super) const EVENTS: ObjectDef = ObjectDef::Table(TableDef {
     partition_size: None,
 });
 
-/// The `entities_by_name` view the baseline's setup created on `entities`, which the registry
-/// doesn't declare
+/// The `entities_by_name` view the baseline's setup created on `entities`, kept as the baseline's
+/// own frozen definition; later revisions stopped declaring the view before exact-name entity
+/// reads brought it back with this same shape
 pub(super) const ENTITIES_BY_NAME: ObjectDef = ObjectDef::View(ViewDef {
     name: "entities_by_name",
     base: "entities",
@@ -216,8 +250,8 @@ fn baseline_layout(backend: SchemaBackend, family: &'static str, version: u32) -
 /// Panics if a declared baseline object is no longer declared, which the snapshot tests rule out.
 #[must_use]
 pub(super) fn baseline_objects() -> Vec<SchemaObject> {
-    // the declared Scylla objects the baseline created, with the undeclared view after its base
-    // and the undeclared table last
+    // the declared Scylla objects the baseline created, with the baseline's own view definition
+    // after its base and the retired table last
     let declared = SchemaObject::declared();
     let mut objects = Vec::new();
     for name in DECLARED_SCYLLA {
@@ -291,16 +325,24 @@ impl RevisionSnapshot {
 
 impl RevisionSnapshot {
     /// Build the snapshot of a revision released after the schema registry existed: the declared
-    /// schema, with the layouts the revision wrote where they differ from the declared ones
+    /// schema, without the objects a later revision added, and with the layouts the revision wrote
+    /// where they differ from the declared ones
     ///
     /// # Arguments
     ///
     /// * `revision` - The revision the snapshot is recorded for
     #[must_use]
     pub fn released(revision: RevisionId) -> RevisionSnapshot {
-        // fingerprint the declared objects, except the layouts this revision wrote differently
+        // fingerprint the declared objects, leaving out each object a later revision added and
+        // keeping the layouts this revision wrote differently
         let mut objects = SchemaObject::declared()
             .into_iter()
+            .filter(|object| {
+                // an object added after this revision was released isn't in its schema
+                !ADDED_OBJECTS.iter().any(|(added, backend, name)| {
+                    object.backend == *backend && object.name == *name && revision.as_str() < *added
+                })
+            })
             .map(|object| {
                 let written = RELEASED_LAYOUTS.iter().find(|(id, family, _)| {
                     *id == revision.as_str()

@@ -15,6 +15,7 @@ use base64::Engine as _;
 use bytes::{Bytes, BytesMut};
 use cart_rs::{CartKey, CartManual, CartVersion, UncartStream};
 use data_encoding::HEXLOWER;
+use futures::StreamExt;
 use md5::Md5;
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
@@ -593,6 +594,8 @@ pub struct S3 {
     pub repos: S3Client,
     /// s3 clients for graphics
     pub graphics: S3Client,
+    /// The s3 bucket for serialized compiled yara rulesets
+    pub yara_rulesets: S3Client,
 }
 
 impl S3 {
@@ -660,6 +663,15 @@ impl S3 {
             config.thorium.files.cart_version,
             &config.thorium.s3,
         )?;
+        // build the serialized yara ruleset cache s3 client
+        let yara_rulesets = S3Client::new(
+            &config.thorium.yara.cache_bucket,
+            // these aren't password protected so just use the files password
+            &config.thorium.files.password,
+            // serialized rulesets are never carted so this is only here to satisfy the constructor
+            config.thorium.files.cart_version,
+            &config.thorium.s3,
+        )?;
         Ok(S3 {
             files,
             results,
@@ -668,6 +680,7 @@ impl S3 {
             attachments,
             repos,
             graphics,
+            yara_rulesets,
         })
     }
 }
@@ -764,6 +777,61 @@ impl S3Client {
                 HeadObjectError::NotFound(_) => Ok(false),
                 err => Err(ApiError::from(err)),
             },
+        }
+    }
+
+    /// List the objects with the given prefix, truncated to 10,000 keys maximum
+    ///
+    /// Returns a list of keys matching the given prefix with a maximum of 10,000
+    ///
+    /// # Caveats
+    ///
+    /// The client will return a maximum of 1000 keys per page, and this function
+    /// will concatenate a maximum of 10 pages, so 10,000 keys total. If there
+    /// are more objects than 10,000, those will not be included
+    ///
+    /// # Arguments
+    ///
+    /// * `prefix` - The prefix to check for objects
+    #[instrument(name = "S3Client::list_truncated", skip(self), err(Debug))]
+    pub async fn list_truncated(&self, prefix: &str) -> Result<Vec<String>, ApiError> {
+        // store a continuation token
+        let mut continuation_token = None;
+        // store our keys
+        let mut keys = Vec::new();
+        // count how many pages we've gotten
+        let mut page: u8 = 1;
+        loop {
+            // list objects with the given prefix
+            let mut resp = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                // match on the given prefix
+                .prefix(prefix)
+                // explicitly set max keys to 1000 per page
+                .max_keys(1000)
+                // set the token
+                .set_continuation_token(continuation_token)
+                .send()
+                .await?;
+            keys.extend(
+                resp.contents
+                    .take()
+                    .into_iter()
+                    // flatten None to an empty Vec
+                    .flatten()
+                    // get the keys for each object
+                    .filter_map(|object| object.key),
+            );
+            // increment our page count
+            page += 1;
+            // if we've gotten 10 pages or we don't have a next token, return our keys
+            if page > 10 || resp.next_continuation_token.is_none() {
+                return Ok(keys);
+            }
+            // we must have a continuation token, so set it for next loop
+            continuation_token = resp.next_continuation_token;
         }
     }
 
@@ -1434,6 +1502,125 @@ impl S3Client {
             .await?
             .body;
         Ok(body)
+    }
+
+    /// Download a file from s3 if it exists
+    ///
+    /// Unlike [`S3Client::download`] a missing key is returned as `None` instead of an
+    /// error so callers can treat it as a clean cache miss.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path to an object in s3
+    #[instrument(name = "S3Client::download_opt", skip(self), err(Debug))]
+    pub async fn download_opt(&self, path: &str) -> Result<Option<ByteStream>, ApiError> {
+        // try to start downloading this object
+        match self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(path)
+            .send()
+            .await
+        {
+            // this object exists so hand back its body stream
+            Ok(output) => Ok(Some(output.body)),
+            // check whether this is just a missing key or a real failure
+            Err(sdk_err) => {
+                // a missing key is a clean miss rather than an error
+                if matches!(sdk_err.as_service_error(), Some(service_err) if service_err.is_no_such_key())
+                {
+                    return Ok(None);
+                }
+                // anything else is a real s3 failure
+                Err(ApiError::from(sdk_err))
+            }
+        }
+    }
+
+    /// Stream a raw request body into s3 without carting it
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path to write this object to in s3
+    /// * `upload_id` - The id of the multipart upload being used
+    /// * `body` - The request body to stream to s3
+    #[instrument(name = "S3Client::stream_body_helper", skip(self, body), err(Debug))]
+    async fn stream_body_helper(
+        &self,
+        path: &str,
+        upload_id: &str,
+        body: axum::body::Body,
+    ) -> Result<(), ApiError> {
+        // track this uploads parts so we can bound, log, and wait on them, hanging every span it
+        // spawns off of ours instead of off of whatever span happens to be current at that point
+        let mut tracker = MultipartTracker::new(path, upload_id, &Span::current());
+        // buffer incoming bytes until we have a full part sized chunk to upload
+        let mut buffer = BytesMut::with_capacity(PART_SIZE);
+        // turn this body into a stream of data frames
+        let mut stream = body.into_data_stream();
+        // stream this bodies data into part sized buffers and upload them concurrently
+        while let Some(raw) = stream.next().await {
+            // surface any failure to read the incoming body as a bad request
+            let raw = match raw {
+                Ok(raw) => raw,
+                Err(error) => return bad!(format!("Failed to read request body: {error}")),
+            };
+            // track how much of the incoming body we have read
+            tracker.record_read(raw.len());
+            // add our chunk to our part buffer
+            buffer.extend_from_slice(&raw);
+            // once we have a full part upload it in the background
+            if buffer.len() >= PART_SIZE {
+                // take the buffered bytes as an owned chunk, leaving capacity for the next part
+                let chunk = buffer.split().freeze();
+                // upload this part in the background, applying backpressure to the incoming
+                // body if too many uploads are already in flight
+                self.submit_part(&mut tracker, chunk).await?;
+            }
+        }
+        // upload whatever is left as the final part; it has the highest part number so s3
+        // allows it to be smaller than the 5 MiB minimum
+        if should_submit_trailing_part(buffer.is_empty(), tracker.part_num) {
+            let chunk = buffer.split().freeze();
+            self.submit_part(&mut tracker, chunk).await?;
+        }
+        // wait for every part to finish uploading and complete the multipart upload
+        self.complete_multipart(tracker).await
+    }
+
+    /// Stream a raw request body into s3
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path to write this object to in s3
+    /// * `body` - The request body to stream to s3
+    #[instrument(name = "S3Client::stream_body", skip(self, body), err(Debug))]
+    pub async fn stream_body(&self, path: &str, body: axum::body::Body) -> Result<(), ApiError> {
+        // ban any paths that might contain traversal attacks
+        if path.contains("..") {
+            return bad!("S3 file names cannot contain '..'".to_owned());
+        }
+        // initiate a multipart upload to s3
+        let init = self
+            .client
+            .create_multipart_upload()
+            .bucket(&self.bucket)
+            .key(path)
+            .content_type("application/octet-stream")
+            .send()
+            .await?;
+        // get our upload id
+        let upload_id = match init.upload_id() {
+            Some(upload_id) => upload_id,
+            None => return unavailable!("Failed to get multipart upload ID".to_owned()),
+        };
+        // stream this body to s3
+        match self.stream_body_helper(path, upload_id, body).await {
+            Ok(()) => Ok(()),
+            // abort this multipart upload and return the error that failed it
+            Err(error) => Err(self.abort_multipart(path, upload_id, error).await),
+        }
     }
 
     /// Download an object from s3 with its metadata intact

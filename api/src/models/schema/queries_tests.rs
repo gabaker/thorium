@@ -4,15 +4,17 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::queries::migrations::SchemaStateQueries;
 use super::queries::{
-    CommentsByIdQueries, CommentsQueries, SamplesListQueries, SamplesQueries, ScyllaQueries,
+    ADDED_LATER, CommentsByIdQueries, CommentsQueries, SamplesListQueries, SamplesQueries,
+    ScyllaQueries,
 };
 use super::scylla::{
     AssociationsTable, CommentsTable, CommitishListTable, CommitishesTable, EntitiesTable,
     LogsTable, NetworkPoliciesTable, NodesTable, NotificationsTable, RepoDataTable, ReposListTable,
-    ResultsStreamTable, ResultsTable, S3IdsTable, SamplesListTable, SchemaMigrationIssuesTable,
-    SchemaMigrationsTable, TagsTable,
+    ResultsStreamTable, ResultsTable, S3IdsTable, SamplesListTable, ScanStatsTable,
+    SchemaMigrationIssuesTable, SchemaMigrationsTable, TagsTable,
 };
-use super::{InKind, InList, Projection, TableStatements, plan_in_chunks};
+use super::{ADDED_OBJECTS, InKind, InList, Projection, TableStatements, plan_in_chunks};
+use crate::models::upgrades::SchemaBackend;
 use crate::models::{
     AssociationListRow, BasicSubmissionRow, CommentIdRow, CommentRow, CommitishDataRow,
     CommitishListRow, CommitishRepoDataRow, EntityListRow, EntityListSupplementRow, EntityRow,
@@ -57,6 +59,14 @@ const INTENDED: [(&str, &str); 3] = [
 /// The cursor statement no generated statement replaces: a commitish tie query reads one kind,
 /// so the tie query reading the kinds sorted before the tied one is gone
 const REMOVED: [&str; 1] = ["commitish_list.list_ties_below"];
+
+/// The statements added after today's text was frozen, which replace no legacy statement:
+/// yara scanning's exact-name entity read and the scan stats insert and pull
+const ADDED: [&str; 3] = [
+    "entities_by_name.get",
+    "scan_stats.insert",
+    "scan_stats.pull",
+];
 
 /// Every converted projection reads the same columns, in the same order, as today's statement
 #[test]
@@ -325,6 +335,7 @@ fn generated_statements() -> Vec<(String, String)> {
     statements.extend(level_one::<NodesTable>("nodes"));
     statements.extend(level_one::<NotificationsTable>("notifications"));
     statements.extend(level_one::<LogsTable>("logs"));
+    statements.extend(level_one::<ScanStatsTable>("scan_stats"));
     statements.extend(ScyllaQueries::statements("{ns}"));
     statements.extend(SchemaStateQueries::statements("{ns}"));
     statements
@@ -536,9 +547,13 @@ fn parse_statements(text: &str) -> BTreeMap<String, String> {
 #[test]
 fn statements_match_todays_text() {
     let legacy = parse_statements(include_str!("goldens/legacy_statements.cql"));
-    let generated = ScyllaQueries::statements("{ns}")
+    let mut generated = ScyllaQueries::statements("{ns}")
         .into_iter()
         .collect::<BTreeMap<_, _>>();
+    // statements added after the freeze replace no legacy statement
+    for name in ADDED {
+        assert!(generated.remove(name).is_some(), "{name} isn't generated");
+    }
     // every statement replaced so far has a generated form, and the other way around
     assert_eq!(
         legacy.keys().collect::<Vec<_>>(),
@@ -830,5 +845,26 @@ fn search_statements_match_todays_text() {
     );
     for (name, old) in &legacy {
         assert_eq!(normalize(old), normalize(&generated[name]), "{name}");
+    }
+}
+
+/// Every Scylla object a later revision added has statements an offline writer can leave out, so
+/// a writer inside an upgrade starts on the schema the upgrade began from
+#[test]
+fn later_objects_have_optional_statements() {
+    // the Scylla objects the baseline module lists as added after older revisions
+    let added = ADDED_OBJECTS
+        .iter()
+        .filter(|(_, backend, _)| *backend == SchemaBackend::Scylla)
+        .map(|(_, _, name)| *name)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(added, ADDED_LATER.into_iter().collect::<BTreeSet<_>>());
+    // each one has generated statements
+    let objects = ScyllaQueries::statements("ns")
+        .into_iter()
+        .filter_map(|(name, _)| name.split_once('.').map(|(object, _)| object.to_owned()))
+        .collect::<BTreeSet<_>>();
+    for name in ADDED_LATER {
+        assert!(objects.contains(name), "{name} has no statements");
     }
 }

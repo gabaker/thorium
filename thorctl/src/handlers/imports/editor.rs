@@ -299,6 +299,30 @@ impl EditorParseError for toml::de::Error {
     }
 }
 
+/// A plain text validation error with no source location
+///
+/// Raw-source editor flows (e.g. `rules edit`) validate with simple checks
+/// like emptiness or size caps that have no line/column to point at.
+pub(crate) struct PlainTextError(pub String);
+
+impl std::fmt::Display for PlainTextError {
+    /// Write this errors message
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write to
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl EditorParseError for PlainTextError {
+    /// Plain text checks never carry a source location
+    fn location(&self) -> Option<(usize, usize)> {
+        None
+    }
+}
+
 /// The menu entries of the error prompt, with the entry that reopens the editor first
 pub(crate) const ERROR_CHOICES: &[&str] = &[
     "Edit   - Reopen editor to fix the issue",
@@ -323,7 +347,7 @@ pub(crate) fn prompt_error_action_with(seams: &Seams) -> Result<ErrorAction, Err
 }
 
 /// Prompt the user to either retry editing or cancel, using the process environment
-fn prompt_error_action() -> Result<ErrorAction, Error> {
+pub(crate) fn prompt_error_action() -> Result<ErrorAction, Error> {
     prompt_error_action_with(&Seams::from_env())
 }
 
@@ -565,6 +589,34 @@ pub(crate) async fn editor_loop_asking<R, E: EditorParseError>(
     parse: impl Fn(&str) -> Result<R, E>,
     ask: impl Fn() -> Result<ErrorAction, Error>,
 ) -> Result<Option<R>, Error> {
+    // merge views always reject leftover conflict markers
+    editor_loop_inner(content, label, editor, ext, true, parse, ask).await
+}
+
+/// The innermost editor loop, with the conflict marker check exposed
+///
+/// Merge views reject leftover conflict markers; raw-source edits (see
+/// [`edit_text`]) switch the check off since their content can legitimately
+/// contain marker-shaped lines.
+///
+/// # Arguments
+///
+/// * `content` - The initial file content
+/// * `label` - A label used when naming the temp file
+/// * `editor` - The editor command to open
+/// * `ext` - The temp file extension (without a dot)
+/// * `check_conflict_markers` - Whether to reject unresolved merge conflict markers
+/// * `parse` - Validates the saved text, returning the value to hand back
+/// * `ask` - Asks the user whether to reopen the editor after an error
+async fn editor_loop_inner<R, E: EditorParseError>(
+    content: &str,
+    label: &str,
+    editor: &str,
+    ext: &str,
+    check_conflict_markers: bool,
+    parse: impl Fn(&str) -> Result<R, E>,
+    ask: impl Fn() -> Result<ErrorAction, Error>,
+) -> Result<Option<R>, Error> {
     // own the temp file in a guard so every exit below (including `?` from the
     // error prompts) removes it rather than leaking it
     let temp = TempFile::create(label, ext, content)?;
@@ -575,8 +627,8 @@ pub(crate) async fn editor_loop_asking<R, E: EditorParseError>(
         let resolved = tokio::fs::read_to_string(temp.path())
             .await
             .map_err(|err| Error::new(format!("Failed to read temporary file: {err}")))?;
-        // check for unresolved conflict markers
-        if let Some(line) = find_conflict_markers(&resolved) {
+        // check for unresolved conflict markers when this flow uses them
+        if check_conflict_markers && let Some(line) = find_conflict_markers(&resolved) {
             eprintln!(
                 "{} Unresolved merge conflict marker found at line {}. Please resolve all conflicts before saving.",
                 "Error:".bright_red().bold(),
@@ -722,6 +774,42 @@ pub(crate) async fn merge_in_editor<E: EditorParseError>(
     editor_loop_core(&conflict, label, editor, ext, |resolved| {
         validate(resolved).map(|()| resolved.to_string())
     })
+    .await
+}
+
+/// Open an editor directly on a raw text blob, returning the saved text (or
+/// `None` if the user cancelled)
+///
+/// Unlike [`merge_in_editor`] there is no conflict view and the conflict
+/// marker check is off: raw rule sources can legitimately contain
+/// marker-shaped lines (a bare seven equals ruler or a string starting with
+/// `<<<<<<<`) and there is no merge to resolve.
+///
+/// # Arguments
+///
+/// * `content` - The raw text to edit
+/// * `label` - A label used when naming the temp file
+/// * `editor` - The editor command to open
+/// * `ext` - The temp file extension (without a dot) for editor highlighting
+/// * `validate` - Validates the saved text on each save
+pub(crate) async fn edit_text<E: EditorParseError>(
+    content: &str,
+    label: &str,
+    editor: &str,
+    ext: &str,
+    validate: impl Fn(&str) -> Result<(), E>,
+) -> Result<Option<String>, Error> {
+    // run the shared loop without the conflict machinery, handing back the
+    // saved text once it validates
+    editor_loop_inner(
+        content,
+        label,
+        editor,
+        ext,
+        false,
+        |resolved| validate(resolved).map(|()| resolved.to_string()),
+        prompt_error_action,
+    )
     .await
 }
 

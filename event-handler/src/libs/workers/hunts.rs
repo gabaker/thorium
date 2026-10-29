@@ -4,3 +4,4 @@
 //! also could support hunting in historic data.
 
 pub mod sigma;
+pub mod yara;

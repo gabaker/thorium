@@ -16,14 +16,20 @@ use crate::models::AuthedUser;
 use crate::models::backends::entities::{is_definition_kind, models, toolsets, workflows};
 use crate::models::backends::{self, GraphicSupport, TagSupport};
 use crate::models::{
-    ApiCursor, Association, AssociationListParams, AssociationTargetColumn, Entity, EntityListLine,
-    EntityListParams, EntityMetadata, EntityResponse, GrepDocumentMatches, GrepMatch, GrepMatches,
-    GrepQueryParams, GrepRequest, GrepSource, GrepStats, InstancedAgentToolset,
-    ModelCredentialEntity, ModelEndpointEntity, Notification, RedactSecrets, TagDeleteRequest,
-    TagRequest, ToolInstanceSummary, TruncationReason,
+    ApiCursor, Association, AssociationListParams, AssociationTargetColumn, Entity,
+    EntityByNameParams, EntityListLine, EntityListParams, EntityMetadata, EntityResponse,
+    GrepDocumentMatches, GrepMatch, GrepMatches, GrepQueryParams, GrepRequest, GrepSource,
+    GrepStats, HuntCheckpoint, HuntCheckpointResponse, HuntCreateRequest, HuntRuleLine,
+    HuntRuleListParams, HuntStatusParams, HuntSystemStatus, InstancedAgentToolset,
+    ModelCredentialEntity, ModelEndpointEntity, Notification, NotificationParams,
+    NotificationRequest, RedactSecrets, TagDeleteRequest, TagRequest, ToolInstanceSummary,
+    TruncationReason, YaraHitWriteRequest, YaraHitWriteResponse,
 };
 use crate::utils::{ApiError, AppState};
-use crate::{bad, not_found};
+use crate::{bad, is_admin, not_found};
+
+/// A notification for an entity as the documents describe it
+pub type EntityNotification = Notification<Entity>;
 
 /// Refuse a run token a write to a definition
 ///
@@ -95,6 +101,371 @@ async fn create(
     Ok(Json(resp))
 }
 
+/// Writes one yara rule hit from authoritative server side state
+///
+/// The server recomputes the hit write groups from fresh database state (the
+/// rules groups, the samples groups, and group kill switches) and performs the
+/// whole partitioned write — entity, associations, depth stamped tags, and
+/// auto flag actions — in one audited idempotent call. A request carrying a
+/// hunt id also decorates the written hit with a `HuntHit` association and a
+/// `HuntId` entity tag; a vanished hunt is a reported skip, never a 404.
+///
+/// # Arguments
+///
+/// * `user` - The user that is writing this hit
+/// * `state` - Shared Thorium objects
+/// * `req` - The hit write request
+#[utoipa::path(
+    post,
+    path = "/api/entities/yara/hit/",
+    responses(
+        (status = 200, description = "Yara hit write outcome", body = YaraHitWriteResponse),
+        (status = 400, description = "The hit write request was malformed"),
+        (status = 401, description = "This user is not authorized to write yara hits"),
+        (status = 404, description = "The target yara rule does not exist"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
+#[instrument(name = "routes::entities::create_yara_hit", skip_all, err(Debug))]
+#[axum_macros::debug_handler]
+async fn create_yara_hit(
+    user: AuthedUser,
+    State(state): State<AppState>,
+    Json(req): Json<YaraHitWriteRequest>,
+) -> Result<Json<YaraHitWriteResponse>, ApiError> {
+    // write this hit from authoritative server side state
+    let resp = Entity::create_yara_hit(&user, req, &state.shared).await?;
+    Ok(Json(resp))
+}
+
+/// Creates a hunt: freeze its rules, split its lanes, and start its chains
+///
+/// Any user may create hunts. The selector resolves and freezes under the
+/// creator's authorization through the engine's snapshot filter, the corpus
+/// clamps to the creation instant, best-effort per user and global active
+/// hunt quotas apply, and one depth 0 chunk event per lane lands on the
+/// engine's queue.
+///
+/// # Arguments
+///
+/// * `user` - The user that is creating this hunt
+/// * `state` - Shared Thorium objects
+/// * `req` - The hunt create request
+#[utoipa::path(
+    post,
+    path = "/api/entities/hunt/",
+    responses(
+        (status = 200, description = "The created hunt entity", body = Entity),
+        (status = 400, description = "The hunt create request was invalid (unshipped engine, Repos corpus, bad groups, quota, selector resolution)"),
+        (status = 401, description = "This user is not authorized to create entities in all given groups"),
+        (status = 404, description = "A selected rule or rule set does not exist"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
+#[instrument(name = "routes::entities::create_hunt", skip_all, err(Debug))]
+#[axum_macros::debug_handler]
+async fn create_hunt(
+    user: AuthedUser,
+    State(state): State<AppState>,
+    Json(req): Json<HuntCreateRequest>,
+) -> Result<Json<Entity>, ApiError> {
+    // create this hunt and start its lane chains
+    let entity = Entity::create_hunt(&user, req, &state.shared).await?;
+    Ok(Json(entity))
+}
+
+/// Cancels a hunt
+///
+/// Only the hunt's submitter or an admin may cancel it. Running chunks observe
+/// the terminal status lazily within one chunk. Cancelling an already
+/// cancelled hunt is an idempotent no-op; a hunt that completed or failed on
+/// its own is a 400.
+///
+/// # Arguments
+///
+/// * `user` - The user that is cancelling this hunt
+/// * `state` - Shared Thorium objects
+/// * `id` - The id of the hunt to cancel
+#[utoipa::path(
+    post,
+    path = "/api/entities/hunt/{id}/cancel",
+    params(
+        ("id" = Uuid, Path, description = "The id of the hunt to cancel"),
+    ),
+    responses(
+        (status = 204, description = "Hunt cancelled"),
+        (status = 400, description = "The entity is not a hunt or is already terminal"),
+        (status = 401, description = "This user is not the hunts submitter or an admin"),
+        (status = 404, description = "The hunt does not exist"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
+#[instrument(name = "routes::entities::cancel_hunt", skip_all, err(Debug))]
+#[axum_macros::debug_handler]
+async fn cancel_hunt(
+    user: AuthedUser,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    // cancel this hunt
+    Entity::cancel_hunt(&user, id, &state.shared).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Commits one processed hunt chunk
+///
+/// Only the admin service account may checkpoint hunts; this is the single
+/// audited place hunt progress commits. The lane sequence compare-and-set and
+/// the next chunk emission run in one atomic step so duplicated checkpoints
+/// collapse instead of forking the lane chain; a lost compare-and-set is a 409
+/// telling the caller to drop its stale chain.
+///
+/// # Arguments
+///
+/// * `user` - The user committing this checkpoint
+/// * `state` - Shared Thorium objects
+/// * `id` - The id of the hunt this checkpoint advances
+/// * `req` - The checkpoint to commit
+#[utoipa::path(
+    post,
+    path = "/api/entities/hunt/{id}/checkpoint",
+    params(
+        ("id" = Uuid, Path, description = "The id of the hunt this checkpoint advances"),
+    ),
+    responses(
+        (status = 200, description = "The checkpoint committed", body = HuntCheckpointResponse),
+        (status = 400, description = "The entity is not a hunt or the lane index is out of range"),
+        (status = 401, description = "This user is not an admin"),
+        (status = 404, description = "The hunt does not exist"),
+        (status = 409, description = "The checkpoint lost its sequence compare-and-set"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
+#[instrument(name = "routes::entities::checkpoint_hunt", skip_all, err(Debug))]
+#[axum_macros::debug_handler]
+async fn checkpoint_hunt(
+    user: AuthedUser,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<HuntCheckpoint>,
+) -> Result<Json<HuntCheckpointResponse>, ApiError> {
+    // commit this hunt chunk checkpoint
+    let resp = Entity::checkpoint_hunt(&user, id, req, &state.shared).await?;
+    Ok(Json(resp))
+}
+
+/// List a page of a hunt's frozen rule snapshot
+///
+/// Any user who can see the hunt may list its frozen rules. Rules that were
+/// deleted after the freeze, or that the caller cannot see, come back as id
+/// only lines; the two cases are indistinguishable on purpose. The cursor is
+/// an index into the immutable frozen rule vec encoded as a Uuid, so cursors
+/// never expire.
+///
+/// # Arguments
+///
+/// * `user` - The user listing this hunts frozen rules
+/// * `params` - The query params to use for this request
+/// * `id` - The id of the hunt to list frozen rules for
+/// * `state` - Shared Thorium objects
+#[utoipa::path(
+    get,
+    path = "/api/entities/hunt/{id}/rules",
+    params(
+        ("id" = Uuid, Path, description = "The id of the hunt to list frozen rules for"),
+        HuntRuleListParams,
+    ),
+    responses(
+        (status = 200, description = "JSON-formatted cursor response containing one page of the hunt's frozen rules", body = ApiCursor<HuntRuleLine>),
+        (status = 400, description = "The entity is not a hunt or a query parameter has an invalid value"),
+        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "The hunt does not exist"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
+#[instrument(name = "routes::entities::list_hunt_rules", skip_all, err(Debug))]
+#[axum_macros::debug_handler]
+async fn list_hunt_rules(
+    user: AuthedUser,
+    params: HuntRuleListParams,
+    Path(id): Path<Uuid>,
+    State(state): State<AppState>,
+) -> Result<Json<ApiCursor<HuntRuleLine>>, ApiError> {
+    // list a page of this hunts frozen rules
+    let cursor = Entity::list_hunt_rules(&user, id, params, &state.shared).await?;
+    Ok(Json(cursor))
+}
+
+/// Get the admin hunt census for the status page
+///
+/// The census is cross-group, cross-user data (hunt names, submitters, and
+/// per-user usage) so it is admin only; the gate runs in the backend before
+/// any read.
+///
+/// # Arguments
+///
+/// * `user` - The user that is reading the census
+/// * `params` - The query params bounding the census
+/// * `state` - Shared Thorium objects
+#[utoipa::path(
+    get,
+    path = "/api/entities/hunt/status/",
+    params(
+        HuntStatusParams,
+    ),
+    responses(
+        (status = 200, description = "The admin hunt census", body = HuntSystemStatus),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
+        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
+#[instrument(name = "routes::entities::hunt_system_status", skip_all, err(Debug))]
+#[axum_macros::debug_handler]
+async fn hunt_system_status(
+    user: AuthedUser,
+    params: HuntStatusParams,
+    State(state): State<AppState>,
+) -> Result<Json<HuntSystemStatus>, ApiError> {
+    // assemble the admin hunt census
+    let status = Entity::hunt_system_status(&user, params, &state.shared).await?;
+    Ok(Json(status))
+}
+
+/// Exempt a yara rule from noisy/slow quarantine
+///
+/// Only admins may manage exemptions. Setting an exemption also deletes any
+/// Noisy/Slow `YaraRuleStatus` values so the rule rejoins scanning in the
+/// same action; Broken tagging is unaffected since a rule that no longer
+/// compiles cannot scan regardless.
+///
+/// # Arguments
+///
+/// * `user` - The user exempting this rule
+/// * `state` - Shared Thorium objects
+/// * `id` - The id of the yara rule to exempt
+#[utoipa::path(
+    post,
+    path = "/api/entities/rules/{id}/quarantine-exemption",
+    params(
+        ("id" = Uuid, Path, description = "The id of the yara rule to exempt from quarantine"),
+    ),
+    responses(
+        (status = 204, description = "The rule is now exempt from quarantine"),
+        (status = 400, description = "The entity is not a yara rule"),
+        (status = 401, description = "This user is not an admin"),
+        (status = 404, description = "The rule does not exist"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
+#[instrument(
+    name = "routes::entities::set_quarantine_exemption",
+    skip_all,
+    err(Debug)
+)]
+#[axum_macros::debug_handler]
+async fn set_quarantine_exemption(
+    user: AuthedUser,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    // get this rule under the requesting users visibility
+    let entity = Entity::get(&user, id, &state.shared).await?;
+    // set the exemption flag (admin only, enforced in the backend)
+    entity
+        .set_quarantine_exemption(&user, true, &state.shared)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Clear a yara rules quarantine exemption
+///
+/// Only admins may manage exemptions. Clearing an exemption only removes the
+/// rule's protection from future quarantine; it never adds or removes any
+/// `YaraRuleStatus` values.
+///
+/// # Arguments
+///
+/// * `user` - The user clearing this rules exemption
+/// * `state` - Shared Thorium objects
+/// * `id` - The id of the yara rule to clear the exemption from
+#[utoipa::path(
+    delete,
+    path = "/api/entities/rules/{id}/quarantine-exemption",
+    params(
+        ("id" = Uuid, Path, description = "The id of the yara rule to clear the exemption from"),
+    ),
+    responses(
+        (status = 204, description = "The rule is no longer exempt from quarantine"),
+        (status = 400, description = "The entity is not a yara rule"),
+        (status = 401, description = "This user is not an admin"),
+        (status = 404, description = "The rule does not exist"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
+#[instrument(
+    name = "routes::entities::clear_quarantine_exemption",
+    skip_all,
+    err(Debug)
+)]
+#[axum_macros::debug_handler]
+async fn clear_quarantine_exemption(
+    user: AuthedUser,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    // get this rule under the requesting users visibility
+    let entity = Entity::get(&user, id, &state.shared).await?;
+    // clear the exemption flag (admin only, enforced in the backend)
+    entity
+        .set_quarantine_exemption(&user, false, &state.shared)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Gets an entity by its id
 ///
 /// The entity is returned without its secrets and without any snapshot groups the user can't see,
@@ -142,6 +513,55 @@ async fn get(
     }
     // return the entity as JSON
     Ok(Json(entity))
+}
+
+/// Get every entity sharing an exact name that this user can see
+///
+/// Matches come back ordered oldest-created first and an unknown name is just
+/// an empty list rather than a 404 since clients distinguish the zero, one,
+/// and many match cases themselves. More than 500 entities sharing one name is
+/// rejected as too ambiguous to resolve by name.
+///
+/// # Arguments
+///
+/// * `user` - The user that is getting entities by name
+/// * `params` - The query params to use for this request
+/// * `state` - Shared Thorium objects
+#[utoipa::path(
+    get,
+    path = "/api/entities/by-name/",
+    params(
+        EntityByNameParams,
+    ),
+    responses(
+        (status = 200, description = "JSON-formatted list of every visible entity sharing the given name ordered oldest-created first", body = Vec<Entity>),
+        (status = 400, description = "The name param is missing or more than 500 entities share the name"),
+        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
+#[instrument(name = "routes::entities::get_by_name", skip_all, err(Debug))]
+#[axum_macros::debug_handler]
+async fn get_by_name(
+    user: AuthedUser,
+    params: EntityByNameParams,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Entity>>, ApiError> {
+    // get every visible entity sharing this exact name
+    let mut entities =
+        Entity::get_by_name(&user, &params.name, &params.kinds, &state.shared).await?;
+    // never return a secret or name a group this user can't see
+    for entity in &mut entities {
+        entity.redact_secrets();
+        entity.hide_snapshot_groups(&user);
+    }
+    // return the matched entities as JSON
+    Ok(Json(entities))
 }
 
 /// Lists entities by the given parameters
@@ -975,11 +1395,144 @@ async fn model_credential_secret(
     Ok(Json(credential))
 }
 
+/// Create a notification for an entity in scylla
+///
+/// # Arguments
+///
+/// * `user` - The user sending the request
+/// * `id` - The id of the entity the notification will be created for
+/// * `state` - Shared Thorium objects
+/// * `params` - The notification params sent with the request
+/// * `req` - The notification request that was sent
+#[utoipa::path(
+    post,
+    path = "/api/entities/notifications/{id}",
+    params(
+        ("id" = Uuid, Path, description = "The id of the entity the notification will be created for"),
+        NotificationParams,
+    ),
+    request_body = NotificationRequest<Entity>,
+    responses(
+        (status = 204, description = "Notification created"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation; a query parameter has an invalid value"),
+        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
+#[instrument(name = "routes::entities::create_notification", skip_all, err(Debug))]
+async fn create_notification(
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+    State(state): State<AppState>,
+    params: NotificationParams,
+    Json(req): Json<NotificationRequest<Entity>>,
+) -> Result<StatusCode, ApiError> {
+    // only admins can create entity notifications
+    is_admin!(&user);
+    // check that the entity exists
+    let entity = Entity::get(&user, id, &state.shared).await?;
+    // generate the entity's key
+    let key = entity.id.to_string();
+    // create the notification
+    shared::notifications::create_notification(entity, key, req, params, &state.shared).await
+}
+
+/// Get all of an entity's notifications
+///
+/// # Arguments
+///
+/// * `user` - The user that is requesting the notifications
+/// * `id` - The id of the entity whose notifications are being requested
+/// * `state` - Shared Thorium objects
+#[utoipa::path(
+    get,
+    path = "/api/entities/notifications/{id}",
+    params(
+        ("id" = Uuid, Path, description = "The id of the entity whose notifications are being requested"),
+    ),
+    responses(
+        (status = 200, description = "Notifications returned for the entity", body = Vec<EntityNotification>),
+        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
+#[instrument(name = "routes::entities::get_notifications", skip_all, err(Debug))]
+async fn get_notifications(
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Notification<Entity>>>, ApiError> {
+    // check that the entity exists and the user has access
+    let entity = Entity::get(&user, id, &state.shared).await?;
+    // generate the entity's key
+    let key = entity.id.to_string();
+    // get all of the entity's notifications
+    shared::notifications::get_notifications(entity, key, &state.shared).await
+}
+
+/// Delete an entity notification
+///
+/// # Arguments
+///
+/// * `user` - The user that is deleting the notification
+/// * `id` - The id of the entity whose notification is being deleted
+/// * `notification_id` - The id of the notification to delete
+/// * `state` - Shared Thorium objects
+#[utoipa::path(
+    delete,
+    path = "/api/entities/notifications/{id}/{notification_id}",
+    params(
+        ("id" = Uuid, Path, description = "The id of the entity whose notification is being deleted"),
+        ("notification_id" = Uuid, Path, description = "The notification's unique ID"),
+    ),
+    responses(
+        (status = 204, description = "Notification deleted"),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
+        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
+#[instrument(name = "routes::entities::delete_notification", skip_all, err(Debug))]
+async fn delete_notification(
+    user: AuthedUser,
+    Path((id, notification_id)): Path<(Uuid, Uuid)>,
+    State(state): State<AppState>,
+) -> Result<StatusCode, ApiError> {
+    // only admins can delete entity notifications
+    is_admin!(&user);
+    // check that the entity exists
+    let entity = Entity::get(&user, id, &state.shared).await?;
+    // generate the entity's key
+    let key = entity.id.to_string();
+    // delete the notification
+    shared::notifications::delete_notification(entity, key, None, notification_id, &state.shared)
+        .await
+}
+
 /// The struct containing our openapi docs
 #[derive(OpenApi)]
 #[openapi(
-    paths(create, get, list, list_details, update, delete, tag, delete_tags, get_image, list_associations, associations, notifications, tool_instances, workflow_toolset, request_instance, request_tool_set_instance, refresh_model_endpoint, model_credential_secret, grep, grep_entity),
-    components(schemas(ApiCursor<Association>, ApiCursor<Entity>, ApiCursor<EntityListLine>, ApiCursor<GrepMatches>, Association, Entity, EntityListLine, EntityResponse, GrepDocumentMatches, GrepMatch, GrepMatches, GrepQueryParams, GrepRequest, GrepSource, GrepStats, InstancedAgentToolset, ModelCredentialEntity, TagDeleteRequest<Entity>, TagRequest<Entity>, ToolInstanceSummary, TruncationReason)),
+    paths(create, create_yara_hit, create_hunt, cancel_hunt, checkpoint_hunt, list_hunt_rules, hunt_system_status, set_quarantine_exemption, clear_quarantine_exemption, get, get_by_name, list, list_details, update, delete, tag, delete_tags, get_image, list_associations, associations, notifications, create_notification, get_notifications, delete_notification, tool_instances, workflow_toolset, request_instance, request_tool_set_instance, refresh_model_endpoint, model_credential_secret, grep, grep_entity),
+    components(schemas(ApiCursor<Association>, ApiCursor<Entity>, ApiCursor<EntityListLine>, ApiCursor<GrepMatches>, ApiCursor<HuntRuleLine>, Association, Entity, EntityListLine, EntityResponse, GrepDocumentMatches, GrepMatch, GrepMatches, GrepQueryParams, GrepRequest, GrepSource, GrepStats, HuntCheckpoint, HuntCheckpointResponse, HuntCreateRequest, HuntRuleLine, HuntSystemStatus, InstancedAgentToolset, ModelCredentialEntity, Notification<Entity>, NotificationRequest<Entity>, TagDeleteRequest<Entity>, TagRequest<Entity>, ToolInstanceSummary, TruncationReason, YaraHitWriteRequest, YaraHitWriteResponse)),
     modifiers(&OpenApiSecurity, &OpenApiParameterExamples),
 )]
 pub struct EntityApiDocs;
@@ -994,8 +1547,25 @@ pub fn mount(router: Router<AppState>) -> Router<AppState> {
         .route("/entities/", post(create))
         .route("/entities/grep/", post(grep))
         .route("/entities/grep/{id}", post(grep_entity))
+        .route("/entities/yara/hit/", post(create_yara_hit))
+        .route("/entities/hunt/", post(create_hunt))
+        .route("/entities/hunt/{id}/cancel", post(cancel_hunt))
+        .route("/entities/hunt/{id}/checkpoint", post(checkpoint_hunt))
+        .route(
+            "/entities/hunt/{id}/rules",
+            axum::routing::get(list_hunt_rules),
+        )
+        .route(
+            "/entities/hunt/status/",
+            axum::routing::get(hunt_system_status),
+        )
+        .route(
+            "/entities/rules/{id}/quarantine-exemption",
+            post(set_quarantine_exemption).delete(clear_quarantine_exemption),
+        )
         .route("/entities/", axum::routing::get(list))
         .route("/entities/details/", axum::routing::get(list_details))
+        .route("/entities/by-name/", axum::routing::get(get_by_name))
         .route(
             "/entities/{id}",
             axum::routing::get(get).patch(update).delete(delete),
@@ -1034,5 +1604,13 @@ pub fn mount(router: Router<AppState>) -> Router<AppState> {
         .route(
             "/entities/models/credentials/{id}/secret",
             axum::routing::get(model_credential_secret),
+        )
+        .route(
+            "/entities/notifications/{id}",
+            post(create_notification).get(get_notifications),
+        )
+        .route(
+            "/entities/notifications/{id}/{notification_id}",
+            axum::routing::delete(delete_notification),
         )
 }

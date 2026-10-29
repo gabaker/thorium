@@ -59,3 +59,21 @@ then provide it to `notifications delete` to delete it:
 ```Bash
 thorctl <ENTITY-TYPE> notifications delete <group> <ENTITY-NAME> <ID>
 ```
+
+## UUID-Keyed Entities (Detection Rules)
+
+Detection rules (YARA/Sigma) are keyed by a UUID rather than a group and name, so their notification
+commands take a single `<RULE>` argument — the rule's ID or its exact name — instead of
+`<group> <ENTITY-NAME>`. A name that several visible rules share errors with the candidate IDs, and
+notifications themselves have no names, so the delete always takes the notification's ID:
+
+```Bash
+thorctl rules notifications create <RULE> --msg <MESSAGE> [--level <info/warn/error>] [--expire <true/false>]
+thorctl rules notifications get --ids <RULE>
+thorctl rules notifications delete <RULE> <NOTIFICATION_ID>
+```
+
+The scanner writes `ERROR` level notifications on rules it quarantines; admin-created advisories ride the
+same stream. See the clip in
+[Operate Rule Scanning and Hunts](./rule_scanning_ops.md#failure-modes-and-remediation) for the full
+quarantine-exemption and advisory workflow.

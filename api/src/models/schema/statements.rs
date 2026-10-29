@@ -15,8 +15,8 @@ use super::queries::migrations::SchemaStateQueries;
 use super::scylla::{
     AssociationsTable, CommentsTable, CommitishListTable, CommitishesTable, EntitiesTable,
     LogsTable, NetworkPoliciesTable, NodesTable, NotificationsTable, RepoDataTable, ReposListTable,
-    ResultsStreamTable, ResultsTable, S3IdsTable, SamplesListTable, SchemaMigrationIssuesTable,
-    SchemaMigrationsTable, TagsTable,
+    ResultsStreamTable, ResultsTable, S3IdsTable, SamplesListTable, ScanStatsTable,
+    SchemaMigrationIssuesTable, SchemaMigrationsTable, TagsTable,
 };
 
 /// One statement in the registry
@@ -103,6 +103,7 @@ pub fn registry(ns: &str) -> Vec<RegisteredStatement> {
         full_row::<NodesTable>(ns),
         full_row::<NotificationsTable>(ns),
         full_row::<LogsTable>(ns),
+        full_row::<ScanStatsTable>(ns),
     ]
     .concat();
     // the API's statements, including its census and backup statements

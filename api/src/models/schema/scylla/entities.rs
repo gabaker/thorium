@@ -39,6 +39,46 @@ pub struct EntitiesTable {
     /// An optional image (S3 path) for this entity
     pub image: Option<String>,
 }
+
+/// Entities by exact name, partitioned by name alone
+///
+/// This backs single partition exact-name reads across groups and kinds, like resolving the
+/// entity a yara rule hit is named after on the deterministic create-as-merge path. Older
+/// releases created this view too, so an upgraded keyspace already holds it with these columns.
+#[derive(ScyllaView)]
+#[thorium_view(name = "entities_by_name", base = EntitiesTable)]
+pub struct EntitiesByNameView {
+    /// The entity's name (the one non-key base column allowed in the view key)
+    #[thorium(partition)]
+    pub name: String,
+    /// The group this row grants access to
+    #[thorium(cluster = "asc")]
+    pub group: String,
+    /// The kind of entity
+    #[thorium(cluster = "asc")]
+    pub kind: EntityKinds,
+    /// When this entity was created
+    #[thorium(cluster = "asc")]
+    pub created: DateTime<Utc>,
+    /// The year this entity was created in
+    #[thorium(cluster = "asc")]
+    pub year: i32,
+    /// The time bucket within the year
+    #[thorium(cluster = "asc")]
+    pub bucket: i32,
+    /// The entity's id
+    #[thorium(cluster = "asc")]
+    pub id: Uuid,
+    /// The user that created this entity
+    pub submitter: String,
+    /// The kind-specific data
+    pub kind_data: EntityMetadata,
+    /// An optional description
+    pub description: Option<String>,
+    /// An optional image
+    pub image: Option<String>,
+}
+
 /// Entities by id, for getting an entity's details and its groups
 #[derive(ScyllaView)]
 #[thorium_view(name = "entities_by_id", base = EntitiesTable)]

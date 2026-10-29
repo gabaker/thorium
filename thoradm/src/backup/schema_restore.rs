@@ -1305,12 +1305,11 @@ mod tests {
     /// The objects a restore leaves uncreated are the tables and views only older releases created
     #[test]
     fn the_skipped_objects_are_the_legacy_ones() {
-        // the class table's legacy tables and views
+        // the class table's legacy tables and views; the re-declared entities_by_name restores
         assert_eq!(
             skipped_objects(),
             [
                 "events",
-                "entities_by_name",
                 "commits",
                 "commits_list",
                 "cursors",

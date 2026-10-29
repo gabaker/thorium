@@ -119,8 +119,8 @@ When the operator knows a newer revision than the deployment's and no target is 
 `ThoriumCluster` goes to `UpgradeRequired` with a message like:
 
 ```
-This cluster is at revision 2026-10-v01 and this operator deploys revision 2026-10-v04. Nothing
-is changed until spec.upgrade.target_revision is set to 2026-10-v04 (Helm value
+This cluster is at revision 2026-10-v01 and this operator deploys revision 2026-10-v05. Nothing
+is changed until spec.upgrade.target_revision is set to 2026-10-v05 (Helm value
 operator.cluster.upgrade.targetRevision); the steps that will run are listed in
 status.upgrade.steps
 ```
@@ -146,14 +146,14 @@ kubectl -n thorium get thoriumcluster thorium \
 
 ```bash
 helm upgrade thorium oci://ghcr.io/cisagov/thorium/charts/thorium --version $VERSION \
-  -n thorium -f site.yaml --set operator.cluster.upgrade.targetRevision=2026-10-v04
+  -n thorium -f site.yaml --set operator.cluster.upgrade.targetRevision=2026-10-v05
 ```
 
 or, for a `ThoriumCluster` that isn't managed by Helm:
 
 ```bash
 kubectl -n thorium patch thoriumcluster thorium --type merge \
-  -p '{"spec":{"upgrade":{"target_revision":"2026-10-v04"}}}'
+  -p '{"spec":{"upgrade":{"target_revision":"2026-10-v05"}}}'
 ```
 
 Development clusters also label their Thorium namespace `thorium.sandia.gov/dev: "true"`, which
@@ -261,7 +261,7 @@ loss](#accepting-loss)):
 operator:
   cluster:
     upgrade:
-      targetRevision: 2026-10-v04
+      targetRevision: 2026-10-v05
       approvals:
         - step: elastic-reindex-keyword-mappings
           backup: thoradm backup 2026-10-08 on /mnt/backups
@@ -496,9 +496,11 @@ changes. One without a fingerprint covers whatever the object becomes, so the st
 separately as `unfingerprinted`. The fingerprint of a single column is a hash of the column and its
 type, so an acknowledgement of `samples_list.preview` lapses when that column's type changes but not
 when another column of the table does. Only `unexpected` objects can be acknowledged. The tables
-and views older releases created and Thorium no longer uses (such as the `events` table and the
-`entities_by_name` view) are acknowledged for you, and `thoradm schema drop-legacy` can remove them
-(see [Legacy Schema Objects](../thoradm/thoradm.md#legacy-schema-objects)). The
+and views older releases created and Thorium no longer uses (such as the `events` table) are
+acknowledged for you as registered legacy objects, and `thoradm schema drop-legacy` can remove them
+(see [Legacy Schema Objects](../thoradm/thoradm.md#legacy-schema-objects)). The `entities_by_name`
+view those releases also created is declared again as of `2026-10-v05`, so a keyspace that
+already holds it simply matches the declared schema and needs no acknowledgement. The
 `schema_migrations` and `schema_migration_issues` tables, which `thoradm schema record`,
 `thoradm migrate`, and every schema apply create, are never reported, whatever revision the
 deployment records.
@@ -780,7 +782,7 @@ its revision when it is converted (see [Converting a Pre-Helm Deployment](./conv
 <!-- upgrade-paths:begin (generated from the catalog's support floors) -->
 | Thorium version | Revision | Oldest revision it upgrades from | From an older revision |
 |-----------------|----------|----------------------------------|------------------------|
-| 1.8.1 | `2026-10-v04` | `2026-10-v01` | — |
+| 1.8.1 | `2026-10-v05` | `2026-10-v01` | — |
 | Pre-Helm, any version | `2026-10-v01` once converted | — | Convert with the `convert-to-helm.sh` of Thorium 1.8.1, then upgrade from `2026-10-v01` |
 <!-- upgrade-paths:end -->
 
@@ -893,7 +895,29 @@ with nothing to undo. Downgrading to `2026-10-v02` from `2026-10-v04` takes the 
 once past it runs `users-settings-theme-reverse` as described for `2026-10-v03`. The schema the
 image applies is not undone: the previous release ignores the columns it doesn't read.
 
-<!-- PLACEHOLDER: the section of the next released revision goes here, after 2026-10-v04 and
+### 2026-10-v05
+
+Applies the yara scanning schema: the `scan_stats` table yara scan telemetry is kept in (every
+write sets a TTL), the `entities_by_name` view Scylla fills from the `entities` table for
+exact-name entity reads, and the `yara_rulesets` S3 bucket role compiled yara rulesets are cached
+under. It holds no schema step of its own: the operator applies the schema of the image it deploys
+before it rolls anything out (see `2026-10-v03`), which creates the table and the view, and its
+reconcile creates the missing bucket. No step changes data, since every added object starts empty.
+Deployments at `2026-10-v04` run this step when a target is set, and a deployment at an older
+revision runs it after the steps of the revisions before it:
+
+| Step | Kind | What it does |
+|------|------|--------------|
+| `finalize-yara-scanning` | Config | Records the revision once the yara scanning schema is applied |
+
+Downgrading to `2026-10-v04` runs `finalize-yara-scanning-reverse`, a Config step that only undoes
+the record. Nothing is dropped on the way down: `2026-10-v04` ignores the objects it doesn't read,
+the scan stats expire by their TTL, Scylla keeps the `entities_by_name` view filled from the
+`entities` table, and the `yara_rulesets` bucket holds a cache rebuilt from rule entities on
+demand. Downgrades below `2026-10-v04` then follow the refusals and steps described for the
+revisions above.
+
+<!-- PLACEHOLDER: the section of the next released revision goes here, after 2026-10-v05 and
 before this heading; add its step table and, if a step waits on running API pods, its warning to
 "How steps run". -->
 

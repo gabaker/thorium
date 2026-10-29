@@ -160,6 +160,22 @@ impl ToolboxManifestV2 {
         }
     }
 
+    /// Sort every inline tool spec's maps so serialized manifests stay byte-stable
+    ///
+    /// yara-x enables serde_json's `preserve_order` feature workspace wide, which makes
+    /// `Value` maps serialize in insertion order; committed manifests keep sorted keys, so
+    /// writers sort the one `Value` subtree a manifest embeds before rendering it.
+    pub fn sort_spec_keys(&mut self) {
+        // walk every tool version and sort its inline spec's maps
+        for tool in self.tools.values_mut() {
+            for version in tool.versions.values_mut() {
+                if let Some(spec) = version.spec.as_mut() {
+                    spec.sort_all_objects();
+                }
+            }
+        }
+    }
+
     /// Count what this manifest holds
     #[must_use]
     pub fn counts(&self) -> Counts {

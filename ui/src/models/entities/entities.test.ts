@@ -15,6 +15,9 @@ describe('ENTITY_LABELS / entityLabel', () => {
     expect(entityLabel(Entities.WindowsProcessTree)).toBe('Windows Process Tree');
     expect(entityLabel(Entities.NetworkConnection)).toBe('Network Connection');
     expect(entityLabel(Entities.SigmaRule)).toBe('Sigma Rule');
+    expect(entityLabel(Entities.YaraRule)).toBe('Yara Rule');
+    expect(entityLabel(Entities.YaraRuleHit)).toBe('Yara Rule Hit');
+    expect(entityLabel(Entities.RuleSet)).toBe('Rule Set');
     expect(entityLabel(Entities.CompiledFunction)).toBe('Compiled Function');
     expect(entityLabel(Entities.DecompiledFunction)).toBe('Decompiled Function');
   });
@@ -26,6 +29,7 @@ describe('ENTITY_LABELS / entityLabel', () => {
 
   it('leaves single-word kinds unchanged', () => {
     expect(entityLabel(Entities.Device)).toBe('Device');
+    expect(entityLabel(Entities.Hunt)).toBe('Hunt');
   });
 
   it('falls back to humanize for an unknown/string kind', () => {

@@ -48,6 +48,9 @@ async fn main() {
         SubCommands::Associations(associations) => {
             handlers::associations::handle(&args, associations).await
         }
+        SubCommands::Rules(rules) => handlers::rules::handle(&args, rules).await,
+        SubCommands::Rulesets(rulesets) => handlers::rulesets::handle(&args, rulesets).await,
+        SubCommands::Hunts(hunts) => handlers::hunts::handle(&args, hunts).await,
         SubCommands::NetworkPolicies(network_policies) => {
             handlers::network_policies::handle(&args, network_policies).await
         }

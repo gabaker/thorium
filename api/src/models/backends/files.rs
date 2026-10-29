@@ -19,12 +19,12 @@ use crate::models::schema::queries::SamplesListListCursor;
 use crate::models::schema::{Bucket, CursorLimit, DEFAULT_LIMIT_CAP};
 use crate::models::{
     ApiCursor, CarvedOrigin, CarvedOriginTypes, Comment, CommentForm, CommentResponse, CommentRow,
-    DeleteCommentParams, DeleteSampleParams, Directionality, FileListParams, Group,
+    DeleteCommentParams, DeleteSampleParams, Directionality, Event, FileListParams, Group,
     GroupAllowAction, Origin, OriginForm, OriginRequest, OriginTypes, S3Objects, Sample,
     SampleCheck, SampleCheckResponse, SampleForm, SampleListLine, SampleSubmissionResponse,
     Submission, SubmissionChunk, SubmissionListRow, SubmissionRow, SubmissionUpdate, TagCounts,
     TagListRow, TagMap, TagType, TreeRelationships, TreeSupport, UnhashedTreeBranch, User,
-    ZipDownloadParams,
+    YaraScanTrigger, ZipDownloadParams,
 };
 use crate::utils::{ApiError, Shared, bounder};
 use crate::{
@@ -405,6 +405,10 @@ impl Sample {
             update_opt!(sub.description, update.description);
             // make sure we aren't adding any groups multiple times
             disjoint!([&sub.groups, &update.add_groups]);
+            // snapshot the group deltas before they are drained below so scan
+            // events can carry exactly the groups whose visibility changed
+            let added_groups = update.add_groups.clone();
+            let removed_groups = update.remove_groups.clone();
             // validate this user can upload/remove samples in all groups
             let edit_groups = update
                 .add_groups
@@ -437,7 +441,34 @@ impl Sample {
                 sub.origin = origin;
             }
             // update this submission object in scylla
-            db::files::update(self, &update, shared).await
+            let updated = db::files::update(self, &update, shared).await?;
+            // emit a yara scan event for any groups that can newly see this sample
+            if !added_groups.is_empty() {
+                // build a scan event for the added groups
+                let event = Event::yara_scannable_sample(
+                    user,
+                    added_groups,
+                    updated.sha256.clone(),
+                    0,
+                    YaraScanTrigger::GroupsAdded,
+                );
+                // save our yara scan event
+                db::events::create(&event, shared).await?;
+            }
+            // emit a yara scan event for any groups that lost sight of this sample
+            if !removed_groups.is_empty() {
+                // build a scan event for the removed groups
+                let event = Event::yara_scannable_sample(
+                    user,
+                    removed_groups,
+                    updated.sha256.clone(),
+                    0,
+                    YaraScanTrigger::GroupsRemoved,
+                );
+                // save our yara scan event
+                db::events::create(&event, shared).await?;
+            }
+            Ok(updated)
         } else {
             not_found!(format!(
                 "Submission {}:{} not found",
@@ -493,6 +524,18 @@ impl Sample {
         };
         // delete this submissions rows from scylla
         db::files::delete_submission(self, submission, groups, shared).await?;
+        // emit a yara scan event so hits shrink out of the groups that lost
+        // sight of this sample; the scanner recomputes against the samples
+        // remaining groups so over emission here is safe
+        let event = Event::yara_scannable_sample(
+            user,
+            groups.clone(),
+            self.sha256.clone(),
+            0,
+            YaraScanTrigger::GroupsRemoved,
+        );
+        // save our yara scan event
+        db::events::create(&event, shared).await?;
         Ok(())
     }
 

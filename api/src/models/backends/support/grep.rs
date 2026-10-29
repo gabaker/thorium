@@ -567,6 +567,10 @@ cfg_if::cfg_if! {
                         EntityMetadata::SigmaRule(sigma) => {
                             queue_metadata_field(searcher, "rule", Some(&sigma.rule));
                         }
+                        // yara rules have their raw unparsed rule source
+                        EntityMetadata::YaraRule(yara) => {
+                            queue_metadata_field(searcher, "rule", Some(&yara.rule));
+                        }
                         // decompiled functions have their decompiled source
                         EntityMetadata::DecompiledFunction(decompiled) => {
                             queue_metadata_field(searcher, "content", Some(&decompiled.content));
@@ -607,6 +611,12 @@ cfg_if::cfg_if! {
                         | EntityMetadata::WorkflowCatalog(_)
                         | EntityMetadata::WorkflowInstance(_)
                         | EntityMetadata::ModelProfile(_)
+                        // yara rule hits, rule sets, and hunts hold structured scan
+                        // state and membership, so they are searched by their name,
+                        // description, and tags only
+                        | EntityMetadata::YaraRuleHit(_)
+                        | EntityMetadata::RuleSet(_)
+                        | EntityMetadata::Hunt(_)
                         // these kinds have no greppable free form text
                         | EntityMetadata::Device(_)
                         | EntityMetadata::Vendor(_)

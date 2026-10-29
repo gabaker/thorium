@@ -353,7 +353,7 @@ playbook again. When the new operator knows a newer revision than the deployment
 work to do wait for an approval naming the backup you took first:
 
 ```yaml
-thorium_upgrade_target_revision: "2026-10-v04"
+thorium_upgrade_target_revision: "2026-10-v05"
 thorium_upgrade_approvals:
   - step: elastic-reindex-keyword-mappings
     backup: "thoradm backup 2026-10-08 on /mnt/backups"
@@ -374,7 +374,7 @@ thorium_deployment_name: dev
 infra_operators_enabled: false
 thorium_values_files:
   - /path/to/thorium-converted-values.yaml   # last, so its values win
-thorium_upgrade_target_revision: "2026-10-v04"
+thorium_upgrade_target_revision: "2026-10-v05"
 ```
 
 Add `thorium_upgrade_approvals` if the reindex step blocks (see

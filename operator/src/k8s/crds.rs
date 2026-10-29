@@ -321,9 +321,17 @@ fn default_event_handler_args() -> Vec<String> {
     ]
 }
 
+/// Serde helper for default number of event-handler replicas
+fn default_event_handler_replicas() -> u16 {
+    1
+}
+
 /// Event handler spec
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Hash, Eq, PartialEq)]
 pub struct ThoriumEventHandler {
+    /// Number of event-handler pods to scale the deployment
+    #[serde(default = "default_event_handler_replicas")]
+    pub replicas: u16,
     /// Environment variables to apply in container
     #[serde(default = "default_envs")]
     pub env: Vec<EnvVar>,

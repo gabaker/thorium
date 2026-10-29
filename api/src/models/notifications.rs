@@ -45,6 +45,12 @@ pub enum NotificationType {
     /// This operation is working on a user's own notifications
     #[strum(serialize = "Users")]
     Users,
+    /// This operation is working on entity notifications
+    ///
+    /// This is appended at the end to keep the discriminant order of the
+    /// existing variants stable for rkyv archived backups
+    #[strum(serialize = "Entities")]
+    Entities,
 }
 
 impl NotificationType {
@@ -57,6 +63,7 @@ impl NotificationType {
             Self::ModelProfiles => "ModelProfiles",
             Self::ModelCredentials => "ModelCredentials",
             Self::Users => "Users",
+            Self::Entities => "Entities",
         }
     }
 }
@@ -264,13 +271,14 @@ mod tests {
     use super::NotificationType;
 
     /// Every notification type, the model kinds and users included
-    const ALL: [NotificationType; 6] = [
+    const ALL: [NotificationType; 7] = [
         NotificationType::Images,
         NotificationType::Pipelines,
         NotificationType::ModelEndpoints,
         NotificationType::ModelProfiles,
         NotificationType::ModelCredentials,
         NotificationType::Users,
+        NotificationType::Entities,
     ];
 
     /// Notification types round-trip through serde and each has its own key, and the types

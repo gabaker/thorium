@@ -81,8 +81,12 @@ enum Target {
 ///
 /// * `manifest` - The manifest to serialize
 pub fn render_manifest(manifest: &ToolboxManifestV2) -> Result<String, Error> {
-    // two-space pretty JSON ending in a newline, from maps that are all sorted
-    output::to_json(manifest)
+    // sort the inline specs' keys first, since preserve_order (from yara-x) makes Value maps
+    // serialize in insertion order; the manifest's own maps are BTreeMaps and stay sorted
+    let mut sorted = manifest.clone();
+    sorted.sort_spec_keys();
+    // two-space pretty JSON ending in a newline
+    output::to_json(&sorted)
 }
 
 /// Find the manifest file a path names, which may be a directory or its `config.toml`

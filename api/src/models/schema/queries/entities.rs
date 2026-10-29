@@ -2,8 +2,9 @@
 //! logs tables and their views
 
 use crate::models::schema::scylla::{
-    AssociationsTable, EntitiesByIdView, EntitiesTable, LogsTable, NetworkPoliciesByNameView,
-    NetworkPoliciesDefaultView, NetworkPoliciesTable, NodesTable, NotificationsTable,
+    AssociationsTable, EntitiesByIdView, EntitiesByNameView, EntitiesTable, LogsTable,
+    NetworkPoliciesByNameView, NetworkPoliciesDefaultView, NetworkPoliciesTable, NodesTable,
+    NotificationsTable,
 };
 use crate::models::{
     AssociationListRow, EntityGroupKindRow, EntityGroupRow, EntityListRow, EntityListSupplementRow,
@@ -50,6 +51,23 @@ pub struct EntitiesByIdQueries {
     /// The names and kinds of a set of entities, in every group
     #[select(project = EntityListSupplementRow, r#in(id))]
     get_names_kinds_by_ids: Select,
+}
+
+/// Statements on the `entities_by_name` view, which finds entities by their exact name
+#[thorium::view_queries(view = EntitiesByNameView)]
+pub struct EntitiesByNameQueries {
+    /// The rows of the entities of some kinds sharing an exact name in a set of groups
+    ///
+    /// The `entities_by_name` view partitions by name alone so this is a single partition
+    /// exact-name read, which makes the per partition limit a plain row limit. The kind
+    /// restriction must live in the CQL (kind is the clustering column right after group) because
+    /// other kinds legally share a rule's name — every yara rule hit is named after its rule, so
+    /// a Rust-side kind filter would crawl one row per hit when resolving a productive rule's
+    /// name. The literal limit of 501 rows is a guard that lets callers detect more than 500 rows
+    /// of the requested kinds sharing one name in a chunk and bail instead of crawling a
+    /// pathological partition.
+    #[select(project = EntityRow, eq(name), r#in(group, kind), per_partition_limit = 501)]
+    get: Select,
 }
 
 /// Statements on the associations table

@@ -76,4 +76,83 @@ impl EventKeys {
             kind = kind,
         )
     }
+
+    /// The registry of event handler workers scored by their last heartbeat
+    ///
+    /// # Arguments
+    ///
+    /// * `shared` - Shared Thorium objects
+    pub fn workers(shared: &Shared) -> String {
+        format!(
+            "{ns}:event-handler:workers",
+            ns = shared.config.thorium.namespace
+        )
+    }
+
+    /// The map of in flight events owned by a single worker
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - The kind of events in this map
+    /// * `worker` - The worker that owns these in flight events
+    /// * `shared` - Shared Thorium objects
+    pub fn in_flight_map_owned(kind: EventType, worker: &str, shared: &Shared) -> String {
+        format!(
+            "{ns}:event-handler:in_flight_map:{kind}:{worker}",
+            ns = shared.config.thorium.namespace,
+            kind = kind,
+            worker = worker,
+        )
+    }
+
+    /// The queue of in flight events owned by a single worker scored by lease time
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - The kind of events in this queue
+    /// * `worker` - The worker that owns these in flight events
+    /// * `shared` - Shared Thorium objects
+    pub fn in_flight_queue_owned(kind: EventType, worker: &str, shared: &Shared) -> String {
+        format!(
+            "{ns}:event-handler:in_flight_queue:{kind}:{worker}",
+            ns = shared.config.thorium.namespace,
+            kind = kind,
+            worker = worker,
+        )
+    }
+
+    /// The TTL'd counter report last published by a single worker for one event kind
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - The kind of events these counters cover
+    /// * `worker` - The worker that took the reading
+    /// * `shared` - Shared Thorium objects
+    pub fn stats(kind: EventType, worker: &str, shared: &Shared) -> String {
+        format!(
+            "{ns}:event-handler:stats:{kind}:{worker}",
+            ns = shared.config.thorium.namespace,
+            kind = kind,
+            worker = worker,
+        )
+    }
+
+    /// The gate marking one quantized snapshot window as already written
+    ///
+    /// The gate is keyed by the window it protects so a gate taken late in one
+    /// window can never suppress the next windows only trigger. It is a cost
+    /// optimization only: quantized row timestamps are the real cross replica
+    /// dedup mechanism, so a lost gate just means doing the work twice.
+    ///
+    /// # Arguments
+    ///
+    /// * `window` - The quantized window this gate protects
+    /// * `shared` - Shared Thorium objects
+    pub fn snapshot_gate(window: i64, shared: &Shared) -> String {
+        format!(
+            "{ns}:event-handler:stats:snapshot-gate:{window}",
+            ns = shared.config.thorium.namespace,
+            window = window,
+        )
+    }
 }

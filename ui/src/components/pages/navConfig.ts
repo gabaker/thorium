@@ -1,5 +1,6 @@
 import { IconType } from 'react-icons';
 import {
+  FaCrosshairs,
   FaUpload,
   FaSearch,
   FaLayerGroup,
@@ -23,7 +24,7 @@ import {
   FaLaptopCode,
   FaHammer,
 } from 'react-icons/fa';
-import { FaHardDrive, FaFolderTree, FaDiagramProject } from 'react-icons/fa6';
+import { FaBinoculars, FaBoxesStacked, FaHardDrive, FaFolderTree, FaDiagramProject, FaMagnifyingGlass } from 'react-icons/fa6';
 import { MdBusinessCenter } from 'react-icons/md';
 // project imports
 import { getBrowsingPathByEntity } from '@components/entities/browsing/EntityBrowsingRoutes';
@@ -62,6 +63,9 @@ export const NAV_ITEMS: NavCategory[] = [
       { label: 'Devices', icon: FaHardDrive, path: getBrowsingPathByEntity(Entities.Device) },
       { label: 'Vendors', icon: MdBusinessCenter, path: getBrowsingPathByEntity(Entities.Vendor) },
       { label: 'Sigma Rules', icon: SigmaIcon, path: getBrowsingPathByEntity(Entities.SigmaRule) },
+      { label: 'Yara Rules', icon: FaMagnifyingGlass, path: getBrowsingPathByEntity(Entities.YaraRule) },
+      { label: 'Rule Sets', icon: FaBoxesStacked, path: getBrowsingPathByEntity(Entities.RuleSet) },
+      { label: 'Hunts', icon: FaBinoculars, path: getBrowsingPathByEntity(Entities.Hunt) },
       { label: 'Incidents', icon: FaExclamationTriangle, path: getBrowsingPathByEntity(Entities.Incident) },
     ],
     // Less-common entity types, revealed by the "Show more" toggle. Add new types here.
@@ -72,6 +76,7 @@ export const NAV_ITEMS: NavCategory[] = [
       { label: 'Windows Process Trees', icon: FaDiagramProject, path: getBrowsingPathByEntity(Entities.WindowsProcessTree) },
       { label: 'Compiled Functions', icon: FaFileCode, path: getBrowsingPathByEntity(Entities.CompiledFunction) },
       { label: 'Decompiled Functions', icon: FaLaptopCode, path: getBrowsingPathByEntity(Entities.DecompiledFunction) },
+      { label: 'Yara Rule Hits', icon: FaCrosshairs, path: getBrowsingPathByEntity(Entities.YaraRuleHit) },
     ],
   },
   {
@@ -90,6 +95,7 @@ export const NAV_ITEMS: NavCategory[] = [
     adminOnly: true,
     children: [
       { label: 'Users', icon: FaUser, path: '/users' },
+      { label: 'Hunt Status', icon: FaBinoculars, path: '/hunt-status' },
       { label: 'Settings', icon: FaCog, path: '/settings' },
     ],
   },

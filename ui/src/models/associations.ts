@@ -44,6 +44,12 @@ export enum AssociationKind {
   HasNetworkConnection = 'HasNetworkConnection',
   /// A Sigma rule hit
   SigmaRuleHit = 'SigmaRuleHit',
+  /// A yara rule hit against a sample or repo
+  YaraRuleHit = 'YaraRuleHit',
+  /// A hunt hit this finding entity
+  HuntHit = 'HuntHit',
+  /// A rule that is a member of a rule set
+  RuleSetMember = 'RuleSetMember',
   /// A PE section within a file/binary
   SectionIn = 'SectionIn',
   /// A library imported by a file/binary
@@ -81,6 +87,9 @@ export const ASSOCIATION_KIND_LABELS: Record<AssociationKind, string> = {
   [AssociationKind.ChildProcess]: 'Child Process',
   [AssociationKind.HasNetworkConnection]: 'Has Network Connection',
   [AssociationKind.SigmaRuleHit]: 'Sigma Rule Hit',
+  [AssociationKind.YaraRuleHit]: 'Yara Rule Hit',
+  [AssociationKind.HuntHit]: 'Hunt Hit',
+  [AssociationKind.RuleSetMember]: 'Rule Set Member',
   [AssociationKind.SectionIn]: 'Section In',
   [AssociationKind.ImportIn]: 'Import In',
   [AssociationKind.FlagFor]: 'Flag For',
@@ -122,6 +131,9 @@ export const CONTAINER_ASSOCIATION_KINDS: ReadonlySet<AssociationKind> = new Set
  */
 export const NON_STRUCTURAL_ASSOCIATION_KINDS: ReadonlySet<AssociationKind> = new Set<AssociationKind>([
   AssociationKind.SigmaRuleHit,
+  AssociationKind.YaraRuleHit,
+  // hunt -> hit edges are relationship edges so a hit node reveals the hunts that found it
+  AssociationKind.HuntHit,
   AssociationKind.HasNetworkConnection,
   AssociationKind.ContainsCVE,
   AssociationKind.ContainsCWE,

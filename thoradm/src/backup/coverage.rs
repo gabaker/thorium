@@ -641,8 +641,8 @@ mod tests {
         views.sort_unstable();
         assert_eq!(views, vec!["tags_by_item", "tags_case_insensitive"]);
         assert_eq!(Registry::views_of("nodes").count(), 0);
-        // only the view older releases created is a legacy view
-        assert!(Registry::is_legacy_view("entities_by_name"));
+        // no view is legacy today: the one older releases created is declared again
+        assert!(!Registry::is_legacy_view("entities_by_name"));
         assert!(!Registry::is_legacy_view("entities_by_id"));
         assert!(!Registry::is_legacy_view("events"));
         // excluded entries include the runtime tables and the ephemeral buckets

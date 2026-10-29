@@ -3,7 +3,7 @@ import { Country } from 'country-list';
 // project imports
 import { getCountryCode } from '@entities/shared/countries';
 import { diffTagUpdate } from '@utilities/tags';
-import { listEntities } from '@thorpi/entities';
+import { EntityListLine, listEntities } from '@thorpi/entities';
 import { RequestTags } from '@models/tags';
 import { Filters } from '@models/search';
 import { CriticalSector } from '@models/entities/sectors';
@@ -15,6 +15,8 @@ import { FileSystem } from '@models/entities/file_systems';
 import { WindowsProcessTree } from '@models/entities/process_trees';
 import { SigmaRule, SigmaRuleMetaFields } from '@models/entities/rules/sigma';
 import { SigmaActionToTake } from '@models/entities/rules/sigma';
+import { YaraActionToTake, YaraRule, YaraRuleMetaFields } from '@models/entities/rules/yara';
+import { RuleSetEntity, RuleSetMember } from '@models/entities/rulesets';
 import { Incident, IncidentMetaFields } from '@models/entities/incident';
 import { CompiledFunction, CompiledFunctionMetaFields, DecompiledFunction, DecompiledFunctionMetaFields } from '@models/entities/functions';
 import { PeImport, PeImportMetaFields, PeSection, PeSectionMetaFields } from '@models/entities/pe';
@@ -86,19 +88,39 @@ const reformatCriticalSectors = (sector: string): string => {
   return sector.replaceAll(' and ', '').replaceAll(',', '').replaceAll(' ', '');
 };
 
-export const getAvailableVendors = async (updateVendors: (vendorsMap: { [key: string]: string }) => void) => {
-  const filters: Filters = { kinds: [Entities.Vendor], limit: 10000 };
-  const vendorsMap: { [key: string]: string } = {};
-  const { entityList } = await listEntities(filters, console.log, true, null);
+/**
+ * Build an id -> name map of all entities of the given kinds for one-shot select pickers.
+ *
+ * Shared by the member/reference pickers (device vendors, rule set members, hunt rules);
+ * the single bounded page matches the picker precedent of loading options up front.
+ *
+ * @param kinds - The entity kinds to list.
+ * @param updateMap - The state setter to hand the id -> name map to.
+ * @returns The thin list lines the summary route serializes (id/name/kind/created only — no
+ *          groups, tags, or metadata); callers that need full entities must fetch details.
+ */
+export const getAvailableEntities = async (
+  kinds: Entities[],
+  updateMap: (entitiesMap: { [key: string]: string }) => void,
+): Promise<EntityListLine[]> => {
+  const filters: Filters = { kinds, limit: 10000 };
+  const entitiesMap: { [key: string]: string } = {};
+  // the plain list lines carry only id/name/kind/created — never pull full details (rule
+  // sources, hydrated members) just to build a picker map
+  const { entityList } = await listEntities(filters, console.log, false, null);
   if (entityList) {
-    entityList.forEach((entity: EntityTypes) => {
-      if ('kind' in entity && entity.kind == Entities.Vendor) {
-        vendorsMap[entity.id] = entity.name;
+    entityList.forEach((entity: EntityListLine) => {
+      if ('kind' in entity && kinds.includes(entity.kind)) {
+        entitiesMap[entity.id] = entity.name;
       }
     });
   }
-  updateVendors(vendorsMap);
+  updateMap(entitiesMap);
   return entityList;
+};
+
+export const getAvailableVendors = async (updateVendors: (vendorsMap: { [key: string]: string }) => void) => {
+  return getAvailableEntities([Entities.Vendor], updateVendors);
 };
 
 // Append shared entity-level fields (name, groups, description, image) to the form
@@ -146,6 +168,20 @@ function appendVendorDiffs(form: FormData, currentVendors: Vendor[] | undefined,
   currentVendors
     ?.filter((iv) => !pendingVendors?.map((pv) => pv.id).includes(iv.id))
     .forEach((v) => form.append('metadata[remove_vendors][]', v.id));
+}
+
+// Diff rule set members between current and pending metadata
+function appendRuleSetMemberDiffs(
+  form: FormData,
+  currentRules: RuleSetMember[] | undefined,
+  pendingRules: RuleSetMember[] | undefined,
+): void {
+  pendingRules
+    ?.filter((pr) => !currentRules?.map((cr) => cr.id).includes(pr.id))
+    .forEach((r) => form.append('metadata[add_ruleset_rules][]', r.id));
+  currentRules
+    ?.filter((cr) => !pendingRules?.map((pr) => pr.id).includes(cr.id))
+    .forEach((r) => form.append('metadata[remove_ruleset_rules][]', r.id));
 }
 
 // Diff critical sectors between current and pending metadata
@@ -330,6 +366,33 @@ function appendSigmaRuleMetaUpdates(form: FormData, meta: SigmaRuleMetaFields, p
   }
 }
 
+function appendYaraRuleMetaUpdates(form: FormData, meta: YaraRuleMetaFields, pending: YaraRuleMetaFields): void {
+  if (pending.rule !== '') {
+    form.append('metadata[yara_rule]', String(pending.rule));
+  }
+  if (pending.score) {
+    form.append(`metadata[score]`, String(pending.score));
+  }
+  if (pending.actions && Array.isArray(pending.actions)) {
+    pending.actions
+      .filter((pa: YaraActionToTake) => !meta.actions.map((ia) => JSON.stringify(ia)).includes(JSON.stringify(pa)))
+      .forEach((a) => form.append('metadata[add_yara_actions][]', JSON.stringify(a)));
+    let numberRemovedActions = 0;
+    meta.actions?.forEach((initialAction: YaraActionToTake, index: number) => {
+      if (JSON.stringify(initialAction) != JSON.stringify(pending.actions[index - numberRemovedActions])) {
+        form.append('metadata[remove_yara_actions][]', String(index));
+        numberRemovedActions++;
+      }
+    });
+  }
+  if (meta.applies_to && Array.isArray(meta.applies_to)) {
+    pending.applies_to?.filter((pe) => !meta.applies_to.includes(pe)).forEach((ae) => form.append('metadata[add_yara_applies_to][]', ae));
+    meta.applies_to
+      ?.filter((ie) => !pending.applies_to.map((e) => JSON.stringify(e)).includes(JSON.stringify(ie)))
+      .forEach((re) => form.append('metadata[remove_yara_applies_to][]', re));
+  }
+}
+
 export function buildUpdateEntityForm(
   entity: EntityTypes,
   pendingEntity: EntityTypes,
@@ -374,6 +437,18 @@ export function buildUpdateEntityForm(
       const meta = entity.metadata.SigmaRule;
       const pending = (pendingEntity as SigmaRule).metadata.SigmaRule;
       appendSigmaRuleMetaUpdates(updateForm, meta, pending);
+      break;
+    }
+    case Entities.YaraRule: {
+      const meta = entity.metadata.YaraRule;
+      const pending = (pendingEntity as YaraRule).metadata.YaraRule;
+      appendYaraRuleMetaUpdates(updateForm, meta, pending);
+      break;
+    }
+    case Entities.RuleSet: {
+      const meta = entity.metadata.RuleSet;
+      const pending = (pendingEntity as RuleSetEntity).metadata.RuleSet;
+      appendRuleSetMemberDiffs(updateForm, meta.rules, pending.rules);
       break;
     }
     case Entities.Incident: {
@@ -507,6 +582,32 @@ export function buildCreateEntityForm(entity: EntityCreateTypes, imageFile?: Fil
       }
       break;
     }
+    case Entities.YaraRule: {
+      const meta = entity.metadata.YaraRule;
+      if (meta.rule !== '') {
+        createForm.append('metadata[yara_rule]', String(meta.rule));
+      }
+      if (meta.score) {
+        createForm.append(`metadata[score]`, String(meta.score));
+      }
+      if (meta.actions && Array.isArray(meta.actions)) {
+        meta.actions.forEach((action: YaraActionToTake) => {
+          if (action.Flag) {
+            createForm.append(`metadata[yara_actions][]`, JSON.stringify(action));
+          }
+        });
+      }
+      if (meta.applies_to && Array.isArray(meta.applies_to)) {
+        meta.applies_to.forEach((e) => createForm.append(`metadata[yara_applies_to][]`, e));
+      }
+      break;
+    }
+    case Entities.RuleSet: {
+      const meta = entity.metadata.RuleSet;
+      // one member rule id per entry; an empty set sends no member fields at all
+      meta.rules?.forEach((id) => createForm.append('metadata[ruleset_rules][]', id));
+      break;
+    }
     case Entities.Flag: {
       const meta = entity.metadata.Flag;
       createForm.set('metadata[suspicion]', String(meta.suspicion));
@@ -601,6 +702,21 @@ export function copyEntityFields(existingEntity: EntityTypes, blank: UISupported
     case Entities.SigmaRule: {
       const srcMeta = existingEntity.metadata.SigmaRule;
       newEntity.metadata = { SigmaRule: structuredClone(srcMeta) };
+      break;
+    }
+    case Entities.YaraRule: {
+      const srcMeta = existingEntity.metadata.YaraRule;
+      newEntity.metadata = { YaraRule: structuredClone(srcMeta) };
+      break;
+    }
+    case Entities.RuleSet: {
+      const srcMeta = existingEntity.metadata.RuleSet;
+      newEntity.metadata = {
+        RuleSet: {
+          // hydrated members copy as the id list the create form expects
+          rules: srcMeta.rules ? srcMeta.rules.map((r: RuleSetMember) => r.id) : [],
+        },
+      };
       break;
     }
     case Entities.Flag: {

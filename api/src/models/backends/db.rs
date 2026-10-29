@@ -9,6 +9,7 @@ pub mod files;
 pub mod grep;
 pub mod groups;
 mod helpers;
+pub mod hunts;
 pub mod images;
 pub mod jobs;
 pub mod keys;

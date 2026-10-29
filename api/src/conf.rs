@@ -2145,6 +2145,36 @@ fn default_events_max_depth() -> u8 {
     5
 }
 
+/// Helps serde default the event handler heartbeat interval to 10 seconds
+fn default_events_heartbeat_secs() -> u64 {
+    10
+}
+
+/// Helps serde default the event handler worker expiry to 90 seconds
+fn default_events_worker_expiry_secs() -> u64 {
+    90
+}
+
+/// Helps serde default the in flight event age backstop to 1 hour
+fn default_events_in_flight_backstop_secs() -> u64 {
+    3600
+}
+
+/// Helps serde default the scan stats snapshot cadence to 30 seconds
+fn default_events_stats_snapshot_secs() -> u64 {
+    30
+}
+
+/// Helps serde default the scan stats retention to 30 days
+fn default_events_stats_retention() -> u64 {
+    2_592_000
+}
+
+/// Helps serde default the scan stats partition size to 12 hours
+fn default_events_stats_partition_size() -> u16 {
+    43_200
+}
+
 /// The settings related to events
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]
 pub struct Events {
@@ -2174,6 +2204,32 @@ pub struct Events {
     /// The most members one toolset instance may have
     #[serde(default = "default_max_tools_per_toolset")]
     pub max_tools_per_toolset: usize,
+    /// How often event handler workers should heartbeat in seconds
+    #[serde(default = "default_events_heartbeat_secs")]
+    pub heartbeat_secs: u64,
+    /// How many seconds after its last heartbeat a worker is presumed dead
+    #[serde(default = "default_events_worker_expiry_secs")]
+    pub worker_expiry_secs: u64,
+    /// The lease age in seconds after which an in flight event is reclaimed
+    /// from a live but wedged worker
+    #[serde(default = "default_events_in_flight_backstop_secs")]
+    pub in_flight_backstop_secs: u64,
+    /// How often to persist a scan stats snapshot in seconds
+    ///
+    /// Snapshot row timestamps quantize to this cadence, which makes it the
+    /// cross replica dedup unit: replicas triggering in the same window write
+    /// the same clustering key and last write wins.
+    #[serde(default = "default_events_stats_snapshot_secs")]
+    pub stats_snapshot_secs: u64,
+    /// How long to hold onto scan stats snapshots in seconds
+    ///
+    /// This is the `scan_stats` tables TTL, so it bounds how far back the
+    /// stats history route can reach.
+    #[serde(default = "default_events_stats_retention")]
+    pub stats_retention: u64,
+    /// The number of seconds each scan stats partition in the database should cover
+    #[serde(default = "default_events_stats_partition_size")]
+    pub stats_partition_size: u16,
 }
 
 /// Helps serde default how long workflow graph events wait before they can be popped to 10 seconds
@@ -2213,7 +2269,88 @@ impl Default for Events {
             max_tools_per_agent: default_max_tools_per_agent(),
             max_crawl_depth: default_max_crawl_depth(),
             max_tools_per_toolset: default_max_tools_per_toolset(),
+            heartbeat_secs: default_events_heartbeat_secs(),
+            worker_expiry_secs: default_events_worker_expiry_secs(),
+            in_flight_backstop_secs: default_events_in_flight_backstop_secs(),
+            stats_snapshot_secs: default_events_stats_snapshot_secs(),
+            stats_retention: default_events_stats_retention(),
+            stats_partition_size: default_events_stats_partition_size(),
         }
+    }
+}
+
+impl Events {
+    /// Validate that these event settings are internally consistent
+    ///
+    /// # Errors
+    ///
+    /// * The heartbeat interval is zero
+    /// * The worker expiry does not allow at least 3 missed heartbeats
+    /// * The in flight age backstop is not more patient than death detection
+    /// * The stats snapshot cadence is faster than the heartbeat that triggers it
+    /// * A stats partition does not cover at least one snapshot window
+    /// * The stats retention does not outlive a single snapshot window
+    /// * The stats retention exceeds Scylla's 20 year table TTL cap
+    pub fn validate(&self) -> Result<(), config::ConfigError> {
+        // a zero heartbeat interval would busy loop beats and reaps while a
+        // zero expiry (which it would allow below) marks every worker that is
+        // not mid beat as dead, so reject it outright
+        if self.heartbeat_secs == 0 {
+            return Err(config::ConfigError::Message(
+                "thorium.events.heartbeat_secs must be at least 1".to_owned(),
+            ));
+        }
+        // make sure a worker gets at least 3 heartbeat chances before it is presumed dead
+        if self.worker_expiry_secs < self.heartbeat_secs.saturating_mul(3) {
+            return Err(config::ConfigError::Message(format!(
+                "thorium.events.worker_expiry_secs ({}) must be at least 3x \
+                thorium.events.heartbeat_secs ({})",
+                self.worker_expiry_secs, self.heartbeat_secs
+            )));
+        }
+        // make sure the age backstop is more patient than heartbeat death detection
+        if self.in_flight_backstop_secs <= self.worker_expiry_secs {
+            return Err(config::ConfigError::Message(format!(
+                "thorium.events.in_flight_backstop_secs ({}) must be greater than \
+                thorium.events.worker_expiry_secs ({})",
+                self.in_flight_backstop_secs, self.worker_expiry_secs
+            )));
+        }
+        // the snapshot trigger rides the heartbeat so a faster cadence than the
+        // beat could never fire on time
+        if self.stats_snapshot_secs < self.heartbeat_secs {
+            return Err(config::ConfigError::Message(format!(
+                "thorium.events.stats_snapshot_secs ({}) must be at least \
+                thorium.events.heartbeat_secs ({})",
+                self.stats_snapshot_secs, self.heartbeat_secs
+            )));
+        }
+        // make sure each stats partition covers at least one snapshot window
+        if u64::from(self.stats_partition_size) < self.stats_snapshot_secs {
+            return Err(config::ConfigError::Message(format!(
+                "thorium.events.stats_partition_size ({}) must be at least \
+                thorium.events.stats_snapshot_secs ({})",
+                self.stats_partition_size, self.stats_snapshot_secs
+            )));
+        }
+        // make sure persisted snapshots outlive at least one snapshot window
+        if self.stats_retention <= self.stats_snapshot_secs {
+            return Err(config::ConfigError::Message(format!(
+                "thorium.events.stats_retention ({}) must be greater than \
+                thorium.events.stats_snapshot_secs ({})",
+                self.stats_retention, self.stats_snapshot_secs
+            )));
+        }
+        // scylla caps a written TTL at 20 years; a larger retention would fail
+        // the scan stats table create and panic every API at boot
+        if self.stats_retention > SCYLLA_MAX_WRITE_TTL {
+            return Err(config::ConfigError::Message(format!(
+                "thorium.events.stats_retention ({}) must be at most \
+                {SCYLLA_MAX_WRITE_TTL} (Scylla's 20 year TTL cap)",
+                self.stats_retention
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -2286,6 +2423,318 @@ impl Default for Associations {
             partition_size: default_associations_partition_size(),
             earliest: default_associations_earliest(),
         }
+    }
+}
+
+/// Helps serde default the max yara rule source size to 128 KiB
+fn default_yara_max_rule_size() -> usize {
+    131_072
+}
+
+/// Helps serde default the max yara scan size to 1 GiB
+fn default_yara_max_scan_size() -> u64 {
+    1_073_741_824
+}
+
+/// Helps serde default the yara scan buffer budget to 1 GiB
+fn default_yara_scan_buffer_budget() -> u64 {
+    1_073_741_824
+}
+
+/// Helps serde default the yara scan timeout to 60 seconds
+fn default_yara_scan_timeout_secs() -> u64 {
+    60
+}
+
+/// Helps serde default the yara small scan class size to 16 MiB
+fn default_yara_small_class_size() -> u64 {
+    16_777_216
+}
+
+/// Helps serde default the yara noisy rule match rate threshold to 20%
+fn default_yara_noisy_threshold() -> f64 {
+    0.20
+}
+
+/// Helps serde default the yara noisy rule sliding window to 1000 scans
+fn default_yara_noisy_window() -> usize {
+    1000
+}
+
+/// Helps serde default the yara slow rule threshold to 5000 milliseconds
+fn default_yara_slow_rule_ms() -> u64 {
+    5000
+}
+
+/// Helps serde default the yara slow rule strike count to 3
+fn default_yara_slow_strikes() -> u32 {
+    3
+}
+
+/// Helps serde default the yara serialized ruleset cache bucket
+fn default_yara_cache_bucket() -> String {
+    "thorium-yara-rulesets".to_owned()
+}
+
+/// Helps serde default the yara module allowlist
+fn default_yara_allowed_modules() -> Vec<String> {
+    // allow the common file format and utility modules by default
+    [
+        "pe", "elf", "macho", "dotnet", "math", "hash", "string", "time", "lnk",
+    ]
+    .into_iter()
+    .map(ToOwned::to_owned)
+    .collect()
+}
+
+/// The settings for yara rules and scans in Thorium
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]
+pub struct Yara {
+    /// The max size of a single yara rule source document in bytes
+    #[serde(default = "default_yara_max_rule_size")]
+    pub max_rule_size: usize,
+    /// The max size of a single object to scan in bytes
+    #[serde(default = "default_yara_max_scan_size")]
+    pub max_scan_size: u64,
+    /// The total byte budget for buffered scan data in a single scanner
+    #[serde(default = "default_yara_scan_buffer_budget")]
+    pub scan_buffer_budget: u64,
+    /// The max number of seconds a single scan may take
+    #[serde(default = "default_yara_scan_timeout_secs")]
+    pub scan_timeout_secs: u64,
+    /// The number of scans to run in parallel (defaults to the core count)
+    #[serde(default)]
+    pub scan_parallelism: Option<usize>,
+    /// The size in bytes under which an object is admitted as a small scan
+    #[serde(default = "default_yara_small_class_size")]
+    pub small_class_size: u64,
+    /// The match rate over the noisy window above which a rule is quarantined
+    #[serde(default = "default_yara_noisy_threshold")]
+    pub noisy_threshold: f64,
+    /// The number of scans in the sliding window used to detect noisy rules
+    #[serde(default = "default_yara_noisy_window")]
+    pub noisy_window: usize,
+    /// The scan time in milliseconds above which a rule counts a slow strike
+    #[serde(default = "default_yara_slow_rule_ms")]
+    pub slow_rule_ms: u64,
+    /// The number of slow strikes before a rule is quarantined as slow
+    #[serde(default = "default_yara_slow_strikes")]
+    pub slow_strikes: u32,
+    /// The yara modules that rules are allowed to import
+    #[serde(default = "default_yara_allowed_modules")]
+    pub allowed_modules: Vec<String>,
+    /// The bucket to cache serialized compiled yara rulesets in
+    #[serde(default = "default_yara_cache_bucket")]
+    pub cache_bucket: String,
+}
+
+impl Default for Yara {
+    fn default() -> Self {
+        Self {
+            max_rule_size: default_yara_max_rule_size(),
+            max_scan_size: default_yara_max_scan_size(),
+            scan_buffer_budget: default_yara_scan_buffer_budget(),
+            scan_timeout_secs: default_yara_scan_timeout_secs(),
+            scan_parallelism: None,
+            small_class_size: default_yara_small_class_size(),
+            noisy_threshold: default_yara_noisy_threshold(),
+            noisy_window: default_yara_noisy_window(),
+            slow_rule_ms: default_yara_slow_rule_ms(),
+            slow_strikes: default_yara_slow_strikes(),
+            allowed_modules: default_yara_allowed_modules(),
+            cache_bucket: default_yara_cache_bucket(),
+        }
+    }
+}
+
+impl Yara {
+    /// Validate that these yara settings are internally consistent
+    ///
+    /// # Errors
+    ///
+    /// * The scan buffer budget cannot hold the largest admissible scan
+    pub fn validate(&self) -> Result<(), config::ConfigError> {
+        // make sure the scan buffer budget can hold the largest admissible scan
+        if self.scan_buffer_budget < self.max_scan_size {
+            return Err(config::ConfigError::Message(format!(
+                "thorium.yara.scan_buffer_budget ({}) must be at least \
+                thorium.yara.max_scan_size ({})",
+                self.scan_buffer_budget, self.max_scan_size
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Helps serde default the number of lanes a hunt is split into to 4
+fn default_hunts_lanes() -> u32 {
+    4
+}
+
+/// Helps serde default the corpus list lines walked per hunt chunk to 500
+fn default_hunts_chunk_size() -> u64 {
+    500
+}
+
+/// Helps serde default the delay between a lane's chunks to 5 seconds
+fn default_hunts_inter_chunk_pacing_secs() -> u64 {
+    5
+}
+
+/// Helps serde default the max frozen snapshot size to 10,000 rules
+fn default_hunts_max_rules_per_hunt() -> usize {
+    10_000
+}
+
+/// Helps serde default the max rule set membership to 1,000 rules
+fn default_hunts_max_rules_per_ruleset() -> usize {
+    1_000
+}
+
+/// Helps serde default the max active hunts per user to 2
+fn default_hunts_max_active_per_user() -> usize {
+    2
+}
+
+/// Helps serde default the max active hunts cluster-wide to 8
+fn default_hunts_max_active_global() -> usize {
+    8
+}
+
+/// Helps serde default the per-hunt bounded error sample list to 25 entries
+fn default_hunts_max_error_samples() -> usize {
+    25
+}
+
+/// Helps serde default the yara hunt scan buffer budget to 1 GiB
+fn default_hunts_yara_scan_buffer_budget() -> u64 {
+    1_073_741_824
+}
+
+/// Helps serde default the compiled yara subset LRU size to 4 rulesets
+fn default_hunts_yara_ruleset_lru_size() -> usize {
+    4
+}
+
+/// The yara engine's settings for hunts
+///
+/// These are deliberately separate from the live scan path's settings in
+/// [`Yara`]: a hunt worker holds this budget *in addition to* the live scan
+/// budget, so pod memory must be raised together with these knobs.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]
+pub struct HuntsYara {
+    /// The total byte budget for buffered hunt scan data in a single worker
+    #[serde(default = "default_hunts_yara_scan_buffer_budget")]
+    pub scan_buffer_budget: u64,
+    /// The number of compiled rule subsets to keep cached per worker
+    #[serde(default = "default_hunts_yara_ruleset_lru_size")]
+    pub ruleset_lru_size: usize,
+}
+
+impl Default for HuntsYara {
+    fn default() -> Self {
+        Self {
+            scan_buffer_budget: default_hunts_yara_scan_buffer_budget(),
+            ruleset_lru_size: default_hunts_yara_ruleset_lru_size(),
+        }
+    }
+}
+
+/// The settings for user-created hunts in Thorium
+///
+/// Hunts are bounded, paced passes of a frozen rule snapshot over historical
+/// data; this is the system's first pacing configuration. The chassis knobs
+/// here are engine-blind and each engine adds its own sub-block.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]
+pub struct Hunts {
+    /// The number of parallel chunk chains (time shards) a hunt is split into
+    #[serde(default = "default_hunts_lanes")]
+    pub lanes: u32,
+    /// The number of corpus list lines walked per chunk
+    #[serde(default = "default_hunts_chunk_size")]
+    pub chunk_size: u64,
+    /// The delay in seconds between a lane's chunks
+    ///
+    /// This rides on the ~3 second pop maturity floor so the effective delay
+    /// is roughly this value plus three seconds plus the pop cadence.
+    #[serde(default = "default_hunts_inter_chunk_pacing_secs")]
+    pub inter_chunk_pacing_secs: u64,
+    /// The max number of rules a hunt may freeze; creates past this are a 400
+    #[serde(default = "default_hunts_max_rules_per_hunt")]
+    pub max_rules_per_hunt: usize,
+    /// The max number of member rules a rule set may hold
+    #[serde(default = "default_hunts_max_rules_per_ruleset")]
+    pub max_rules_per_ruleset: usize,
+    /// The max Created/Running hunts per user across all engines (best-effort)
+    #[serde(default = "default_hunts_max_active_per_user")]
+    pub max_active_per_user: usize,
+    /// The max Created/Running hunts cluster-wide (best-effort)
+    #[serde(default = "default_hunts_max_active_global")]
+    pub max_active_global: usize,
+    /// The max number of per-item errors sampled into a hunt's counters
+    #[serde(default = "default_hunts_max_error_samples")]
+    pub max_error_samples: usize,
+    /// The yara engine's hunt settings
+    #[serde(default)]
+    pub yara: HuntsYara,
+}
+
+impl Default for Hunts {
+    fn default() -> Self {
+        Self {
+            lanes: default_hunts_lanes(),
+            chunk_size: default_hunts_chunk_size(),
+            inter_chunk_pacing_secs: default_hunts_inter_chunk_pacing_secs(),
+            max_rules_per_hunt: default_hunts_max_rules_per_hunt(),
+            max_rules_per_ruleset: default_hunts_max_rules_per_ruleset(),
+            max_active_per_user: default_hunts_max_active_per_user(),
+            max_active_global: default_hunts_max_active_global(),
+            max_error_samples: default_hunts_max_error_samples(),
+            yara: HuntsYara::default(),
+        }
+    }
+}
+
+impl Hunts {
+    /// Validate that these hunt settings are internally consistent
+    ///
+    /// # Arguments
+    ///
+    /// * `yara` - The live yara scan settings to cross-check budgets against
+    ///
+    /// # Errors
+    ///
+    /// * Any zero-valued knob that would stall or divide-by-zero hunt execution
+    /// * A hunt scan buffer budget that cannot hold the largest admissible scan
+    pub fn validate(&self, yara: &Yara) -> Result<(), config::ConfigError> {
+        // a hunt must always have at least one lane to make progress
+        if self.lanes == 0 {
+            return Err(config::ConfigError::Message(
+                "thorium.hunts.lanes must be at least 1".to_owned(),
+            ));
+        }
+        // a chunk must always walk at least one corpus line to make progress
+        if self.chunk_size == 0 {
+            return Err(config::ConfigError::Message(
+                "thorium.hunts.chunk_size must be at least 1".to_owned(),
+            ));
+        }
+        // a hunt that can never freeze a rule can never be created
+        if self.max_rules_per_hunt == 0 {
+            return Err(config::ConfigError::Message(
+                "thorium.hunts.max_rules_per_hunt must be at least 1".to_owned(),
+            ));
+        }
+        // make sure the hunt scan buffer budget can hold the largest admissible
+        // scan since hunts admit items under the live scan path's size cap
+        if self.yara.scan_buffer_budget < yara.max_scan_size {
+            return Err(config::ConfigError::Message(format!(
+                "thorium.hunts.yara.scan_buffer_budget ({}) must be at least \
+                thorium.yara.max_scan_size ({})",
+                self.yara.scan_buffer_budget, yara.max_scan_size
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -2686,6 +3135,12 @@ pub struct Thorium {
     /// The settings related to associations
     #[serde(default)]
     pub associations: Associations,
+    /// The settings related to yara rules and scans
+    #[serde(default)]
+    pub yara: Yara,
+    /// The settings related to user-created hunts
+    #[serde(default)]
+    pub hunts: Hunts,
     /// The settings related to graphics (image files)
     #[serde(default)]
     pub graphics: Graphics,
@@ -3161,6 +3616,12 @@ impl Conf {
         })?;
         // refuse settings that can't work before anything uses them
         conf.validate()?;
+        // make sure the yara settings are internally consistent
+        conf.thorium.yara.validate()?;
+        // make sure the hunt settings are internally consistent
+        conf.thorium.hunts.validate(&conf.thorium.yara)?;
+        // make sure the event settings are internally consistent
+        conf.thorium.events.validate()?;
         // refuse Redis settings we can't connect with
         conf.redis
             .validate()
@@ -3246,7 +3707,7 @@ impl Conf {
     }
 
     /// The settings that become a table's default TTL, by their key path
-    fn table_ttls(&self) -> [(&'static str, u64); 3] {
+    fn table_ttls(&self) -> [(&'static str, u64); 4] {
         [
             ("thorium.retention.logs", self.thorium.retention.logs),
             (
@@ -3254,6 +3715,10 @@ impl Conf {
                 self.thorium.retention.notifications,
             ),
             ("thorium.events.retention", self.thorium.events.retention),
+            (
+                "thorium.events.stats_retention",
+                self.thorium.events.stats_retention,
+            ),
         ]
     }
 
@@ -3302,8 +3767,8 @@ impl Conf {
 #[cfg(test)]
 mod tests {
     use super::{
-        Conf, MAX_REDIS_DB, NAMESPACE_MAX_LEN, Redis, Scaler, default_namespace_blacklist,
-        parse_namespace, validate_namespace,
+        Conf, Events, Hunts, MAX_REDIS_DB, NAMESPACE_MAX_LEN, Redis, Scaler, Yara,
+        default_namespace_blacklist, parse_namespace, validate_namespace,
     };
     use std::path::Path;
 
@@ -3534,6 +3999,68 @@ mod tests {
         assert!(error.contains("redis.db"), "unexpected error: {error}");
         // a negative database doesn't parse
         assert!(serde_norway::from_str::<Redis>("host: localhost\nport: 6379\ndb: -1\n").is_err());
+    }
+
+    /// The hunt knobs must default sanely when omitted so existing configs
+    /// keep deserializing across a rolling upgrade
+    #[test]
+    fn hunts_defaults_pinned() {
+        // deserialize a hunts config that doesn't set any knobs
+        let hunts: Hunts = serde_json::from_str("{}").expect("Failed to deserialize hunts");
+        // make sure every chassis knob falls back to its documented default
+        assert_eq!(hunts.lanes, 4);
+        assert_eq!(hunts.chunk_size, 500);
+        assert_eq!(hunts.inter_chunk_pacing_secs, 5);
+        assert_eq!(hunts.max_rules_per_hunt, 10_000);
+        assert_eq!(hunts.max_rules_per_ruleset, 1_000);
+        assert_eq!(hunts.max_active_per_user, 2);
+        assert_eq!(hunts.max_active_global, 8);
+        assert_eq!(hunts.max_error_samples, 25);
+        // make sure the yara engine sub-block defaults are pinned too
+        assert_eq!(hunts.yara.scan_buffer_budget, 1_073_741_824);
+        assert_eq!(hunts.yara.ruleset_lru_size, 4);
+        // the defaults themselves must be internally consistent
+        hunts
+            .validate(&Yara::default())
+            .expect("Default hunts config is invalid");
+    }
+
+    /// A hunt scan buffer budget below the live scan size cap must be rejected
+    /// since hunts admit items under that same cap
+    #[test]
+    fn hunts_validate_rejects_small_budget() {
+        // build a hunts config whose budget cannot hold the largest scan
+        let mut hunts = Hunts::default();
+        hunts.yara.scan_buffer_budget = 1024;
+        // this config must fail validation against the default yara settings
+        assert!(hunts.validate(&Yara::default()).is_err());
+    }
+
+    /// Zero-valued lane and chunk knobs must be rejected so hunts can always
+    /// make progress
+    #[test]
+    fn hunts_validate_rejects_zero_knobs() {
+        // build a hunts config with no lanes
+        let no_lanes = Hunts {
+            lanes: 0,
+            ..Hunts::default()
+        };
+        // this config must fail validation
+        assert!(no_lanes.validate(&Yara::default()).is_err());
+        // build a hunts config with an empty chunk size
+        let no_chunk = Hunts {
+            chunk_size: 0,
+            ..Hunts::default()
+        };
+        // this config must fail validation
+        assert!(no_chunk.validate(&Yara::default()).is_err());
+        // build a hunts config that can never freeze a rule
+        let no_rules = Hunts {
+            max_rules_per_hunt: 0,
+            ..Hunts::default()
+        };
+        // this config must fail validation
+        assert!(no_rules.validate(&Yara::default()).is_err());
     }
 
     #[test]
@@ -4183,5 +4710,112 @@ mod tests {
                 "error doesn't name the path: {error}"
             );
         }
+    }
+
+    /// The worker reclaim knobs must default sanely when omitted so existing
+    /// configs keep deserializing across a rolling upgrade
+    #[test]
+    fn events_worker_knobs_default_when_omitted() {
+        // deserialize an events config that doesn't set any worker reclaim knobs
+        let events: Events = serde_json::from_str("{}").expect("Failed to deserialize events");
+        // make sure our worker reclaim knobs fall back to their defaults
+        assert_eq!(events.heartbeat_secs, 10);
+        assert_eq!(events.worker_expiry_secs, 90);
+        assert_eq!(events.in_flight_backstop_secs, 3600);
+        // the defaults themselves must be internally consistent
+        events.validate().expect("Default events config is invalid");
+    }
+
+    /// An expiry shorter than 3 heartbeats must be rejected so a single
+    /// delayed beat can't get a healthy worker reaped
+    #[test]
+    fn events_validate_rejects_short_worker_expiry() {
+        // build an events config whose expiry only allows 2 missed beats
+        let events = Events {
+            worker_expiry_secs: 20,
+            ..Events::default()
+        };
+        // this config must fail validation
+        assert!(events.validate().is_err());
+    }
+
+    /// A backstop at or below the worker expiry must be rejected so death
+    /// detection always fires before the age backstop
+    #[test]
+    fn events_validate_rejects_small_backstop() {
+        // build an events config whose backstop equals the worker expiry
+        let events = Events {
+            in_flight_backstop_secs: 90,
+            ..Events::default()
+        };
+        // this config must fail validation
+        assert!(events.validate().is_err());
+    }
+
+    /// A zero heartbeat interval must be rejected so beats can never busy loop
+    /// and a zero expiry can never mark every live worker as dead
+    #[test]
+    fn events_validate_rejects_zero_heartbeat() {
+        // build an events config with a zero heartbeat and zero expiry
+        let events = Events {
+            heartbeat_secs: 0,
+            worker_expiry_secs: 0,
+            ..Events::default()
+        };
+        // this config must fail validation
+        assert!(events.validate().is_err());
+    }
+
+    /// The scan stats knobs must default sanely when omitted so existing
+    /// configs keep deserializing across a rolling upgrade
+    #[test]
+    fn events_stats_knobs_default_when_omitted() {
+        // deserialize an events config that doesn't set any scan stats knobs
+        let events: Events = serde_json::from_str("{}").expect("Failed to deserialize events");
+        // make sure our scan stats knobs fall back to their defaults
+        assert_eq!(events.stats_snapshot_secs, 30);
+        assert_eq!(events.stats_retention, 2_592_000);
+        assert_eq!(events.stats_partition_size, 43_200);
+        // the defaults themselves must be internally consistent
+        events.validate().expect("Default events config is invalid");
+    }
+
+    /// A snapshot cadence faster than the heartbeat must be rejected since the
+    /// beat-ridden trigger could never fire on time
+    #[test]
+    fn events_validate_rejects_snapshot_below_heartbeat() {
+        // build an events config whose snapshot cadence outpaces the beat
+        let events = Events {
+            stats_snapshot_secs: 5,
+            ..Events::default()
+        };
+        // this config must fail validation
+        assert!(events.validate().is_err());
+    }
+
+    /// A stats partition smaller than one snapshot window must be rejected so
+    /// every partition holds at least one row
+    #[test]
+    fn events_validate_rejects_partition_below_snapshot() {
+        // build an events config whose partitions are smaller than a window
+        let events = Events {
+            stats_partition_size: 10,
+            ..Events::default()
+        };
+        // this config must fail validation
+        assert!(events.validate().is_err());
+    }
+
+    /// A stats retention at or below one snapshot window must be rejected so
+    /// persisted rows always outlive the window that wrote them
+    #[test]
+    fn events_validate_rejects_retention_at_or_below_snapshot() {
+        // build an events config whose retention equals one snapshot window
+        let events = Events {
+            stats_retention: 30,
+            ..Events::default()
+        };
+        // this config must fail validation
+        assert!(events.validate().is_err());
     }
 }

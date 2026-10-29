@@ -5,14 +5,15 @@ pub mod migrations;
 mod repos;
 mod results;
 mod samples;
+mod scan_stats;
 #[cfg(feature = "search-streamer")]
 pub mod search;
 
 pub use entities::{
-    AssociationsListCursor, AssociationsQueries, EntitiesByIdQueries, EntitiesListCursor,
-    EntitiesQueries, LogsQueries, NetworkPoliciesByNameQueries, NetworkPoliciesDefaultQueries,
-    NetworkPoliciesListCursor, NetworkPoliciesQueries, NodesInsert, NodesListCursor,
-    NodesListDetailsCursor, NodesQueries, NotificationsQueries,
+    AssociationsListCursor, AssociationsQueries, EntitiesByIdQueries, EntitiesByNameQueries,
+    EntitiesListCursor, EntitiesQueries, LogsQueries, NetworkPoliciesByNameQueries,
+    NetworkPoliciesDefaultQueries, NetworkPoliciesListCursor, NetworkPoliciesQueries, NodesInsert,
+    NodesListCursor, NodesListDetailsCursor, NodesQueries, NotificationsQueries,
 };
 pub use repos::{
     CommitishListListCursor, CommitishListQueries, CommitishesQueries,
@@ -28,9 +29,33 @@ pub use samples::{
     CommentsByIdQueries, CommentsQueries, S3IdsQueries, S3Sha256sQueries, SamplesListListCursor,
     SamplesListQueries, SamplesQueries,
 };
+pub use scan_stats::ScanStatsQueries;
 
+#[cfg(feature = "api")]
+use axum::http::StatusCode;
 use scylla::client::session::Session;
 use scylla::errors::PrepareError;
+#[cfg(feature = "api")]
+use std::collections::BTreeSet;
+
+#[cfg(feature = "api")]
+use super::apply::read_texts;
+#[cfg(feature = "api")]
+use super::object_added_later;
+#[cfg(feature = "api")]
+use crate::models::upgrades::SchemaBackend;
+#[cfg(feature = "api")]
+use crate::utils::ApiError;
+
+/// The declared Scylla objects a later revision added, whose statements an offline writer leaves
+/// unprepared while the keyspace doesn't hold them yet
+///
+/// An upgrade runs an earlier revision's conversion steps before the operator applies the schema
+/// of the image it deploys, so a writer running inside one of those steps can find the schema the
+/// upgrade started from. Each object here has an optional field in [`ScyllaQueries`], and every
+/// Scylla object `ADDED_OBJECTS` lists must be here. Which objects are missing is read through
+/// `ADDED_OBJECTS` itself; a unit test holds this list to it, so each one has an optional field.
+pub const ADDED_LATER: [&str; 2] = ["entities_by_name", "scan_stats"];
 
 /// Every queries struct, prepared against one keyspace
 pub struct ScyllaQueries {
@@ -76,6 +101,9 @@ pub struct ScyllaQueries {
     pub entities: EntitiesQueries,
     /// Statements on the `entities_by_id` view
     pub entities_by_id: EntitiesByIdQueries,
+    /// Statements on the `entities_by_name` view; absent only for an offline writer on a keyspace
+    /// that doesn't hold the view yet (read them through [`ScyllaQueries::entities_by_name`])
+    pub entities_by_name: Option<EntitiesByNameQueries>,
     /// Statements on the associations table
     pub associations: AssociationsQueries,
     /// Statements on the `network_policies` table
@@ -90,10 +118,13 @@ pub struct ScyllaQueries {
     pub notifications: NotificationsQueries,
     /// Statements on the logs table
     pub logs: LogsQueries,
+    /// Statements on the `scan_stats` table; absent only for an offline writer on a keyspace that
+    /// doesn't hold the table yet (read them through [`ScyllaQueries::scan_stats`])
+    pub scan_stats: Option<ScanStatsQueries>,
 }
 
 impl ScyllaQueries {
-    /// Prepare every generated statement
+    /// Prepare every generated statement, failing when any object is missing from the keyspace
     ///
     /// # Arguments
     ///
@@ -102,6 +133,46 @@ impl ScyllaQueries {
     // the driver's own error is returned as is, so callers convert it the way they already do
     #[allow(clippy::result_large_err)]
     pub async fn prepare(session: &Session, ns: &str) -> Result<Self, PrepareError> {
+        // the API runs on the whole declared schema, so every object's statements are prepared
+        Self::prepare_with(session, ns, &|_| true).await
+    }
+
+    /// Prepare every generated statement except those of the objects a later revision added that
+    /// the keyspace doesn't hold yet, for a writer that runs inside an upgrade
+    ///
+    /// # Arguments
+    ///
+    /// * `session` - The Scylla session to prepare on
+    /// * `ns` - The keyspace the statements target
+    #[cfg(feature = "api")]
+    pub async fn prepare_present(session: &Session, ns: &str) -> Result<Self, ApiError> {
+        // find which of the later objects the keyspace holds
+        let present = present_objects(session, ns).await?;
+        // prepare the rest as the API does, leaving out the later objects that are missing
+        Self::prepare_with(session, ns, &|name| present.contains(name))
+            .await
+            .map_err(|err| {
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Some(format!("the Scylla statements didn't prepare: {err}")),
+                )
+            })
+    }
+
+    /// Prepare the generated statements, leaving out a later object the keyspace doesn't hold
+    ///
+    /// # Arguments
+    ///
+    /// * `session` - The Scylla session to prepare on
+    /// * `ns` - The keyspace the statements target
+    /// * `holds` - Whether the keyspace holds an object from [`ADDED_LATER`]
+    // the driver's own error is returned as is, as `prepare` returns it
+    #[allow(clippy::result_large_err)]
+    async fn prepare_with(
+        session: &Session,
+        ns: &str,
+        holds: &(dyn Fn(&str) -> bool + Sync),
+    ) -> Result<Self, PrepareError> {
         // prepare each object's statements in turn
         let samples_list = SamplesListQueries::prepare(session, ns).await?;
         let samples = SamplesQueries::prepare(session, ns).await?;
@@ -124,6 +195,11 @@ impl ScyllaQueries {
         let tags_case_insensitive = TagsCaseInsensitiveQueries::prepare(session, ns).await?;
         let entities = EntitiesQueries::prepare(session, ns).await?;
         let entities_by_id = EntitiesByIdQueries::prepare(session, ns).await?;
+        let entities_by_name = if holds("entities_by_name") {
+            Some(EntitiesByNameQueries::prepare(session, ns).await?)
+        } else {
+            None
+        };
         let associations = AssociationsQueries::prepare(session, ns).await?;
         let network_policies = NetworkPoliciesQueries::prepare(session, ns).await?;
         let network_policies_by_name = NetworkPoliciesByNameQueries::prepare(session, ns).await?;
@@ -131,6 +207,11 @@ impl ScyllaQueries {
         let nodes = NodesQueries::prepare(session, ns).await?;
         let notifications = NotificationsQueries::prepare(session, ns).await?;
         let logs = LogsQueries::prepare(session, ns).await?;
+        let scan_stats = if holds("scan_stats") {
+            Some(ScanStatsQueries::prepare(session, ns).await?)
+        } else {
+            None
+        };
         Ok(ScyllaQueries {
             samples_list,
             samples,
@@ -153,6 +234,7 @@ impl ScyllaQueries {
             tags_case_insensitive,
             entities,
             entities_by_id,
+            entities_by_name,
             associations,
             network_policies,
             network_policies_by_name,
@@ -160,7 +242,26 @@ impl ScyllaQueries {
             nodes,
             notifications,
             logs,
+            scan_stats,
         })
+    }
+
+    /// Get the statements on the `entities_by_name` view
+    #[cfg(feature = "api")]
+    pub fn entities_by_name(&self) -> Result<&EntitiesByNameQueries, ApiError> {
+        // only an offline writer runs without them, and nothing it writes reads the view
+        self.entities_by_name
+            .as_ref()
+            .ok_or_else(|| not_prepared("entities_by_name"))
+    }
+
+    /// Get the statements on the `scan_stats` table
+    #[cfg(feature = "api")]
+    pub fn scan_stats(&self) -> Result<&ScanStatsQueries, ApiError> {
+        // only an offline writer runs without them, and nothing it writes touches the table
+        self.scan_stats
+            .as_ref()
+            .ok_or_else(|| not_prepared("scan_stats"))
     }
 
     /// Every generated statement's text, named `<object>.<statement>`, in declaration order
@@ -199,6 +300,7 @@ impl ScyllaQueries {
             ),
             ("entities", EntitiesQueries::statements(ns)),
             ("entities_by_id", EntitiesByIdQueries::statements(ns)),
+            ("entities_by_name", EntitiesByNameQueries::statements(ns)),
             ("associations", AssociationsQueries::statements(ns)),
             ("network_policies", NetworkPoliciesQueries::statements(ns)),
             (
@@ -212,6 +314,7 @@ impl ScyllaQueries {
             ("nodes", NodesQueries::statements(ns)),
             ("notifications", NotificationsQueries::statements(ns)),
             ("logs", LogsQueries::statements(ns)),
+            ("scan_stats", ScanStatsQueries::statements(ns)),
         ];
         groups
             .into_iter()
@@ -222,4 +325,57 @@ impl ScyllaQueries {
             })
             .collect()
     }
+}
+
+/// Read which of the Scylla objects a later revision added (see [`ADDED_LATER`]) a keyspace holds
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to read with
+/// * `ns` - The keyspace to look in
+#[cfg(feature = "api")]
+async fn present_objects(session: &Session, ns: &str) -> Result<BTreeSet<String>, ApiError> {
+    // Scylla stores unquoted keyspace names in lowercase
+    let keyspace = ns.to_lowercase();
+    // start with none found, since a missing object simply has no row
+    let mut present = BTreeSet::new();
+    // look among the keyspace's tables, then its views
+    for cql in [
+        "SELECT table_name FROM system_schema.tables WHERE keyspace_name = ?",
+        "SELECT view_name FROM system_schema.views WHERE keyspace_name = ?",
+    ] {
+        // read every object's name, answering 503 when the schema tables can't be read
+        let rows = read_texts::<1>(session, cql, &[&keyspace])
+            .await
+            .map_err(|err| {
+                ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Some(format!("Scylla's schema tables can't be read: {err}")),
+                )
+            })?;
+        // keep only the later objects, the only ones that may be missing
+        present.extend(
+            rows.into_iter()
+                .map(|[name]| name)
+                .filter(|name| object_added_later(SchemaBackend::Scylla, name)),
+        );
+    }
+    Ok(present)
+}
+
+/// The error for statements an offline writer left unprepared because their object is missing
+///
+/// # Arguments
+///
+/// * `object` - The table or view the statements target
+#[cfg(feature = "api")]
+fn not_prepared(object: &str) -> ApiError {
+    // the schema of the deployed image hasn't been applied yet, which a retry after it can fix
+    ApiError::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        Some(format!(
+            "the {object} statements aren't prepared because the keyspace doesn't hold {object} \
+             yet; apply the schema first"
+        )),
+    )
 }

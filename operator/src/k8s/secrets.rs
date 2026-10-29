@@ -134,7 +134,9 @@ pub struct RenderedConfig {
 pub fn render_thorium_config(conf: &Conf) -> Result<RenderedConfig, Error> {
     // convert the merged config to JSON first so enums serialize as maps; serializing the
     // typed config directly emits YAML tags (e.g. `!Grpc`) that the config loader rejects
-    let conf_json = serde_json::to_value(conf)?;
+    let mut conf_json = serde_json::to_value(conf)?;
+    // sort every object so the secret's bytes and hash don't change when map iteration order does
+    conf_json.sort_all_objects();
     // render the config as YAML
     let yaml = serde_norway::to_string(&conf_json)?;
     // hash the rendered config so components can roll out when it changes

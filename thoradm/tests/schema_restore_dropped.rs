@@ -14,8 +14,10 @@ use std::collections::BTreeSet;
 use thorium::models::schema::{MigrationRecordKind, RevisionSnapshot};
 use thorium::models::upgrades::SchemaBackend;
 
-/// The objects released revisions created that no release reads, which a restore leaves uncreated
-const UNUSED: [&str; 2] = ["events", "entities_by_name"];
+/// The objects released revisions created that no release reads, which a restore leaves
+/// uncreated; the `entities_by_name` view older snapshots also list is declared again, so a
+/// restore creates it like every declared view
+const UNUSED: [&str; 1] = ["events"];
 
 /// Returns the names of the namespace's tables and views, sorted
 ///

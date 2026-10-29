@@ -42,6 +42,10 @@ import {
   PeSectionMeta,
 } from './pe';
 import { CreateSigmaRule, SigmaActionToTake, SigmaRule, SigmaRuleAppliesTo, SigmaRuleCreateMeta, SigmaRuleMeta } from './rules/sigma';
+import { CreateYaraRule, YaraActionToTake, YaraRule, YaraRuleAppliesTo, YaraRuleCreateMeta, YaraRuleMeta } from './rules/yara';
+import { CreateYaraRuleHit, YaraRuleHit, YaraRuleHitCreateMeta, YaraRuleHitMeta } from './rules/yara_hits';
+import { CreateRuleSetEntity, RuleSetCreateMeta, RuleSetEntity, RuleSetMeta } from './rulesets';
+import { CreateHuntEntity, Hunt, HuntCreateMeta, HuntMeta } from './hunts';
 import { labelWithFallback } from '../labels';
 
 // Entity types
@@ -71,6 +75,14 @@ export enum Entities {
   NetworkConnection = 'NetworkConnection',
   /// A sigma rule to apply to data
   SigmaRule = 'SigmaRule',
+  /// A yara rule to apply to raw sample bytes
+  YaraRule = 'YaraRule',
+  /// A yara rule hit against a sample
+  YaraRuleHit = 'YaraRuleHit',
+  /// A named group of associated rules of any engine
+  RuleSet = 'RuleSet',
+  /// A user-created, bounded, paced pass of a frozen rule snapshot over historical data
+  Hunt = 'Hunt',
   /// A flag denoting something interesting, odd, or suspicious
   Flag = 'Flag',
   /// An incident grouping related activity (teams, networks, machines, locations)
@@ -105,6 +117,10 @@ export const ENTITY_LABELS: Record<Entities, string> = {
   [Entities.WindowsProcess]: 'Windows Process',
   [Entities.NetworkConnection]: 'Network Connection',
   [Entities.SigmaRule]: 'Sigma Rule',
+  [Entities.YaraRule]: 'Yara Rule',
+  [Entities.YaraRuleHit]: 'Yara Rule Hit',
+  [Entities.RuleSet]: 'Rule Set',
+  [Entities.Hunt]: 'Hunt',
   [Entities.Flag]: 'Flag',
   [Entities.Incident]: 'Incident',
   [Entities.CompiledFunction]: 'Compiled Function',
@@ -133,15 +149,19 @@ export type EntityTypes =
   | FileSystem
   | Flag
   | Folder
+  | Hunt
   | Incident
   | NetworkConnection
   | Other
   | PeImport
   | PeSection
+  | RuleSetEntity
   | SigmaRule
   | Vendor
   | WindowsProcess
-  | WindowsProcessTree;
+  | WindowsProcessTree
+  | YaraRule
+  | YaraRuleHit;
 
 export type EntityMetaTypes =
   | CompiledFunctionMeta
@@ -151,15 +171,19 @@ export type EntityMetaTypes =
   | FileSystemMeta
   | FlagMeta
   | FolderMeta
+  | HuntMeta
   | IncidentMeta
   | NetworkConnectionMeta
   | OtherMeta
   | PeImportMeta
   | PeSectionMeta
+  | RuleSetMeta
   | SigmaRuleMeta
   | VendorMeta
   | WindowsProcessMeta
-  | WindowsProcessTreeMeta;
+  | WindowsProcessTreeMeta
+  | YaraRuleMeta
+  | YaraRuleHitMeta;
 
 // pure create entities
 export type EntityCreateTypes =
@@ -170,21 +194,27 @@ export type EntityCreateTypes =
   | CreateFileSystem
   | CreateFlag
   | CreateFolder
+  | CreateHuntEntity
   | CreateIncident
   | CreateNetworkConnection
   | CreateOther
   | CreatePeImport
   | CreatePeSection
+  | CreateRuleSetEntity
   | CreateSigmaRule
   | CreateVendor
   | CreateWindowsProcess
-  | CreateWindowsProcessTree;
+  | CreateWindowsProcessTree
+  | CreateYaraRule
+  | CreateYaraRuleHit;
 
 export type UISupportedEntityCreateTypes =
   | CreateDevice
   | CreateCollection
   | CreateVendor
   | CreateSigmaRule
+  | CreateYaraRule
+  | CreateRuleSetEntity
   | CreateFlag
   | CreateIncident
   | CreateCompiledFunction
@@ -196,6 +226,8 @@ export type UISupportedEntityCreateKind =
   | Entities.Device
   | Entities.Vendor
   | Entities.SigmaRule
+  | Entities.YaraRule
+  | Entities.RuleSet
   | Entities.Flag
   | Entities.Incident
   | Entities.CompiledFunction
@@ -211,15 +243,19 @@ export type EntityCreateMetaTypes =
   | FileSystemCreateMeta
   | FlagCreateMeta
   | FolderCreateMeta
+  | HuntCreateMeta
   | IncidentCreateMeta
   | NetworkConnectionCreateMeta
   | OtherCreateMeta
   | PeImportCreateMeta
   | PeSectionCreateMeta
+  | RuleSetCreateMeta
   | SigmaRuleCreateMeta
   | VendorCreateMeta
   | WindowsProcessCreateMeta
-  | WindowsProcessTreeCreateMeta;
+  | WindowsProcessTreeCreateMeta
+  | YaraRuleCreateMeta
+  | YaraRuleHitCreateMeta;
 
 // all possible entity variants including legacy types (file/repo)
 export type ExtendedEntityTypes = EntityTypes | Sample | Repo;
@@ -322,8 +358,23 @@ export type UpdateEntityMetadata = {
   add_sigma_actions?: SigmaActionToTake[];
   /// The actions to remove by their index in this vec
   remove_sigma_actions?: number[];
+  /// A yara rule in its source format
+  yara_rule?: string;
+  /// The new things this yara rule should apply too
+  add_yara_applies_to?: YaraRuleAppliesTo[];
+  /// The things this yara rule should no longer apply too
+  remove_yara_applies_to?: YaraRuleAppliesTo[];
+  /// The new actions to take when a yara rule hits
+  add_yara_actions?: YaraActionToTake[];
+  /// The actions to remove by their index in this vec
+  remove_yara_actions?: number[];
   /// The score that a rule applies
   score?: number;
+  // ----- Rule set -----
+  /// The ids of new member rules to associate with a rule set
+  add_ruleset_rules?: string[];
+  /// The ids of member rules to remove from a rule set
+  remove_ruleset_rules?: string[];
   // ----- Incident -----
   /// The cover term / codename for an incident
   cover_term?: string;

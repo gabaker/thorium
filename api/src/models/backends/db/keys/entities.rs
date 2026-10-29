@@ -5,8 +5,10 @@ use uuid::Uuid;
 use crate::models::CensusKeys;
 use crate::utils::Shared;
 
+pub mod hunts;
 pub mod vendors;
 
+pub use hunts::HuntKeys;
 pub use vendors::VendorKeys;
 
 /// Build the keys for this entities cursor/census caches

@@ -86,6 +86,8 @@ $grid-breakpoints: (
 .warning-bar {
   --bs-progress-bg: var(--thorium-bar-bg) !important;
   --bs-progress-bar-bg: var(--thorium-warning-bar-bg) !important;
+  // dark amber label: Bootstrap's default white fails contrast on the amber fill
+  --bs-progress-bar-color: var(--thorium-warning-text) !important;
 }
 
 .info-bar {

@@ -64,8 +64,12 @@ pub async fn create_or_update(meta: &ClusterMeta, cm: &ConfigMap) -> Result<(), 
 ///
 /// * `tracing` - Thorium's tracing configuration settings
 pub fn tracing_yaml(tracing: &Tracing) -> Result<String, Error> {
-    // serialize through JSON to drop enum tags, then render the result as YAML
-    Ok(serde_norway::to_string(&serde_json::to_value(tracing)?)?)
+    // serialize through JSON to drop enum tags
+    let mut tracing_json = serde_json::to_value(tracing)?;
+    // sort every object so the ConfigMap's bytes don't change when map iteration order does
+    tracing_json.sort_all_objects();
+    // render the sorted config as YAML
+    Ok(serde_norway::to_string(&tracing_json)?)
 }
 
 /// Create Thorium tracing `ConfigMap`

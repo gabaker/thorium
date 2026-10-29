@@ -721,12 +721,12 @@ deployment with a namespace prefix.
      -o jsonpath='{.metadata.labels.thorium\.sandia\.gov/state-revision}'; echo
    ```
 
-9. **Upgrade.** Set the target revision; the operator runs the steps up to `2026-10-v04` and then
+9. **Upgrade.** Set the target revision; the operator runs the steps up to `2026-10-v05` and then
    rolls out the new components of the version set in step 7:
 
    ```bash
    kubectl -n thorium patch thoriumcluster dev --type merge \
-     -p '{"spec":{"upgrade":{"target_revision":"2026-10-v04"}}}'
+     -p '{"spec":{"upgrade":{"target_revision":"2026-10-v05"}}}'
    ```
 
    If the `elastic-reindex-keyword-mappings` step blocks, approve it in `spec.upgrade.approvals`

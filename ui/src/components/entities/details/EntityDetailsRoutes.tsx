@@ -19,6 +19,7 @@ export const EntityDetailsRoutes: Record<
   '/incident/:entityID': { type: Entities.Incident },
   '/function/compiled/:entityID': { type: Entities.CompiledFunction },
   '/function/decompiled/:entityID': { type: Entities.DecompiledFunction },
+  '/hunt/:entityID': { type: Entities.Hunt },
   '/pe/section/:entityID': { type: Entities.PeSection },
   '/pe/import/:entityID': { type: Entities.PeImport },
   '/folder/:entityID': { type: Entities.Folder },
@@ -26,6 +27,9 @@ export const EntityDetailsRoutes: Record<
   '/other/:entityID': { type: Entities.Other },
   '/repo/*': { type: Entities.Repo, override_page: RepoDetails },
   '/rules/sigma/:entityID': { type: Entities.SigmaRule },
+  '/rules/yara/:entityID': { type: Entities.YaraRule },
+  '/rules/yara/hit/:entityID': { type: Entities.YaraRuleHit },
+  '/ruleset/:entityID': { type: Entities.RuleSet },
   '/vendor/:entityID': { type: Entities.Vendor },
   '/windows/process/tree/:entityID': { type: Entities.WindowsProcessTree },
   '/windows/process/:entityID': { type: Entities.WindowsProcess },
@@ -33,6 +37,6 @@ export const EntityDetailsRoutes: Record<
 
 export const EntityDetailsBasePathByType: Partial<Record<Entities, string>> = buildPathByType(EntityDetailsRoutes, (config) => config.type);
 
-export function getDetailsBasePathByEntity(entity: keyof ExtendedTypeMap): string | undefined {
+export function getDetailsBasePathByEntity(entity: Entities): string | undefined {
   return EntityDetailsBasePathByType[entity];
 }

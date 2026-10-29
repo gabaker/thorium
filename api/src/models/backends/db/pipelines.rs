@@ -39,7 +39,9 @@ pub fn build(
         .cmd("hsetnx").arg(&keys.data).arg("sla").arg(cast.sla)
         .cmd("hsetnx").arg(&keys.data).arg("triggers").arg(serialize!(&cast.triggers))
         .cmd("hsetnx").arg(&keys.data).arg("stage_tools").arg(serialize!(&cast.stage_tools))
-        .cmd("hset").arg(cache_status).arg("status").arg(true)
+        .cmd("hset").arg(&cache_status).arg("triggers").arg(true)
+        // bump the triggers generation counter for replica safe cache polling
+        .cmd("hincrby").arg(&cache_status).arg("triggers_gen").arg(1)
         .cmd("sadd").arg(&keys.set).arg(&cast.name);
     // add option value if set
     hsetnx_opt_serialize!(pipe, &keys.data, "description", &cast.description);
@@ -274,7 +276,9 @@ pub async fn update(pipeline: &Pipeline, add: &[String], remove: &[String], shar
     pipe.cmd("hset").arg(&keys.data).arg("triggers").arg(serialize!(&pipeline.triggers));
     // only flag the event cache dirty when there are triggers to evaluate
     if !pipeline.triggers.is_empty() {
-        pipe.cmd("hset").arg(cache_status).arg("status").arg(true);
+        pipe.cmd("hset").arg(&cache_status).arg("triggers").arg(true);
+        // bump the triggers generation counter for replica safe cache polling
+        pipe.cmd("hincrby").arg(&cache_status).arg("triggers_gen").arg(1);
     }
     // update optional values if set
     hset_del_opt_serialize!(pipe, &keys.data, "description", &pipeline.description);

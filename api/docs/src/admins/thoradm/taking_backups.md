@@ -450,8 +450,9 @@ connection to a cluster), or `thoradm backup coverage --json` for a JSON array w
 resource in the same order and the fields `store`, `name`, `prefixes`, `base_table`,
 `classification`, `component`, `reason`, `category`, and `gap`. Developers regenerate the table with
 `cargo run -p thoradm --example coverage_page`. Excluded resources are runtime state
-that is invalid after a restore (reactions, jobs, workers, stage logs, events, caches, and the
-`ephemeral` and `reaction_cache` buckets) or data rebuilt from other data. The "Known gap" column
+that is invalid after a restore or expires on its own (reactions, jobs, workers, stage logs,
+events, scan-stats snapshots, caches, and the `ephemeral` and `reaction_cache` buckets) or data
+rebuilt from other data (such as the `yara_rulesets` bucket's cached rulesets). The "Known gap" column
 lists what today's backup or restore doesn't carry yet. The Thoradm guide's
 [What a Backup Holds](./thoradm.md#what-a-backup-holds) sums it up for restoring.
 
@@ -473,6 +474,7 @@ lists what today's backup or restore doesn't carry yet. The Thoradm guide's
 | Scylla table | `notifications` | Backed up | `notifications` | CORE |  |
 | Scylla table | `nodes` | Backed up | `nodes` | CORE |  |
 | Scylla table | `logs` | Excluded | stage logs of reactions, which are runtime state and expire by TTL | EPHEMERAL |  |
+| Scylla table | `scan_stats` | Excluded | disposable scan-rate telemetry snapshots, which expire by TTL and are replaced by new snapshots | EPHEMERAL |  |
 | Scylla table | `events`, only in keyspaces older releases created | Excluded | a table of trigger events nothing reads or writes | EPHEMERAL |  |
 | Scylla table | `commits`, only in keyspaces older releases created | Excluded | git commits of repos that development builds before 1.0.0 wrote; the commitishes table replaced it | CORE |  |
 | Scylla table | `commits_list`, only in keyspaces older releases created | Excluded | the listing of git commits of repos that development builds before 1.0.0 wrote; the commitish_list table replaced it | CORE |  |
@@ -495,7 +497,7 @@ lists what today's backup or restore doesn't carry yet. The Thoradm guide's
 | Scylla view | `network_policies_by_name` (view of `network_policies`) | Backed up | `network-policies` | DERIVED |  |
 | Scylla view | `network_policies_default` (view of `network_policies`) | Backed up | `network-policies` | DERIVED |  |
 | Scylla view | `entities_by_id` (view of `entities`) | Backed up | `entities` | DERIVED |  |
-| Scylla view | `entities_by_name` (view of `entities`), only in keyspaces older releases created | Backed up | `entities` | DERIVED |  |
+| Scylla view | `entities_by_name` (view of `entities`) | Backed up | `entities` | DERIVED |  |
 | Scylla view | `export_error_ids` (view of `export_errors`), only in keyspaces older releases created | Excluded | the errors of export operations of releases before 1.1.0, which removed the exports feature | DERIVED |  |
 | Redis | `users` | Backed up | `redis` | CORE |  |
 | Redis | `user_data:*` | Backed up | `redis` | CORE |  |
@@ -549,6 +551,7 @@ lists what today's backup or restore doesn't carry yet. The Thoradm guide's
 | Redis | `workload_ttc:*` | Excluded | runtime state of reactions, jobs, workers, or services, invalid after a restore | EPHEMERAL |  |
 | Redis | `workloads:*` | Excluded | runtime state of reactions, jobs, workers, or services, invalid after a restore | EPHEMERAL |  |
 | Redis | `entities:instance_lock:*` | Excluded | runtime state of reactions, jobs, workers, or services, invalid after a restore | EPHEMERAL |  |
+| Redis | `hunts:*` | Excluded | hunt lane checkpoint sequences, reseeded from the hunt entity, and hunt persist locks, which expire | EPHEMERAL |  |
 | Redis | `oauth:context:*` | Excluded | OAuth login contexts, which expire | EPHEMERAL |  |
 | Redis | `oauth:registration_sessions:*` | Excluded | OAuth registration sessions, which expire | EPHEMERAL |  |
 | Redis | `oauth:link_token:*` | Excluded | OAuth account-link tokens, which expire | EPHEMERAL |  |
@@ -559,6 +562,7 @@ lists what today's backup or restore doesn't carry yet. The Thoradm guide's
 | S3 bucket | `graphics` | Backed up | `graphics` | CORE |  |
 | S3 bucket | `ephemeral` | Excluded | per-reaction scratch files | EPHEMERAL |  |
 | S3 bucket | `reaction_cache` | Excluded | per-reaction cache files | EPHEMERAL |  |
+| S3 bucket | `yara_rulesets` | Excluded | serialized compiled yara rulesets, rebuilt from rule entities on demand | DERIVED |  |
 
 A view isn't copied: restore rebuilds it from its base table, waiting for the build with no time
 limit and logging which views are built and which are still building. Every column of a backed-up table is

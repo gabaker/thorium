@@ -335,10 +335,10 @@ async fn count_rows(session: &Session, keyspace: &str, name: &str) -> Result<i64
     Ok(count)
 }
 
-/// The API's setup of an empty keyspace creates neither the `events` table nor the
-/// `entities_by_name` view, which nothing reads or writes
+/// The API's setup of an empty keyspace doesn't create the `events` table, which nothing reads or
+/// writes, and creates the declared `entities_by_name` view
 #[tokio::test]
-async fn setup_creates_no_events_table_or_entities_by_name_view() -> Result<(), Error> {
+async fn setup_creates_no_events_table() -> Result<(), Error> {
     // start the API's Scylla setup against an empty keyspace beside the run's own namespace
     let keyspace = format!("{}_unused", CONF.thorium.namespace);
     let session = test_utilities::scylla_session().await?;
@@ -353,16 +353,14 @@ async fn setup_creates_no_events_table_or_entities_by_name_view() -> Result<(), 
     })
     .await;
     assert!(setup.is_ok(), "setup failed on an empty keyspace");
-    // the declared objects exist and the unused ones don't
+    // the declared objects exist, the entities_by_name view among them,
+    // and the unused table doesn't
     assert!(object_exists(&session, &keyspace, "entities").await?);
     assert!(object_exists(&session, &keyspace, "entities_by_id").await?);
+    assert!(object_exists(&session, &keyspace, "entities_by_name").await?);
     assert!(
         !object_exists(&session, &keyspace, "events").await?,
         "setup created the events table"
-    );
-    assert!(
-        !object_exists(&session, &keyspace, "entities_by_name").await?,
-        "setup created the entities_by_name view"
     );
     // remove our keyspace
     exec(&session, &format!("DROP KEYSPACE IF EXISTS {keyspace}")).await?;

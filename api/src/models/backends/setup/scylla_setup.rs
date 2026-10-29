@@ -59,10 +59,12 @@ impl Scylla {
         Ok(scylla)
     }
 
-    /// Connect to Scylla and prepare every generated statement, with no schema check and no DDL
+    /// Connect to Scylla and prepare the generated statements, with no schema check and no DDL
     ///
-    /// For a writer that runs inside an upgrade, where the schema is already applied and the
-    /// startup check isn't the writer's to make.
+    /// For a writer that runs inside an upgrade, where the startup check isn't the writer's to
+    /// make. An upgrade runs an earlier revision's steps before the operator applies the deployed
+    /// image's schema, so the statements of an object a later revision added are left out while
+    /// the keyspace doesn't hold it.
     ///
     /// # Arguments
     ///
@@ -75,15 +77,8 @@ impl Scylla {
                 Some(format!("Scylla can't be reached: {err}")),
             )
         })?;
-        // prepare the generated statements against the namespace's keyspace
-        let queries = ScyllaQueries::prepare(&session, &config.thorium.namespace)
-            .await
-            .map_err(|err| {
-                ApiError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Some(format!("the Scylla statements didn't prepare: {err}")),
-                )
-            })?;
+        // prepare the statements of the objects the namespace's keyspace holds
+        let queries = ScyllaQueries::prepare_present(&session, &config.thorium.namespace).await?;
         Ok(Scylla { session, queries })
     }
 

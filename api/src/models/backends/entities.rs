@@ -9,7 +9,7 @@ use futures::stream::{self, StreamExt};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::str::FromStr;
-use tracing::instrument;
+use tracing::{Level, event, instrument};
 use uuid::Uuid;
 
 use super::db;
@@ -19,31 +19,37 @@ use crate::models::backends::{GraphicSupport, TagSupport};
 use crate::models::entities::EntityMetadataForm;
 use crate::models::entities::incident::Incident;
 use crate::models::entities::network_activity::{NetConState, NetworkConnection};
+use crate::models::entities::rules::YaraActionToTake;
 use crate::models::schema::queries::EntitiesListCursor;
 use crate::models::schema::{Bucket, CursorLimit, DEFAULT_LIMIT_CAP};
 use crate::models::{
     ApiCursor, Association, AssociationKind, AssociationListOpts, AssociationRequest,
     AssociationTarget, AssociationTargetColumn, CollectionEntity, CompiledFunction, Country,
-    CriticalSector, DecompiledFunction, DeviceEntity, Entity, EntityForm, EntityKinds,
-    EntityListLine, EntityListParams, EntityListRow, EntityMetadata, EntityMetadataUpdateForm,
-    EntityResponse, EntityRow, EntityUpdateForm, Event, FileSystemEntity, FileSystemFolderEntity,
-    Flag, Group, GroupAllowAction, GroupPolicy, ListableAssociation, ModelApi, ModelMatcher,
-    ModelSecret, NetworkPolicy, PeImportEntity, PeSectionEntity, Repo, Sample, SigmaRule,
-    TagListRow, TagMap, TagType, ToolSetSelector, TreeSupport, User, VendorEntity,
+    CriticalSector, DecompiledFunction, DeviceEntity, Entity, EntityByNameParams, EntityForm,
+    EntityKinds, EntityListLine, EntityListParams, EntityListRow, EntityMetadata,
+    EntityMetadataUpdateForm, EntityResponse, EntityRow, EntityUpdateForm, Event, FileSystemEntity,
+    FileSystemFolderEntity, Flag, Group, GroupAllowAction, GroupPolicy, Hunt, KeySupport,
+    ListableAssociation, MatchedRule, ModelApi, ModelMatcher, ModelSecret, NetworkPolicy,
+    PeImportEntity, PeSectionEntity, Repo, RuleSet, Sample, SigmaRule, TagDeleteRequest,
+    TagListRow, TagMap, TagRequest, TagType, ToolSetSelector, TreeSupport, User, VendorEntity,
     WindowsProcessEntity, WindowsProcessTreeEntity, WorkflowGraphChange, WorkflowLimits,
+    YaraHitWriteRequest, YaraHitWriteResponse, YaraRule, YaraRuleHit,
 };
 use crate::utils::{ApiError, Shared, helpers};
 use crate::{
     bad, bad_internal, deserialize, ensure_empty_segment, ensure_segments_complete, for_groups,
-    internal_err, internal_err_unwrapped, is_admin, opt_tag, opt_tag_to_string, serialize, tag,
-    tag_list_clone, unauthorized, update, update_add_rem, update_clear_opt, update_opt,
+    internal_err, internal_err_unwrapped, is_admin, not_found, opt_tag, opt_tag_to_string,
+    serialize, tag, tag_list_clone, unauthorized, update, update_add_rem, update_clear_opt,
+    update_opt,
 };
 
 mod agents;
 mod collections;
 mod devices;
+mod hunts;
 pub(crate) mod models;
 pub(crate) mod references;
+mod rules;
 pub(crate) mod tools;
 pub(crate) mod toolsets;
 pub mod workflows;
@@ -212,6 +218,52 @@ impl GraphSettings {
     }
 }
 
+/// The per cause split of a yara hits requested event groups
+///
+/// Suppression precedence is rule, then sample, then policy: a group missing
+/// the rule never counts again under the sample or policy causes so the splits
+/// members stay disjoint and sum back to the deduped event groups.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct YaraHitGroupSplit {
+    /// The groups the hit may be written into
+    written: Vec<String>,
+    /// The event groups suppressed because the rule is not in them
+    suppressed_rule: Vec<String>,
+    /// The event groups suppressed because the sample is not in them
+    suppressed_sample: Vec<String>,
+    /// The event groups suppressed by kill switches or group deletion
+    suppressed_policy: Vec<String>,
+}
+
+impl YaraHitGroupSplit {
+    /// Build a hit write response from this split
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The deterministic id for the hits identity
+    /// * `name` - The hit entitys name if one was written or merged
+    /// * `sample_missing` - Whether the sample no longer exists
+    /// * `hunt_missing` - Whether a supplied hunt vanished before decoration
+    fn into_response(
+        self,
+        id: Uuid,
+        name: Option<String>,
+        sample_missing: bool,
+        hunt_missing: bool,
+    ) -> YaraHitWriteResponse {
+        YaraHitWriteResponse {
+            id,
+            name,
+            written: self.written,
+            suppressed_rule: self.suppressed_rule,
+            suppressed_sample: self.suppressed_sample,
+            suppressed_policy: self.suppressed_policy,
+            sample_missing,
+            hunt_missing,
+        }
+    }
+}
+
 /// An entity update read from its form, with the images it uploaded
 struct ParsedUpdate {
     /// The fields of the update
@@ -325,6 +377,140 @@ fn refuse_scoped_credential_write(
         ));
     }
     Ok(())
+}
+
+/// Split a yara hits event groups by the write groups formula
+///
+/// `write_groups = rule.groups ∩ event.groups ∩ sample.groups ∩ allowed`
+/// where `allowed` holds only groups that exist and allow entity, association,
+/// and tag writes. Duplicate event groups are deduped first (keeping first
+/// seen order) so no group can double insert rows or double count, and a group
+/// absent from `allowed` is suppressed by policy so deleted groups stay leak
+/// safe instead of defaulting open.
+///
+/// # Arguments
+///
+/// * `event_groups` - The groups the scan event made the sample visible too
+/// * `rule_groups` - The rules groups from its authoritative rows
+/// * `sample_groups` - The samples current groups from its authoritative rows
+/// * `allowed` - The groups that exist and allow every hit write kind
+fn split_yara_hit_groups(
+    event_groups: &[String],
+    rule_groups: &[String],
+    sample_groups: &HashSet<&str>,
+    allowed: &HashSet<String>,
+) -> YaraHitGroupSplit {
+    // track the groups we have already split so duplicates count once
+    let mut seen = HashSet::with_capacity(event_groups.len());
+    // build the split for this hits event groups
+    let mut split = YaraHitGroupSplit::default();
+    // split each event group by the first formula term it fails
+    for group in event_groups {
+        // skip duplicate event groups so rows and counts stay single
+        if !seen.insert(group.as_str()) {
+            continue;
+        }
+        if !rule_groups.contains(group) {
+            // groups without the rule are suppressed by the rule term
+            split.suppressed_rule.push(group.clone());
+        } else if !sample_groups.contains(group.as_str()) {
+            // groups without the sample are suppressed by the sample term
+            split.suppressed_sample.push(group.clone());
+        } else if !allowed.contains(group) {
+            // deleted or kill switched groups are suppressed by policy
+            split.suppressed_policy.push(group.clone());
+        } else {
+            // this group passes every term of the write groups formula
+            split.written.push(group.clone());
+        }
+    }
+    split
+}
+
+/// The incoming scan facts one hit write carries for a newer wins refresh
+///
+/// These are exactly the facts a converge may replace on a stored hit; the
+/// identity fields and `rule_name` are deliberately absent since a refresh
+/// must never move a hit between identities or let a renamed rule spoof
+/// another's name.
+struct IncomingHitFacts {
+    /// The content hash of the rule source that fired
+    rule_hash: String,
+    /// The hash of the compiled ruleset build this scan used
+    ruleset_hash: String,
+    /// The yara engine version that evaluated this rule
+    engine_version: String,
+    /// When the scan that produced this write completed
+    scanned_at: DateTime<Utc>,
+    /// The rules within the source document that matched
+    matched: Vec<MatchedRule>,
+}
+
+/// Take the incoming scan facts off a hits metadata form
+///
+/// Defaults mirror `YaraRuleHit::from_form` exactly (missing strings are
+/// empty, a missing `scanned_at` is now) so the generic multipart path
+/// refreshes with the same facts its create branch would have stored. This
+/// drains the forms hit fields so it must only run on the merge path where
+/// the form is otherwise discarded.
+///
+/// # Arguments
+///
+/// * `metadata` - The metadata form to take the scan facts from
+fn take_hit_facts(metadata: &mut EntityMetadataForm) -> IncomingHitFacts {
+    IncomingHitFacts {
+        rule_hash: metadata.yara_hit_rule_hash.take().unwrap_or_default(),
+        ruleset_hash: metadata.yara_hit_ruleset_hash.take().unwrap_or_default(),
+        engine_version: metadata.yara_hit_engine_version.take().unwrap_or_default(),
+        scanned_at: metadata.yara_hit_scanned_at.take().unwrap_or_else(Utc::now),
+        matched: std::mem::take(&mut metadata.yara_hit_matched),
+    }
+}
+
+/// Build the refreshed hit when the incoming scan is strictly newer
+///
+/// Newer wins ordering means a redelivered stale write can never clobber a
+/// fresher refresh, and an equal timestamp deliberately does not rewrite so
+/// idempotent redeliveries stay write free. Only the scan facts are replaced
+/// (`rule_hash`, `ruleset_hash`, `engine_version`, `scanned_at`, and
+/// `matched`), never the identity fields or `rule_name`.
+///
+/// # Arguments
+///
+/// * `stored` - The stored hits metadata
+/// * `incoming` - The incoming scan facts
+fn refresh_hit_facts(stored: &YaraRuleHit, incoming: IncomingHitFacts) -> Option<YaraRuleHit> {
+    // only a strictly newer scan may replace the stored facts
+    if incoming.scanned_at <= stored.scanned_at {
+        return None;
+    }
+    // rebuild this hit around the fresh scan facts
+    let fresh = YaraRuleHit {
+        rule_id: stored.rule_id,
+        sha256: stored.sha256.clone(),
+        rule_name: stored.rule_name.clone(),
+        rule_hash: incoming.rule_hash,
+        ruleset_hash: incoming.ruleset_hash,
+        engine_version: incoming.engine_version,
+        scanned_at: incoming.scanned_at,
+        matched: incoming.matched,
+    };
+    // bound the refreshed match metadata to the documented hit caps
+    Some(fresh.bound())
+}
+
+/// The convergent view of a yara hit after a write
+///
+/// This is deliberately slim: callers need the identity, the entity name,
+/// and the stored `created` (for tag earliest maps) without cloning the
+/// full entity the merge paths update consumes.
+struct ConvergedHit {
+    /// The deterministic id this hit converged onto
+    id: Uuid,
+    /// The hit entitys name
+    name: String,
+    /// When the stored hit was first created
+    created: DateTime<Utc>,
 }
 
 impl Entity {
@@ -465,6 +651,11 @@ impl Entity {
                 ))
                 .await;
             }
+            Some(EntityKinds::YaraRuleHit) => {
+                // yara rule hits have a deterministic identity so creates converge
+                // instead of duplicating under retries or re-submissions
+                return Box::pin(Self::create_hit_as_merge(user, entity_form, shared)).await;
+            }
             _ => (),
         }
         // make sure every tool instance this entity names exists and this user can see it
@@ -473,6 +664,549 @@ impl Entity {
         let entity = Box::pin(db::entities::create(user, entity_form, entity_id, shared)).await?;
         // the entity was created successfully
         Ok(EntityResponse::new(entity_id, entity.name))
+    }
+
+    /// Create a yara rule hit entity converging on its deterministic identity
+    ///
+    /// A hits id is a UUIDv5 over `(rule_id, sha256)` derived server side from
+    /// the forms metadata, so there is no client supplied id to trust. When
+    /// the named rule exists its authoritative groups bound the write even on
+    /// this generic path, so a stale or buggy admin writer narrows instead of
+    /// leaking; a missing or non rule id passes through unchanged so mid
+    /// flight writes against deleted rules keep converging. Non admin callers
+    /// whose duplicate hit lives only in groups they cannot see will 404 on
+    /// the merge fetch; the scanner writes hits as the admin service account
+    /// so this never applies to it.
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user creating this hit
+    /// * `entity_form` - The form carrying this hits metadata
+    /// * `shared` - Shared Thorium objects
+    #[instrument(name = "Entity::create_hit_as_merge", skip_all, err(Debug))]
+    async fn create_hit_as_merge(
+        user: &User,
+        mut entity_form: EntityForm,
+        shared: &Shared,
+    ) -> Result<EntityResponse, ApiError> {
+        // hits never carry graphics since they are machine written facts
+        if entity_form.image.is_some() {
+            return bad!("Yara rule hits cannot have graphics!".to_owned());
+        }
+        // both identity fields are required to derive this hits id
+        let (Some(rule_id), Some(sha256)) = (
+            entity_form.metadata.yara_hit_rule_id.as_ref(),
+            entity_form.metadata.yara_hit_sha256.as_ref(),
+        ) else {
+            return bad!("Yara rule hits must have a rule id and sha256!".to_owned());
+        };
+        // an empty sha256 or nil rule id is a missing identity too
+        if sha256.is_empty() {
+            return bad!("Yara rule hits cannot have an empty sha256!".to_owned());
+        }
+        if rule_id.is_nil() {
+            return bad!("Yara rule hits cannot have a nil rule id!".to_owned());
+        }
+        // derive the deterministic id for this hit
+        let derived = YaraRuleHit::deterministic_id(rule_id, sha256);
+        // copy the rule id so the trim below can mutate the form freely
+        let rule_id = *rule_id;
+        // when this hits rule exists its authoritative groups bound the write
+        // even here on the generic path
+        if let Some((_, EntityKinds::YaraRule, rule_groups)) =
+            db::entities::exists_by_id(rule_id, shared).await?
+        {
+            // trim the requested groups to the rules authoritative groups
+            entity_form
+                .groups
+                .retain(|group| rule_groups.contains(group));
+            // a write fully outside its rules groups is unauthorized
+            if entity_form.groups.is_empty() {
+                return unauthorized!(format!(
+                    "Yara rule hits can only be written into the groups of rule {rule_id}!"
+                ));
+            }
+        }
+        // converge this hit onto its deterministic identity
+        let hit = Self::converge_hit(user, entity_form, derived, shared).await?;
+        Ok(EntityResponse::new(hit.id, hit.name))
+    }
+
+    /// Converge a yara rule hit onto its deterministic identity
+    ///
+    /// The entities base table partitions by `(kind, group, year, bucket)`
+    /// with the time bucket derived from `created`, so a deterministic id only
+    /// converges writes if merges reuse the first rows `created`; that is
+    /// exactly what the merge path below does. The probe then
+    /// write window is narrow but real: concurrent first creates of the same
+    /// identity (across api replicas, or scanner replicas reclaiming the same
+    /// events) can insert same id rows whose `created` timestamps diverge.
+    /// Reads fold same id rows so the divergence is invisible until a full
+    /// revocation delete, which keys on `created` and can orphan the stray
+    /// row; the deferred reconciliation sweep repairs that remainder.
+    ///
+    /// Merges are newer wins (M4c): a converge whose incoming scan is strictly
+    /// newer than the stored hits also refreshes the stored scan facts, so
+    /// scan path rescans and hunts alike repair stale `rule_hash` metadata
+    /// while a redelivered stale write can never clobber a fresher refresh.
+    /// The refresh is read then write, not a compare and set: two concurrent
+    /// writes carrying different facts can land in either order (last write
+    /// wins) and any stale hash tag row that leaves behind is self healed by
+    /// a later converges sweep. Group merges and metadata refreshes share one
+    /// update so nothing writes twice, and a converge that changes nothing
+    /// writes nothing at all.
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user creating this hit
+    /// * `entity_form` - The validated form carrying this hits metadata
+    /// * `derived` - The deterministic id derived for this hits identity
+    /// * `shared` - Shared Thorium objects
+    #[instrument(name = "Entity::converge_hit", skip_all, err(Debug))]
+    async fn converge_hit(
+        user: &User,
+        mut entity_form: EntityForm,
+        derived: Uuid,
+        shared: &Shared,
+    ) -> Result<ConvergedHit, ApiError> {
+        // probe for this hits rows across all groups by its id
+        if let Some((name, _, existing_groups)) =
+            db::entities::exists_by_id(derived, shared).await?
+        {
+            // take the incoming scan facts off the form we are discarding
+            let incoming = take_hit_facts(&mut entity_form.metadata);
+            // find the requested groups this hit is not yet in
+            let missing = entity_form
+                .groups
+                .iter()
+                .filter(|group| !existing_groups.contains(group))
+                .cloned()
+                .collect::<Vec<String>>();
+            // fetch the full hit entity unconditionally: a merge reuses its
+            // original created timestamp so rows stay in their original time
+            // buckets and the newer wins comparison needs its stored facts
+            let mut entity = db::entities::get(&existing_groups, derived, shared).await?;
+            // a non hit entity under a derived hit id is a server side bug
+            let EntityMetadata::YaraRuleHit(stored) = &entity.metadata else {
+                return internal_err!(format!("Entity {derived} is not a yara rule hit!"));
+            };
+            // build the refreshed metadata when the incoming scan is newer
+            let refreshed = refresh_hit_facts(stored, incoming);
+            // the hash every tag row should carry after this converge
+            let fresh_hash = refreshed
+                .as_ref()
+                .map_or(stored.rule_hash.as_str(), |fresh| fresh.rule_hash.as_str());
+            // detect stale hash rows from this entitys own tag rows; the
+            // intrinsic refresh is add only so a refresh leaves its old hash
+            // row behind, and detecting from the stored rows lets any later
+            // converge self heal a crash between an update and its sweep
+            let stale_hashes = entity
+                .tags
+                .get(YaraRuleHit::RULE_HASH_TAG)
+                .map(|values| {
+                    values
+                        .keys()
+                        .filter(|value| value.as_str() != fresh_hash)
+                        .cloned()
+                        .collect::<Vec<String>>()
+                })
+                .unwrap_or_default();
+            // build the stale row sweep before the update consumes the entity
+            let sweep = if stale_hashes.is_empty() {
+                None
+            } else {
+                // delete each stale hash value across all of this hits groups
+                let mut deletes =
+                    TagDeleteRequest::<Entity>::default().groups(entity.groups.clone());
+                for stale in stale_hashes {
+                    deletes.add_ref(YaraRuleHit::RULE_HASH_TAG, stale);
+                }
+                Some(deletes)
+            };
+            // capture the created the update below consumes with the entity
+            let created = entity.created;
+            // merge the groups and metadata in one update when either changed
+            if !missing.is_empty() || refreshed.is_some() {
+                // replace the stored scan facts when the incoming scan won
+                if let Some(fresh) = refreshed {
+                    entity.metadata = EntityMetadata::YaraRuleHit(fresh);
+                }
+                // add the missing groups to this hit
+                entity.groups.extend(missing.iter().cloned());
+                // write the merged rows for this hit
+                db::entities::update(user, entity, &missing, &Vec::default(), shared).await?;
+            }
+            // sweep stale hash rows only after the fresh rows are persisted so
+            // a crash here leaves extra rows (self healed later), never none
+            if let Some(deletes) = sweep {
+                // build the tag key for this hit entity
+                let entity_key = Entity::build_key(derived.to_string(), &());
+                // delete the stale hash tag rows
+                db::tags::delete(&entity_key, &deletes, shared).await?;
+            }
+            // converge on the existing hit
+            return Ok(ConvergedHit {
+                id: derived,
+                name,
+                created,
+            });
+        }
+        // this hit does not exist yet so create it with its derived id
+        let entity = db::entities::create(user, entity_form, derived, shared).await?;
+        Ok(ConvergedHit {
+            id: derived,
+            name: entity.name,
+            created: entity.created,
+        })
+    }
+
+    /// Write one yara rule hit from authoritative server side state
+    ///
+    /// This is the single audited place the write groups formula
+    /// `rule.groups ∩ event.groups ∩ sample.groups ∩ allowable_groups` runs
+    /// for server side hit writes: the rules groups, name, score, and actions
+    /// come from its freshly loaded entity, the samples groups from its
+    /// current rows, and the kill switch allowances from a fresh snapshot of
+    /// existing groups — so a stale scanner cache can never widen a hit. The
+    /// whole call is idempotent (deterministic identity, merging entity
+    /// writes, upserting tag and association rows) so callers retry it as a
+    /// unit; a deleted sample is reported as a convergent skip and a deleted
+    /// rule is the routes only 404. A request carrying a hunt id decorates
+    /// the written hit with a `HuntHit` association and a `HuntId` entity
+    /// tag in the written groups; a hunt that vanished mid scan is a
+    /// reported skip (`hunt_missing`), never a failed write.
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user writing this hit
+    /// * `req` - The hit write request to apply
+    /// * `shared` - Shared Thorium objects
+    #[instrument(name = "Entity::create_yara_hit", skip_all, err(Debug))]
+    pub async fn create_yara_hit(
+        user: &User,
+        req: YaraHitWriteRequest,
+        shared: &Shared,
+    ) -> Result<YaraHitWriteResponse, ApiError> {
+        // hit writes are a system invariant so only admin service accounts
+        // may use this route; group checks never constrain admins anyways
+        is_admin!(user);
+        // both identity halves are required to derive this hits id
+        if req.sha256.is_empty() {
+            return bad!("Yara rule hits cannot have an empty sha256!".to_owned());
+        }
+        if req.rule_id.is_nil() {
+            return bad!("Yara rule hits cannot have a nil rule id!".to_owned());
+        }
+        // an event with no groups can never write anything
+        if req.event_groups.is_empty() {
+            return bad!("Yara hit writes must have at least one event group!".to_owned());
+        }
+        // empty group names are malformed requests rather than suppressions
+        if req.event_groups.iter().any(String::is_empty) {
+            return bad!("Yara hit write groups cannot be empty strings!".to_owned());
+        }
+        // derive the deterministic id for this hits identity
+        let derived = YaraRuleHit::deterministic_id(&req.rule_id, &req.sha256);
+        // dedupe the event groups so no group can double write or double count
+        let mut seen = HashSet::with_capacity(req.event_groups.len());
+        let event_groups = req
+            .event_groups
+            .iter()
+            .filter(|group| seen.insert(group.as_str()))
+            .cloned()
+            .collect::<Vec<String>>();
+        // load this rules authoritative kind and group rows in one read
+        let Some((_, kind, rule_groups)) = db::entities::exists_by_id(req.rule_id, shared).await?
+        else {
+            return not_found!(format!("Yara rule {} not found!", req.rule_id));
+        };
+        // only yara rules can anchor a yara hit write
+        if kind != EntityKinds::YaraRule {
+            return bad!(format!("Entity {} is not a yara rule!", req.rule_id));
+        }
+        // a hit fully outside its rules groups writes nothing at all and
+        // skips the sample, group, and rule detail loads entirely
+        if !event_groups.iter().any(|group| rule_groups.contains(group)) {
+            // every event group was suppressed by the rule term
+            let split = YaraHitGroupSplit {
+                suppressed_rule: event_groups,
+                ..YaraHitGroupSplit::default()
+            };
+            return Ok(split.into_response(derived, None, false, false));
+        }
+        // load the sample so the write time invariant binds against its
+        // current groups instead of the possibly stale event ones
+        let sample = match Sample::get(user, &req.sha256, shared).await {
+            Ok(sample) => sample,
+            // a deleted sample is a convergent skip rather than an error
+            Err(ApiError::Thorium { code, .. }) if code == StatusCode::NOT_FOUND => {
+                // split the event groups by the rule term for the audit record
+                let (candidates, suppressed_rule): (Vec<String>, Vec<String>) = event_groups
+                    .into_iter()
+                    .partition(|group| rule_groups.contains(group));
+                // a gone sample suppresses every group that carried the rule
+                let split = YaraHitGroupSplit {
+                    suppressed_rule,
+                    suppressed_sample: candidates,
+                    ..YaraHitGroupSplit::default()
+                };
+                return Ok(split.into_response(derived, None, true, false));
+            }
+            Err(error) => return Err(error),
+        };
+        // collect the samples current groups
+        let sample_groups = sample.groups();
+        // find the groups that survive the rule and sample terms so only
+        // those are checked for existence and fresh allowances
+        let candidates = event_groups
+            .iter()
+            .filter(|group| rule_groups.contains(group))
+            .filter(|group| sample_groups.contains(group.as_str()))
+            .cloned()
+            .collect::<Vec<String>>();
+        // check which candidate groups still exist; deleted groups must
+        // suppress instead of defaulting open through group detail casts
+        let exist_flags = db::groups::exists_each(&candidates, shared).await?;
+        // keep only the candidates that still exist
+        let existing = candidates
+            .into_iter()
+            .zip(exist_flags)
+            .filter_map(|(group, exists)| exists.then_some(group))
+            .collect::<Vec<String>>();
+        // snapshot fresh kill switch allowances for the surviving groups
+        let details = db::groups::list_details(existing.iter(), shared).await?;
+        // a hit write needs entity, association, and tag writes so a group
+        // disallowing any of the three is suppressed by policy
+        let allowed = details
+            .iter()
+            .filter(|group| {
+                group.allowed.entities && group.allowed.associations && group.allowed.tags
+            })
+            .map(|group| group.name.clone())
+            .collect::<HashSet<String>>();
+        // run the full write groups formula in its single audited place
+        let split = split_yara_hit_groups(&event_groups, &rule_groups, &sample_groups, &allowed);
+        // an empty intersection writes nothing at all - not even for the
+        // rule owner - since that is what keeps hits leak free both ways
+        if split.written.is_empty() {
+            return Ok(split.into_response(derived, None, false, false));
+        }
+        // load the full rule so its name, score, and actions come from
+        // authoritative state instead of the callers possibly stale cache
+        let rule = db::entities::get(&rule_groups, req.rule_id, shared).await?;
+        // pull the yara rule metadata off this rules entity
+        let EntityMetadata::YaraRule(rule_meta) = &rule.metadata else {
+            return bad!(format!("Entity {} is not a yara rule!", req.rule_id));
+        };
+        // probe the hunt when this write carries one; decoration is best
+        // effort but must be reported so the workers stats stay truthful
+        let mut hunt_missing = false;
+        let mut hunt_probe: Option<(Uuid, String)> = None;
+        if let Some(hunt_id) = req.hunt {
+            match db::entities::exists_by_id(hunt_id, shared).await? {
+                // only live hunt entities may decorate this hit
+                Some((hunt_name, EntityKinds::Hunt, _)) => {
+                    hunt_probe = Some((hunt_id, hunt_name));
+                }
+                // a non hunt id is a caller bug but the hit must still land;
+                // the rules wrong kind probe above 400s because the rule is
+                // this hits identity while the hunt is only decoration
+                Some((_, kind, _)) => {
+                    event!(
+                        Level::WARN,
+                        msg = "Hit decoration hunt is not a hunt",
+                        hunt = hunt_id.to_string(),
+                        kind = kind.as_str(),
+                    );
+                    hunt_missing = true;
+                }
+                // a hunt deleted mid scan skips decoration, never the hit
+                None => {
+                    event!(
+                        Level::WARN,
+                        msg = "Hit decoration hunt no longer exists",
+                        hunt = hunt_id.to_string(),
+                    );
+                    hunt_missing = true;
+                }
+            }
+        }
+        // build the metadata form for this hit from the scan time facts the
+        // scanner sent and the authority facts we just loaded
+        let metadata = EntityMetadataForm {
+            yara_hit_rule_id: Some(req.rule_id),
+            yara_hit_sha256: Some(req.sha256.clone()),
+            yara_hit_rule_name: Some(rule.name.clone()),
+            yara_hit_rule_hash: Some(req.rule_hash),
+            yara_hit_ruleset_hash: Some(req.ruleset_hash),
+            yara_hit_engine_version: Some(req.engine_version),
+            yara_hit_scanned_at: Some(req.scanned_at),
+            yara_hit_matched: req.matched,
+            ..EntityMetadataForm::default()
+        };
+        // build the entity form for this hit named after its rule
+        let entity_form = EntityForm {
+            name: Some(rule.name.clone()),
+            kind: Some(EntityKinds::YaraRuleHit),
+            metadata,
+            groups: split.written.clone(),
+            ..EntityForm::default()
+        };
+        // converge this hit onto its deterministic identity
+        let hit = Self::converge_hit(user, entity_form, derived, shared).await?;
+        // associate this hit back to the rule that produced it
+        let created_by = AssociationRequest::new(
+            AssociationKind::CreatedBy,
+            AssociationTarget::Entity {
+                id: req.rule_id,
+                name: rule.name.clone(),
+            },
+        )
+        .target(AssociationTarget::Entity {
+            id: hit.id,
+            name: hit.name.clone(),
+        })
+        .groups(split.written.clone());
+        // associate this hit onto the sample it fired on
+        let hit_on = AssociationRequest::new(
+            AssociationKind::YaraRuleHit,
+            AssociationTarget::Entity {
+                id: hit.id,
+                name: hit.name.clone(),
+            },
+        )
+        .target(AssociationTarget::File(req.sha256.clone()))
+        .groups(split.written.clone());
+        // collect this hits associations so the hunt one can join conditionally
+        let mut assocs = Vec::with_capacity(3);
+        assocs.push(created_by);
+        assocs.push(hit_on);
+        // decorate this hit with its hunts association when the hunt is live
+        if let Some((hunt_id, hunt_name)) = &hunt_probe {
+            // associate this hit onto the hunt that produced it (hunt -> hit)
+            let hunt_hit = AssociationRequest::new(
+                AssociationKind::HuntHit,
+                AssociationTarget::Entity {
+                    id: *hunt_id,
+                    name: hunt_name.clone(),
+                },
+            )
+            .target(AssociationTarget::Entity {
+                id: hit.id,
+                name: hit.name.clone(),
+            })
+            .groups(split.written.clone());
+            assocs.push(hunt_hit);
+        }
+        // write the associations; a retry re-applies rows that read as the
+        // same edges so failures are logged rather than failing the whole
+        // converged hit (duplicate rows are the platform wide gap the
+        // deferred association reaper covers)
+        for assoc in assocs {
+            if let Err(error) = assoc.apply(user, shared).await {
+                // log that we failed to create a hit association
+                event!(
+                    Level::ERROR,
+                    msg = "Failed to create hit association",
+                    sha256 = &req.sha256,
+                    hit = hit.id.to_string(),
+                    error = error.to_string(),
+                );
+            }
+        }
+        // tag this hit with its hunts id so hunt findings are one tag
+        // filtered listing; entity tags emit no events so no depth stamp is
+        // needed, and a failure here is fatal since idempotent retries
+        // converge back onto the same rows
+        if let Some((hunt_id, _)) = &hunt_probe {
+            // build the hunt id tag over exactly the written groups
+            let hunt_tag = TagRequest::<Entity>::default()
+                .groups(split.written.clone())
+                .add(Hunt::ID_TAG, hunt_id.to_string());
+            // every written group sees this hit from its converged creation
+            let earliest = split
+                .written
+                .iter()
+                .map(|group| (group, hit.created))
+                .collect::<HashMap<&String, DateTime<Utc>>>();
+            // write the hunt id tag rows for this hit
+            let entity_key = Entity::build_key(hit.id.to_string(), &());
+            db::tags::create(user, entity_key, hunt_tag, &earliest, shared).await?;
+        }
+        // tag the sample with this rules hit at the stamped loop breaking
+        // depth; sample tags emit NewTags events whose depth defaults to 0 so
+        // an unstamped tag would reset trigger lineage and loop forever
+        let tag_req = TagRequest::<Sample>::default()
+            .groups(split.written.clone())
+            .trigger_depth(req.event_depth.saturating_add(1))
+            .add(YaraRuleHit::HIT_TAG, rule.name.clone());
+        sample.tag(user, tag_req, shared).await?;
+        // run any auto flag actions this rule carries from authoritative state
+        for action in &rule_meta.actions {
+            match action {
+                YaraActionToTake::Flag(auto) => {
+                    // build the flag metadata this action promotes the hit too
+                    let flag_metadata = EntityMetadataForm {
+                        suspicion: Some(rule_meta.score),
+                        confidence: Some(auto.confidence),
+                        content: auto.content.clone(),
+                        reasoning: Some(auto.reasoning.clone()),
+                        ..EntityMetadataForm::default()
+                    };
+                    // build the flag entity form named after the rule
+                    let flag_form = EntityForm {
+                        name: Some(rule.name.clone()),
+                        kind: Some(EntityKinds::Flag),
+                        metadata: flag_metadata,
+                        groups: split.written.clone(),
+                        ..EntityForm::default()
+                    };
+                    // create this flag with a fresh id since flags are additive
+                    let flag =
+                        db::entities::create(user, flag_form, Uuid::new_v4(), shared).await?;
+                    // associate this flag onto the hit it was promoted from
+                    let flag_for = AssociationRequest::new(
+                        AssociationKind::FlagFor,
+                        AssociationTarget::Entity {
+                            id: flag.id,
+                            name: flag.name.clone(),
+                        },
+                    )
+                    .target(AssociationTarget::Entity {
+                        id: hit.id,
+                        name: hit.name.clone(),
+                    })
+                    .groups(split.written.clone());
+                    // flag association failures are logged like hit ones
+                    if let Err(error) = flag_for.apply(user, shared).await {
+                        // log that we failed to create a flag association
+                        event!(
+                            Level::ERROR,
+                            msg = "Failed to create flag association",
+                            sha256 = &req.sha256,
+                            hit = hit.id.to_string(),
+                            error = error.to_string(),
+                        );
+                    }
+                }
+            }
+        }
+        // one info event per write keeps the audited place auditable without
+        // leaking group names into hot path logs
+        event!(
+            Level::INFO,
+            msg = "Wrote yara hit",
+            hit = hit.id.to_string(),
+            rule = req.rule_id.to_string(),
+            sha256 = &req.sha256,
+            written = split.written.len(),
+            suppressed_rule = split.suppressed_rule.len(),
+            suppressed_sample = split.suppressed_sample.len(),
+            suppressed_policy = split.suppressed_policy.len(),
+            decorated = hunt_probe.is_some(),
+            hunt_missing = hunt_missing,
+        );
+        Ok(split.into_response(derived, Some(hit.name), false, hunt_missing))
     }
 
     /// Create an `Entity` in the db
@@ -675,7 +1409,67 @@ impl Entity {
                 // tag the instance's root, version or revision, hash, and what it follows
                 self.instance_intrinsic_tags(tags);
             }
-            // other and windows process trees have no taggable data
+            EntityMetadata::YaraRule(rule) => {
+                // always tag this rules content hash so hits stay attributable to the
+                // exact source that fired even after the rule is edited
+                tag!(tags, "YaraRuleHash", rule.rule_hash());
+                // build a compiler to extract this rules info with
+                let mut compiler = yara_x::Compiler::new();
+                // includes are never allowed in stored rules
+                compiler.enable_includes(false);
+                // compile this rules source so we can tag its rule level info;
+                // stored rules can go stale across engine upgrades so a compile
+                // failure here must not fail create/update/retrieval paths and
+                // we just emit the content hash instead
+                if compiler.add_source(rule.rule.as_str()).is_ok() {
+                    // build our compiled rule set
+                    let compiled = compiler.build();
+                    // step over the compiled rules in this source and tag their info
+                    for compiled_rule in compiled.iter() {
+                        // tag this rules identifier
+                        tag!(tags, "YaraRuleName", compiled_rule.identifier().to_owned());
+                        // step over this rules metadata
+                        for (key, value) in compiled_rule.metadata() {
+                            // tag this rules author and description meta where present
+                            match (key, value) {
+                                ("author", yara_x::MetaValue::String(author)) => {
+                                    tag!(tags, "YaraRuleAuthor", author.to_owned());
+                                }
+                                ("description", yara_x::MetaValue::String(description)) => {
+                                    tag!(tags, "YaraRuleDescription", description.to_owned());
+                                }
+                                _ => (),
+                            }
+                        }
+                        // tag this rules yara tags
+                        for yara_tag in compiled_rule.tags() {
+                            tag!(tags, "YaraRuleTags", yara_tag.identifier().to_owned());
+                        }
+                    }
+                }
+            }
+            EntityMetadata::YaraRuleHit(hit) => {
+                // tag which rule fired so hits are searchable by rule name
+                tag!(tags, YaraRuleHit::RULE_NAME_TAG, hit.rule_name.clone());
+                // tag the exact rule text that fired for post edit attribution
+                tag!(tags, YaraRuleHit::RULE_HASH_TAG, hit.rule_hash.clone());
+            }
+            EntityMetadata::Hunt(hunt) => {
+                // mirror this hunts status as a tag so lifecycle browse is a tag filter
+                tag!(tags, Hunt::STATUS_TAG, hunt.status.to_string());
+                // mirror this hunts engine since one Hunt kind cannot be split
+                // by the kinds[] list param
+                tag!(tags, Hunt::ENGINE_TAG, hunt.engine.to_string());
+                // mark active hunts so the quota census and the "my running
+                // hunts" browse are each a single strict AND tag query
+                if hunt.status.is_active() {
+                    tag!(tags, Hunt::ACTIVE_TAG, "true".to_owned());
+                }
+            }
+            // other and windows process trees have no taggable data; rule sets
+            // deliberately add no kind-specific tags since name and kind browse
+            // are already first-class and a member-count tag would churn on
+            // every membership edit for no query it enables
             EntityMetadata::Tool(_)
             | EntityMetadata::WorkflowCatalog(_)
             | EntityMetadata::Agent(_)
@@ -687,7 +1481,8 @@ impl Entity {
             | EntityMetadata::Collection(_)
             | EntityMetadata::WindowsProcessTree(_)
             | EntityMetadata::CompiledFunction(_)
-            | EntityMetadata::DecompiledFunction(_) => (),
+            | EntityMetadata::DecompiledFunction(_)
+            | EntityMetadata::RuleSet(_) => (),
         }
         Ok(())
     }
@@ -772,6 +1567,34 @@ impl Entity {
                     // get all of the entities we found
                     metadata.vendors = db::entities::get_many(&user.groups, &ids, shared).await?;
                 }
+                EntityMetadata::RuleSet(metadata) => {
+                    // build a list of the member rule ids for this rule set
+                    let mut ids = Vec::with_capacity(3);
+                    // get only the rule set member associations
+                    loop {
+                        // filter only to rule set member associations
+                        for association in cursor.data.drain(..) {
+                            // skip any associations that are not rule set members
+                            if association.kind == AssociationKind::RuleSetMember {
+                                // parse our other value for this association
+                                let other: AssociationTargetColumn =
+                                    deserialize!(&association.other);
+                                // add any entity ids we find to our list
+                                if let AssociationTargetColumn::Entity(id) = other {
+                                    ids.push(id);
+                                }
+                            }
+                        }
+                        // if our cursor is exhausted then stop looping
+                        if cursor.exhausted() {
+                            break;
+                        }
+                        // get the next page of associations
+                        cursor.next(shared).await?;
+                    }
+                    // get all of the member rule entities we found
+                    metadata.rules = db::entities::get_many(&user.groups, &ids, shared).await?;
+                }
                 // vendor/collection/... has no data that we need to retrieve
                 EntityMetadata::Vendor(_)
                 | EntityMetadata::Collection(_)
@@ -783,6 +1606,9 @@ impl Entity {
                 | EntityMetadata::PeSection(_)
                 | EntityMetadata::PeImport(_)
                 | EntityMetadata::SigmaRule(_)
+                | EntityMetadata::YaraRule(_)
+                | EntityMetadata::YaraRuleHit(_)
+                | EntityMetadata::Hunt(_)
                 | EntityMetadata::Flag(_)
                 | EntityMetadata::Incident(_)
                 | EntityMetadata::CompiledFunction(_)
@@ -833,6 +1659,43 @@ impl Entity {
         let entity = for_groups!(db::entities::get, user, shared, id)?;
         // populate any info based on associations for this entity
         entity.populate_associations(user, shared).await
+    }
+
+    /// Get every entity sharing an exact name that this user can see
+    ///
+    /// Matches come back ordered oldest-created first and an unknown name is
+    /// just an empty list since callers distinguish the zero, one, and many
+    /// match cases themselves.
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user getting the entities
+    /// * `name` - The exact name of the entities to get
+    /// * `kinds` - The entity kinds to include
+    /// * `shared` - Shared Thorium objects
+    #[instrument(name = "Entity::get_by_name", skip_all, err(Debug))]
+    pub async fn get_by_name(
+        user: &User,
+        name: &str,
+        kinds: &[EntityKinds],
+        shared: &Shared,
+    ) -> Result<Vec<Entity>, ApiError> {
+        // for users we can search their groups but for admins we need to get all groups
+        // try to get any entities sharing this exact name
+        let entities = for_groups!(db::entities::get_by_name, user, shared, name, kinds)?;
+        // build a list of matches with their association info populated
+        let mut populated = Vec::with_capacity(entities.len());
+        // create a stream of entities to populate with any association data;
+        // buffered streams keep the oldest-created-first order of their input
+        let mut populator_stream = stream::iter(entities)
+            .map(|entity| entity.populate_associations(user, shared))
+            .buffered(20);
+        // get populated matches from our stream until we hit a problem or no more exist
+        while let Some(entity) = populator_stream.next().await {
+            // raise an error if we ran into a problem
+            populated.push(entity?);
+        }
+        Ok(populated)
     }
 
     /// List entities names, ids, and kinds according to the given params
@@ -1068,6 +1931,37 @@ impl Entity {
                     }
                 }
             }
+            EntityMetadata::YaraRule(rule) => {
+                // if a new rule body was set then re-validate it before applying;
+                // unlike sigma rules, yara rules are compile checked on update as
+                // well as create so stored rules are always compilable at write time
+                if let Some(new_rule) = form.yara_rule.take() {
+                    // compile the new rule body against this instances yara settings
+                    YaraRule::validate(&new_rule, &shared.config.thorium.yara)?;
+                    // the new rule body compiled so set it
+                    rule.rule = new_rule;
+                }
+                // update our score if needed
+                update!(rule.score, form.score);
+                // add new things this rule should apply too
+                rule.applies_to.append(&mut form.add_yara_applies_to);
+                // remove any entities that this yara rule no longer applies too
+                rule.applies_to
+                    .retain(|thing| !form.remove_yara_applies_to.contains(thing));
+                // add a new action to perform when this yara rule hits
+                rule.actions.append(&mut form.add_yara_actions);
+                // remove the requested indices in reverse order to ensure the indices remain valid
+                // we could use swap_remove here and not have to do this but that would change the
+                // order of things on update which could be annoying. Its also going to be rare that
+                // we ever have multiple actions to remove anyways.
+                for index in form.remove_yara_actions.iter().rev() {
+                    // make sure this index is in bounds
+                    if *index < rule.actions.len() {
+                        // remove this index if it exists
+                        rule.actions.remove(*index);
+                    }
+                }
+            }
             EntityMetadata::Flag(flag) => {
                 // update the required values in this flag if needed
                 update!(flag.suspicion, form.suspicion);
@@ -1190,13 +2084,21 @@ impl Entity {
             }
             // other kinds have no metadata to update, and model configuration is updated by its
             // own handlers
+            // yara rule hit metadata is machine written and refreshed newer
+            // wins on every hit converge (M4c), never updated by users
+            // rule set membership rides the association update path below
+            // hunt metadata is machine written: lifecycle changes go through
+            // the dedicated hunt cancel route and checkpoints, never this path
             EntityMetadata::Other
             | EntityMetadata::Folder(_)
             | EntityMetadata::ToolSetInstance(_)
             | EntityMetadata::WorkflowInstance(_)
             | EntityMetadata::ModelEndpoint(_)
             | EntityMetadata::ModelProfile(_)
-            | EntityMetadata::ModelCredential(_) => (),
+            | EntityMetadata::ModelCredential(_)
+            | EntityMetadata::YaraRuleHit(_)
+            | EntityMetadata::RuleSet(_)
+            | EntityMetadata::Hunt(_) => (),
         }
         // a tool publishes a new instance if a version and spec were given
         if self.kind == EntityKinds::Tool {
@@ -1930,6 +2832,29 @@ impl Entity {
         if self.kind == EntityKinds::ModelCredential {
             Box::pin(models::ban_dependents(user, &self, shared)).await?;
         }
+        // hunt deletes serialize against checkpoint persists so a concurrent
+        // checkpoint's read-modify-write can never resurrect the deleted rows
+        // and their active tags
+        let lock = match self.kind {
+            EntityKinds::Hunt => Some(db::hunts::lock_persist(&self.id, shared).await?),
+            _ => None,
+        };
+        // delete this entity while holding any persist mutex we took
+        let outcome = self.delete_locked(user, shared).await;
+        // always release our mutex no matter how the delete went
+        if let Some(lock) = lock {
+            let _ = db::hunts::unlock_persist(lock, shared).await;
+        }
+        outcome
+    }
+
+    /// Delete an `Entity` after any kind specific locking
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user deleting an entity
+    /// * `shared` - Shared Thorium objects
+    async fn delete_locked(self, user: &User, shared: &Shared) -> Result<(), ApiError> {
         // remove any associations for this entity
         self.delete_associations(user, shared).await?;
         // delete the entity
@@ -2608,6 +3533,8 @@ impl Entity {
             EntityMetadata::ToolSet(tool_set) => tool_set.clear_populated(),
             // a workflow's agents are built from its edges
             EntityMetadata::WorkflowCatalog(workflow) => workflow.clear_populated(),
+            // rule set membership is built by association
+            EntityMetadata::RuleSet(ruleset) => ruleset.rules.clear(),
             // most other entities have no association specific data
             EntityMetadata::Vendor(_)
             | EntityMetadata::Collection(_)
@@ -2619,6 +3546,8 @@ impl Entity {
             | EntityMetadata::PeImport(_)
             | EntityMetadata::NetworkConnection(_)
             | EntityMetadata::SigmaRule(_)
+            | EntityMetadata::YaraRule(_)
+            | EntityMetadata::YaraRuleHit(_)
             | EntityMetadata::Flag(_)
             | EntityMetadata::Incident(_)
             | EntityMetadata::CompiledFunction(_)
@@ -2628,6 +3557,7 @@ impl Entity {
             | EntityMetadata::ModelEndpoint(_)
             | EntityMetadata::ModelProfile(_)
             | EntityMetadata::ModelCredential(_)
+            | EntityMetadata::Hunt(_)
             | EntityMetadata::Other => (),
         }
     }
@@ -2675,6 +3605,8 @@ impl EntityMetadata {
             EntityMetadata::PeSection(section) => Some(serialize!(section)),
             EntityMetadata::PeImport(import) => Some(serialize!(import)),
             EntityMetadata::SigmaRule(rule) => Some(serialize!(rule)),
+            EntityMetadata::YaraRule(rule) => Some(serialize!(rule)),
+            EntityMetadata::YaraRuleHit(hit) => Some(serialize!(hit)),
             EntityMetadata::Flag(flag) => Some(serialize!(flag)),
             EntityMetadata::Incident(incident) => Some(serialize!(incident)),
             EntityMetadata::CompiledFunction(func) => Some(serialize!(func)),
@@ -2689,6 +3621,8 @@ impl EntityMetadata {
             EntityMetadata::ModelEndpoint(endpoint) => Some(serialize!(endpoint)),
             EntityMetadata::ModelProfile(profile) => Some(serialize!(profile)),
             EntityMetadata::ModelCredential(credential) => Some(serialize!(credential)),
+            EntityMetadata::RuleSet(ruleset) => Some(serialize!(ruleset)),
+            EntityMetadata::Hunt(hunt) => Some(serialize!(hunt)),
             EntityMetadata::Other => None,
         };
         Ok((self.into(), data))
@@ -2829,6 +3763,67 @@ impl EntityForm {
                     // make sure the device and this vendor share a group we can write in
                     AssociationRequest::shared_groups(&source, &allowed, &other, &entity.groups)?;
                     // add this link to the other
+                    req.targets.push(other);
+                }
+                Ok(Some(req))
+            }
+            EntityKinds::RuleSet => {
+                // dedupe the requested member ids so caps and the missing-id
+                // diff below stay truthful under repeated ids
+                let mut seen = HashSet::with_capacity(self.metadata.ruleset_rules.len());
+                let rule_ids: Vec<Uuid> = self
+                    .metadata
+                    .ruleset_rules
+                    .drain(..)
+                    .filter(|rule_id| seen.insert(*rule_id))
+                    .collect();
+                // enforce the membership cap before fetching anything
+                if rule_ids.len() > shared.config.thorium.hunts.max_rules_per_ruleset {
+                    return bad!(format!(
+                        "Rule sets are capped at {} rules (thorium.hunts.max_rules_per_ruleset)",
+                        shared.config.thorium.hunts.max_rules_per_ruleset
+                    ));
+                }
+                // empty rule sets have no associations to build
+                if rule_ids.is_empty() {
+                    return Ok(None);
+                }
+                // get all of the member rule entities visible to this user in one batch
+                let entities = for_groups!(db::entities::get_many, user, shared, &rule_ids)?;
+                // get_many silently drops ids that don't exist or aren't visible
+                // so diff the results to name the first missing member
+                if entities.len() != rule_ids.len() {
+                    // build a set of the ids that were found
+                    let found: HashSet<Uuid> = entities.iter().map(|entity| entity.id).collect();
+                    // find the first missing id to report
+                    if let Some(missing) = rule_ids.iter().find(|rule_id| !found.contains(rule_id))
+                    {
+                        return not_found!(format!("Rule {missing} was not found!"));
+                    }
+                }
+                // make sure every member is a rule entity of some engine
+                if let Some(bad) = entities.iter().find(|entity| !entity.kind.is_rule()) {
+                    return bad!(format!("Entity {} ({}) is not a rule!", bad.name, bad.id));
+                }
+                // build our source target
+                let source = AssociationTarget::Entity {
+                    id,
+                    name: name.to_owned(),
+                };
+                // start with an empty req sized for our members
+                let mut req = AssociationRequest::with_capacity(
+                    AssociationKind::RuleSetMember,
+                    source,
+                    entities.len(),
+                );
+                // step over the member rules we are associating with this rule set
+                for entity in entities {
+                    // build the target object for this member rule
+                    let other = AssociationTarget::Entity {
+                        id: entity.id,
+                        name: entity.name,
+                    };
+                    // add this link to the request
                     req.targets.push(other);
                 }
                 Ok(Some(req))
@@ -3000,6 +3995,18 @@ impl EntityMetadataForm {
             "entropy" => self.entropy = Some(field.text().await?.parse()?),
             // the sigma rule specific fields
             "sigma_rule" => self.sigma_rule = Some(field.text().await?),
+            // the yara rule specific fields
+            "yara_rule" => self.yara_rule = Some(field.text().await?),
+            // the yara rule hit specific fields
+            "yara_hit_rule_id" => self.yara_hit_rule_id = Some(field.text().await?.parse()?),
+            "yara_hit_sha256" => self.yara_hit_sha256 = Some(field.text().await?),
+            "yara_hit_rule_name" => self.yara_hit_rule_name = Some(field.text().await?),
+            "yara_hit_rule_hash" => self.yara_hit_rule_hash = Some(field.text().await?),
+            "yara_hit_ruleset_hash" => self.yara_hit_ruleset_hash = Some(field.text().await?),
+            "yara_hit_engine_version" => {
+                self.yara_hit_engine_version = Some(field.text().await?);
+            }
+            "yara_hit_scanned_at" => self.yara_hit_scanned_at = Some(field.text().await?.parse()?),
             "score" => self.score = Some(field.text().await?.parse()?),
             // the flag specific fields
             "suspicion" => self.suspicion = Some(field.text().await?.parse()?),
@@ -3094,6 +4101,12 @@ impl EntityMetadataForm {
                         // add this id to our vendor list
                         self.vendors.push(vendor_id);
                     }
+                    "ruleset_rules" => {
+                        // try to parse this member rule id
+                        let rule_id = field.text().await?.parse::<Uuid>()?;
+                        // add this id to our member rule list
+                        self.ruleset_rules.push(rule_id);
+                    }
                     "critical_sectors" => {
                         // try to convert this field to a critical sector
                         let sector = CriticalSector::from_str(&field.text().await?)?;
@@ -3123,6 +4136,12 @@ impl EntityMetadataForm {
                     "functions" => self.functions.push(field.text().await?),
                     "sigma_applies_to" => self.sigma_applies_to.push(field.text().await?.parse()?),
                     "sigma_actions" => self.sigma_actions.push(deserialize!(&field.text().await?)),
+                    "yara_applies_to" => self.yara_applies_to.push(field.text().await?.parse()?),
+                    "yara_actions" => self.yara_actions.push(deserialize!(&field.text().await?)),
+                    "yara_hit_matched" => {
+                        self.yara_hit_matched
+                            .push(deserialize!(&field.text().await?));
+                    }
                     "disassembly" => self.disassembly.push(deserialize!(&field.text().await?)),
                     // the incident specific list fields
                     "mission_teams" => self.mission_teams.push(field.text().await?),
@@ -3273,6 +4292,26 @@ impl EntityMetadataForm {
                 ))
             }
             EntityKinds::Other => Ok(EntityMetadata::Other),
+            EntityKinds::YaraRule => Ok(EntityMetadata::YaraRule(YaraRule::from_form(
+                self,
+                &shared.config,
+            )?)),
+            EntityKinds::YaraRuleHit => {
+                Ok(EntityMetadata::YaraRuleHit(YaraRuleHit::from_form(self)?))
+            }
+            // rule set membership is validated and stored as associations in
+            // build_association_req so the metadata itself starts empty and is
+            // hydrated at read time
+            EntityKinds::RuleSet => Ok(EntityMetadata::RuleSet(RuleSet::default())),
+            EntityKinds::Hunt => match self.hunt {
+                // the dedicated hunt create route builds this form server side
+                Some(hunt) => Ok(EntityMetadata::Hunt(hunt)),
+                // no multipart parser arm ever sets the hunt field so generic
+                // multipart creates always land here
+                None => {
+                    bad!("Hunts can only be created through POST /api/entities/hunt/".to_owned())
+                }
+            },
         }
     }
 }
@@ -3661,6 +4700,8 @@ impl EntityMetadataUpdateForm {
             "entropy" => self.entropy = Some(field.text().await?.parse()?),
             // the sigma rule specific fields
             "sigma_rule" => self.sigma_rule = Some(field.text().await?),
+            // the yara rule specific fields
+            "yara_rule" => self.yara_rule = Some(field.text().await?),
             "score" => self.score = Some(field.text().await?.parse()?),
             // the flag specific fields
             "suspicion" => self.suspicion = Some(field.text().await?.parse()?),
@@ -3789,6 +4830,12 @@ impl EntityMetadataUpdateForm {
                     "remove_urls" => self.remove_urls.push(field.text().await?),
                     "add_vendors" => self.add_vendors.push(field.text().await?.parse()?),
                     "remove_vendors" => self.remove_vendors.push(field.text().await?.parse()?),
+                    "add_ruleset_rules" => {
+                        self.add_ruleset_rules.push(field.text().await?.parse()?);
+                    }
+                    "remove_ruleset_rules" => {
+                        self.remove_ruleset_rules.push(field.text().await?.parse()?);
+                    }
                     "add_critical_sectors" => {
                         self.add_critical_sectors.push(field.text().await?.parse()?);
                     }
@@ -3856,6 +4903,19 @@ impl EntityMetadataUpdateForm {
                         .push(deserialize!(&field.text().await?)),
                     "remove_sigma_actions" => {
                         self.remove_sigma_actions
+                            .insert(field.text().await?.parse()?);
+                    }
+                    "add_yara_applies_to" => {
+                        self.add_yara_applies_to.push(field.text().await?.parse()?);
+                    }
+                    "remove_yara_applies_to" => self
+                        .remove_yara_applies_to
+                        .push(field.text().await?.parse()?),
+                    "add_yara_actions" => self
+                        .add_yara_actions
+                        .push(deserialize!(&field.text().await?)),
+                    "remove_yara_actions" => {
+                        self.remove_yara_actions
                             .insert(field.text().await?.parse()?);
                     }
                     // the incident specific list fields
@@ -4026,6 +5086,143 @@ impl EntityMetadataUpdateForm {
             // a workflow's agents are checked together before any is written
             EntityMetadata::WorkflowCatalog(_) => {
                 helpers::heap_future(|| workflows::update_edges(user, entity, self, shared)).await
+            }
+            EntityMetadata::RuleSet(_) => {
+                // nothing to do if this rule sets membership isn't changing
+                if self.add_ruleset_rules.is_empty() && self.remove_ruleset_rules.is_empty() {
+                    return Ok(());
+                }
+                // dedupe the requested adds so caps and the missing-id diff
+                // below stay truthful under repeated ids
+                let mut seen = HashSet::with_capacity(self.add_ruleset_rules.len());
+                let add_ids: Vec<Uuid> = self
+                    .add_ruleset_rules
+                    .drain(..)
+                    .filter(|rule_id| seen.insert(*rule_id))
+                    .collect();
+                // convert our list of removals to a list of serialized target columns
+                let serialized_removes = self
+                    .remove_ruleset_rules
+                    .iter()
+                    .filter_map(|rule_id| {
+                        // this should never actually fail
+                        serde_json::to_string(&AssociationTargetColumn::Entity(*rule_id)).ok()
+                    })
+                    .collect::<Vec<String>>();
+                // build our association target column
+                let source = match entity.build_association_target_column() {
+                    Some(source) => source,
+                    // this should be impossible and never occur
+                    None => {
+                        return internal_err!(format!(
+                            "Failed to build association target column for {entity:#?}"
+                        ));
+                    }
+                };
+                // build the opts for listing associations
+                let opts = AssociationListOpts::default()
+                    .groups(user.groups.clone())
+                    .limit(100);
+                // list associations for this entity scoped to the requesting user
+                let mut cursor = db::associations::list(user, opts, &source, shared).await?;
+                // track the surviving member ids so adds that already exist don't
+                // double count against the cap
+                let mut existing: HashSet<Uuid> = HashSet::new();
+                // build a list of associations to remove
+                let mut remove_assoc = Vec::with_capacity(self.remove_ruleset_rules.len());
+                // crawl this rule sets current membership in one pass
+                loop {
+                    // split the member rows into removals and survivors
+                    for assoc in cursor.data.drain(..) {
+                        // skip any associations that are not rule set members
+                        if assoc.kind == AssociationKind::RuleSetMember {
+                            // determine if this member is being removed
+                            if serialized_removes.contains(&assoc.other) {
+                                // add this association that we want to remove
+                                remove_assoc.push(assoc);
+                            } else {
+                                // parse our other value for this association
+                                let other: AssociationTargetColumn = deserialize!(&assoc.other);
+                                // track this surviving member id
+                                if let AssociationTargetColumn::Entity(member_id) = other {
+                                    existing.insert(member_id);
+                                }
+                            }
+                        }
+                    }
+                    // check if this cursor is exhausted
+                    if cursor.exhausted() {
+                        break;
+                    }
+                    // get the next page of data in this cursor
+                    cursor.next(shared).await?;
+                }
+                // drop adds that are already members since re-adding them would
+                // just rewrite the same association rows
+                let new_ids: Vec<Uuid> = add_ids
+                    .into_iter()
+                    .filter(|rule_id| !existing.contains(rule_id))
+                    .collect();
+                // enforce the membership cap over the survivors plus new members
+                if existing.len() + new_ids.len()
+                    > shared.config.thorium.hunts.max_rules_per_ruleset
+                {
+                    return bad!(format!(
+                        "Rule sets are capped at {} rules (thorium.hunts.max_rules_per_ruleset)",
+                        shared.config.thorium.hunts.max_rules_per_ruleset
+                    ));
+                }
+                // validate and associate any new members
+                if !new_ids.is_empty() {
+                    // get all of the new member rule entities visible to this user
+                    let entities = for_groups!(db::entities::get_many, user, shared, &new_ids)?;
+                    // get_many silently drops ids that don't exist or aren't
+                    // visible so diff the results to name the first missing member
+                    if entities.len() != new_ids.len() {
+                        // build a set of the ids that were found
+                        let found: HashSet<Uuid> =
+                            entities.iter().map(|entity| entity.id).collect();
+                        // find the first missing id to report
+                        if let Some(missing) =
+                            new_ids.iter().find(|rule_id| !found.contains(rule_id))
+                        {
+                            return not_found!(format!("Rule {missing} was not found!"));
+                        }
+                    }
+                    // make sure every new member is a rule entity of some engine
+                    if let Some(bad) = entities.iter().find(|entity| !entity.kind.is_rule()) {
+                        return bad!(format!("Entity {} ({}) is not a rule!", bad.name, bad.id));
+                    }
+                    // build our source target
+                    let source_target = AssociationTarget::Entity {
+                        id: entity.id,
+                        name: entity.name.clone(),
+                    };
+                    // start with an empty req sized for our new members
+                    let mut req = AssociationRequest::with_capacity(
+                        AssociationKind::RuleSetMember,
+                        source_target,
+                        entities.len(),
+                    );
+                    // step over the new member rules for this rule set
+                    for member in entities {
+                        // build the target object for this member rule
+                        let other = AssociationTarget::Entity {
+                            id: member.id,
+                            name: member.name,
+                        };
+                        // add this link to the request
+                        req.targets.push(other);
+                    }
+                    // create these associations
+                    req.apply(user, shared).await?;
+                }
+                // if we have any associations to delete then do that
+                if !remove_assoc.is_empty() {
+                    // delete all of the requested associations
+                    db::associations::delete_many(&source, &remove_assoc, shared).await?;
+                }
+                Ok(())
             }
             _ => Ok(()),
         }
@@ -4342,6 +5539,30 @@ where
     }
 }
 
+impl<S> FromRequestParts<S> for EntityByNameParams
+where
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    /// Extract entity by name params from a requests query string
+    ///
+    /// Unlike list params these never fall back to a default: a missing query
+    /// string deserializes as empty so a missing name is reported as a 400.
+    ///
+    /// # Arguments
+    ///
+    /// * `parts` - The request parts to extract params from
+    /// * `_state` - The shared state for this extractor (unused)
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        // deserialize our query string treating a missing one as empty so a
+        // missing name param is a 400 instead of silently defaulting
+        Ok(serde_qs::Config::new()
+            .max_depth(5)
+            .deserialize_str(parts.uri.query().unwrap_or(""))?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4479,5 +5700,259 @@ mod tests {
         // the extra filters list each kind once, in first-seen order
         let kinds = EntityListLine::get_extra_filters(&mut params);
         assert_eq!(kinds, vec![EntityKinds::FileSystem, EntityKinds::Device]);
+    }
+
+    /// Build owned string vectors for split tests
+    ///
+    /// # Arguments
+    ///
+    /// * `groups` - The group names to own
+    fn owned(groups: &[&str]) -> Vec<String> {
+        groups.iter().map(|group| (*group).to_owned()).collect()
+    }
+
+    /// Build the allowed set for split tests
+    ///
+    /// # Arguments
+    ///
+    /// * `groups` - The group names that exist and allow all hit writes
+    fn allowed(groups: &[&str]) -> HashSet<String> {
+        groups.iter().map(|group| (*group).to_owned()).collect()
+    }
+
+    /// The split must mirror the writers intersection matrix plus the sample term
+    #[test]
+    fn split_matrix() {
+        // a and b carry rule and sample and allow writes; c lacks the rule;
+        // s lacks the sample; k is kill switched; z does not exist
+        let rule_groups = owned(&["a", "b", "s", "k", "z"]);
+        let sample_groups = HashSet::from(["a", "b", "c", "k", "z"]);
+        let allow = allowed(&["a", "b", "c", "s"]);
+        // split an event visible to every test group
+        let split = split_yara_hit_groups(
+            &owned(&["a", "b", "c", "s", "k", "z"]),
+            &rule_groups,
+            &sample_groups,
+            &allow,
+        );
+        // every group must land under the first term it fails
+        assert_eq!(split.written, owned(&["a", "b"]));
+        assert_eq!(split.suppressed_rule, owned(&["c"]));
+        assert_eq!(split.suppressed_sample, owned(&["s"]));
+        assert_eq!(split.suppressed_policy, owned(&["k", "z"]));
+    }
+
+    /// An event fully outside the rule or sample must write nothing
+    #[test]
+    fn split_empty_intersections() {
+        // the rule and sample share no groups with these events
+        let rule_groups = owned(&["a"]);
+        let sample_groups = HashSet::from(["b"]);
+        let allow = allowed(&["a", "b", "c"]);
+        // an event in the rules group still fails the sample term
+        let split = split_yara_hit_groups(&owned(&["a"]), &rule_groups, &sample_groups, &allow);
+        assert!(split.written.is_empty());
+        assert_eq!(split.suppressed_sample, owned(&["a"]));
+        // an event in the samples group still fails the rule term
+        let split = split_yara_hit_groups(&owned(&["b"]), &rule_groups, &sample_groups, &allow);
+        assert!(split.written.is_empty());
+        assert_eq!(split.suppressed_rule, owned(&["b"]));
+    }
+
+    /// Duplicate event groups must split and count exactly once
+    #[test]
+    fn split_dedupes_event_groups() {
+        // a passes every term; c fails the rule term
+        let rule_groups = owned(&["a"]);
+        let sample_groups = HashSet::from(["a", "c"]);
+        let allow = allowed(&["a", "c"]);
+        // send every event group twice
+        let split = split_yara_hit_groups(
+            &owned(&["a", "c", "a", "c"]),
+            &rule_groups,
+            &sample_groups,
+            &allow,
+        );
+        // each group must appear exactly once in its split
+        assert_eq!(split.written, owned(&["a"]));
+        assert_eq!(split.suppressed_rule, owned(&["c"]));
+    }
+
+    /// Suppression precedence must be rule then sample then policy
+    #[test]
+    fn split_precedence_is_rule_sample_policy() {
+        // x fails every term so it must only count under the rule term
+        let rule_groups = owned(&[]);
+        let sample_groups = HashSet::new();
+        let allow = allowed(&[]);
+        let split = split_yara_hit_groups(&owned(&["x"]), &rule_groups, &sample_groups, &allow);
+        assert_eq!(split.suppressed_rule, owned(&["x"]));
+        assert!(split.suppressed_sample.is_empty());
+        assert!(split.suppressed_policy.is_empty());
+    }
+
+    /// A group absent from the allowed set must suppress by policy
+    #[test]
+    fn split_absent_group_suppresses() {
+        // g carries the rule and sample but was deleted from the backend
+        let rule_groups = owned(&["g"]);
+        let sample_groups = HashSet::from(["g"]);
+        let allow = allowed(&[]);
+        let split = split_yara_hit_groups(&owned(&["g"]), &rule_groups, &sample_groups, &allow);
+        // a deleted group must suppress instead of defaulting open
+        assert!(split.written.is_empty());
+        assert_eq!(split.suppressed_policy, owned(&["g"]));
+    }
+
+    /// The split must preserve first seen event group order
+    #[test]
+    fn split_preserves_event_order() {
+        // every group passes so order is purely insertion order
+        let rule_groups = owned(&["b", "a", "c"]);
+        let sample_groups = HashSet::from(["a", "b", "c"]);
+        let allow = allowed(&["a", "b", "c"]);
+        let split = split_yara_hit_groups(
+            &owned(&["c", "a", "b"]),
+            &rule_groups,
+            &sample_groups,
+            &allow,
+        );
+        // the written groups must keep the events first seen order
+        assert_eq!(split.written, owned(&["c", "a", "b"]));
+    }
+
+    /// Build a stored hit for newer wins refresh tests
+    ///
+    /// # Arguments
+    ///
+    /// * `scanned_at` - When the stored hits scan completed
+    fn stored_hit(scanned_at: DateTime<Utc>) -> YaraRuleHit {
+        YaraRuleHit {
+            rule_id: Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap(),
+            sha256: "a".repeat(64),
+            rule_name: "stored-rule".to_owned(),
+            rule_hash: "b".repeat(64),
+            ruleset_hash: "c".repeat(64),
+            engine_version: "yara-x 1.21.0".to_owned(),
+            scanned_at,
+            matched: Vec::default(),
+        }
+    }
+
+    /// Build incoming scan facts for newer wins refresh tests
+    ///
+    /// # Arguments
+    ///
+    /// * `scanned_at` - When the incoming scan completed
+    fn incoming_facts(scanned_at: DateTime<Utc>) -> IncomingHitFacts {
+        IncomingHitFacts {
+            rule_hash: "d".repeat(64),
+            ruleset_hash: "e".repeat(64),
+            engine_version: "yara-x 9.9.9".to_owned(),
+            scanned_at,
+            matched: vec![MatchedRule {
+                rule_identifier: "fresh".to_owned(),
+                strings: Vec::default(),
+            }],
+        }
+    }
+
+    /// Only a strictly newer scan may refresh a stored hits facts
+    #[test]
+    fn refresh_requires_strictly_newer_scan() {
+        // pin a stored scan instant to compare against
+        let stored_at = DateTime::<Utc>::UNIX_EPOCH + chrono::Duration::hours(1);
+        let stored = stored_hit(stored_at);
+        // an older incoming scan must never clobber the stored facts
+        let older = incoming_facts(stored_at - chrono::Duration::seconds(1));
+        assert!(refresh_hit_facts(&stored, older).is_none());
+        // an equal timestamp is an idempotent redelivery and must not rewrite
+        let equal = incoming_facts(stored_at);
+        assert!(refresh_hit_facts(&stored, equal).is_none());
+        // a strictly newer scan must win
+        let newer = incoming_facts(stored_at + chrono::Duration::seconds(1));
+        assert!(refresh_hit_facts(&stored, newer).is_some());
+    }
+
+    /// A refresh must replace only the scan facts, never identity or name
+    #[test]
+    fn refresh_replaces_only_scan_facts() {
+        // build a stored hit and a strictly newer incoming scan
+        let stored_at = DateTime::<Utc>::UNIX_EPOCH + chrono::Duration::hours(1);
+        let stored = stored_hit(stored_at);
+        let newer_at = stored_at + chrono::Duration::hours(1);
+        let fresh = refresh_hit_facts(&stored, incoming_facts(newer_at))
+            .expect("a newer scan must refresh");
+        // the five scan facts must carry the incoming values
+        assert_eq!(fresh.rule_hash, "d".repeat(64));
+        assert_eq!(fresh.ruleset_hash, "e".repeat(64));
+        assert_eq!(fresh.engine_version, "yara-x 9.9.9");
+        assert_eq!(fresh.scanned_at, newer_at);
+        assert_eq!(fresh.matched.len(), 1);
+        // the identity fields and rule name must stay stored
+        assert_eq!(fresh.rule_id, stored.rule_id);
+        assert_eq!(fresh.sha256, stored.sha256);
+        assert_eq!(fresh.rule_name, "stored-rule");
+    }
+
+    /// A refresh must re-bound pathological match metadata to the hit caps
+    #[test]
+    fn refresh_rebounds_matched_caps() {
+        // build a stored hit and an oversized newer incoming scan
+        let stored_at = DateTime::<Utc>::UNIX_EPOCH + chrono::Duration::hours(1);
+        let stored = stored_hit(stored_at);
+        let mut incoming = incoming_facts(stored_at + chrono::Duration::hours(1));
+        incoming.matched = vec![
+            MatchedRule {
+                rule_identifier: "huge".to_owned(),
+                strings: Vec::default(),
+            };
+            1000
+        ];
+        // the refreshed hit must truncate to the documented caps
+        let fresh = refresh_hit_facts(&stored, incoming).expect("a newer scan must refresh");
+        assert_eq!(fresh.matched.len(), YaraRuleHit::MAX_MATCHED_RULES);
+    }
+
+    /// Taking facts off an empty form must mirror from_forms defaults
+    #[test]
+    fn take_hit_facts_mirrors_from_form_defaults() {
+        // capture an instant before the take so the now default is provable
+        let before = Utc::now();
+        // take the facts off a default form with no hit fields set
+        let mut form = EntityMetadataForm::default();
+        let facts = take_hit_facts(&mut form);
+        // missing strings must default empty exactly like from_form
+        assert_eq!(facts.rule_hash, "");
+        assert_eq!(facts.ruleset_hash, "");
+        assert_eq!(facts.engine_version, "");
+        assert!(facts.matched.is_empty());
+        // a missing scanned_at must default to now exactly like from_form
+        assert!(facts.scanned_at >= before);
+    }
+
+    /// Taking facts must drain the form so a double take cannot stale read
+    #[test]
+    fn take_hit_facts_drains_the_form() {
+        // build a form carrying every hit scan fact
+        let mut form = EntityMetadataForm {
+            yara_hit_rule_hash: Some("b".repeat(64)),
+            yara_hit_ruleset_hash: Some("c".repeat(64)),
+            yara_hit_engine_version: Some("yara-x 1.21.0".to_owned()),
+            yara_hit_scanned_at: Some(DateTime::<Utc>::UNIX_EPOCH),
+            yara_hit_matched: vec![MatchedRule {
+                rule_identifier: "marker".to_owned(),
+                strings: Vec::default(),
+            }],
+            ..EntityMetadataForm::default()
+        };
+        // the first take must carry the forms facts
+        let facts = take_hit_facts(&mut form);
+        assert_eq!(facts.rule_hash, "b".repeat(64));
+        assert_eq!(facts.scanned_at, DateTime::<Utc>::UNIX_EPOCH);
+        assert_eq!(facts.matched.len(), 1);
+        // the form must be drained so its fields cannot be read twice
+        assert!(form.yara_hit_rule_hash.is_none());
+        assert!(form.yara_hit_matched.is_empty());
     }
 }

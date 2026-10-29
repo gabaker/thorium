@@ -327,6 +327,12 @@ spec:
                           - name
                           type: object
                         type: array
+                      replicas:
+                        default: 1
+                        description: Number of event-handler pods to scale the deployment
+                        maximum: 65535.0
+                        minimum: 0.0
+                        type: integer
                       resources:
                         default:
                           cpu: 2000
@@ -1424,6 +1430,8 @@ spec:
                         type: object
                       events:
                         default:
+                          heartbeat_secs: 10
+                          in_flight_backstop_secs: 3600
                           max_agents_per_workflow: 32
                           max_crawl_depth: 8
                           max_depth: 5
@@ -1431,9 +1439,25 @@ spec:
                           max_tools_per_toolset: 64
                           partition_size: 10
                           retention: 604800
+                          stats_partition_size: 43200
+                          stats_retention: 2592000
+                          stats_snapshot_secs: 30
+                          worker_expiry_secs: 90
                           workflow_graph_delay: 10
                         description: The settings related to events
                         properties:
+                          heartbeat_secs:
+                            default: 10
+                            description: How often event handler workers should heartbeat in seconds
+                            minimum: 0.0
+                            type: integer
+                          in_flight_backstop_secs:
+                            default: 3600
+                            description: |-
+                              The lease age in seconds after which an in flight event is reclaimed
+                              from a live but wedged worker
+                            minimum: 0.0
+                            type: integer
                           max_agents_per_workflow:
                             default: 32
                             description: The most agents one workflow may reach
@@ -1470,6 +1494,36 @@ spec:
                           retention:
                             default: 604800
                             description: How long to hold onto events for regardless of if they are acted on or not
+                            minimum: 0.0
+                            type: integer
+                          stats_partition_size:
+                            default: 43200
+                            description: The number of seconds each scan stats partition in the database should cover
+                            maximum: 65535.0
+                            minimum: 0.0
+                            type: integer
+                          stats_retention:
+                            default: 2592000
+                            description: |-
+                              How long to hold onto scan stats snapshots in seconds
+
+                              This is the `scan_stats` tables TTL, so it bounds how far back the
+                              stats history route can reach.
+                            minimum: 0.0
+                            type: integer
+                          stats_snapshot_secs:
+                            default: 30
+                            description: |-
+                              How often to persist a scan stats snapshot in seconds
+
+                              Snapshot row timestamps quantize to this cadence, which makes it the
+                              cross replica dedup unit: replicas triggering in the same window write
+                              the same clustering key and last write wins.
+                            minimum: 0.0
+                            type: integer
+                          worker_expiry_secs:
+                            default: 90
+                            description: How many seconds after its last heartbeat a worker is presumed dead
                             minimum: 0.0
                             type: integer
                           workflow_graph_delay:
@@ -1619,6 +1673,83 @@ spec:
                             description: The max size a compiled regex can be; accepts M, MB, MiB, or equivalents for KB and GB
                             example: 10 MiB
                             type: string
+                        type: object
+                      hunts:
+                        default:
+                          chunk_size: 500
+                          inter_chunk_pacing_secs: 5
+                          lanes: 4
+                          max_active_global: 8
+                          max_active_per_user: 2
+                          max_error_samples: 25
+                          max_rules_per_hunt: 10000
+                          max_rules_per_ruleset: 1000
+                          yara:
+                            ruleset_lru_size: 4
+                            scan_buffer_budget: 1073741824
+                        description: The settings related to user-created hunts
+                        properties:
+                          chunk_size:
+                            default: 500
+                            description: The number of corpus list lines walked per chunk
+                            minimum: 0.0
+                            type: integer
+                          inter_chunk_pacing_secs:
+                            default: 5
+                            description: |-
+                              The delay in seconds between a lane's chunks
+
+                              This rides on the ~3 second pop maturity floor so the effective delay
+                              is roughly this value plus three seconds plus the pop cadence.
+                            minimum: 0.0
+                            type: integer
+                          lanes:
+                            default: 4
+                            description: The number of parallel chunk chains (time shards) a hunt is split into
+                            minimum: 0.0
+                            type: integer
+                          max_active_global:
+                            default: 8
+                            description: The max Created/Running hunts cluster-wide (best-effort)
+                            minimum: 0.0
+                            type: integer
+                          max_active_per_user:
+                            default: 2
+                            description: The max Created/Running hunts per user across all engines (best-effort)
+                            minimum: 0.0
+                            type: integer
+                          max_error_samples:
+                            default: 25
+                            description: The max number of per-item errors sampled into a hunt's counters
+                            minimum: 0.0
+                            type: integer
+                          max_rules_per_hunt:
+                            default: 10000
+                            description: The max number of rules a hunt may freeze; creates past this are a 400
+                            minimum: 0.0
+                            type: integer
+                          max_rules_per_ruleset:
+                            default: 1000
+                            description: The max number of member rules a rule set may hold
+                            minimum: 0.0
+                            type: integer
+                          yara:
+                            default:
+                              ruleset_lru_size: 4
+                              scan_buffer_budget: 1073741824
+                            description: The yara engine's hunt settings
+                            properties:
+                              ruleset_lru_size:
+                                default: 4
+                                description: The number of compiled rule subsets to keep cached per worker
+                                minimum: 0.0
+                                type: integer
+                              scan_buffer_budget:
+                                default: 1073741824
+                                description: The total byte budget for buffered hunt scan data in a single worker
+                                minimum: 0.0
+                                type: integer
+                            type: object
                         type: object
                       interface:
                         default: 0.0.0.0
@@ -2601,6 +2732,101 @@ spec:
                                 - Trace
                                 type: string
                             type: object
+                        type: object
+                      yara:
+                        default:
+                          allowed_modules:
+                          - pe
+                          - elf
+                          - macho
+                          - dotnet
+                          - math
+                          - hash
+                          - string
+                          - time
+                          - lnk
+                          cache_bucket: thorium-yara-rulesets
+                          max_rule_size: 131072
+                          max_scan_size: 1073741824
+                          noisy_threshold: 0.2
+                          noisy_window: 1000
+                          scan_buffer_budget: 1073741824
+                          scan_parallelism: null
+                          scan_timeout_secs: 60
+                          slow_rule_ms: 5000
+                          slow_strikes: 3
+                          small_class_size: 16777216
+                        description: The settings related to yara rules and scans
+                        properties:
+                          allowed_modules:
+                            default:
+                            - pe
+                            - elf
+                            - macho
+                            - dotnet
+                            - math
+                            - hash
+                            - string
+                            - time
+                            - lnk
+                            description: The yara modules that rules are allowed to import
+                            items:
+                              type: string
+                            type: array
+                          cache_bucket:
+                            default: thorium-yara-rulesets
+                            description: The bucket to cache serialized compiled yara rulesets in
+                            type: string
+                          max_rule_size:
+                            default: 131072
+                            description: The max size of a single yara rule source document in bytes
+                            minimum: 0.0
+                            type: integer
+                          max_scan_size:
+                            default: 1073741824
+                            description: The max size of a single object to scan in bytes
+                            minimum: 0.0
+                            type: integer
+                          noisy_threshold:
+                            default: 0.2
+                            description: The match rate over the noisy window above which a rule is quarantined
+                            format: double
+                            type: number
+                          noisy_window:
+                            default: 1000
+                            description: The number of scans in the sliding window used to detect noisy rules
+                            minimum: 0.0
+                            type: integer
+                          scan_buffer_budget:
+                            default: 1073741824
+                            description: The total byte budget for buffered scan data in a single scanner
+                            minimum: 0.0
+                            type: integer
+                          scan_parallelism:
+                            description: The number of scans to run in parallel (defaults to the core count)
+                            minimum: 0.0
+                            nullable: true
+                            type: integer
+                          scan_timeout_secs:
+                            default: 60
+                            description: The max number of seconds a single scan may take
+                            minimum: 0.0
+                            type: integer
+                          slow_rule_ms:
+                            default: 5000
+                            description: The scan time in milliseconds above which a rule counts a slow strike
+                            minimum: 0.0
+                            type: integer
+                          slow_strikes:
+                            default: 3
+                            description: The number of slow strikes before a rule is quarantined as slow
+                            minimum: 0.0
+                            type: integer
+                          small_class_size:
+                            default: 16777216
+                            description: The size in bytes under which an object is admitted as a small scan
+                            minimum: 0.0
+                            type: integer
                         type: object
                     type: object
                 type: object

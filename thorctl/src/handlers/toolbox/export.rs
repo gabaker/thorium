@@ -985,8 +985,11 @@ async fn write_toolbox(
         };
         write_file(output, &file, false)?;
     }
-    // write the assembled manifest last, so a failed export leaves the old one in place
-    let mut json = serde_json::to_string_pretty(merged)
+    // write the assembled manifest last, so a failed export leaves the old one in place; the
+    // inline specs' keys are sorted first so exports stay byte-stable under preserve_order
+    let mut sorted = merged.clone();
+    sorted.sort_spec_keys();
+    let mut json = serde_json::to_string_pretty(&sorted)
         .map_err(|err| Error::new(format!("Failed to write toolbox.json: {err}")))?;
     json.push('\n');
     let file = OutFile {

@@ -1,3 +1,6 @@
+/// The intrinsic tag key the API stamps on every entity for its submitter
+export const SUBMITTER_TAG = 'submitter';
+
 /// A single tag's values and the groups who can see them
 export type Tag = {
   [value: string]: string[];

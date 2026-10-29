@@ -12,6 +12,8 @@ of features including:
 - downloading results
 - listing files
 - searching the contents of files, repos, and entities with a regex (`thorctl grep`; see [Search](../users/search.md#grepping-with-thorctl))
+- creating and managing YARA/Sigma detection rules and rule sets, and hunting over existing files
+  (`thorctl rules`, `thorctl rulesets`, `thorctl hunts`)
 - creating groups (`thorctl groups create`)
 - creating, publishing, editing, deleting, and running tools (`thorctl tools`, `thorctl instances`)
 - creating, editing, and running pipelines (`thorctl pipelines`)
@@ -150,6 +152,7 @@ thorctl config --clear-proxy
 | ------- | ------------ | ----- |
 | `files`, `repos`, `tags`, `results`, `associations`, `trees` | Upload, tag, search, and download data | [Users](../users/users.md) |
 | `groups` | List, describe, and create groups | [Creating/Editing Groups](./adding_editing_groups.md) |
+| `rules`, `rulesets`, `hunts` | Create, edit, and import YARA/Sigma rules, curate rule sets, and hunt over existing files | [YARA Rules](../users/yara_rules.md), [Hunts](../users/hunts.md) |
 | `tools`, `instances` | Create, publish, edit, update, delete, snapshot, and run tools; list and compare instances; `instances request` builds one now | [Tools and Tool Instances](../developers/tools.md) |
 | `agents`, `toolsets`, `workflows` | Create, link, spec, update, edit, delete, and run AI agents, toolsets, and workflows | [AI Agents, Toolsets, and Workflows](../developers/agents_workflows.md) |
 | `pipelines` | Create, update, edit, run, export, and import pipelines and set each stage's tool | [Building Pipelines](../developers/build_pipelines.md) |
@@ -261,6 +264,9 @@ Commands:
   associations      Create, delete, and list associations between files, repos, and entities [alias:
                     assoc]
   network-policies  Perform network policy related tasks [alias: netpols]
+  rules             Perform YARA/Sigma detection rule related tasks [alias: rule]
+  rulesets          Perform rule set related tasks [alias: ruleset]
+  hunts             Perform hunt related tasks [alias: hunt]
   tools             Create, publish, and inspect tools and their versions
   models            Manage model endpoints, catalogs, profiles, credentials, and their bans
   agents            Create, link, and inspect AI agents (not the thorium-agent job runner)

@@ -65,6 +65,14 @@ const EXECUTORS: &[(&str, Executor)] = &[
         "finalize-tool-only-reverse",
         Executor::Unattended(Unattended::Finalize),
     ),
+    (
+        "finalize-yara-scanning",
+        Executor::Unattended(Unattended::Finalize),
+    ),
+    (
+        "finalize-yara-scanning-reverse",
+        Executor::Unattended(Unattended::Finalize),
+    ),
 ];
 
 /// Find the executor registered for a step id
@@ -581,13 +589,14 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         // from the revision that applies the schema first the drain waits, then the conversions
-        // run, and the record is last
+        // run, and the two records follow, the yara scanning one last
         let conversions = [
             "drain-reactions",
             "images-to-tools",
             "pipelines-to-tool-stages",
             "provenance-to-legacy-tools",
             "finalize-tool-only",
+            "finalize-yara-scanning",
         ];
         assert_eq!(plan("2026-10-v03"), conversions);
         // from the first Helm revision the schema is applied first and the drain still waits
@@ -602,6 +611,7 @@ mod tests {
                 "pipelines-to-tool-stages",
                 "provenance-to-legacy-tools",
                 "finalize-tool-only",
+                "finalize-yara-scanning",
             ]
         );
         // the conversions pause the five components and the drain pauses none
@@ -621,7 +631,6 @@ mod tests {
         ] {
             assert_eq!(step(id).pause, pauses, "{id}");
         }
-        assert_eq!(step("finalize-tool-only").pause, []);
         // the three conversions run as migration Jobs, and so does the drain's check
         for id in [
             "drain-reactions",
@@ -632,12 +641,16 @@ mod tests {
             assert!(runs_in_thoradm(step(id)), "{id}");
             assert!(registered(id).is_none(), "{id} needs no row of its own");
         }
-        // the record step has its own row and runs unattended
-        assert!(!runs_in_thoradm(step("finalize-tool-only")));
-        assert_eq!(
-            registered("finalize-tool-only"),
-            Some(Executor::Unattended(Unattended::Finalize))
-        );
+        // the record steps have their own rows and run unattended, pausing nothing
+        for id in ["finalize-tool-only", "finalize-yara-scanning"] {
+            assert!(!runs_in_thoradm(step(id)), "{id}");
+            assert_eq!(
+                registered(id),
+                Some(Executor::Unattended(Unattended::Finalize)),
+                "{id}"
+            );
+            assert_eq!(step(id).pause, [], "{id}");
+        }
         // the pipeline conversion reads what the image conversion wrote, and every data step
         // after the drain checks again once the drain ends
         assert_eq!(

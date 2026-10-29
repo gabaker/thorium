@@ -23,23 +23,24 @@ use crate::k8s::crds::ThoriumCluster;
 /// The revision the record is rewound to
 const OLDER: &str = "2026-10-v02";
 
-/// The steps of the latest revision, which the state holds finished
-const LATEST_STEPS: [&str; 5] = [
-    "drain-reactions",
-    "images-to-tools",
-    "pipelines-to-tool-stages",
-    "provenance-to-legacy-tools",
-    "finalize-tool-only",
+/// The steps the state holds finished, each with the revision that holds it: the conversion steps
+/// and the record of the yara scanning schema
+const LATEST_STEPS: [(&str, &str); 6] = [
+    ("2026-10-v04", "drain-reactions"),
+    ("2026-10-v04", "images-to-tools"),
+    ("2026-10-v04", "pipelines-to-tool-stages"),
+    ("2026-10-v04", "provenance-to-legacy-tools"),
+    ("2026-10-v04", "finalize-tool-only"),
+    ("2026-10-v05", "finalize-yara-scanning"),
 ];
 
-/// Build the finished history of the latest revision's steps
+/// Build the finished history of the newest revisions' steps
 fn finished_history() -> Vec<AppliedStep> {
-    // each step of the latest revision done, a few seconds apart
-    let latest = latest().to_string();
+    // each step done under the revision that holds it, a few seconds apart
     LATEST_STEPS
         .iter()
         .zip(10..)
-        .map(|(step, seconds)| entry(&latest, step, StepState::Done, seconds))
+        .map(|((revision, step), seconds)| entry(revision, step, StepState::Done, seconds))
         .collect()
 }
 
@@ -137,7 +138,7 @@ fn assert_replans(gate: Gate) {
         .iter()
         .map(|step| step.step.as_str())
         .collect::<Vec<_>>();
-    for step in LATEST_STEPS {
+    for (_, step) in LATEST_STEPS {
         assert!(ids.contains(&step), "{step} is not planned in {ids:?}");
     }
 }

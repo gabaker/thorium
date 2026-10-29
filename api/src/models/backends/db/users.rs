@@ -44,7 +44,12 @@ pub fn build(
             .arg(serialize!(&cast.token_expiration))
         .cmd("hset").arg(SystemKeys::data(shared)).arg("scaler_cache").arg(true)
         .cmd("hsetnx").arg(&keys.by_token).arg(&cast.token).arg(&cast.username)
-        .cmd("hset").arg(cache_status).arg("status").arg(true)
+        .cmd("hset").arg(&cache_status).arg("users").arg(true)
+        // user changes also stale the trigger cache since it embeds the user map
+        .cmd("hset").arg(&cache_status).arg("triggers").arg(true)
+        // bump both generation counters for replica safe cache polling
+        .cmd("hincrby").arg(&cache_status).arg("users_gen").arg(1)
+        .cmd("hincrby").arg(&cache_status).arg("triggers_gen").arg(1)
         .cmd("hsetnx").arg(&keys.data).arg("settings").arg(serialize!(&cast.settings))
         .cmd("hsetnx").arg(&keys.data).arg("verified").arg(cast.verified)
         .cmd("hsetnx").arg(&keys.data).arg("aliases").arg(serialize!(&cast.aliases))
@@ -582,7 +587,12 @@ pub async fn save_token(user: &User, old: &str, shared: &Shared) -> Result<(), A
         // update the token map
         .cmd("hset").arg(&keys.by_token).arg(&user.token).arg(&user.username)
         .cmd("hdel").arg(&keys.by_token).arg(old)
-        .cmd("hset").arg(cache_status).arg("status").arg(true)
+        .cmd("hset").arg(&cache_status).arg("users").arg(true)
+        // user changes also stale the trigger cache since it embeds the user map
+        .cmd("hset").arg(&cache_status).arg("triggers").arg(true)
+        // bump both generation counters for replica safe cache polling
+        .cmd("hincrby").arg(&cache_status).arg("users_gen").arg(1)
+        .cmd("hincrby").arg(&cache_status).arg("triggers_gen").arg(1)
         .cmd("hset").arg(&system_map).arg("scaler_cache").arg("true")
         .query_async(conn!(shared)).await?;
     Ok(())
@@ -835,7 +845,12 @@ pub async fn save(user: &User, shared: &Shared) -> Result<(), ApiError> {
     pipe.cmd("hset").arg(&data_key).arg("username").arg(&user.username)
         .cmd("hset").arg(&data_key).arg("groups").arg(serialize!(&user.groups))
         .cmd("hset").arg(&data_key).arg("role").arg(serialize!(&user.role))
-        .cmd("hset").arg(cache_status).arg("status").arg(true)
+        .cmd("hset").arg(&cache_status).arg("users").arg(true)
+        // user changes also stale the trigger cache since it embeds the user map
+        .cmd("hset").arg(&cache_status).arg("triggers").arg(true)
+        // bump both generation counters for replica safe cache polling
+        .cmd("hincrby").arg(&cache_status).arg("users_gen").arg(1)
+        .cmd("hincrby").arg(&cache_status).arg("triggers_gen").arg(1)
         .cmd("hset").arg(&data_key).arg("settings").arg(serialize!(&user.settings))
         .cmd("hset").arg(&data_key).arg("aliases").arg(serialize!(&user.aliases));
     // if password is set then save that in redis

@@ -211,10 +211,11 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-/// `schema legacy` on an older release's keyspace lists both objects with rows and the downgrade
-/// lines in text, and the same facts as JSON, exiting 0
+/// `schema legacy` on an older release's keyspace lists the events table with rows and the
+/// downgrade lines in text, and the same facts as JSON, exiting 0; the re-declared
+/// `entities_by_name` view the keyspace also holds is declared, so it is never listed
 #[tokio::test]
-async fn the_listing_shows_both_objects_as_text_and_json() {
+async fn the_listing_shows_the_events_table_as_text_and_json() {
     // two events and three entities
     let ns = namespace("lgc_list");
     let session = older_release(&ns, 2, 3).await;
@@ -228,7 +229,7 @@ async fn the_listing_shows_both_objects_as_text_and_json() {
         ),
         "{text}"
     );
-    assert!(text.contains("  scylla:entities_by_name  (view, class Derived)\n    present:     yes\n    rows:        3\n"), "{text}");
+    assert!(!text.contains("scylla:entities_by_name"), "{text}");
     assert!(
         text.contains("    downgrade to 2026-10-v01: recreated (it does not use this object)\n"),
         "{text}"
@@ -243,17 +244,16 @@ async fn the_listing_shows_both_objects_as_text_and_json() {
     let output = run(thoradm(&ns).args(["schema", "legacy", "--json"]));
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let json: Value = serde_json::from_str(&stdout(&output)).expect("JSON");
+    assert_eq!(json["objects"].as_array().map(Vec::len), Some(1));
     assert_eq!(json["objects"][0]["id"], "scylla:events");
     assert_eq!(json["objects"][0]["rows"], 2);
-    assert_eq!(json["objects"][1]["id"], "scylla:entities_by_name");
-    assert_eq!(json["objects"][1]["rows"], 3);
     // one downgrade line for each revision of the production catalog's support window
     let window = support_window(&Catalog::PRODUCTION);
     assert_eq!(
         json["objects"][0]["downgrades"].as_array().map(Vec::len),
         Some(window.len())
     );
-    // a keyspace this release created lists both as not present
+    // a keyspace this release created lists the table as not present
     exec(&session, &format!("DROP KEYSPACE IF EXISTS {ns}")).await;
     let output = run(thoradm(&ns).args(["schema", "apply", "--wait-for-scylla", "60"]));
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -326,29 +326,27 @@ async fn legacy_drops(session: &Session, ns: &str) -> usize {
 }
 
 /// Without a terminal, `--execute` needs `--confirm`: it refuses with exit 1 and drops nothing; with
-/// `--confirm` it drops the named objects and records one audit row each with who and the rows
+/// `--confirm` it drops the named object and records one audit row with who and the rows
 #[tokio::test]
 async fn execute_needs_confirm_without_a_terminal_and_records_each_drop() {
-    // an older release's keyspace with rows in both objects
+    // an older release's keyspace with rows in the legacy table and the re-declared view
     let ns = namespace("lgc_exec");
     let session = older_release(&ns, 3, 2).await;
-    let both = [
+    let events = [
         "schema",
         "drop-legacy",
         "--object",
         "scylla:events",
-        "--object",
-        "scylla:entities_by_name",
         "--execute",
     ];
-    let output = run(thoradm(&ns).args(both).stdin(std::process::Stdio::null()));
+    let output = run(thoradm(&ns).args(events).stdin(std::process::Stdio::null()));
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     assert!(stderr(&output).contains("--confirm"), "{}", stderr(&output));
     assert!(exists(&session, &ns.to_lowercase(), "events").await);
     assert_eq!(legacy_drops(&session, &ns).await, 0);
-    // with --confirm both are dropped and recorded
+    // with --confirm the table is dropped and recorded
     let output = run(thoradm(&ns)
-        .args(both)
+        .args(events)
         .arg("--confirm")
         .env("USER", "tester"));
     assert_eq!(
@@ -364,10 +362,10 @@ async fn execute_needs_confirm_without_a_terminal_and_records_each_drop() {
         stdout(&output)
     );
     assert!(!exists(&session, &ns.to_lowercase(), "events").await);
-    assert!(!exists(&session, &ns.to_lowercase(), "entities_by_name").await);
-    // the declared base table of the view is untouched
+    // the re-declared view and its declared base table are untouched
+    assert!(exists(&session, &ns.to_lowercase(), "entities_by_name").await);
     assert_eq!(count(&session, &ns, "entities").await, 2);
-    // one audit row per object: its id after the time, the rows, and who
+    // one audit row for the drop: its id after the time, the rows, and who
     let rows = session
         .query_unpaged(
             format!(
@@ -384,8 +382,8 @@ async fn execute_needs_confirm_without_a_terminal_and_records_each_drop() {
         .expect("typed rows")
         .map(|row| row.expect("a row"))
         .collect::<Vec<_>>();
-    assert_eq!(found.len(), 2, "{found:?}");
-    let mut recorded = found
+    assert_eq!(found.len(), 1, "{found:?}");
+    let recorded = found
         .iter()
         .map(|(id, value, lease)| {
             let object = id
@@ -400,11 +398,8 @@ async fn execute_needs_confirm_without_a_terminal_and_records_each_drop() {
             )
         })
         .collect::<Vec<_>>();
-    recorded.sort();
-    assert_eq!(recorded[0].0, "scylla:entities_by_name");
-    assert_eq!(recorded[0].1, "2");
-    assert_eq!(recorded[1].0, "scylla:events");
-    assert_eq!(recorded[1].1, "3");
+    assert_eq!(recorded[0].0, "scylla:events");
+    assert_eq!(recorded[0].1, "3");
     assert!(
         recorded.iter().all(|(.., who)| who.starts_with("tester@")),
         "{recorded:?}"
@@ -435,13 +430,21 @@ async fn refusals_exit_1_and_drop_nothing() {
         "{}",
         stderr(&output)
     );
+    // the view that came back is declared again, so it refuses like any declared object
+    let output = refused(&["scylla:entities_by_name"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("scylla:entities_by_name is a declared object; refusing."),
+        "{}",
+        stderr(&output)
+    );
     // an id nothing registers lists the registered ones
     let output = refused(&["scylla:tools"]);
     assert_eq!(output.status.code(), Some(1));
     assert!(
         stderr(&output).contains(
             "scylla:tools is not a registered legacy object. Registered: scylla:events, \
-             scylla:entities_by_name, scylla:commits, scylla:commits_list, scylla:cursors, \
+             scylla:commits, scylla:commits_list, scylla:cursors, \
              scylla:simple_cursors, scylla:workers, scylla:exports, scylla:export_errors, \
              scylla:export_error_ids."
         ),

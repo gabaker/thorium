@@ -17,9 +17,6 @@ use thoradm::backup::coverage::{Registry, Store};
 /// The components these tests back up: every table component and Redis, without objects
 const COMPONENTS: &str = "no-s3";
 
-/// The view only keyspaces older releases created hold
-const LEGACY_VIEW: &str = "entities_by_name";
-
 /// Returns the names of the namespace's materialized views, sorted
 ///
 /// # Arguments
@@ -109,9 +106,9 @@ fn restore(harness: &Harness, backup: &Path, report_dir: Option<&Path>) -> Outpu
     command.output().expect("failed to run thoradm")
 }
 
-/// A restore drops every declared view of the tables it loads, and never the legacy view only
-/// older keyspaces hold, and its `schema apply` creates them again, so the same views exist
-/// afterwards, no view statements are saved, and the API serves a sample without a restart
+/// A restore drops every declared view of the tables it loads and its `schema apply` creates
+/// them again, so the same views exist afterwards, no view statements are saved, and the API
+/// serves a sample without a restart
 #[tokio::test]
 async fn declared_views_are_dropped_and_recreated_by_the_restore() {
     // a sample, and the namespace's views before the restore
@@ -124,18 +121,17 @@ async fn declared_views_are_dropped_and_recreated_by_the_restore() {
         .partition(|(_, legacy)| *legacy);
     let declared: Vec<&str> = declared.into_iter().map(|(name, _)| name).collect();
     let legacy: Vec<&str> = legacy.into_iter().map(|(name, _)| name).collect();
-    // a fresh install holds exactly the declared views
-    assert_eq!(before.len(), 12, "{before:?}");
-    assert_eq!(declared.len(), 12, "{declared:?}");
-    assert_eq!(legacy, [LEGACY_VIEW]);
-    assert!(!before.contains(&LEGACY_VIEW.to_owned()), "{before:?}");
+    // a fresh install holds exactly the declared views, and no view is legacy today
+    assert_eq!(before.len(), 13, "{before:?}");
+    assert_eq!(declared.len(), 13, "{declared:?}");
+    assert!(legacy.is_empty(), "{legacy:?}");
     // restore into the emptied target, the API running all along
     empty_target(harness).await;
     let report = backup.parent().unwrap().join("report");
     let restored = restore(harness, &backup, Some(&report));
     assert_eq!(restored.status.code(), Some(0), "{}", describe(&restored));
     let stderr = String::from_utf8_lossy(&restored.stderr);
-    // the same views exist, every declared one was dropped, and the legacy one never was
+    // the same views exist, and every declared one was dropped
     assert_eq!(views(harness).await, before);
     let ns = &harness.conf.thorium.namespace;
     for view in &declared {
@@ -144,10 +140,6 @@ async fn declared_views_are_dropped_and_recreated_by_the_restore() {
             "{view} wasn't dropped:\n{stderr}"
         );
     }
-    assert!(
-        !stderr.contains(&format!("Dropped view {ns}.{LEGACY_VIEW}")),
-        "the legacy view was dropped:\n{stderr}"
-    );
     // no statements were saved
     assert!(
         !report.join("views.cql").exists(),
@@ -160,50 +152,29 @@ async fn declared_views_are_dropped_and_recreated_by_the_restore() {
     assert!(stderr.contains("no API restart is needed"), "{stderr}");
 }
 
-/// A restore into a keyspace an older release created leaves its legacy view in place and never
-/// drops it, and a restore into a keyspace without it doesn't create it
+/// A restore into a keyspace an older release created treats the re-declared `entities_by_name`
+/// view like every other declared view: the older keyspace's copy has the declared shape, so the
+/// restore drops and recreates it and the view exists afterwards
 #[tokio::test]
-async fn the_legacy_view_is_kept_where_it_exists_and_never_created() {
-    // a backup of a fresh install, which lacks the legacy view
+async fn the_re_declared_view_is_recreated_in_older_keyspaces() {
+    // a backup of a fresh install, which declares the view
     let harness = Harness::get().await;
     let _guard = harness.restore_guard().await;
     let (backup, _) = seeded_backup(harness, "legacy-view").await;
-    assert!(
-        !views(harness).await.contains(&LEGACY_VIEW.to_owned()),
-        "a fresh install holds {LEGACY_VIEW}"
-    );
-    // a restore into a keyspace without the view succeeds and doesn't create it
-    empty_target(harness).await;
-    let restored = restore(harness, &backup, None);
-    assert_eq!(restored.status.code(), Some(0), "{}", describe(&restored));
-    assert!(!views(harness).await.contains(&LEGACY_VIEW.to_owned()));
-    // a restore into a keyspace an older release created, which holds the view, keeps it
+    let view = "entities_by_name".to_owned();
+    assert!(views(harness).await.contains(&view));
+    // shape the target like a keyspace an older release created, which already holds the view
     empty_target(harness).await;
     common::legacy::create_entities_by_name(harness).await;
     let restored = restore(harness, &backup, None);
-    let after = views(harness).await;
-    // drop the view again whatever happened, so later tests see a fresh install
-    if after.contains(&LEGACY_VIEW.to_owned()) {
-        harness
-            .scylla()
-            .await
-            .query_unpaged(
-                format!(
-                    "DROP MATERIALIZED VIEW IF EXISTS {}.{LEGACY_VIEW}",
-                    harness.conf.thorium.namespace
-                ),
-                &[],
-            )
-            .await
-            .expect("failed to drop the legacy view");
-    }
     assert_eq!(restored.status.code(), Some(0), "{}", describe(&restored));
-    assert!(after.contains(&LEGACY_VIEW.to_owned()), "{after:?}");
-    // the legacy view was never dropped
+    // the view was dropped and recreated like every declared view
+    let after = views(harness).await;
+    assert!(after.contains(&view), "{after:?}");
     let stderr = String::from_utf8_lossy(&restored.stderr);
     let ns = &harness.conf.thorium.namespace;
     assert!(
-        !stderr.contains(&format!("Dropped view {ns}.{LEGACY_VIEW}")),
-        "the legacy view was dropped:\n{stderr}"
+        stderr.contains(&format!("Dropped view {ns}.{view}")),
+        "the re-declared view wasn't dropped:\n{stderr}"
     );
 }

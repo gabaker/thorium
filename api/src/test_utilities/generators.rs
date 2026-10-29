@@ -12,7 +12,9 @@ use crate::client::{ClientSettings, Users};
 use crate::models::entities::network_activity::{
     NetConState, NetworkConnection, TransportLayerProtocol,
 };
-use crate::models::entities::rules::{SigmaActionToTake, SigmaAutoFlag};
+use crate::models::entities::rules::{
+    SigmaActionToTake, SigmaAutoFlag, YaraActionToTake, YaraAutoFlag,
+};
 use crate::models::{
     AgentConfig, AgentEntityRequest, AgenticTool, AgenticToolBacking, AllowedEndpoint,
     CredentialKind, EntityUpdate, HarnessCapabilities, HarnessSpec, K8sEnvironment,
@@ -30,15 +32,16 @@ use crate::models::{
     EphemeralDependencySettings, FileSystemEntity, FileSystemFolderEntity, FilesHandler, Flag,
     GenericJobArgs, GroupAllowed, GroupRequest, GroupUpdate, GroupUsersRequest, GroupUsersUpdate,
     ImageLifetime, ImageRequest, ImageScaler, IncidentRequest, IpBlock, IpBlockRaw, Ipv4Block,
-    Ipv6Block, KwargDependency, NetworkPolicyCustomK8sRule, NetworkPolicyCustomLabel,
-    NetworkPolicyPort, NetworkPolicyRequest, NetworkPolicyRuleRaw, NetworkProtocol,
-    NodeRegistration, OriginRequest, OutputCollection, OutputDisplayType, PeImportEntity,
-    PeSectionEntity, Pipeline, PipelineRequest, Pools, ReactionCreation, ReactionRequest,
-    RepoCheckout, RepoDependencySettings, RepoRequest, Resources, ResourcesRequest,
-    ResultDependencySettings, SampleDependencySettings, SampleRequest, ScopedTokenRequest,
-    SigmaRule, SigmaRuleAppliesTo, StageLogsAdd, ToolEntityRequest, ToolSpec, ToolVersion,
-    UserCreate, UserRole, VendorEntityRequest, Volume, VolumeTypes, WindowsProcessEntity,
-    WindowsProcessTreeEntity, WorkerDeleteMap, WorkerRegistrationList,
+    Ipv6Block, KwargDependency, MatchedRule, MatchedString, NetworkPolicyCustomK8sRule,
+    NetworkPolicyCustomLabel, NetworkPolicyPort, NetworkPolicyRequest, NetworkPolicyRuleRaw,
+    NetworkProtocol, NodeRegistration, OriginRequest, OutputCollection, OutputDisplayType,
+    PeImportEntity, PeSectionEntity, Pipeline, PipelineRequest, Pools, ReactionCreation,
+    ReactionRequest, RepoCheckout, RepoDependencySettings, RepoRequest, Resources,
+    ResourcesRequest, ResultDependencySettings, SampleDependencySettings, SampleRequest,
+    ScopedTokenRequest, SigmaRule, SigmaRuleAppliesTo, StageLogsAdd, ToolEntityRequest, ToolSpec,
+    ToolVersion, UserCreate, UserRole, VendorEntityRequest, Volume, VolumeTypes,
+    WindowsProcessEntity, WindowsProcessTreeEntity, WorkerDeleteMap, WorkerRegistrationList,
+    YaraRule, YaraRuleAppliesTo, YaraRuleHit,
 };
 use crate::models::{
     BareMetalEnvironment, InstancedAgent, InstancedTool, InstancedToolBinding, KvmEnvironment,
@@ -159,21 +162,21 @@ pub async fn users(cnt: usize, client: &Thorium) -> Result<Vec<String>, Error> {
     Ok(usernames)
 }
 
+/// Create a fresh user with a specific role and return a client logged in as them
+///
+/// # Arguments
+///
+/// * `client` - The client to get a host string from when creating this user
+/// * `role` - The role the new user should hold
 #[allow(dead_code)]
-pub async fn client(client: &Thorium) -> Result<Thorium, Error> {
+pub async fn client_with_role(client: &Thorium, role: UserRole) -> Result<Thorium, Error> {
     // generate username and password
     let username = gen_string(24);
     let password = gen_string(64);
     // build user create blueprint
     let bp = UserCreate::new(&username, &password, "fake@fake.gov")
         .skip_verification()
-        .role(UserRole::Developer {
-            k8s: true,
-            bare_metal: true,
-            windows: true,
-            kvm: false,
-            external: true,
-        });
+        .role(role);
     // use default client settings
     let settings = ClientSettings::default();
     // get our secret key
@@ -185,6 +188,27 @@ pub async fn client(client: &Thorium) -> Result<Thorium, Error> {
         .basic_auth(username, password)
         .build()
         .await
+}
+
+/// Create a fresh non-admin (Developer role) user and return a client as them
+///
+/// # Arguments
+///
+/// * `client` - The client to get a host string from when creating this user
+#[allow(dead_code)]
+pub async fn client(client: &Thorium) -> Result<Thorium, Error> {
+    // build a client for a fresh developer role user
+    client_with_role(
+        client,
+        UserRole::Developer {
+            k8s: true,
+            bare_metal: true,
+            windows: true,
+            kvm: false,
+            external: true,
+        },
+    )
+    .await
 }
 
 /// Create a new user that is a member of the given groups and build a client for them
@@ -1926,6 +1950,75 @@ pub fn gen_sigma_meta() -> EntityMetadataRequest {
     EntityMetadataRequest::SigmaRule(rule)
 }
 
+/// A minimal, valid yara rule used to generate yara rule entities in tests
+const TEST_YARA_RULE: &str = r#"rule ThoriumTest
+{
+    meta:
+        author = "thorium-tests"
+        description = "A test rule that matches a magic marker"
+    strings:
+        $marker = "thorium-yara-test-marker"
+    condition:
+        $marker
+}
+"#;
+
+/// Generate metadata for a yara rule entity
+#[allow(dead_code)]
+#[must_use]
+pub fn gen_yara_meta() -> EntityMetadataRequest {
+    // build a yara rule from our test rule
+    let rule = YaraRule::new(TEST_YARA_RULE, YaraRuleAppliesTo::Samples)
+        .expect("failed to build test yara rule");
+    // build our yara rule metadata request
+    EntityMetadataRequest::YaraRule(rule)
+}
+
+/// Generate metadata for a rule set entity
+///
+/// # Arguments
+///
+/// * `rules` - The ids of the rule entities to add as members
+#[allow(dead_code)]
+#[must_use]
+pub fn gen_ruleset_meta(rules: Vec<Uuid>) -> EntityMetadataRequest {
+    // build our rule set metadata request
+    EntityMetadataRequest::RuleSet(crate::models::RuleSetRequest::new(rules))
+}
+
+/// Generate metadata for a yara rule hit entity
+///
+/// # Arguments
+///
+/// * `rule_id` - The id of the yara rule entity that produced this hit
+/// * `sha256` - The sha256 of the sample this hit is for
+#[allow(dead_code)]
+#[must_use]
+pub fn gen_yara_hit_meta(rule_id: Uuid, sha256: impl Into<String>) -> EntityMetadataRequest {
+    // build a matched string for this hit
+    let matched_string = MatchedString {
+        id: "$marker".to_owned(),
+        count: 1,
+        first_offsets: vec![0],
+    };
+    // build a matched rule for this hit
+    let matched = MatchedRule {
+        rule_identifier: "ThoriumUnitTest".to_owned(),
+        strings: vec![matched_string],
+    };
+    // build our yara rule hit metadata request
+    EntityMetadataRequest::YaraRuleHit(YaraRuleHit {
+        rule_id,
+        sha256: sha256.into(),
+        rule_name: gen_string(12),
+        rule_hash: gen_string(64),
+        ruleset_hash: gen_string(64),
+        engine_version: "yara-x 1.21.0".to_owned(),
+        scanned_at: chrono::Utc::now(),
+        matched: vec![matched],
+    })
+}
+
 /// Generate metadata for a random network connection entity
 #[allow(dead_code)]
 #[must_use]
@@ -2295,6 +2388,28 @@ pub fn gen_sigma_update(_existing: &Entity) -> EntityMetadataUpdate {
         add_applies_to: vec![SigmaRuleAppliesTo::NetworkConnections],
         remove_applies_to: vec![SigmaRuleAppliesTo::WindowsProcesses],
         add_actions: vec![SigmaActionToTake::Flag(SigmaAutoFlag {
+            confidence: Confidence::Likely,
+            content: Some(gen_string(gen_int!(4, 16))),
+            reasoning: gen_string(gen_int!(8, 32)),
+        })],
+        remove_actions: std::collections::BTreeSet::new(),
+    }
+}
+
+/// Generate a yara rule metadata update touching every yara-specific field
+///
+/// Yara rules only apply to samples today so there is no second applies-to
+/// variant to add or remove in this update.
+#[allow(dead_code)]
+#[must_use]
+pub fn gen_yara_update(_existing: &Entity) -> EntityMetadataUpdate {
+    // build a yara rule update that changes the rule, score, and actions
+    EntityMetadataUpdate::YaraRule {
+        yara_rule: Some(TEST_YARA_RULE.to_owned()),
+        score: Some(gen_int!(1, 100)),
+        add_applies_to: Vec::new(),
+        remove_applies_to: Vec::new(),
+        add_actions: vec![YaraActionToTake::Flag(YaraAutoFlag {
             confidence: Confidence::Likely,
             content: Some(gen_string(gen_int!(4, 16))),
             reasoning: gen_string(gen_int!(8, 32)),

@@ -416,6 +416,9 @@ fn build_specs(manifest: &mut ToolboxManifestV2, summary: &mut ConvertSummary) {
                         label: None,
                     })
                 });
+                // sort the spec's maps so written manifests stay byte-stable: yara-x's
+                // preserve_order feature makes serde_json maps insertion-ordered
+                spec.sort_all_objects();
                 // the spec replaces the legacy config the version remembered
                 if let Some(version) = manifest
                     .tools

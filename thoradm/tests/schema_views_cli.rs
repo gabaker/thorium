@@ -468,7 +468,7 @@ async fn verify_views_exits_0_when_every_view_is_in_step() {
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     let report: Value = serde_json::from_slice(&output.stdout).expect("the report is JSON");
     let views = report["views"].as_array().expect("views");
-    assert_eq!(views.len(), 12);
+    assert_eq!(views.len(), 13);
     assert!(
         views
             .iter()

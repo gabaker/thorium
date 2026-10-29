@@ -466,6 +466,22 @@ async fn run_moves_names_and_changes_nothing_else() {
     world.drop_keyspace().await;
 }
 
+/// A run on the schema an upgrade from `2026-10-v03` holds while its conversions run, without the
+/// objects `2026-10-v05` adds, moves the same names
+#[tokio::test]
+async fn run_moves_names_before_the_later_objects_exist() {
+    // build a keyspace at the schema of the revision the upgrade starts from
+    let world = World::new_at("mp_v03", "2026-10-v03").await;
+    // seed one row of each shape the migration meets
+    seed_all(&world).await;
+    // run the pass and expect the same names moved and the same issues raised
+    let out = run(&world, 100).await.expect("the pass runs");
+    assert_eq!(out.status, MigrationRunStatus::DoneWithIssues);
+    assert_eq!(out.counts.written, 3, "{:?}", out.counts);
+    // remove the test's keyspace
+    world.drop_keyspace().await;
+}
+
 /// Running again finds nothing to move, writes nothing, and leaves every row as it was
 #[tokio::test]
 async fn a_rerun_finds_nothing_to_do() {

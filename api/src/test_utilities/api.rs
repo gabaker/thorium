@@ -11,9 +11,16 @@ use std::{sync::LazyLock, time::Duration};
 use tokio::sync::OnceCell;
 use tokio_util::time::FutureExt;
 
+use chrono::Datelike;
+
 use crate::models::schema::{ApplyOptions, ApplyTarget, apply, connect};
-use crate::utils::StartupOpts;
-use crate::{Conf, Error, Thorium, client::ClientSettings, conf::S3, models::AuthResponse};
+use crate::utils::{StartupOpts, helpers};
+use crate::{
+    Conf, Error, Thorium,
+    client::ClientSettings,
+    conf::S3,
+    models::{AuthResponse, EventType, ScanStatsSnapshot, WorkerStatsReport},
+};
 
 /// The path to a valid Thorium config in the testing directory
 ///
@@ -680,6 +687,12 @@ async fn init_s3_buckets(s3_conf: &S3, conf: &Conf) -> Result<(), Error> {
         &conf.thorium.attachments.bucket,
     )
     .await?;
+    init_bucket(
+        &s3_client,
+        lifecycle.clone(),
+        &conf.thorium.yara.cache_bucket,
+    )
+    .await?;
     Ok(())
 }
 
@@ -1072,6 +1085,365 @@ pub async fn release_instance_lock(root: uuid::Uuid) -> Result<(), Error> {
         .await
         .map_err(|err| Error::new(format!("Failed to release the lock: {err}")))?;
     Ok(())
+}
+
+/// Get a hunt lane's checkpoint sequence from the test redis instance
+///
+/// This is test support plumbing for asserting that hunt creation seeded the
+/// per lane checkpoint sequence keys the chunk chains commit through.
+///
+/// # Arguments
+///
+/// * `hunt` - The hunt's entity id
+/// * `lane` - The lane index to read the sequence for
+pub async fn hunt_lane_seq(hunt: &uuid::Uuid, lane: u32) -> Result<Option<i64>, Error> {
+    // build the key to this lanes checkpoint sequence
+    let key = format!(
+        "{ns}:hunts:{hunt}:lane:{lane}:seq",
+        ns = CONF.thorium.namespace
+    );
+    // connect to the test redis instance
+    let redis = get_redis_client(&CONF).await;
+    // get a connection from our pool
+    let mut conn = redis
+        .get()
+        .await
+        .map_err(|err| Error::new(format!("Error getting Redis connection from pool: {err}")))?;
+    // get this lanes sequence if its key exists
+    let seq: Option<i64> = redis::cmd("get")
+        .arg(&key)
+        .query_async(&mut *conn)
+        .await
+        .map_err(|err| Error::new(format!("Error getting hunt lane seq: {err}")))?;
+    Ok(seq)
+}
+
+/// Read one workers published counter report and its TTL from the test redis
+///
+/// This is test support plumbing for asserting the worker stats publish route
+/// upserted a TTL'd counter key: the live stats aggregate route only exposes
+/// reports for registered live workers, while this reads the raw key directly
+/// so publish tests can also assert TTLs and rejected-write absence.
+///
+/// # Arguments
+///
+/// * `kind` - The kind of events the report covers
+/// * `worker` - The worker that published the report
+pub async fn worker_stats_report(
+    kind: EventType,
+    worker: &str,
+) -> Result<Option<(WorkerStatsReport, i64)>, Error> {
+    // build the key to this workers counter report
+    let key = format!(
+        "{ns}:event-handler:stats:{kind}:{worker}",
+        ns = CONF.thorium.namespace
+    );
+    // connect to the test redis instance
+    let redis = get_redis_client(&CONF).await;
+    // get a connection from our pool
+    let mut conn = redis
+        .get()
+        .await
+        .map_err(|err| Error::new(format!("Error getting Redis connection from pool: {err}")))?;
+    // get this workers serialized report if its key exists
+    let raw: Option<String> = redis::cmd("get")
+        .arg(&key)
+        .query_async(&mut *conn)
+        .await
+        .map_err(|err| Error::new(format!("Error getting worker stats report: {err}")))?;
+    // bail out early if this report does not exist
+    let Some(raw) = raw else { return Ok(None) };
+    // get this keys remaining time to live
+    let ttl: i64 = redis::cmd("ttl")
+        .arg(&key)
+        .query_async(&mut *conn)
+        .await
+        .map_err(|err| Error::new(format!("Error getting worker stats report ttl: {err}")))?;
+    // parse this workers report
+    let report: WorkerStatsReport = serde_json::from_str(&raw)
+        .map_err(|err| Error::new(format!("Error parsing worker stats report: {err}")))?;
+    Ok(Some((report, ttl)))
+}
+
+/// List the scylla list cursor keys saved in the test redis for one user
+///
+/// This is test support plumbing for asserting when a list saves (or skips
+/// saving) its resumable cursor; cursor keys are scoped under the creating
+/// user so a fresh user scans clean.
+///
+/// # Arguments
+///
+/// * `username` - The user whose scylla cursor keys to list
+pub async fn cursor_keys(username: &str) -> Result<Vec<String>, Error> {
+    // build the pattern this users scylla cursor keys live under
+    let pattern = format!(
+        "{ns}:cursors:Scylla:{username}:*",
+        ns = CONF.thorium.namespace
+    );
+    // connect to the test redis instance
+    let redis = get_redis_client(&CONF).await;
+    // get a connection from our pool
+    let mut conn = redis
+        .get()
+        .await
+        .map_err(|err| Error::new(format!("Error getting Redis connection from pool: {err}")))?;
+    // scan for this users cursor keys across all pages
+    let mut keys = Vec::new();
+    let mut cursor: u64 = 0;
+    loop {
+        // get the next page of matching keys
+        let (next, page): (u64, Vec<String>) = redis::cmd("scan")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg(&pattern)
+            .arg("COUNT")
+            .arg(1_000)
+            .query_async(&mut *conn)
+            .await
+            .map_err(|err| Error::new(format!("Error scanning cursor keys: {err}")))?;
+        keys.extend(page);
+        // a zero cursor means the scan is complete
+        if next == 0 {
+            break;
+        }
+        cursor = next;
+    }
+    Ok(keys)
+}
+
+/// Insert one scan stats snapshot row directly into the test scylla
+///
+/// This is test support plumbing for backfilling history rows at arbitrary
+/// timestamps (including partition and year crossings) without waiting out
+/// real snapshot windows; the partition math mirrors the API's writer.
+///
+/// # Arguments
+///
+/// * `snapshot` - The snapshot row to backfill
+pub async fn insert_scan_stats_row(snapshot: &ScanStatsSnapshot) -> Result<(), Error> {
+    // connect to the test scylla instance
+    let session = get_scylla_client(&CONF).await?;
+    // compute the partition this snapshot lands in exactly like the writer
+    let year = snapshot.snapshot_at.year();
+    let bucket = helpers::partition(
+        snapshot.snapshot_at,
+        year,
+        CONF.thorium.events.stats_partition_size,
+    );
+    // serialize this snapshot like the writer does
+    let serialized = serde_json::to_string(snapshot)
+        .map_err(|err| Error::new(format!("Error serializing scan stats row: {err}")))?;
+    // insert this snapshot row into the test scylla
+    session
+        .query_unpaged(
+            format!(
+                "INSERT INTO {ns}.scan_stats (year, bucket, snapshot_at, data) \
+                VALUES (?, ?, ?, ?)",
+                ns = CONF.thorium.namespace
+            ),
+            (year, bucket, snapshot.snapshot_at, serialized),
+        )
+        .await
+        .map_err(|err| Error::new(format!("Error inserting scan stats row: {err}")))?;
+    Ok(())
+}
+
+/// Delete a hunt lane's checkpoint sequence from the test redis instance
+///
+/// This is test support plumbing for simulating a lost lane sequence key so
+/// the checkpoint route's reseed path can be exercised.
+///
+/// # Arguments
+///
+/// * `hunt` - The hunt's entity id
+/// * `lane` - The lane index to delete the sequence for
+pub async fn delete_hunt_lane_seq(hunt: &uuid::Uuid, lane: u32) -> Result<(), Error> {
+    // build the key to this lanes checkpoint sequence
+    let key = format!(
+        "{ns}:hunts:{hunt}:lane:{lane}:seq",
+        ns = CONF.thorium.namespace
+    );
+    // connect to the test redis instance
+    let redis = get_redis_client(&CONF).await;
+    // get a connection from our pool
+    let mut conn = redis
+        .get()
+        .await
+        .map_err(|err| Error::new(format!("Error getting Redis connection from pool: {err}")))?;
+    // delete this lanes sequence key
+    let _: () = redis::cmd("del")
+        .arg(&key)
+        .query_async(&mut *conn)
+        .await
+        .map_err(|err| Error::new(format!("Error deleting hunt lane seq: {err}")))?;
+    Ok(())
+}
+
+/// Overwrite a hunt lane's checkpoint sequence in the test redis instance
+///
+/// This is test support plumbing for manufacturing the "commit won but its
+/// view persist was lost" state: bump the authoritative sequence past the
+/// entity's persisted view, then checkpoint the old sequence and assert the
+/// 409 loss path still merges its sticky facts.
+///
+/// # Arguments
+///
+/// * `hunt` - The hunt's entity id
+/// * `lane` - The lane index to overwrite the sequence for
+/// * `seq` - The sequence value to store
+pub async fn set_hunt_lane_seq(hunt: &uuid::Uuid, lane: u32, seq: u64) -> Result<(), Error> {
+    // build the key to this lanes checkpoint sequence
+    let key = format!(
+        "{ns}:hunts:{hunt}:lane:{lane}:seq",
+        ns = CONF.thorium.namespace
+    );
+    // connect to the test redis instance
+    let redis = get_redis_client(&CONF).await;
+    // get a connection from our pool
+    let mut conn = redis
+        .get()
+        .await
+        .map_err(|err| Error::new(format!("Error getting Redis connection from pool: {err}")))?;
+    // overwrite this lanes sequence key
+    let _: () = redis::cmd("set")
+        .arg(&key)
+        .arg(seq)
+        .query_async(&mut *conn)
+        .await
+        .map_err(|err| Error::new(format!("Error setting hunt lane seq: {err}")))?;
+    Ok(())
+}
+
+/// Find every pending chunk event for one hunt lane with its queue score
+///
+/// This is test support plumbing for asserting paced emission without popping
+/// through the maturity window: the next chunk event's existence, payload,
+/// count, and future dated score are all read straight off the pending queue.
+///
+/// # Arguments
+///
+/// * `hunt` - The hunt's entity id
+/// * `lane` - The lane index to find the pending chunks for
+pub async fn pending_hunt_chunks(
+    hunt: &uuid::Uuid,
+    lane: u32,
+) -> Result<Vec<(crate::models::Event, i64)>, Error> {
+    // build the key to the yara hunt chunk pending queue
+    let key = format!(
+        "{ns}:event-handler:queue:{kind}",
+        ns = CONF.thorium.namespace,
+        kind = crate::models::EventType::YaraHuntChunk
+    );
+    // connect to the test redis instance
+    let redis = get_redis_client(&CONF).await;
+    // get a connection from our pool
+    let mut conn = redis
+        .get()
+        .await
+        .map_err(|err| Error::new(format!("Error getting Redis connection from pool: {err}")))?;
+    // get every pending member with its score
+    let members: Vec<(String, i64)> = redis::cmd("zrange")
+        .arg(&key)
+        .arg(0)
+        .arg(-1)
+        .arg("WITHSCORES")
+        .query_async(&mut *conn)
+        .await
+        .map_err(|err| Error::new(format!("Error listing pending chunk events: {err}")))?;
+    // gather every chunk event on this hunts lane
+    let mut found = Vec::default();
+    for (member, score) in members {
+        // parse this member as a full event
+        let event: crate::models::Event = serde_json::from_str(&member)
+            .map_err(|err| Error::new(format!("Error parsing pending chunk event: {err}")))?;
+        // keep this member if it is a chunk for our hunt and lane
+        if let crate::models::EventData::YaraHuntChunk(chunk) = &event.data
+            && &chunk.hunt == hunt
+            && chunk.lane == lane
+        {
+            found.push((event, score));
+        }
+    }
+    Ok(found)
+}
+
+/// Wipe the pending yara hunt chunk queue in the test redis instance
+///
+/// This is test support plumbing for cleaning up paced chunk events without
+/// waiting out the pop maturity window; only hunt tests emit chunk events so
+/// wiping the whole queue is safe cleanup.
+pub async fn wipe_hunt_chunk_queue() -> Result<(), Error> {
+    // build the key to the yara hunt chunk pending queue
+    let key = format!(
+        "{ns}:event-handler:queue:{kind}",
+        ns = CONF.thorium.namespace,
+        kind = crate::models::EventType::YaraHuntChunk
+    );
+    // connect to the test redis instance
+    let redis = get_redis_client(&CONF).await;
+    // get a connection from our pool
+    let mut conn = redis
+        .get()
+        .await
+        .map_err(|err| Error::new(format!("Error getting Redis connection from pool: {err}")))?;
+    // drop the whole pending chunk queue
+    let _: () = redis::cmd("del")
+        .arg(&key)
+        .query_async(&mut *conn)
+        .await
+        .map_err(|err| Error::new(format!("Error wiping the chunk queue: {err}")))?;
+    Ok(())
+}
+
+/// Get the pending event queue score for a single event by id
+///
+/// This is test support plumbing for asserting that reclaimed events are
+/// restored at their own body timestamp rather than their lease time. The
+/// pending queue members are serialized event JSON so each member is parsed
+/// and matched on its `id` field.
+///
+/// # Arguments
+///
+/// * `kind` - The kind of event queue to search
+/// * `event_id` - The id of the event whose score to get
+pub async fn pending_event_score(
+    kind: &crate::models::EventType,
+    event_id: &uuid::Uuid,
+) -> Result<Option<i64>, Error> {
+    // build the key to this kinds pending event queue
+    let key = format!(
+        "{ns}:event-handler:queue:{kind}",
+        ns = CONF.thorium.namespace
+    );
+    // connect to the test redis instance
+    let redis = get_redis_client(&CONF).await;
+    // get a connection from our pool
+    let mut conn = redis
+        .get()
+        .await
+        .map_err(|err| Error::new(format!("Error getting Redis connection from pool: {err}")))?;
+    // get every pending member with its score
+    let members: Vec<(String, i64)> = redis::cmd("zrange")
+        .arg(&key)
+        .arg(0)
+        .arg(-1)
+        .arg("WITHSCORES")
+        .query_async(&mut *conn)
+        .await
+        .map_err(|err| Error::new(format!("Error listing pending events: {err}")))?;
+    // render our target id once so each member compare is cheap
+    let target = event_id.to_string();
+    // search each member for our event id
+    for (member, score) in members {
+        // parse this member as loose json since we only need its id
+        let parsed: serde_json::Value = serde_json::from_str(&member)
+            .map_err(|err| Error::new(format!("Error parsing pending event: {err}")))?;
+        // check if this member is our event
+        if parsed.get("id").and_then(|id| id.as_str()) == Some(target.as_str()) {
+            return Ok(Some(score));
+        }
+    }
+    Ok(None)
 }
 
 /// A write-once cell for the admin token, written to when the API is stood up for the first time

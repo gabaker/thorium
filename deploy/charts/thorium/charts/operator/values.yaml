@@ -97,6 +97,8 @@ cluster:
     search_streamer:
       resources: { cpu: 0, memory: 0 }
     event_handler:
+      # the number of event-handler pods; raise it to scan samples with more parallelism
+      replicas: 1
       resources: { cpu: 0, memory: 0 }
   # Auth tokens for tool image registries, as registry host -> base64 of user:password (the
   # ThoriumCluster's registry_auth). While any is set the operator writes them to the

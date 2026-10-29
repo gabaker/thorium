@@ -11,6 +11,8 @@ import PeImportCreateConfig from './PeImportCreateConfig';
 import { Entities, EntityCreateTypeMap, UISupportedEntityCreateKind } from '@models/entities/entities';
 import createEntityCreatePage, { CreateMetadataComponent } from '../EntityCreate';
 import SigmaRuleCreateConfig from './SigmaRuleCreateConfig';
+import YaraRuleCreateConfig from './YaraRuleCreateConfig';
+import RuleSetCreateConfig from './RuleSetCreateConfig';
 
 export type EntityCreateConfig<K extends UISupportedEntityCreateKind> = {
   kind: K;
@@ -26,6 +28,8 @@ export type EntityCreateConfigMap = {
 export const EntitiesCreateConfig = {
   [Entities.Collection]: CollectionCreateConfig,
   [Entities.SigmaRule]: SigmaRuleCreateConfig,
+  [Entities.YaraRule]: YaraRuleCreateConfig,
+  [Entities.RuleSet]: RuleSetCreateConfig,
   [Entities.Device]: DeviceCreateConfig,
   [Entities.Vendor]: VendorCreateConfig,
   [Entities.Flag]: FlagCreateConfig,
@@ -40,6 +44,8 @@ export const EntityCreatePages = {
   [Entities.Collection]: createEntityCreatePage(CollectionCreateConfig),
   [Entities.Device]: createEntityCreatePage(DeviceCreateConfig),
   [Entities.SigmaRule]: createEntityCreatePage(SigmaRuleCreateConfig),
+  [Entities.YaraRule]: createEntityCreatePage(YaraRuleCreateConfig),
+  [Entities.RuleSet]: createEntityCreatePage(RuleSetCreateConfig),
   [Entities.Vendor]: createEntityCreatePage(VendorCreateConfig),
   [Entities.Flag]: createEntityCreatePage(FlagCreateConfig),
   [Entities.Incident]: createEntityCreatePage(IncidentCreateConfig),

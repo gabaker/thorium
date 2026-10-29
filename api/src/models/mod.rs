@@ -56,6 +56,15 @@ pub use entities::devices::{DeviceEntity, DeviceEntityRequest};
 pub use entities::filesystem::{FileSystemEntity, FileSystemEntityBuilder, FileSystemFolderEntity};
 pub use entities::flags::{Confidence, Flag};
 pub use entities::functions::{CompiledFunction, CompiledInstruction, DecompiledFunction};
+pub use entities::hits::{
+    MatchedRule, MatchedString, YaraHitWriteRequest, YaraHitWriteResponse, YaraRuleHit,
+};
+pub use entities::hunts::{
+    Hunt, HuntCheckpoint, HuntCheckpointResponse, HuntCorpus, HuntCorpusBounds,
+    HuntCorpusBoundsRequest, HuntCorpusRequest, HuntCounters, HuntCreateRequest, HuntEngine,
+    HuntLane, HuntQuotaView, HuntRuleLine, HuntRuleListOpts, HuntRuleListParams, HuntSelector,
+    HuntStatus, HuntStatusLine, HuntStatusOpts, HuntStatusParams, HuntSystemStatus, UserHuntCensus,
+};
 pub use entities::incident::{Incident, IncidentRequest};
 pub use entities::models::{
     AWS_CONFIG_FILE, AWS_PROFILE, AgentModelMismatch, CREDENTIALS_DIR, HarnessCredential,
@@ -75,7 +84,8 @@ pub use entities::models::{
 };
 pub use entities::pe::{PeImportEntity, PeSectionEntity};
 pub use entities::processes::{WindowsProcessEntity, WindowsProcessTreeEntity};
-pub use entities::rules::{SigmaRule, SigmaRuleAppliesTo};
+pub use entities::rules::{SigmaRule, SigmaRuleAppliesTo, YaraRule, YaraRuleAppliesTo};
+pub use entities::rulesets::{RuleSet, RuleSetRequest};
 pub use entities::shared::CriticalSector;
 #[cfg(any(feature = "api", feature = "client"))]
 pub use entities::tools::tool_portability_json;
@@ -106,16 +116,18 @@ pub use entities::workflows::{
     WorkflowInstanceStatus, WorkflowInstanceTrigger, WorkflowLimits, WorkflowResultKey,
 };
 pub use entities::{
-    Entity, EntityKinds, EntityListLine, EntityListOpts, EntityListParams, EntityMetadata,
-    EntityMetadataRequest, EntityMetadataUpdate, EntityParentInfo, EntityRequest, EntityResponse,
-    EntityUpdate, GroupPolicy,
+    Entity, EntityByNameParams, EntityKinds, EntityListLine, EntityListOpts, EntityListParams,
+    EntityMetadata, EntityMetadataRequest, EntityMetadataUpdate, EntityParentInfo, EntityRequest,
+    EntityResponse, EntityUpdate, GroupPolicy,
 };
 pub use errors::InvalidEnum;
 pub use events::{
-    Event, EventCacheStatus, EventCacheStatusOpts, EventData, EventIds, EventMarks, EventPeekOpts,
-    EventPopOpts, EventRequest, EventTrigger, EventType, ModelRefreshEvent, ModelRefreshReason,
-    ModelRefreshTarget, SigmaScannableResultsEvent, TriggerPotential, WorkflowGraphChange,
-    WorkflowGraphEvent,
+    Event, EventCacheStatus, EventCacheStatusOpts, EventData, EventDepths, EventIds, EventMarks,
+    EventPeekOpts, EventPopOpts, EventRequest, EventStats, EventTrigger, EventType,
+    EventWorkerOpts, HuntChunkEvent, KindDepth, KindStats, ModelRefreshEvent, ModelRefreshReason,
+    ModelRefreshTarget, ReapSummary, ScanStatsSnapshot, SigmaScannableResultsEvent,
+    StatsHistoryParams, TriggerPotential, WorkerStatsReport, WorkflowGraphChange,
+    WorkflowGraphEvent, YaraSampleScanEvent, YaraScanTrigger, valid_worker_id,
 };
 pub use files::{
     Attachment, Buffer, CartedFile, CarvedOrigin, CarvedOriginTypes, Comment, CommentRequest,

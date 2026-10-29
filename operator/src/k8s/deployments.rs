@@ -444,7 +444,7 @@ fn event_handler_template(meta: &ClusterMeta, host_aliases: &Vec<K8sHostAliases>
             }
         },
         "spec": {
-            "replicas": 1,
+            "replicas": handler_spec.replicas,
             "selector": {
                 "matchLabels": {
                     "app": "event-handler",

@@ -18,6 +18,7 @@ use thorium::client::migrations::{
     MIGRATED_FROM_IMAGE_TAG, MIGRATION_OPERATOR, ToolIdMap, migrated_at,
 };
 use thorium::models::backends::db;
+use thorium::models::schema::queries::ScyllaQueries;
 use thorium::models::schema::{
     Batch, CheckRun, MigrateError, MigrationRunStatus, MigrationRunner, Outcome, PassOutcome,
     PassStore, RunBackends, RunContext, RunMode, RunOptions, Slice, check_pass, run_pass,
@@ -760,6 +761,93 @@ async fn a_run_writes_tools_that_read_back_with_their_images_settings() {
     // a tool made three rows of events, one per tool
     let counts = rows(&world).await;
     assert_eq!(counts["events"], 3, "{counts:?}");
+    world.drop_keyspace().await;
+}
+
+/// The revision an upgrade to `2026-10-v05` can start from whose schema lacks the objects
+/// `2026-10-v05` adds; its conversions run before the operator applies the image's schema
+const BEFORE_LATER_OBJECTS: &str = "2026-10-v03";
+
+/// Whether the world's keyspace holds a table or view
+///
+/// # Arguments
+///
+/// * `world` - The test world
+/// * `name` - The table or view
+async fn holds(world: &World, name: &str) -> bool {
+    // look for it among the keyspace's tables, then its views
+    for cql in [
+        "SELECT table_name FROM system_schema.tables WHERE keyspace_name = ? AND table_name = ?",
+        "SELECT view_name FROM system_schema.views WHERE keyspace_name = ? AND view_name = ?",
+    ] {
+        let rows = world
+            .session()
+            .query_unpaged(cql, (&world.ns, name))
+            .await
+            .expect("the schema reads")
+            .into_rows_result()
+            .expect("the rows read")
+            .rows_num();
+        if rows > 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// The tool writer starts on a keyspace without the objects a later revision adds, while the
+/// API's own statement preparation still refuses that keyspace
+#[tokio::test]
+async fn the_writer_starts_before_the_later_objects_exist() {
+    // build a keyspace at the schema of the revision the upgrade starts from
+    let world = World::new_at("itt_v03_start", BEFORE_LATER_OBJECTS).await;
+    // the keyspace holds the revision's schema, without what 2026-10-v05 adds
+    assert!(holds(&world, "entities").await);
+    assert!(!holds(&world, "scan_stats").await);
+    assert!(!holds(&world, "entities_by_name").await);
+    // the API prepares every statement, so it can't start on this keyspace
+    let refused = ScyllaQueries::prepare(world.session(), &world.ns)
+        .await
+        .err()
+        .expect("the API's preparation refuses the keyspace");
+    assert!(
+        refused.to_string().contains("unconfigured table"),
+        "{refused}"
+    );
+    // the writer prepares only what the keyspace holds
+    Box::pin(Shared::for_offline_writer(
+        world.conf.clone(),
+        world.backends.redis.clone(),
+    ))
+    .await
+    .expect("the writer starts");
+    world.drop_keyspace().await;
+}
+
+/// A run on the schema an upgrade from `2026-10-v03` holds while its conversions run converts
+/// every image, and the tools read back
+#[tokio::test]
+async fn a_run_converts_images_before_the_later_objects_exist() {
+    // build a keyspace at the schema of the revision the upgrade starts from
+    let world = World::new_at("itt_v03_run", BEFORE_LATER_OBJECTS).await;
+    // seed a group with a member, the shared state the tool reads back through, and one image
+    seed_group(&world, "jupiter", &["io"]).await;
+    let shared = Box::pin(shared(&world)).await;
+    seed_image(&world, &image("jupiter", "alpha")).await;
+    // convert every image and expect the run to finish having written the one tool
+    let out = run(&world, &[], 100).await;
+    assert_eq!(out.status, MigrationRunStatus::Done, "{out:?}");
+    assert_eq!(out.counts.written, 1, "{:?}", out.counts);
+    // the tool reads back as a member of its group
+    let tool = Entity::get(
+        &member("io", "jupiter"),
+        ToolIdMap::tool_id("jupiter", "alpha"),
+        &shared,
+    )
+    .await
+    .expect("the tool reads");
+    assert_eq!(tool.name, "alpha");
+    // remove the test's keyspace
     world.drop_keyspace().await;
 }
 

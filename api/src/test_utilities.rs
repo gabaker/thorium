@@ -17,12 +17,14 @@ use base64::Engine;
 
 use crate::client::Error;
 pub use api::{
-    BootstrapAction, CONF, TEST_CONFIG_VAR, TempBuckets, admin_client, bootstrap_plan,
-    delete_entity_rows, drop_entity_redis_keys, entity_census_exists, entity_rows,
-    get_redis_client, graphic_exists, hold_instance_lock, hold_instance_lock_for, init_bucket,
-    instance_lock_exists, notification_rows, prepare_backends, read_only, redis_pool,
+    BootstrapAction, CONF, TEST_CONFIG_VAR, TempBuckets, admin_client, bootstrap_plan, cursor_keys,
+    delete_entity_rows, delete_hunt_lane_seq, drop_entity_redis_keys, entity_census_exists,
+    entity_rows, get_redis_client, graphic_exists, hold_instance_lock, hold_instance_lock_for,
+    hunt_lane_seq, init_bucket, insert_scan_stats_row, instance_lock_exists, notification_rows,
+    pending_event_score, pending_hunt_chunks, prepare_backends, read_only, redis_pool,
     release_instance_lock, s3_client, scylla_session, set_entity_image, set_entity_kind_data,
-    start_api, test_config_path, use_api_stack_size, wipe_dbs,
+    set_hunt_lane_seq, start_api, test_config_path, use_api_stack_size, wipe_dbs,
+    wipe_hunt_chunk_queue, worker_stats_report,
 };
 
 // expose a blocking admin client for sync tests

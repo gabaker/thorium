@@ -2,9 +2,10 @@ import { JSX, lazy } from 'react';
 
 // project imports
 import { buildPathByType } from '@entities/shared/routePaths';
-import { Entities, ExtendedTypeMap } from '@models/entities';
+import { Entities } from '@models/entities';
 
 const FileUpload = lazy(async () => await import('./override_pages/FileUpload'));
+const HuntCreate = lazy(async () => await import('./override_pages/HuntCreate'));
 
 export const EntityCreateRoutes: Record<string, { type: Entities; override_page?: React.LazyExoticComponent<() => JSX.Element> }> = {
   '/create/collection': { type: Entities.Collection },
@@ -21,6 +22,10 @@ export const EntityCreateRoutes: Record<string, { type: Entities; override_page?
   '/create/files': { type: Entities.File, override_page: FileUpload },
   '/create/flag': { type: Entities.Flag },
   '/create/flags': { type: Entities.Flag },
+  // hunts create through their dedicated JSON route, so an override page replaces the
+  // generic multipart create factory
+  '/create/hunt': { type: Entities.Hunt, override_page: HuntCreate },
+  '/create/hunts': { type: Entities.Hunt, override_page: HuntCreate },
   '/create/incident': { type: Entities.Incident },
   '/create/incidents': { type: Entities.Incident },
   '/create/function/compiled': { type: Entities.CompiledFunction },
@@ -33,12 +38,16 @@ export const EntityCreateRoutes: Record<string, { type: Entities; override_page?
   '/create/pe/imports': { type: Entities.PeImport },
   '/create/rule/sigma': { type: Entities.SigmaRule },
   '/create/rules/sigma': { type: Entities.SigmaRule },
+  '/create/rule/yara': { type: Entities.YaraRule },
+  '/create/rules/yara': { type: Entities.YaraRule },
+  '/create/ruleset': { type: Entities.RuleSet },
+  '/create/rulesets': { type: Entities.RuleSet },
   '/create/vendor': { type: Entities.Vendor },
   '/create/vendors': { type: Entities.Vendor },
 };
 
 export const EntityCreatePathByType: Partial<Record<Entities, string>> = buildPathByType(EntityCreateRoutes, (config) => config.type);
 
-export function getCreatePathByEntity(entity: keyof ExtendedTypeMap): string | undefined {
+export function getCreatePathByEntity(entity: Entities): string | undefined {
   return EntityCreatePathByType[entity];
 }

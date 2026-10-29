@@ -1,7 +1,7 @@
 import { JSX } from 'react';
 
 // project imports
-import { MetadataComponent } from '../EntityDetails';
+import { MetadataComponent, SectionComponent } from '../EntityDetails';
 import { getEntity } from '@thorpi/entities';
 import { EntityTypeMap } from '@models/entities';
 
@@ -17,6 +17,21 @@ export type EntityDetailsConfig<T extends keyof EntityTypeMap> = {
   BlankEntity: EntityTypeMap[T];
   icon: (size: number) => JSX.Element;
   supportsGraphic?: boolean;
+  /**
+   * Optional replacement for the Associations graph card at the bottom of the details page.
+   *
+   * When set, the component owns the whole section (its own card and title) and the
+   * association graph (and its tree data fetching) is never mounted for this kind.
+   */
+  AssociationsSection?: SectionComponent<T>;
+  /**
+   * Auto-refetch the entity while this returns a millisecond interval; null stops polling.
+   *
+   * Re-derived from each freshly fetched entity (so a kind can poll only while it is in an
+   * active state, e.g. a Running hunt), paused during editing so a landing refetch never
+   * clobbers pending edits, and cleared on unmount.
+   */
+  refetchIntervalMs?: (entity: EntityTypeMap[T]) => number | null;
 };
 
 /**

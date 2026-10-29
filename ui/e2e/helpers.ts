@@ -101,13 +101,27 @@ export async function authenticate(username: string, password: string): Promise<
   return res.data?.Authed?.token ?? res.data?.token;
 }
 
+// Theme lives in the API user object (no localStorage): the UI applies the stored theme
+// after login, so capture runs set it via the API and restore the prior value when done.
+export async function getUserTheme(token: string): Promise<string> {
+  const client = buildClient(token);
+  const res = await client.get('/users/whoami');
+  return res.data?.settings?.theme ?? 'Automatic';
+}
+
+export async function setUserTheme(token: string, theme: string): Promise<void> {
+  const client = buildClient(token);
+  await client.patch('/users/', { settings: { theme } });
+}
+
 export async function createEntity(token: string, name: string, kind: string, groups: string[]): Promise<string> {
   const client = buildClient(token);
   const form = new FormData();
   form.set('name', name);
   form.set('kind', kind);
   for (const group of groups) {
-    form.append('groups', group);
+    // the entity multipart parser requires the [] suffix on list fields
+    form.append('groups[]', group);
   }
   const res = await client.post('/entities/', form);
   return res.data.id;
@@ -125,7 +139,8 @@ export async function createEntityWithImage(
   form.set('name', name);
   form.set('kind', kind);
   for (const group of groups) {
-    form.append('groups', group);
+    // the entity multipart parser requires the [] suffix on list fields
+    form.append('groups[]', group);
   }
   form.set('image', new Blob([image.data], { type: image.contentType }), image.filename);
   const res = await client.post('/entities/', form);
@@ -174,7 +189,8 @@ export async function createEntityWithMetadata(
   form.set('name', name);
   form.set('kind', kind);
   for (const group of groups) {
-    form.append('groups', group);
+    // the entity multipart parser requires the [] suffix on list fields
+    form.append('groups[]', group);
   }
   for (const { key, value } of metadata) {
     const str = typeof value === 'string' ? value : String(value);
@@ -192,6 +208,81 @@ export async function createEntityWithMetadata(
 export async function deleteEntity(token: string, id: string): Promise<void> {
   const client = buildClient(token);
   await client.delete(`/entities/${id}`);
+}
+
+/**
+ * Create a group via `POST /groups/` (204). Lets specs seed into a dedicated throwaway
+ * group so hunts over the group's corpus see exactly the spec's samples.
+ */
+export async function createGroupViaAPI(token: string, name: string): Promise<boolean> {
+  const client = buildClient(token);
+  const res = await client.post('/groups/', { name });
+  return res.status === 204;
+}
+
+/** Delete a group by name via `DELETE /groups/{group}` (204). */
+export async function deleteGroupViaAPI(token: string, name: string): Promise<boolean> {
+  const client = buildClient(token);
+  const res = await client.delete(`/groups/${name}`);
+  return res.status === 204;
+}
+
+/**
+ * Delete one submission of a sample via `DELETE /files/sample/{sha256}/{submission}` —
+ * sample deletion is per-submission; a bare-sha delete is a 405.
+ */
+export async function deleteSubmission(token: string, sha256: string, submission: string): Promise<void> {
+  const client = buildClient(token);
+  await client.delete(`/files/sample/${sha256}/${submission}`);
+}
+
+/**
+ * List entity ids of a kind filtered by one tag pair via `GET /entities/`
+ * (`kinds[]=<kind>&tags[<key>][]=<value>`), for cleanup of machine-written entities.
+ *
+ * Walks the API's opaque pagination cursor (pass the returned `cursor` back in to fetch
+ * the next page; an absent cursor means exhausted — the same contract as the thorpi
+ * `listEntities` wrapper) so cleanup sees every match, not just the first page of 100.
+ */
+export async function listEntityIdsByTag(token: string, kind: string, tagKey: string, tagValue: string): Promise<string[]> {
+  const client = buildClient(token);
+  const ids: string[] = [];
+  let cursor: string | undefined;
+  // safety cap of 50 pages (5000 ids at limit 100) so a buggy/cycling cursor can never
+  // spin a cleanup sweep forever
+  for (let page = 0; page < 50; page++) {
+    const params: Record<string, unknown> = { kinds: [kind], tags: { [tagKey]: [tagValue] }, limit: 100 };
+    // pass the previous page's cursor back in to fetch the following page
+    if (cursor) params.cursor = cursor;
+    const res = await client.get('/entities/', { params });
+    const lines: { id: string }[] = res.data?.data ?? [];
+    ids.push(...lines.map((line) => line.id));
+    cursor = res.data?.cursor ?? undefined;
+    // no cursor in the response: every page has been read
+    if (!cursor) break;
+  }
+  return ids;
+}
+
+/** Cancel a hunt via `POST /entities/hunt/{id}/cancel` (204; idempotent), for cleanup. */
+export async function cancelHuntViaAPI(token: string, id: string): Promise<boolean> {
+  const client = buildClient(token);
+  const res = await client.post(`/entities/hunt/${id}/cancel`);
+  return res.status === 204;
+}
+
+/**
+ * Create a yara hunt over an explicit rule list via the dedicated JSON route
+ * (`POST /entities/hunt/`), for specs that exercise hunt details without driving the
+ * create form. The corpus is left to its defaults (the groups' files up to creation),
+ * so seeding into an empty dedicated group makes the hunt complete without scanning.
+ *
+ * @returns The created hunt entity's UUID.
+ */
+export async function createHuntViaAPI(token: string, name: string, groups: string[], ruleIds: string[]): Promise<string> {
+  const client = buildClient(token);
+  const res = await client.post('/entities/hunt/', { name, groups, engine: 'yara', selector: { Rules: ruleIds } });
+  return res.data.id;
 }
 
 export async function uploadFile(

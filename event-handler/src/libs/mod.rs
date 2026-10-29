@@ -2,6 +2,8 @@
 
 mod cache;
 mod controller;
+mod heartbeat;
+mod identity;
 mod stats;
 pub mod workers;
 

@@ -17,6 +17,18 @@ thorium:
     bucket: "<BUCKET>"
   repos:
     bucket: "<BUCKET>"
+  # tiny worker reclaim knobs so the reap/backstop integration tests run in
+  # seconds; these only matter to tests that call the reap/depths routes
+  events:
+    heartbeat_secs: 1
+    worker_expiry_secs: 3
+    in_flight_backstop_secs: 4
+    # tiny snapshot windows so the gate and history tests run in seconds, with
+    # partitions a few windows wide so ranged reads cross partition boundaries
+    stats_snapshot_secs: 2
+    stats_partition_size: 10
+  yara:
+    cache_bucket: "testing-thorium-yara-rulesets"
   s3:
     access_key: "<ACCESS_KEY>"
     secret_token: "<SECRET_TOKEN>"

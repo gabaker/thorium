@@ -120,6 +120,18 @@ pub enum AssociationKind {
     Includes,
     /// This harness tool instance provides this native agentic tool instance
     Provides,
+    /// A yara rule hit against a sample or repo
+    YaraRuleHit,
+    /// A rule that is a member of a rule set
+    ///
+    /// This is appended at the end to keep the discriminant order of the
+    /// existing variants stable for rkyv archived backups.
+    RuleSetMember,
+    /// A hunt hit this finding entity
+    ///
+    /// This is appended at the end to keep the discriminant order of the
+    /// existing variants stable for rkyv archived backups.
+    HuntHit,
 }
 
 impl std::fmt::Display for AssociationKind {
@@ -205,6 +217,9 @@ impl AssociationKind {
             | Self::FlagFor
             | Self::CreatedBy
             | Self::SigmaRuleHit
+            | Self::YaraRuleHit
+            | Self::RuleSetMember
+            | Self::HuntHit
             | Self::InvolvedIn => false,
         }
     }
@@ -248,6 +263,9 @@ impl AssociationKind {
             AssociationKind::BuiltFrom => "BuiltFrom",
             AssociationKind::Includes => "Includes",
             AssociationKind::Provides => "Provides",
+            AssociationKind::YaraRuleHit => "YaraRuleHit",
+            AssociationKind::RuleSetMember => "RuleSetMember",
+            AssociationKind::HuntHit => "HuntHit",
         }
     }
 
@@ -331,6 +349,9 @@ impl AssociationKind {
             | Self::FlagFor
             | Self::CreatedBy
             | Self::SigmaRuleHit
+            | Self::YaraRuleHit
+            | Self::RuleSetMember
+            | Self::HuntHit
             | Self::InvolvedIn => true,
         }
     }
@@ -417,6 +438,10 @@ impl From<(EntityKinds, EntityKinds)> for AssociationKind {
             ) => Self::ChildProcess,
             (EntityKinds::FileSystem, EntityKinds::Folder) => Self::FolderIn,
             (EntityKinds::SigmaRule, EntityKinds::Flag) => Self::CreatedBy,
+            // yara rules create their hit entities
+            (EntityKinds::YaraRule, EntityKinds::YaraRuleHit) => Self::CreatedBy,
+            // hunts hit their finding entities
+            (EntityKinds::Hunt, EntityKinds::YaraRuleHit) => Self::HuntHit,
             (EntityKinds::Flag, _) => Self::FlagFor,
             (EntityKinds::Vendor, EntityKinds::Device) => Self::DevelopedBy,
             (EntityKinds::Incident | EntityKinds::Other, _) | (_, EntityKinds::Other) => {

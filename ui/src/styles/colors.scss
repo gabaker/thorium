@@ -273,6 +273,13 @@ $snl-black-0: tint($snl-black, 25%);
   --thorium-nav-text: var(--thorium-text);
   --thorium-link-text: #{$snl-medium-blue-600};
   --thorium-link-text-alt: #{$snl-medium-blue-200};
+  // Chart series (fixed categorical order; validated against the dark panel surface)
+  --thorium-series-1: #3987e5;
+  --thorium-series-2: #d95926;
+  --thorium-series-3: #199e70;
+  --thorium-series-4: #c98500;
+  --thorium-series-5: #8f73e5;
+  --thorium-series-6: #e05fa6;
   // Panels
   --thorium-panel-bg: #{$snl-black-100}; // body - 200
   --thorium-secondary-panel-bg: #{$snl-black-0}; // panel - 100 ????
@@ -335,6 +342,13 @@ $snl-black-0: tint($snl-black, 25%);
   --thorium-nav-text: #{$snl-white};
   --thorium-link-text: #{$snl-medium-blue-600};
   --thorium-link-text-alt: #{$snl-medium-blue-800};
+  // Chart series (fixed categorical order; validated against the light panel surface)
+  --thorium-series-1: #2a78d6;
+  --thorium-series-2: #eb6834;
+  --thorium-series-3: #1baf7a;
+  --thorium-series-4: #eda100;
+  --thorium-series-5: #7a5bd6;
+  --thorium-series-6: #cf4f96;
   // Panels
   --thorium-panel-bg: #{$snl-white};
   --thorium-secondary-panel-bg: #{$snl-white-200};

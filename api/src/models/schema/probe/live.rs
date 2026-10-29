@@ -22,7 +22,13 @@ impl LegacyObjects for Registered {
     /// * `name` - The object's name
     fn is_legacy(&self, backend: crate::models::upgrades::SchemaBackend, name: &str) -> bool {
         // the registry holds every object an older release created and this one doesn't declare
-        is_legacy(backend, name)
+        if is_legacy(backend, name) {
+            return true;
+        }
+        // an object this build declares that a recorded revision's snapshot predates is the
+        // declared schema arriving early, not drift: long-lived keyspaces already hold the
+        // re-declared entities_by_name view while their revision's snapshot doesn't list it
+        crate::models::schema::object_added_later(backend, name)
     }
 }
 

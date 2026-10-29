@@ -9,8 +9,8 @@ use thoradm::migrate::fixture;
 use thoradm::migrate::registry::MigrationDef;
 use thorium::Conf;
 use thorium::models::schema::{
-    MigrationRunStatus, PassSpec, PassStore, RunBackends, RunContext, RunLimits, RunMode,
-    SchemaObject, WriterLease, apply_objects,
+    ADDED_OBJECTS, MigrationRunStatus, PassSpec, PassStore, RunBackends, RunContext, RunLimits,
+    RunMode, SchemaObject, WriterLease, apply_objects,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -37,7 +37,7 @@ impl World {
     /// * `suffix` - What makes the test's keyspace unique (lowercase, short)
     pub async fn new(suffix: &str) -> World {
         // only the state tables and the fixture tables
-        World::build(suffix, false).await
+        World::build(suffix, false, None).await
     }
 
     /// Build a world holding the whole declared schema, for the migrations that move real tables
@@ -47,7 +47,19 @@ impl World {
     /// * `suffix` - What makes the test's keyspace unique (lowercase, short)
     pub async fn new_full(suffix: &str) -> World {
         // every declared table and view
-        World::build(suffix, true).await
+        World::build(suffix, true, None).await
+    }
+
+    /// Build a world holding the declared schema as a revision applied it, leaving out the
+    /// objects a later revision added
+    ///
+    /// # Arguments
+    ///
+    /// * `suffix` - What makes the test's keyspace unique (lowercase, short)
+    /// * `revision` - The revision whose schema the keyspace holds
+    pub async fn new_at(suffix: &str, revision: &str) -> World {
+        // every declared table and view the revision's schema created
+        World::build(suffix, true, Some(revision)).await
     }
 
     /// Build a world
@@ -56,7 +68,8 @@ impl World {
     ///
     /// * `suffix` - What makes the test's keyspace unique
     /// * `full` - Whether to create every declared object
-    async fn build(suffix: &str, full: bool) -> World {
+    /// * `revision` - The revision whose schema to create, leaving out what later revisions added
+    async fn build(suffix: &str, full: bool, revision: Option<&str>) -> World {
         // the run's namespace comes from the environment, or is made up for a local run
         let base = super::base_namespace::base_namespace();
         let ns = format!("{base}_{suffix}");
@@ -79,6 +92,14 @@ impl World {
                     object.name.as_str(),
                     "schema_migrations" | "schema_migration_issues"
                 )
+            })
+            .filter(|object| {
+                // an object a later revision added isn't in an older revision's schema
+                !revision.is_some_and(|revision| {
+                    ADDED_OBJECTS.iter().any(|(added, backend, name)| {
+                        object.backend == *backend && object.name == *name && revision < *added
+                    })
+                })
             })
             .collect::<Vec<_>>();
         apply_objects(&session, &conf, &objects, false, "", &|_| ())

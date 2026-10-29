@@ -11,9 +11,12 @@ use crate::models::schema::{CLASSES, DataClass, RevisionSnapshot, SchemaObject, 
 
 /// The ids the registry has held, in order; the registry may only grow, so every id here must
 /// stay, and a new entry is appended here in the same change
+///
+/// The one exception is an object the build starts declaring again, whose guard entry leaves
+/// with the change that declares it: the `entities_by_name` view left when exact-name entity
+/// reads brought it back.
 const GUARD: &[&str] = &[
     "scylla:events",
-    "scylla:entities_by_name",
     "scylla:commits",
     "scylla:commits_list",
     "scylla:cursors",
@@ -122,9 +125,9 @@ fn legacy_registry_is_append_only() {
     assert_eq!(ids[..GUARD.len()], *GUARD);
 }
 
-/// The two exemplars are the `events` table, class `Runtime`, and the `entities_by_name` view,
-/// class `Derived`, both created by `2026-10-v01` and `2026-10-v02` and used by no revision, and
-/// each carries the class and legacy mark the class table gives the same object
+/// The exemplar is the `events` table, class `Runtime`, created by `2026-10-v01` and
+/// `2026-10-v02` and used by no revision, and it carries the class and legacy mark the class
+/// table gives the same object; the re-declared `entities_by_name` view is no longer registered
 #[test]
 fn the_exemplars_carry_their_classes() {
     // the events table
@@ -134,18 +137,13 @@ fn the_exemplars_carry_their_classes() {
     assert_eq!(events.created_by, ["2026-10-v01", "2026-10-v02"]);
     assert_eq!(events.used_by, []);
     assert_eq!(events.id(), "scylla:events");
-    // the entities_by_name view
-    let view = legacy_def(SchemaBackend::Scylla, "entities_by_name").expect("registered");
-    assert_eq!(view.kind, LegacyKind::View);
-    assert_eq!(view.class, DataClass::Derived);
-    assert_eq!(view.created_by, ["2026-10-v01", "2026-10-v02"]);
-    assert_eq!(view.used_by, []);
-    assert_eq!(view.id(), "scylla:entities_by_name");
     // the rest are the objects of releases before the first revision, and lookups agree
-    assert_eq!(LEGACY.len(), 2 + PRE_REVISION.len());
+    assert_eq!(LEGACY.len(), 1 + PRE_REVISION.len());
     assert!(is_legacy(SchemaBackend::Scylla, "events"));
     assert!(!is_legacy(SchemaBackend::Redis, "events"));
     assert!(!is_legacy(SchemaBackend::Scylla, "samples_list"));
+    // the view yara's exact-name reads re-declared left the registry when it came back
+    assert!(!is_legacy(SchemaBackend::Scylla, "entities_by_name"));
     // the class table holds each as a legacy entry of the same class, in the same store kind
     for entry in LEGACY {
         let store = match entry.kind {

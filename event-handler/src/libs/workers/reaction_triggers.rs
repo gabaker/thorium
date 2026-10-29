@@ -1,7 +1,7 @@
 //! The workers for handling reaction trigger events in Thorium
 use chrono::prelude::*;
 use futures_locks::RwLock;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use thorium::models::{
     Event, EventData, EventIds, EventType, ReactionRequest, RepoDependencyRequest, TagType,
@@ -39,6 +39,8 @@ impl std::ops::AddAssign for ReactionTriggerStats {
 pub struct ReactionTriggerWorker {
     /// A shared Thorium client
     thorium: Arc<Thorium>,
+    /// The identity of this event handler process that owns our popped events
+    worker: String,
     /// A shared trigger cache
     triggers: TriggerCache,
     /// The timestamp to retry failed events if there are any
@@ -56,7 +58,7 @@ impl ReactionTriggerWorker {
     /// have been re-checked. A `NewTags` event whose required file/repo data could not be
     /// fetched because of a transient error must not be cleared, since `check` could not
     /// actually evaluate it. Instead it is left in flight so it is retried once our retry
-    /// timestamp passes and `reset_all` requeues it.
+    /// timestamp passes and this workers scoped reset requeues it.
     ///
     /// # Arguments
     ///
@@ -184,8 +186,13 @@ impl ReactionTriggerWorker {
                             }
                         }
                     }
-                    // these events never confirm a trigger, so they never get here
+                    // these events never confirm a trigger, so they never get here: sigma
+                    // and yara scan events are consumed by their own scan workers, hunt
+                    // chunk events by hunt workers, and workflow graph and model refresh
+                    // events by the AI worker
                     EventData::SigmaScannableResults { .. }
+                    | EventData::YaraScannableSample { .. }
+                    | EventData::YaraHuntChunk { .. }
                     | EventData::WorkflowGraph(_)
                     | EventData::ModelRefresh(_) => {
                         continue;
@@ -229,10 +236,10 @@ impl ReactionTriggerWorker {
         event_ids
             .ids
             .extend(filtered.potentials.drain(..).map(|(id, _)| id));
-        // clear all requested events
+        // clear all requested events from our own in flight keys
         self.thorium
             .events
-            .clear(EventType::ReactionTrigger, &event_ids)
+            .clear(EventType::ReactionTrigger, &event_ids, Some(&self.worker))
             .await?;
         Ok(())
     }
@@ -283,10 +290,12 @@ impl EventWorkerSupportCore for ReactionTriggerWorker {
     ///
     /// * `cache` - A cache of all info a worker may need to be created
     /// * `thorium` - A Thorium client
-    async fn new(cache: &EventWorkerCache, thorium: &Arc<Thorium>) -> Self {
+    /// * `worker` - The identity of this event handler process
+    async fn new(cache: &EventWorkerCache, thorium: &Arc<Thorium>, worker: &str) -> Self {
         // build this worker
         ReactionTriggerWorker {
             thorium: thorium.clone(),
+            worker: worker.to_owned(),
             triggers: cache.triggers.clone(),
             retry_ts: Arc::new(RwLock::new(None)),
             event_cache: HashMap::with_capacity(1000),
@@ -320,6 +329,8 @@ impl EventWorkerSupportCore for ReactionTriggerWorker {
             WorkerCacheUpdates::ReactionTriggers(triggers) => self.triggers = triggers,
             WorkerCacheUpdates::Users(users) => self.triggers.users = users,
             WorkerCacheUpdates::SigmaRulesContext(_) => (),
+            // the trigger worker does not care about yara cache updates
+            WorkerCacheUpdates::YaraRulesContext(_) | WorkerCacheUpdates::GroupAllowances(_) => (),
         }
     }
 
@@ -343,6 +354,20 @@ impl EventWorkerSupportCore for ReactionTriggerWorker {
             triggered = stats.triggered,
             errors = stats.errors
         );
+    }
+
+    /// Flatten this worker kinds stats into cumulative counters for publishing
+    ///
+    /// # Arguments
+    ///
+    /// * `stats` - The stats to flatten
+    fn counter_map(stats: &Self::Stats) -> BTreeMap<String, u64> {
+        // key each counter by its stats field name
+        BTreeMap::from([
+            ("seen".to_owned(), stats.seen as u64),
+            ("triggered".to_owned(), stats.triggered as u64),
+            ("errors".to_owned(), stats.errors as u64),
+        ])
     }
 }
 
@@ -374,13 +399,13 @@ mod tests {
     /// When a potential tag-trigger event's required file/repo data cannot be fetched (a
     /// transient error left it out of the data cache and `check` returned false for missing
     /// data), `should_clear_potential` returns false so the event is not cleared. It is left
-    /// in-flight for `reset_all`/retry so the user's triggered reaction is eventually created
-    /// instead of the event being lost on a transient fetch blip.
+    /// in-flight for the scoped reset/retry so the user's triggered reaction is eventually
+    /// created instead of the event being lost on a transient fetch blip.
     #[test]
     fn potential_with_missing_data_is_not_cleared() {
         // simulate a drained potential whose required data could not be fetched
         let should_clear = ReactionTriggerWorker::should_clear_potential(true);
-        // it must be retained (not cleared) so retry/reset_all can reprocess it
+        // it must be retained (not cleared) so the scoped retry/reset_worker can reprocess it
         assert!(
             !should_clear,
             "a potential event whose data was missing must be retained, not cleared and lost"
@@ -398,5 +423,33 @@ mod tests {
             should_clear,
             "a potential event with present data that did not match should be cleared"
         );
+    }
+
+    /// The counter map keys every [`ReactionTriggerStats`] field by its name so the
+    /// published counters match the tracing gauges field for field.
+    #[test]
+    fn trigger_stats_counter_map() {
+        // build stats with a distinct value per field
+        let stats = ReactionTriggerStats {
+            seen: 1,
+            triggered: 2,
+            errors: 3,
+        };
+        // flatten these stats into a counter map
+        let map = ReactionTriggerWorker::counter_map(&stats);
+        // every field must appear under its own name with its value
+        assert_eq!(map.get("seen"), Some(&1), "seen must map to its field name");
+        assert_eq!(
+            map.get("triggered"),
+            Some(&2),
+            "triggered must map to its field name"
+        );
+        assert_eq!(
+            map.get("errors"),
+            Some(&3),
+            "errors must map to its field name"
+        );
+        // no extra counters may be published
+        assert_eq!(map.len(), 3, "the counter map must hold exactly 3 entries");
     }
 }
