@@ -12,6 +12,27 @@ mod utils;
 
 use args::{Args, SubCommands};
 
+/// Render an error that reached `main` as the text printed to stderr
+///
+/// Generic errors print as their message, errors that carry an HTTP status print on one line
+/// as `Code: <status> Error: <msg>`, and any other error prints in its debug form.
+///
+/// # Arguments
+///
+/// * `error` - The error to render
+fn render_error(error: &Error) -> String {
+    // print generic errors as plain text
+    if let Error::Generic(msg) = error {
+        return msg.clone();
+    }
+    // print errors with an HTTP status in the client's one line display form
+    if error.status().is_some() {
+        return error.to_string();
+    }
+    // fall back to the debug form for every other kind of error
+    format!("{error:#?}")
+}
+
 /// Installs the interrupt handler, parses the command line, runs the matching Thorctl command,
 /// and exits with a non-zero code after printing the error if the command fails
 #[tokio::main]
@@ -76,11 +97,51 @@ async fn main() {
             utils::interrupt::exit_interrupted();
         }
         // print our error to stderr nicely if possible
-        match error {
-            Error::Generic(msg) => eprintln!("{msg}"),
-            _ => eprintln!("{error:#?}"),
-        }
+        eprintln!("{}", render_error(&error));
         // exit with the timeout code if a --wait-for timed out, or 1 otherwise
         std::process::exit(utils::watch::exit_code());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use http::StatusCode;
+    use thorium::Error;
+
+    use super::render_error;
+
+    /// An API error renders on one line with its status code and message
+    #[test]
+    fn render_api_error_on_one_line() {
+        // build an error like the one the client returns for an unauthorized request
+        let error = Error::Thorium {
+            code: StatusCode::UNAUTHORIZED,
+            msg: Some("{\"trace\":\"x\"}".to_string()),
+        };
+        // an API error should print as the client's display text rather than a debug struct
+        assert_eq!(
+            render_error(&error),
+            "Code: 401 Unauthorized Error: {\"trace\":\"x\"}"
+        );
+    }
+
+    /// A generic error renders as its plain message
+    #[test]
+    fn render_generic_error_as_text() {
+        // a generic error should print without any prefix or quoting
+        assert_eq!(
+            render_error(&Error::Generic("no such file".to_string())),
+            "no such file"
+        );
+    }
+
+    /// An error without an HTTP status keeps its debug form
+    #[test]
+    fn render_other_error_as_debug() {
+        // build an IO error that has no HTTP status
+        let error = Error::IO(std::io::Error::other("disk gone"));
+        // an error with no status should print in its debug form
+        assert_eq!(render_error(&error), format!("{error:#?}"));
+        assert!(render_error(&error).starts_with("IO("));
     }
 }
