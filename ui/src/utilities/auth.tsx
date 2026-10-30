@@ -1,3 +1,4 @@
+import { useQueryClient } from '@tanstack/react-query';
 import React, { createContext, JSX, useContext, useEffect, useState } from 'react';
 import { Navigate } from 'react-router-dom';
 
@@ -87,6 +88,10 @@ function useAuthProvider() {
   const [token, setToken] = useState(getCookie('THORIUM_TOKEN')); // set time of last userInfo update
   const [lastUpdateDate, setLastUpdateDate] = useState(Date.now());
   const [activeScopedToken, setActiveScopedToken] = useState<ScopedToken | undefined>(getScopedFromSession());
+  const queryClient = useQueryClient();
+  // the query cache holds what one identity could read, so it is dropped whenever the identity behind requests changes
+  // (login, logout, impersonation, or a scoped token starting or ending) and the next session in the tab reads afresh
+  const clearCachedReads = () => queryClient.clear();
 
   // options for set/get of a secure cookie
   const getUserInfo = async () => {
@@ -171,6 +176,7 @@ function useAuthProvider() {
       }
       // set cookie with name THORIUM_TOKEN and store the user's Thorium token
       document.cookie = buildCookie(result.token, result.expires);
+      clearCachedReads();
       setToken(result.token);
       return LoginOutcome.LoggedIn;
     },
@@ -181,6 +187,7 @@ function useAuthProvider() {
         clearScopedSession();
         setUserInfo(null);
         document.cookie = buildRevokeCookie();
+        clearCachedReads();
         resolve(true);
       });
     },
@@ -204,6 +211,7 @@ function useAuthProvider() {
       }
       // auto-verified deployment: log the user in immediately
       document.cookie = buildCookie(result.token, result.expires);
+      clearCachedReads();
       setToken(result.token);
       return RegisterOutcome.LoggedIn;
     },
@@ -214,12 +222,14 @@ function useAuthProvider() {
       setToken(undefined);
       setUserInfo(null);
       document.cookie = buildRevokeCookie();
+      clearCachedReads();
       return result;
     },
     // logout of any current session and impersonate a user
     impersonate(userToken: string, tokenExpires: string) {
       // set cookie with name THORIUM_TOKEN
       document.cookie = buildCookie(userToken, tokenExpires);
+      clearCachedReads();
       setToken(userToken);
     },
     // finalize an OAuth login/registration by storing the issued Thorium token.
@@ -227,15 +237,18 @@ function useAuthProvider() {
     // RequireAuth) behaves exactly as it does after a password login.
     completeOAuth(token: string, expires: string) {
       document.cookie = buildCookie(token, expires);
+      clearCachedReads();
       setToken(token);
     },
     setScopedToken(token: ScopedToken) {
       setActiveScopedToken(token);
       setScopedSession(token);
+      clearCachedReads();
     },
     clearScopedToken() {
       setActiveScopedToken(undefined);
       clearScopedSession();
+      clearCachedReads();
     },
   };
 }
