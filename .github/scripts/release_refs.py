@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Choose the tags and versions a workflow run publishes the Thorium image and Helm charts under.
 
-Both the release workflow (deploy.yml) and the chart workflow (charts.yml) call this script, so
-images and charts follow the same rules:
+The Thorium CI workflow (ci.yml) calls this script for both the image and the charts, so they
+follow the same rules:
 
 * every push and pull request builds, but only some runs publish:
   - every branch on forks, so a fork can test its own image and charts

@@ -3,8 +3,8 @@
 //! oracle after every run
 //!
 //! Running every mode twice takes tens of minutes, so that test is ignored by default and runs in
-//! its own CI job (`restore-empty-merge-wipe`) or with `--include-ignored`; a restore into an empty
-//! target, run once, runs by default.
+//! its own CI job (restore into empty, merge, and wipe targets) or with `--include-ignored`; a
+//! restore into an empty target, run once, runs by default.
 //!
 //! The tests restore, so each holds the binary's restore guard.
 
@@ -298,7 +298,7 @@ async fn an_empty_target_restore_gives_the_source() {
 /// source and refuses a plain re-run without change; a merge keeps the target's own data and
 /// writes the backup's over shared keys; a wipe equals the source's tables with the excluded data and the target's objects kept
 #[tokio::test]
-#[ignore = "takes tens of minutes: runs in the restore-empty-merge-wipe CI job, or with --include-ignored"]
+#[ignore = "takes tens of minutes: runs in its own CI job (restore into empty, merge, and wipe targets), or with --include-ignored"]
 #[allow(clippy::too_many_lines)]
 async fn each_restore_mode_gives_its_result_twice() {
     // the source: the clean fixture with its census rebuilt, snapshotted and backed up

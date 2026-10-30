@@ -46,6 +46,6 @@ Deployment" ([api/docs/src/admins/deploy/convert-to-helm.md](../api/docs/src/adm
 `scripts/render-values.py` renders a values template (`roles/thorium/templates/values.yaml.j2`,
 `roles/infra_operators/templates/values.yaml.j2`) the way Ansible would (python3 with Jinja2 and
 PyYAML, no Ansible or cluster needed), so the generated chart values can be checked with
-`helm lint`/`helm template`. The Deployment Tools workflow (`.github/workflows/deploy-tools.yml`)
-runs it for the defaults and each `group_vars` variant; run its render steps locally to reproduce
-it.
+`helm lint`/`helm template`. The Render megathor Values job of the Thorium CI workflow
+(`.github/workflows/ci.yml`) runs it for the defaults and each `group_vars` variant; run its render
+steps locally to reproduce it.
