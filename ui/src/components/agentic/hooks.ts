@@ -1,24 +1,25 @@
-import { useEffect, useRef, useState } from 'react';
+import { useQueries } from '@tanstack/react-query';
+import { useEffect, useRef } from 'react';
 
 // project imports
 import { NamedInstance, Notice, REQUEST_WATCH, requestedNotice, watchRequestedInstance } from '@components/agentic/instances';
 import { Severity } from '@components/shared/alerts/AlertBanner';
-import { requestInstance } from '@thorpi/agentic';
 import { sampleFileNames } from '@components/agentic/runs/display';
-import { getFileDetails } from '@thorpi/files';
-import { getGroup } from '@thorpi/groups';
+import { requestInstance } from '@thorpi/agentic';
 import {
   canCreatePipelineInGroupName,
   createBlockReason,
   deleteBlockReason,
   editBlockReason,
-  hasGroupDetails,
   pipelineCreateBlockReason,
 } from '@utilities/agentic/access';
 import { useAuth } from '@utilities/auth';
 import { AgenticListQueryState, useAgenticListQuery } from '@utilities/queries/agentic';
+import { useGroupDetailsQuery } from '@utilities/queries/groups';
+import { sampleQueryOptions } from '@utilities/queries/samples';
 import { canEditEntityInGroups } from '@utilities/permissions';
 import { AgenticKinds, AnyAgenticEntity } from '@models/agentic';
+import { Sample } from '@models/files';
 import { Group } from '@models/groups';
 
 /**
@@ -44,7 +45,8 @@ export function useGroupNames(): string[] {
 }
 
 /**
- * Read the details of groups the user can see, to decide which actions to offer.
+ * Read the details of groups the user can see, to decide which actions to offer; each group is read once and shared
+ * through the query cache.
  *
  * A group that can't be read is left out, so the actions it would gate stay available and the
  * API's refusal is shown instead.
@@ -53,20 +55,7 @@ export function useGroupNames(): string[] {
  * @returns The details of the groups read so far.
  */
 export function useGroupDetails(names: string[]): Group[] {
-  const [details, setDetails] = useState<Group[]>([]);
-  // a stable key so a new array of the same names doesn't read the groups again
-  const key = [...names].sort().join('\n');
-  useEffect(() => {
-    let cancelled = false;
-    const wanted = key === '' ? [] : key.split('\n');
-    void Promise.all(wanted.map((name) => getGroup(name, () => undefined))).then((read) => {
-      if (!cancelled) setDetails(read.filter((group) => hasGroupDetails(group)));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [key]);
-  return details;
+  return useGroupDetailsQuery(names);
 }
 
 /** What the signed in user may do with an entity, with the reason for each refusal. */
@@ -213,7 +202,25 @@ export function useRequestInstance<T extends NamedInstance>(options: RequestInst
 }
 
 /**
- * Read the file names of samples so a list of bare SHA256s can say which file is which.
+ * Name the samples of a list of SHA256s from their details.
+ *
+ * @param shas - The SHA256s of the samples.
+ * @param samples - Each sample's details in the same order: `null` when it can't be read, `undefined` while it is read.
+ * @returns The submitted file names keyed by SHA256; a sample without details or a name gets no entry.
+ */
+export function sampleNamesByHash(shas: string[], samples: (Pick<Sample, 'submissions'> | null | undefined)[]): Record<string, string> {
+  const names: Record<string, string> = {};
+  shas.forEach((sha, index) => {
+    const sample = samples[index];
+    const name = sample ? sampleFileNames(sample) : '';
+    if (name !== '') names[sha] = name;
+  });
+  return names;
+}
+
+/**
+ * Read the file names of samples so a list of bare SHA256s can say which file is which; each sample is read through the
+ * query cache it shares with the launch form's sample checks.
  *
  * A sample that can't be read, or that was submitted without a name, gets no entry; the
  * SHA256 alone is shown for it.
@@ -222,23 +229,12 @@ export function useRequestInstance<T extends NamedInstance>(options: RequestInst
  * @returns The submitted file names, keyed by SHA256.
  */
 export function useSampleNames(shas: string[]): Record<string, string> {
-  const [names, setNames] = useState<Record<string, string>>({});
-  const key = shas.join(',');
-  useEffect(() => {
-    let cancelled = false;
-    // a different set of samples starts from no names
-    setNames({});
-    void Promise.all(
-      shas.map(async (sha) => {
-        const sample = await getFileDetails(sha, () => undefined);
-        return [sha, sample ? sampleFileNames(sample) : ''] as const;
-      }),
-    ).then((found) => {
-      if (!cancelled) setNames(Object.fromEntries(found.filter(([, name]) => name !== '')));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [key]);
-  return names;
+  return useQueries({
+    queries: shas.map((sha) => sampleQueryOptions(sha)),
+    combine: (results) =>
+      sampleNamesByHash(
+        shas,
+        results.map((result) => result.data),
+      ),
+  });
 }
