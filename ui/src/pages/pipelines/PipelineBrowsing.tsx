@@ -27,6 +27,8 @@ import { fetchGroups } from '@utilities/fetch';
 import { generateCopyName } from '@utilities/naming';
 import { getThoriumRole } from '@utilities/role';
 import { editorObjectToPipelineUpdate } from '@utilities/transforms/pipeline';
+import { invalidatePipelines } from '@utilities/queries/pipelines';
+import { useChangeAndInvalidate } from '@utilities/queries/changes';
 import type { Group } from '@models/groups';
 import type { Pipeline, PipelineUpdate } from '@models/pipelines';
 import { RoleKey } from '@models/users';
@@ -46,6 +48,8 @@ const filterPipelines = (pipelines: Pipeline[], clauses: Clause[]): Pipeline[] =
 
 const PipelineBrowsing: FC = () => {
   const navigate = useNavigate();
+  // a change marks the cached pipeline lists stale, so other pages show it at once
+  const change = useChangeAndInvalidate(invalidatePipelines);
   const [loading, setLoading] = useState(false);
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const [groups, setGroups] = useState<Record<string, Group>>({});
@@ -126,7 +130,7 @@ const PipelineBrowsing: FC = () => {
       setUpdateError('Invalid pipeline data');
       return false;
     }
-    if (await updatePipeline(result.group, result.name, result.data as PipelineUpdate, setUpdateError)) {
+    if (await change(() => updatePipeline(result.group, result.name, result.data as PipelineUpdate, setUpdateError))) {
       // Refresh only the edited pipeline so the open accordion stays put and only its content rerenders.
       void refreshPipeline(originalPipeline.group, originalPipeline.name);
       return true;

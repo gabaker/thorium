@@ -1,3 +1,4 @@
+import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Button, ButtonToolbar, Card, Col, FormCheck, Modal, Row } from 'react-bootstrap';
@@ -11,6 +12,7 @@ import Subtitle from '@components/shared/titles/Subtitle';
 import { OverlayTipTop, OverlayTipLeft } from '@components/shared/overlay/tips';
 import { useAuth } from '@utilities/auth';
 import { listReactions, deleteReaction } from '@thorpi/reactions';
+import { invalidateRunLists } from '@utilities/queries/runs';
 import { reactionPath } from '@utilities/runs';
 import { getStatusBadge } from './reactions';
 import type { Reaction, ReactionRunResult } from '@models/reactions';
@@ -49,6 +51,7 @@ interface ReactionStatusProps {
 }
 
 const ReactionStatus = ({ sha256, autoRefresh }: ReactionStatusProps) => {
+  const client = useQueryClient();
   const [loading, setLoading] = useState(false);
   const [reactionsList, setReactionsList] = useState<Reaction[]>([]);
   const [reactionsMap, setReactionsMap] = useState<Record<string, Reaction>>({});
@@ -196,7 +199,8 @@ const ReactionStatus = ({ sha256, autoRefresh }: ReactionStatusProps) => {
         }
       }
     }
-
+    // the cached run lists may still hold the deleted reactions
+    void invalidateRunLists(client);
     setLoading(false);
     deleteInProgress = false;
     await getReactionsList();

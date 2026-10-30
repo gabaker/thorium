@@ -1,7 +1,8 @@
-import { useQuery } from '@tanstack/react-query';
+import { QueryClient, useQuery } from '@tanstack/react-query';
 
 // project imports
 import { listPipelines } from '@thorpi/pipelines';
+import { pipelineOrderKeys } from '@utilities/queries/runs';
 import { Pipeline } from '@models/pipelines';
 
 /** How long a pipeline list stays fresh; a picker opened again within this time reuses the list it read. */
@@ -19,6 +20,19 @@ export const pipelineKeys = {
    */
   details: (groups: string[]) => ['pipelines', 'details', [...groups].sort().join(',')] as const,
 };
+
+/**
+ * Mark every cached pipeline list and run's pipeline order stale, for a pipeline created, updated, or deleted.
+ *
+ * @param client - The query client.
+ * @returns A promise that settles once the reads in use have been made again.
+ */
+export async function invalidatePipelines(client: QueryClient): Promise<void> {
+  await Promise.all([
+    client.invalidateQueries({ queryKey: pipelineKeys.lists }),
+    client.invalidateQueries({ queryKey: pipelineOrderKeys }),
+  ]);
+}
 
 /** The pipelines of several groups, with the groups whose listing failed. */
 export interface GroupPipelines {

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // project imports
 import WorkflowCreate from './WorkflowCreate';
+import { withQueryClient } from '@utilities/testing/queryClient';
 import { AgenticKinds } from '@models/agentic';
 
 /** The per-kind list errors, set by each test. */
@@ -22,9 +23,11 @@ vi.mock('@components/agentic/hooks', () => ({
 /** Render the create page. */
 const render = (): string =>
   renderToStaticMarkup(
-    <MemoryRouter>
-      <WorkflowCreate />
-    </MemoryRouter>,
+    withQueryClient(
+      <MemoryRouter>
+        <WorkflowCreate />
+      </MemoryRouter>,
+    ),
   );
 
 afterEach(() => {

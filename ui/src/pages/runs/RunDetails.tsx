@@ -25,7 +25,7 @@ import { Button, ButtonVariant } from '@components/shared/buttons';
 import { cancelRun, retryWorkflowRun } from '@thorpi/runs';
 import { useAuth } from '@utilities/auth';
 import { isDeveloperAny } from '@utilities/permissions';
-import { reactionKey, useReactionQuery, useReactionUpdates, useStageOrder } from '@utilities/queries/runs';
+import { invalidateRunLists, reactionKey, useReactionQuery, useReactionUpdates, useStageOrder } from '@utilities/queries/runs';
 import { isRunFinished } from '@utilities/runs';
 import { Reaction, ReactionStatus } from '@models/reactions';
 
@@ -90,6 +90,8 @@ const RunDetails: FC = () => {
     onSuccess: (created) => {
       if (created) void navigate(`/runs/${run?.group ?? group}/${created.id}`);
     },
+    // a retry starts a new run, so the cached run lists are stale
+    onSettled: () => invalidateRunLists(queryClient),
   });
 
   const cancel = useMutation({
@@ -97,8 +99,8 @@ const RunDetails: FC = () => {
       setActionError('');
       return cancelRun(current.group, current.id, setActionError);
     },
-    // the run's state changed, so read it (and through it, its updates) again
-    onSettled: () => queryClient.invalidateQueries({ queryKey: reactionKey(group, id) }),
+    // the run's state changed, so read it (and through it, its updates) again, and the run lists that show its status
+    onSettled: () => Promise.all([queryClient.invalidateQueries({ queryKey: reactionKey(group, id) }), invalidateRunLists(queryClient)]),
   });
 
   const finished = run ? isRunFinished(run.status) : false;

@@ -20,6 +20,8 @@ import { useAuth } from '@utilities/auth';
 import { fetchGroups } from '@utilities/fetch';
 import { listUsers } from '@thorpi/users';
 import { createGroup, getGroup } from '@thorpi/groups';
+import { invalidateGroups } from '@utilities/queries/groups';
+import { useChangeAndInvalidate } from '@utilities/queries/changes';
 import { type Group } from '@models/groups';
 import GroupInfo from './GroupInfo';
 
@@ -50,6 +52,8 @@ const filterGroups = (groups: Record<string, Group>, clauses: Clause[]): Record<
 };
 
 const CreateGroup = ({ setGroups, setLoading }: CreateGroupProps) => {
+  // a change marks the cached group details stale, so other pages show it at once
+  const change = useChangeAndInvalidate(invalidateGroups);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [createError, setCreateError] = useState('');
   const [newGroupName, setNewGroupName] = useState('');
@@ -108,7 +112,7 @@ const CreateGroup = ({ setGroups, setLoading }: CreateGroupProps) => {
                     name: newGroupName,
                     description: newGroupDescription,
                   };
-                  if (await createGroup(groupInfo, setCreateError)) {
+                  if (await change(() => createGroup(groupInfo, setCreateError))) {
                     void fetchGroups(setGroups as (groups: Record<string, Group> | Group[] | string[]) => void, setLoading, true);
                     void checkCookie();
                   }

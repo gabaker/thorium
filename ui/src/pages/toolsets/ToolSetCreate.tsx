@@ -15,12 +15,16 @@ import { createAgenticEntity } from '@thorpi/agentic';
 import { buildToolSetCreateForm, selectorError } from '@utilities/agentic/forms';
 import { keepCovering } from '@utilities/agentic/groups';
 import { applyPins, toolPinChoice } from '@utilities/agentic/pins';
+import { invalidateAgentic } from '@utilities/queries/agentic';
+import { useChangeAndInvalidate } from '@utilities/queries/changes';
 import { AgenticKinds } from '@models/agentic';
 import { Tool, ToolKind } from '@models/tools';
 
 /** Create a toolset from agentic tools, an optional tag selector, and the read only and auto instance flags. */
 const ToolSetCreate: FC = () => {
   const navigate = useNavigate();
+  // a change marks the cached lists and entities stale, so other pages show it at once
+  const change = useChangeAndInvalidate(invalidateAgentic);
   // only groups the user may create entities in are offered
   const groups = useEditableGroupNames();
   const tools = useAgenticList<Tool>(AgenticKinds.Tool);
@@ -41,19 +45,21 @@ const ToolSetCreate: FC = () => {
   const selectorProblem = selectorError(selectorKey, selectorValue);
   const submit = async () => {
     setError('');
-    const created = await createAgenticEntity(
-      buildToolSetCreateForm({
-        name,
-        groups: picked,
-        description,
-        // a pinned tool is sent as the tool instance it is pinned to
-        tools: applyPins(pickedTools, pins),
-        selectorKey,
-        selectorValue,
-        readOnly,
-        autoInstance,
-      }),
-      setError,
+    const created = await change(() =>
+      createAgenticEntity(
+        buildToolSetCreateForm({
+          name,
+          groups: picked,
+          description,
+          // a pinned tool is sent as the tool instance it is pinned to
+          tools: applyPins(pickedTools, pins),
+          selectorKey,
+          selectorValue,
+          readOnly,
+          autoInstance,
+        }),
+        setError,
+      ),
     );
     if (created) void navigate(`/toolsets/${created.id}`);
   };

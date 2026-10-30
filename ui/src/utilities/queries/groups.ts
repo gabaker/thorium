@@ -1,9 +1,12 @@
 //! Query hooks for groups: the details of each group, read once and shared by every page that decides what to offer.
-import { useQueries } from '@tanstack/react-query';
+import { QueryClient, useQueries } from '@tanstack/react-query';
 
 // project imports
 import { getGroup } from '@thorpi/groups';
 import { hasGroupDetails } from '@utilities/agentic/access';
+import { invalidateAgentic } from '@utilities/queries/agentic';
+import { Invalidate } from '@utilities/queries/changes';
+import { invalidatePipelines } from '@utilities/queries/pipelines';
 import { Group } from '@models/groups';
 
 /** How long a group's details stay fresh; roles change rarely while a page is open. */
@@ -21,6 +24,22 @@ export const groupKeys = {
    */
   details: (name: string) => ['group', name] as const,
 };
+
+/**
+ * Mark every cached group's details stale, for a group created, updated (members and roles), or deleted.
+ *
+ * @param client - The query client.
+ * @returns A promise that settles once the groups in use have been read again.
+ */
+export async function invalidateGroups(client: QueryClient): Promise<void> {
+  await client.invalidateQueries({ queryKey: groupKeys.all });
+}
+
+/**
+ * The invalidations for leaving or deleting a group: the user can lose sight of the agentic entities and pipelines the
+ * group held, so the lists and entities read through its membership are marked stale with the group details.
+ */
+export const invalidateGroupAccess: Invalidate[] = [invalidateGroups, invalidateAgentic, invalidatePipelines];
 
 /**
  * Get the distinct names to read, in a stable order.

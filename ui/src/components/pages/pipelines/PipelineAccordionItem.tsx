@@ -13,6 +13,8 @@ import { OverlayTipBottom, OverlayTipLeft, OverlayTipRight } from '@components/s
 import { useAuth } from '@utilities/auth';
 import { canDeletePipeline, canModifyPipeline } from '@utilities/permissions';
 import { deletePipeline } from '@thorpi/pipelines';
+import { invalidatePipelines } from '@utilities/queries/pipelines';
+import { useChangeAndInvalidate } from '@utilities/queries/changes';
 import type { Group } from '@models/groups';
 import type { Pipeline } from '@models/pipelines';
 import { FaLink } from 'react-icons/fa';
@@ -43,6 +45,8 @@ const PipelineAccordionItem: FC<PipelineAccordionItemProps> = ({
   onCopy,
 }) => {
   const { userInfo } = useAuth();
+  // a change marks the cached pipeline lists stale, so other pages show it at once
+  const change = useChangeAndInvalidate(invalidatePipelines);
   const [inEditMode, setEditMode] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleteError, setDeleteError] = useState('');
@@ -61,7 +65,7 @@ const PipelineAccordionItem: FC<PipelineAccordionItemProps> = ({
   };
 
   const handleDelete = async () => {
-    if (await deletePipeline(pipeline.group, pipeline.name, setDeleteError)) {
+    if (await change(() => deletePipeline(pipeline.group, pipeline.name, setDeleteError))) {
       onRefresh();
       handleCloseDeleteModal();
     }

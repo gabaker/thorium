@@ -42,6 +42,8 @@ import { buildRootUpdateForm, selectorError } from '@utilities/agentic/forms';
 import { isInstanceReady } from '@utilities/agentic/display';
 import { applyPins, toolPinChoice } from '@utilities/agentic/pins';
 import { agentsUsingToolSet } from '@utilities/agentic/usedBy';
+import { invalidateAgentic } from '@utilities/queries/agentic';
+import { useChangeAndInvalidate } from '@utilities/queries/changes';
 import { AgenticKinds } from '@models/agentic';
 import { Agent } from '@models/agents';
 import { Tool, ToolInstanceEntity, ToolKind } from '@models/tools';
@@ -71,6 +73,8 @@ const ALL_FIELDS: EditField[] = ['description', 'selector'];
  */
 const ToolSetPage: FC<{ id: string }> = ({ id }) => {
   const navigate = useNavigate();
+  // a change marks the cached lists and entities stale, so other pages show it at once
+  const change = useChangeAndInvalidate(invalidateAgentic);
   const [set, setSet] = useState<ToolSet | null>(null);
   const [instances, setInstances] = useState<ToolSetInstance[]>([]);
   const [chosen, setChosen] = useState<string>('');
@@ -177,13 +181,13 @@ const ToolSetPage: FC<{ id: string }> = ({ id }) => {
     setError('');
     setNotice(null);
     // a refused update has already set the error banner
-    if (!(await updateEntity(id, form, setError))) return false;
+    if (!(await change(() => updateEntity(id, form, setError)))) return false;
     setNotice({ text: message, severity: Severity.Success });
     await load(reset);
     return true;
   };
   const remove = async () => {
-    if (await deleteEntity(id, setError)) void navigate('/toolsets');
+    if (await change(() => deleteEntity(id, setError))) void navigate('/toolsets');
   };
   // a revision the user picked stays shown; otherwise the newest Ready instance (or the newest) follows new builds
   const shownInstance =

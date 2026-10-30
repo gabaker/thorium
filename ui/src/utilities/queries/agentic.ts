@@ -1,4 +1,4 @@
-import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
+import { QueryClient, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback } from 'react';
 
 // project imports
@@ -12,6 +12,8 @@ export const AGENTIC_LIST_STALE_MS = 60 * 1000;
 export const agenticKeys = {
   /** Every agentic list query */
   lists: ['agentic-list'] as const,
+  /** Every query that reads one entity, such as a tool with its versions */
+  entities: ['agentic-entity'] as const,
   /**
    * The list of one kind.
    *
@@ -27,6 +29,20 @@ export const agenticKeys = {
    */
   entity: (id: string) => ['agentic-entity', id] as const,
 };
+
+/**
+ * Mark every cached agentic list and entity stale, for a change to any tool, agent, toolset, workflow, model, or
+ * instance; one change can alter several (a new version changes its tool, and a deleted tool every list that held it).
+ *
+ * @param client - The query client.
+ * @returns A promise that settles once the lists and entities in use have been read again.
+ */
+export async function invalidateAgentic(client: QueryClient): Promise<void> {
+  await Promise.all([
+    client.invalidateQueries({ queryKey: agenticKeys.lists }),
+    client.invalidateQueries({ queryKey: agenticKeys.entities }),
+  ]);
+}
 
 /** A list read for a page: the entities and the message of a failed or cut-off read. */
 export interface AgenticListRead<T> {

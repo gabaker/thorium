@@ -14,12 +14,16 @@ import { Button, ButtonVariant } from '@components/shared/buttons';
 import TextInput from '@components/shared/inputs/TextInput';
 import { createAgenticEntity } from '@thorpi/agentic';
 import { buildToolCreateForm, parseToolSpec, specKindMismatch } from '@utilities/agentic/forms';
+import { invalidateAgentic } from '@utilities/queries/agentic';
+import { useChangeAndInvalidate } from '@utilities/queries/changes';
 import { AgenticKinds } from '@models/agentic';
 import { Tool, ToolKind } from '@models/tools';
 
 /** Create a tool and publish its first version from a spec written as YAML or JSON. */
 const ToolCreate: FC = () => {
   const navigate = useNavigate();
+  // a change marks the cached lists and entities stale, so other pages show it at once
+  const change = useChangeAndInvalidate(invalidateAgentic);
   // only groups the user may create entities in are offered
   const myGroups = useEditableGroupNames();
   const existing = useAgenticList<Tool>(AgenticKinds.Tool);
@@ -74,12 +78,13 @@ const ToolCreate: FC = () => {
 
   /** Send the create request and open the new tool. */
   const submit = async () => {
-    if (problem !== '' || parsed.json === null || createdId !== '') return;
+    // the spec is held apart so the check that it parsed still holds inside the change
+    const spec = parsed.json;
+    if (problem !== '' || spec === null || createdId !== '') return;
     setBusy(true);
     setError('');
-    const created = await createAgenticEntity(
-      buildToolCreateForm({ name, groups, description, version, spec: parsed.json, kind }),
-      setError,
+    const created = await change(() =>
+      createAgenticEntity(buildToolCreateForm({ name, groups, description, version, spec, kind }), setError),
     );
     setBusy(false);
     if (!created) return;

@@ -22,6 +22,8 @@ import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
 import { Button, ButtonVariant } from '@components/shared/buttons';
 import TextInput from '@components/shared/inputs/TextInput';
 import { createPipeline } from '@thorpi/pipelines';
+import { invalidatePipelines } from '@utilities/queries/pipelines';
+import { useChangeAndInvalidate } from '@utilities/queries/changes';
 import { AgenticKinds } from '@models/agentic';
 import { Pipeline } from '@models/pipelines';
 import { Tool } from '@models/tools';
@@ -39,6 +41,8 @@ const FormActions = styled(Actions)`
 /** Create a pipeline whose every stage is backed by a tool (following latest) or a pinned tool version. */
 const PipelineCreate: FC = () => {
   const navigate = useNavigate();
+  // a change marks the cached pipeline lists stale, so other pages show it at once
+  const change = useChangeAndInvalidate(invalidatePipelines);
   const { state } = useLocation() as { state: Pipeline | null };
   // only groups the user may create a pipeline in are offered, and a user who can create in none is told why
   const myGroups = usePipelineGroupNames();
@@ -73,7 +77,7 @@ const PipelineCreate: FC = () => {
     if (problem !== '' || blockReason !== '') return;
     setBusy(true);
     setError('');
-    const created = await createPipeline(buildPipelineRequest(values), setError);
+    const created = await change(() => createPipeline(buildPipelineRequest(values), setError));
     setBusy(false);
     if (created) void navigate('/pipelines');
   };

@@ -41,6 +41,8 @@ export const reactionUpdatesKey = (group: string, id: string) => ['reaction-upda
 export const reactionLogsKey = (group: string, id: string, stage: string) => ['reaction-logs', group, id, stage] as const;
 /** The query key of a reaction's sub reactions. */
 export const reactionSubRunsKey = (group: string, id: string) => ['reaction-sub-runs', group, id] as const;
+/** The prefix of every pipeline stage order query, which a pipeline change makes stale. */
+export const pipelineOrderKeys = ['pipeline-order'] as const;
 /** The query key of a pipeline's stage order. */
 export const pipelineOrderKey = (group: string, name: string) => ['pipeline-order', group, name] as const;
 

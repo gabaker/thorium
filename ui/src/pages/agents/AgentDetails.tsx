@@ -26,6 +26,8 @@ import Page from '@components/pages/Page';
 import { getAgenticEntity } from '@thorpi/agentic';
 import { deleteEntity } from '@thorpi/entities';
 import { workflowsUsingAgent } from '@utilities/agentic/usedBy';
+import { invalidateAgentic } from '@utilities/queries/agentic';
+import { useChangeAndInvalidate } from '@utilities/queries/changes';
 import { Agent } from '@models/agents';
 import { AgenticKinds, AnyAgenticEntity } from '@models/agentic';
 import { Workflow } from '@models/workflows';
@@ -38,6 +40,8 @@ import { Workflow } from '@models/workflows';
  */
 const AgentPage: FC<{ id: string }> = ({ id }) => {
   const navigate = useNavigate();
+  // a change marks the cached lists and entities stale, so other pages show it at once
+  const change = useChangeAndInvalidate(invalidateAgentic);
   const [agent, setAgent] = useState<Agent | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -106,7 +110,7 @@ const AgentPage: FC<{ id: string }> = ({ id }) => {
             disabled={deleteReason !== ''}
             title={deleteReason}
             onConfirm={() =>
-              void deleteEntity(id, setError).then((done) => {
+              void change(() => deleteEntity(id, setError)).then((done) => {
                 if (done) void navigate('/agents');
               })
             }

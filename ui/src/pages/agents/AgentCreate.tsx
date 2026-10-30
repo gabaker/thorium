@@ -16,6 +16,8 @@ import { buildAgentCreateForm, positiveIntError } from '@utilities/agentic/forms
 import { keepCovering } from '@utilities/agentic/groups';
 import { applyPins, toolPinChoice, toolSetPinChoice } from '@utilities/agentic/pins';
 import { splitEntries } from '@utilities/runs';
+import { invalidateAgentic } from '@utilities/queries/agentic';
+import { useChangeAndInvalidate } from '@utilities/queries/changes';
 import { Agent } from '@models/agents';
 import { AgenticKinds } from '@models/agentic';
 import { Tool, ToolKind } from '@models/tools';
@@ -24,6 +26,8 @@ import { ToolSet, ToolSetInstance } from '@models/toolsets';
 /** Create an agent: prompts, models, harness, and the tools, toolsets, and sub-agents it links. */
 const AgentCreate: FC = () => {
   const navigate = useNavigate();
+  // a change marks the cached lists and entities stale, so other pages show it at once
+  const change = useChangeAndInvalidate(invalidateAgentic);
   // only groups the user may create entities in are offered
   const groups = useEditableGroupNames();
   const tools = useAgenticList<Tool>(AgenticKinds.Tool);
@@ -60,24 +64,26 @@ const AgentCreate: FC = () => {
     .map((set) => toolSetPinChoice(set.id, set.name, setInstances.items));
   const submit = async () => {
     setError('');
-    const created = await createAgenticEntity(
-      buildAgentCreateForm({
-        name,
-        groups: picked,
-        description,
-        systemPrompt,
-        prompt,
-        models: splitEntries(models),
-        maxTurns,
-        functionName,
-        modelDescription,
-        // a pinned link is sent as the instance it is pinned to
-        harness: applyPins(pickedHarness ? [pickedHarness] : [], pins)[0] ?? '',
-        tools: applyPins(pickedTools, pins),
-        toolSets: applyPins(pickedSets, pins),
-        subAgents: pickedAgents,
-      }),
-      setError,
+    const created = await change(() =>
+      createAgenticEntity(
+        buildAgentCreateForm({
+          name,
+          groups: picked,
+          description,
+          systemPrompt,
+          prompt,
+          models: splitEntries(models),
+          maxTurns,
+          functionName,
+          modelDescription,
+          // a pinned link is sent as the instance it is pinned to
+          harness: applyPins(pickedHarness ? [pickedHarness] : [], pins)[0] ?? '',
+          tools: applyPins(pickedTools, pins),
+          toolSets: applyPins(pickedSets, pins),
+          subAgents: pickedAgents,
+        }),
+        setError,
+      ),
     );
     if (created) void navigate(`/agents/${created.id}`);
   };

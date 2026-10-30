@@ -15,12 +15,16 @@ import { createAgenticEntity } from '@thorpi/agentic';
 import { buildWorkflowCreateForm, positiveIntError } from '@utilities/agentic/forms';
 import { keepCovering } from '@utilities/agentic/groups';
 import { splitEntries } from '@utilities/runs';
+import { invalidateAgentic } from '@utilities/queries/agentic';
+import { useChangeAndInvalidate } from '@utilities/queries/changes';
 import { Agent } from '@models/agents';
 import { AgenticKinds } from '@models/agentic';
 
 /** Create a workflow from agents, an entry agent, default models, and limits. */
 const WorkflowCreate: FC = () => {
   const navigate = useNavigate();
+  // a change marks the cached lists and entities stale, so other pages show it at once
+  const change = useChangeAndInvalidate(invalidateAgentic);
   // only groups the user may create entities in are offered
   const groups = useEditableGroupNames();
   const agents = useAgenticList<Agent>(AgenticKinds.Agent);
@@ -47,18 +51,20 @@ const WorkflowCreate: FC = () => {
   };
   const submit = async () => {
     setError('');
-    const created = await createAgenticEntity(
-      buildWorkflowCreateForm({
-        name,
-        groups: picked,
-        description,
-        agents: pickedAgents,
-        entryAgent: pickedEntry,
-        defaultModels: splitEntries(models),
-        maxAliveSubAgents: alive,
-        autoInstance: auto,
-      }),
-      setError,
+    const created = await change(() =>
+      createAgenticEntity(
+        buildWorkflowCreateForm({
+          name,
+          groups: picked,
+          description,
+          agents: pickedAgents,
+          entryAgent: pickedEntry,
+          defaultModels: splitEntries(models),
+          maxAliveSubAgents: alive,
+          autoInstance: auto,
+        }),
+        setError,
+      ),
     );
     if (created) void navigate(`/workflows/${created.id}`);
   };

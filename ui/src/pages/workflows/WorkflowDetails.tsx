@@ -47,6 +47,8 @@ import { getAgenticEntity, listAllAgentic } from '@thorpi/agentic';
 import { deleteEntity, updateEntity } from '@thorpi/entities';
 import { buildRootUpdateForm, buildWorkflowUpdateForm, parsePositiveInt, positiveIntError } from '@utilities/agentic/forms';
 import { splitEntries } from '@utilities/runs';
+import { invalidateAgentic } from '@utilities/queries/agentic';
+import { useChangeAndInvalidate } from '@utilities/queries/changes';
 import { Agent } from '@models/agents';
 import { AgenticKinds } from '@models/agentic';
 import { Workflow, WorkflowInstance } from '@models/workflows';
@@ -65,6 +67,8 @@ const ALL_FIELDS: EditField[] = ['description', 'models', 'alive', 'auth', 'entr
  */
 const WorkflowPage: FC<{ id: string }> = ({ id }) => {
   const navigate = useNavigate();
+  // a change marks the cached lists and entities stale, so other pages show it at once
+  const change = useChangeAndInvalidate(invalidateAgentic);
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const [instances, setInstances] = useState<WorkflowInstance[]>([]);
   const [loading, setLoading] = useState(true);
@@ -149,7 +153,7 @@ const WorkflowPage: FC<{ id: string }> = ({ id }) => {
     setError('');
     setNotice(null);
     // a refused update has already set the error banner
-    if (!(await updateEntity(id, form, setError))) return false;
+    if (!(await change(() => updateEntity(id, form, setError)))) return false;
     setNotice({ text: message, severity: Severity.Success });
     await load(reset);
     return true;
@@ -174,7 +178,7 @@ const WorkflowPage: FC<{ id: string }> = ({ id }) => {
             disabled={deleteReason !== ''}
             title={deleteReason}
             onConfirm={() =>
-              void deleteEntity(id, setError).then((done) => {
+              void change(() => deleteEntity(id, setError)).then((done) => {
                 if (done) void navigate('/workflows');
               })
             }

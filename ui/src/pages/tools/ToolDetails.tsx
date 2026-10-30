@@ -67,7 +67,8 @@ import {
 } from '@utilities/agentic/display';
 import { pinnedToolInstance } from '@utilities/agentic/pins';
 import { useAuth } from '@utilities/auth';
-import { agenticKeys, useAgenticEntityReads } from '@utilities/queries/agentic';
+import { agenticKeys, invalidateAgentic, useAgenticEntityReads } from '@utilities/queries/agentic';
+import { changeAndInvalidate } from '@utilities/queries/changes';
 import { usePipelineListQuery } from '@utilities/queries/pipelines';
 import { AgenticKinds } from '@models/agentic';
 import { Tool, ToolInstance, ToolKind, ToolVersion } from '@models/tools';
@@ -221,7 +222,8 @@ const ToolPage: FC<{ id: string }> = ({ id }) => {
   }, [selected, tool?.metadata.Tool.latest]);
 
   /**
-   * Run an action, then show its result beside the control it came from and read the tool again.
+   * Run an action, then show its result beside the control it came from and read the tool again. The cached lists and
+   * entities are marked stale whatever the outcome, since a refused delete of a tool may have removed some versions.
    *
    * @param where - The part of the page whose controls ran the action.
    * @param work - The action; resolves `true` when it succeeded.
@@ -232,7 +234,7 @@ const ToolPage: FC<{ id: string }> = ({ id }) => {
     setArea(where);
     setError('');
     setNotice('');
-    if (await work()) {
+    if (await changeAndInvalidate(client, invalidateAgentic, work)) {
       setNotice(done);
       await load(followLatest);
     }

@@ -44,6 +44,8 @@ import { canModifyPipeline } from '@utilities/permissions';
 import { FormatType } from '@utilities/rules/types';
 import { useDebouncedValue } from '@utilities/useDebouncedValue';
 import { changedStageTools, pipelineToEditorObject } from '@utilities/transforms/pipeline';
+import { invalidatePipelines } from '@utilities/queries/pipelines';
+import { useChangeAndInvalidate } from '@utilities/queries/changes';
 import type { Group } from '@models/groups';
 import type { EventTrigger, Pipeline, PipelineBan, PipelineUpdate } from '@models/pipelines';
 
@@ -67,6 +69,8 @@ interface PipelineInfoProps {
 
 const PipelineInfo: FC<PipelineInfoProps> = ({ ref, pipeline, groups, inEditMode, onExitEditMode, onUpdate, refreshPipeline }) => {
   const { userInfo } = useAuth();
+  // a change marks the cached pipeline lists stale, so other pages show it at once
+  const change = useChangeAndInvalidate(invalidatePipelines);
   const [updateError, setUpdateError] = useState('');
   const [editorObj, setEditorObj] = useState<Record<string, unknown>>(() => pipelineToEditorObject(pipeline));
   const [viewMode, setViewMode] = useState<ViewMode>(ViewMode.Form);
@@ -138,7 +142,7 @@ const PipelineInfo: FC<PipelineInfoProps> = ({ ref, pipeline, groups, inEditMode
     const addTools = changedStageTools(pendingEdit.stageTools, pipeline.stage_tools ?? {}) as Record<string, string>;
     const update = { order: pendingEdit.order } as PipelineUpdate;
     if (Object.keys(addTools).length > 0) update.add_stage_tools = addTools;
-    if (await updatePipeline(pipeline.group, pipeline.name, update, setOrderUpdateError)) {
+    if (await change(() => updatePipeline(pipeline.group, pipeline.name, update, setOrderUpdateError))) {
       setPendingEdit(null);
       setOrderUpdateError('');
       // Refresh only this pipeline so the reordered content rerenders without collapsing the accordion.

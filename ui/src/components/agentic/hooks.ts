@@ -14,7 +14,8 @@ import {
   pipelineCreateBlockReason,
 } from '@utilities/agentic/access';
 import { useAuth } from '@utilities/auth';
-import { AgenticListQueryState, useAgenticListQuery } from '@utilities/queries/agentic';
+import { AgenticListQueryState, invalidateAgentic, useAgenticListQuery } from '@utilities/queries/agentic';
+import { useChangeAndInvalidate } from '@utilities/queries/changes';
 import { useGroupDetailsQuery } from '@utilities/queries/groups';
 import { sampleQueryOptions } from '@utilities/queries/samples';
 import { canEditEntityInGroups } from '@utilities/permissions';
@@ -181,24 +182,27 @@ export function useRequestInstance<T extends NamedInstance>(options: RequestInst
       mounted.current = false;
     };
   }, []);
-  return async () => {
-    setError('');
-    const before = instances;
-    if (!(await requestInstance(root, id, setError))) return;
-    const queued: Notice = { text: requestedNotice(before[0]), severity: Severity.Success };
-    setNotice(queued);
-    const outcome = await watchRequestedInstance(
-      async () => {
-        const current = await read();
-        if (mounted.current) setInstances(current);
-        return current.map((item) => ({ id: item.id, name: item.name, invalid: invalidErrors(root, item) }));
-      },
-      before,
-      { ...REQUEST_WATCH, cancelled: () => !mounted.current },
-    );
-    // a notice from a later action is left alone, and a left page shows nothing
-    if (mounted.current) setNotice((current) => (current === queued ? outcome : current));
-  };
+  // the instance lists other pages cached are marked stale once the watch ends, when the new instance is likely built
+  const change = useChangeAndInvalidate(invalidateAgentic);
+  return () =>
+    change(async () => {
+      setError('');
+      const before = instances;
+      if (!(await requestInstance(root, id, setError))) return;
+      const queued: Notice = { text: requestedNotice(before[0]), severity: Severity.Success };
+      setNotice(queued);
+      const outcome = await watchRequestedInstance(
+        async () => {
+          const current = await read();
+          if (mounted.current) setInstances(current);
+          return current.map((item) => ({ id: item.id, name: item.name, invalid: invalidErrors(root, item) }));
+        },
+        before,
+        { ...REQUEST_WATCH, cancelled: () => !mounted.current },
+      );
+      // a notice from a later action is left alone, and a left page shows nothing
+      if (mounted.current) setNotice((current) => (current === queued ? outcome : current));
+    });
 }
 
 /**

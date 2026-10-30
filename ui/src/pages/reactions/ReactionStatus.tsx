@@ -15,7 +15,7 @@ import { Actions, BannerSlot, EntityLink, InlineList, Mono, Muted, PageHead, Pag
 import Page from '@components/pages/Page';
 import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
 import { deleteReaction } from '@thorpi/reactions';
-import { reactionKey, useReactionQuery, useReactionUpdates, useStageOrder } from '@utilities/queries/runs';
+import { invalidateRunLists, reactionKey, useReactionQuery, useReactionUpdates, useStageOrder } from '@utilities/queries/runs';
 import { ReactionReadView, reactionReadView, runKind } from '@utilities/runs';
 import { RunKind } from '@models/runs';
 import { Reaction } from '@models/reactions';
@@ -112,6 +112,8 @@ const ReactionStatus: FC = () => {
       queryClient.removeQueries({ queryKey: reactionKey(group, reactionID) });
       void queryClient.invalidateQueries({ queryKey: ['reaction-sub-runs'] });
     },
+    // the cached run lists may still hold the reaction, even after a refused delete that removed part of it
+    onSettled: () => invalidateRunLists(queryClient),
   });
 
   // a reaction that was never read (it doesn't exist or the user can't see it) shows only a titled message with a way back
