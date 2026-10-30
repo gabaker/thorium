@@ -1,11 +1,10 @@
 import { FC } from 'react';
 
 // project imports
-import { LaunchSection, NoticeBanner } from './LaunchNotices';
+import { LaunchPickerSection } from './LaunchPickerSection';
 import { pipelineBlocker } from './pipelineRequest';
-import { PickerOption, SearchPicker } from '@components/agentic/pickers';
+import { PickerOption } from '@components/agentic/pickers';
 import { Severity } from '@components/shared/alerts/AlertBanner';
-import { LoadingSpinner } from '@components/shared/fallback/LoadingSpinner';
 import { PipelineListQueryState } from '@utilities/queries/pipelines';
 import { Pipeline } from '@models/pipelines';
 
@@ -39,26 +38,20 @@ interface PipelineLaunchProps {
 
 /** The Pipelines tab: a searchable list of the static pipelines to add to the runs to launch. */
 export const PipelineLaunch: FC<PipelineLaunchProps> = ({ pipelines, selected, onSelect, search, onSearch }) => (
-  <LaunchSection>
-    <h2>Choose pipelines</h2>
-    {pipelines.errors.length > 0 && (
-      <NoticeBanner severity={Severity.Warning}>
-        <span data-testid="pipeline-list-error">Some pipelines could not be listed: {pipelines.errors.join('; ')}</span>
-      </NoticeBanner>
-    )}
-    <LoadingSpinner loading={pipelines.loading} />
-    {!pipelines.loading && (
-      <SearchPicker
-        label="Pipelines"
-        hint="A pipeline runs the tool behind each stage in order, in the pipeline's group."
-        testId="run-pipeline"
-        options={pipelineOptions(pipelines.pipelines)}
-        selected={selected}
-        onChange={onSelect}
-        emptyText="No pipelines in your groups."
-        search={search}
-        onSearch={onSearch}
-      />
-    )}
-  </LaunchSection>
+  <LaunchPickerSection
+    title="Choose pipelines"
+    error={pipelines.errors.length > 0 ? `Some pipelines could not be listed: ${pipelines.errors.join('; ')}` : ''}
+    errorTestId="pipeline-list-error"
+    errorSeverity={Severity.Warning}
+    loading={pipelines.loading}
+    label="Pipelines"
+    hint="A pipeline runs the tool behind each stage in order, in the pipeline's group."
+    testId="run-pipeline"
+    options={pipelineOptions(pipelines.pipelines)}
+    selected={selected}
+    onSelect={onSelect}
+    emptyText="No pipelines in your groups."
+    search={search}
+    onSearch={onSearch}
+  />
 );

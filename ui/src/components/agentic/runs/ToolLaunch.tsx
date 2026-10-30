@@ -1,10 +1,8 @@
 import { FC } from 'react';
 
 // project imports
-import { LaunchSection, NoticeBanner } from './LaunchNotices';
-import { entityOptions, SearchPicker } from '@components/agentic/pickers';
-import { Severity } from '@components/shared/alerts/AlertBanner';
-import { LoadingSpinner } from '@components/shared/fallback/LoadingSpinner';
+import { LaunchPickerSection } from './LaunchPickerSection';
+import { entityOptions } from '@components/agentic/pickers';
 import { AgenticListQueryState } from '@utilities/queries/agentic';
 import { Tool, ToolKind } from '@models/tools';
 
@@ -27,28 +25,20 @@ export const ToolLaunch: FC<ToolLaunchProps> = ({ tools, selected, onSelect, sea
   // Harness tools can't be run directly
   const runnable = tools.items.filter((tool) => tool.metadata.Tool.kind !== ToolKind.Harness);
   return (
-    <LaunchSection>
-      <h2>Choose tools</h2>
-      {/* the picker decides what can be run, so a failed or cut-off tool listing is shown with it */}
-      {tools.error !== '' && (
-        <NoticeBanner severity={Severity.Error}>
-          <span data-testid="tools-error">{tools.error}</span>
-        </NoticeBanner>
-      )}
-      <LoadingSpinner loading={tools.loading} />
-      {!tools.loading && (
-        <SearchPicker
-          label="Tools"
-          hint="Each chosen tool starts on its latest version; pick another version in the list below."
-          testId="run-tool"
-          options={entityOptions(runnable)}
-          selected={selected}
-          onChange={onSelect}
-          emptyText="No tools can be run directly."
-          search={search}
-          onSearch={onSearch}
-        />
-      )}
-    </LaunchSection>
+    <LaunchPickerSection
+      title="Choose tools"
+      error={tools.error}
+      errorTestId="tools-error"
+      loading={tools.loading}
+      label="Tools"
+      hint="Each chosen tool starts on its latest version; pick another version in the list below."
+      testId="run-tool"
+      options={entityOptions(runnable)}
+      selected={selected}
+      onSelect={onSelect}
+      emptyText="No tools can be run directly."
+      search={search}
+      onSearch={onSearch}
+    />
   );
 };
