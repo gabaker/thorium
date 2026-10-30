@@ -146,6 +146,44 @@ test.describe('tool edit root', () => {
     await expect(page.getByTestId('edit-save')).toBeDisabled();
   });
 
+  test('a saved description stays in the field while the tool is read back', async ({ page }) => {
+    const calls = await mockEditableTool(page);
+    // the tool read after the save is held back, so the field is checked while that read is in flight
+    await page.route('**/api/entities/*', async (route) => {
+      const id = new URL(route.request().url()).pathname.split('/').pop() ?? '';
+      if (id === TOOL_ID && route.request().method() === 'GET' && calls.patches.length > 0) {
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
+      }
+      return route.fallback();
+    });
+    await page.goto(`/tools/${TOOL_ID}`);
+    await page.getByTestId('edit-description').fill('new text');
+    await page.getByTestId('edit-save').click();
+    await expect(page.getByTestId('tool-notice')).toHaveText('Tool updated');
+    await expect(page.getByTestId('edit-description')).toHaveValue('new text', { timeout: 500 });
+    // once the held-back read lands, the field shows the stored description, which is the saved one
+    await page.waitForTimeout(2_500);
+    await expect(page.getByTestId('edit-description')).toHaveValue('new text');
+  });
+
+  test('a saved description stays in the field when reading the tool back fails', async ({ page }) => {
+    const calls = await mockEditableTool(page);
+    // every tool read after the save fails
+    await page.route('**/api/entities/*', (route) => {
+      const id = new URL(route.request().url()).pathname.split('/').pop() ?? '';
+      if (id === TOOL_ID && route.request().method() === 'GET' && calls.patches.length > 0) {
+        return fulfillJson(route, { error: 'Internal Server Error' }, 500);
+      }
+      return route.fallback();
+    });
+    await page.goto(`/tools/${TOOL_ID}`);
+    await page.getByTestId('edit-description').fill('new text');
+    await page.getByTestId('edit-save').click();
+    await expect(page.getByTestId('tool-notice')).toHaveText('Tool updated');
+    await expect(page.getByTestId('tool-error-line').first()).toBeVisible();
+    await expect(page.getByTestId('edit-description')).toHaveValue('new text');
+  });
+
   test('a result shows beside the button that was used', async ({ page }) => {
     await mockEditableTool(page);
     await page.setViewportSize({ width: 1280, height: 500 });

@@ -1,5 +1,5 @@
 import { useQueryClient } from '@tanstack/react-query';
-import { FC, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { FC, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import styled from 'styled-components';
 
@@ -40,7 +40,6 @@ import { Button, ButtonSize, ButtonVariant } from '@components/shared/buttons';
 import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
 import TextInput from '@components/shared/inputs/TextInput';
 import Time from '@components/shared/Time';
-import { getAgenticEntity, listToolInstances } from '@thorpi/agentic';
 import { deleteEntity, updateEntity } from '@thorpi/entities';
 import {
   deleteBlockReason,
@@ -67,11 +66,10 @@ import {
 } from '@utilities/agentic/display';
 import { pinnedToolInstance } from '@utilities/agentic/pins';
 import { useAuth } from '@utilities/auth';
-import { agenticKeys, invalidateAgentic, useAgenticEntityReads } from '@utilities/queries/agentic';
-import { changeAndInvalidate } from '@utilities/queries/changes';
+import { AgenticReadError, invalidateAgentic, useAgenticEntityRead, useAgenticEntityReads } from '@utilities/queries/agentic';
 import { usePipelineListQuery } from '@utilities/queries/pipelines';
-import { AgenticKinds } from '@models/agentic';
-import { Tool, ToolInstance, ToolKind, ToolVersion } from '@models/tools';
+import { toolKeys, useToolRead } from '@utilities/queries/tools';
+import { ToolInstance, ToolKind, ToolVersion } from '@models/tools';
 
 /** The intro sentence of a section, set apart from the field that follows it. */
 /** The label that leads a row of tag badges; it matches the keys in {@link KeyValues}. */
@@ -105,8 +103,16 @@ const ToolPage: FC<{ id: string }> = ({ id }) => {
   // a tool can only gain groups where the user may edit and that allow entities
   const myGroups = useEditableGroupNames();
   const { userInfo } = useAuth();
-  const [tool, setTool] = useState<Tool | null>(null);
-  const [instance, setInstance] = useState<ToolInstance | null>(null);
+  // the tool and its full version list, read through the cache and again on every visit
+  const toolQuery = useToolRead(id);
+  const read = toolQuery.data;
+  const tool = read && 'tool' in read ? read.tool : null;
+  // the kind an opened id turned out to be when it is not a tool
+  const other = read && 'other' in read ? read.other : null;
+  // why the last tool read failed; a reread that fails after the tool was read leaves the tool shown
+  const readError = toolQuery.error?.message ?? '';
+  // whether the tool read failed for a reason a retry may fix (such as a server error), not because the tool is missing or its id is bad
+  const readFailed = toolQuery.error instanceof AgenticReadError && isRetryableReadStatus(toolQuery.error.status);
   const groupDetails = useGroupDetails(tool?.groups ?? []);
   const editReason = editBlockReason(groupDetails, userInfo);
   // why the user couldn't delete a version another user submitted; empty when they could
@@ -117,7 +123,7 @@ const ToolPage: FC<{ id: string }> = ({ id }) => {
   const versionReads = useAgenticEntityReads<ToolInstance>(othersVersionReason === '' ? [] : versionIds);
   // who submitted each version: a name once read, null when it can't be read, or undefined while it is read
   const submitters = Object.fromEntries(
-    Object.entries(versionReads).map(([version, read]) => [version, read === undefined ? undefined : (read?.submitter ?? null)]),
+    Object.entries(versionReads).map(([version, entity]) => [version, entity === undefined ? undefined : (entity?.submitter ?? null)]),
   );
   // deleting the tool deletes every version, so a version the user can't delete blocks it too
   const deleteReason = toolDeleteBlockReason(
@@ -126,100 +132,38 @@ const ToolPage: FC<{ id: string }> = ({ id }) => {
     tool?.submitter ?? '',
     (tool?.metadata.Tool.instances ?? []).map((entry) => submitters[entry.id]),
   );
-  const [selected, setSelected] = useState('');
+  // the version the user chose to view; empty follows the tool's latest version
+  const [chosen, setChosen] = useState('');
+  // the version shown: the chosen one while it still exists, so a deleted choice moves to latest
+  const selected = versionIds.includes(chosen) ? chosen : tool?.metadata.Tool.latest || versionIds[0] || '';
+  // the shown version's spec; with no version left no spec is shown, and a read the user has moved past is not shown
+  const selectedRead = useAgenticEntityRead<ToolInstance>(selected);
+  const instance = selectedRead.entity ?? null;
+  // the latest spec, which the publish form starts from so a change is a small edit
+  const latestRead = useAgenticEntityRead<ToolInstance>(tool?.metadata.Tool.latest ?? '');
   // the pipelines of the tool's groups, read through the cache every pipeline list shares
   const pipelineList = usePipelineListQuery(tool?.groups ?? [], tool !== null);
   const uses = useMemo(() => (tool ? pipelineUses(pipelineList.pipelines, [tool.id, ...versionIds]) : []), [tool, pipelineList.pipelines]);
   const [error, setError] = useState('');
-  // the kind an opened id turned out to be when it is not a tool
-  const [other, setOther] = useState<{ id: string; kind: string } | null>(null);
-  // whether the tool read failed for a reason a retry may fix (such as a server error), not because the tool is missing or its id is bad
-  const [readFailed, setReadFailed] = useState(false);
+  // the error shown: the last action's, else a failed reread of the tool, its version list, or the shown spec
+  const shownError =
+    [error, tool ? readError : '', read && 'tool' in read ? read.versionsError : '', selectedRead.error].find(
+      (message) => message !== '',
+    ) ?? '';
   const [notice, setNotice] = useState('');
   const [area, setArea] = useState<FeedbackArea>('page');
   // the block that shows the result of the last action, wherever it is on the page
   const feedbackRef = useRef<HTMLDivElement>(null);
-  const [loading, setLoading] = useState(true);
   const [publishVersion, setPublishVersion] = useState('');
-  const [publishSpec, setPublishSpec] = useState('');
-  const [description, setDescription] = useState('');
+  // the publish spec as typed; until it is typed in, the form holds the latest spec
+  const [publishDraft, setPublishDraft] = useState<string | null>(null);
+  const latestSpec = latestRead.entity?.metadata.ToolInstance.spec;
+  const publishSpec = publishDraft ?? (latestSpec === undefined ? '' : specToText(latestSpec));
+  // the description as typed; until it is typed in, the field holds the stored description
+  const [descriptionDraft, setDescriptionDraft] = useState<string | null>(null);
+  const description = descriptionDraft ?? tool?.description ?? '';
   const [chosenAddGroup, setAddGroup] = useState('');
   const parsed = useMemo(() => parseToolSpec(publishSpec), [publishSpec]);
-
-  /**
-   * Read the tool and its instance list again.
-   *
-   * @param followLatest - Move the selected version to the new latest, as after a publish.
-   */
-  const load = useCallback(
-    async (followLatest = false) => {
-      setOther(null);
-      setReadFailed(false);
-      const found = await getAgenticEntity<Tool>(id, setError, (status) => setReadFailed(isRetryableReadStatus(status)));
-      if (!found || found.kind !== AgenticKinds.Tool) {
-        // an id of another kind (such as a tool instance) has no tool metadata to show
-        if (found) setOther({ id, kind: found.kind });
-        setLoading(false);
-        return;
-      }
-      // the entity's own instance list may be trimmed (and is left out when empty), so read the full list including deprecated versions
-      const instances = await listToolInstances(id, setError);
-      found.metadata.Tool.instances = instances.length > 0 ? instances : (found.metadata.Tool.instances ?? []);
-      setTool(found);
-      setDescription(found.description ?? '');
-      setLoading(false);
-      // keep the selected version only while it still exists, so a deleted selection moves to latest
-      const ids = (found.metadata.Tool.instances ?? []).map((entry) => entry.id);
-      setSelected((current) => (!followLatest && ids.includes(current) ? current : found.metadata.Tool.latest || ids[0] || ''));
-    },
-    [id],
-  );
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  // read the selected instance's spec
-  useEffect(() => {
-    // with no version selected (the tool has none left) no spec is shown
-    if (selected === '') {
-      setInstance(null);
-      return;
-    }
-    // a read that finishes after another version was chosen must not replace that version's spec
-    let cancelled = false;
-    // an error from a read the user has moved past must not be shown beside the newer version's spec
-    void getAgenticEntity<ToolInstance>(selected, (message) => {
-      if (!cancelled) setError(message);
-    }).then((found) => {
-      if (cancelled) return;
-      setInstance(found);
-      // the version read is shared, so its submitter is not read again
-      if (found) client.setQueryData(agenticKeys.entity(found.id), found);
-      // start the publish form from the latest spec so a change is a small edit
-      if (found && found.id === tool?.metadata.Tool.latest) {
-        setPublishSpec((current) => (current === '' ? specToText(found.metadata.ToolInstance.spec) : current));
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [selected, tool?.metadata.Tool.latest]);
-
-  // start the publish form from the latest spec even while another version is the one shown
-  useEffect(() => {
-    const latest = tool?.metadata.Tool.latest;
-    // the selected spec read fills the form when the latest is the selected version, so only another selection needs its own read
-    if (!latest || selected === '' || selected === latest) return;
-    let cancelled = false;
-    void getAgenticEntity<ToolInstance>(latest, () => undefined).then((found) => {
-      if (cancelled || !found) return;
-      setPublishSpec((current) => (current === '' ? specToText(found.metadata.ToolInstance.spec) : current));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [selected, tool?.metadata.Tool.latest]);
 
   /**
    * Run an action, then show its result beside the control it came from and read the tool again. The cached lists and
@@ -234,9 +178,17 @@ const ToolPage: FC<{ id: string }> = ({ id }) => {
     setArea(where);
     setError('');
     setNotice('');
-    if (await changeAndInvalidate(client, invalidateAgentic, work)) {
-      setNotice(done);
-      await load(followLatest);
+    let succeeded = false;
+    try {
+      succeeded = await work();
+    } finally {
+      // the version shown stays shown while it exists, unless a success should move the view to the new latest
+      setChosen(succeeded && followLatest ? '' : selected);
+      if (succeeded) setNotice(done);
+      // the action ends once this tool is read back, along with every other list and entity in use
+      await invalidateAgentic(client);
+      // the typed description stays until the tool is read back with it, and stays shown when that read fails
+      if (succeeded && client.getQueryState(toolKeys.withVersions(id))?.status !== 'error') setDescriptionDraft(null);
     }
   };
 
@@ -248,15 +200,15 @@ const ToolPage: FC<{ id: string }> = ({ id }) => {
   const feedback = (where: FeedbackArea) => {
     // the page banner sits in the page's banner slot, and a banner in a section in a stack that keeps it off the control above it
     const Wrapper = where === 'page' ? BannerSlot : BannerStack;
-    if (where !== area || (error === '' && notice === '')) return null;
+    if (where !== area || (shownError === '' && notice === '')) return null;
     // the wrapper only exists while a banner is shown, so an idle page adds no blank space of its own;
     // the API marks names with markdown backticks
     return (
       <Wrapper ref={feedbackRef}>
-        {error !== '' && (
+        {shownError !== '' && (
           <AlertBanner>
             {/* a message can lead with an outcome line (such as what a partial delete removed) before the API error */}
-            {error.split('\n').map((line, index) => (
+            {shownError.split('\n').map((line, index) => (
               <div key={index} data-testid="tool-error-line">
                 <CodeSpans text={line} />
               </div>
@@ -275,7 +227,7 @@ const ToolPage: FC<{ id: string }> = ({ id }) => {
   // again once the tool and the selected version are read back after the action, since each reread can move the result down the page
   useEffect(() => {
     const node = feedbackRef.current;
-    if ((error === '' && notice === '') || !node) return;
+    if ((shownError === '' && notice === '') || !node) return;
     // a result already in view stays put; one out of view is centred, so a later reread that grows the page above it
     // still leaves it on screen
     const { top, bottom } = node.getBoundingClientRect();
@@ -283,9 +235,10 @@ const ToolPage: FC<{ id: string }> = ({ id }) => {
       // the window is scrolled directly: scrollIntoView can stop at a page wrapper that clips overflow and scroll only it
       window.scrollBy({ top: (top + bottom - window.innerHeight) / 2, behavior: 'instant' });
     }
-  }, [error, notice, area, tool, instance]);
+  }, [shownError, notice, area, tool, instance]);
 
-  if (loading)
+  // the first read, and a retry of a read that never succeeded, show the spinner
+  if (toolQuery.isPending || (read === undefined && toolQuery.isFetching))
     return (
       <Page title="Tool · Thorium">
         <LoadingSpinner loading={true} />
@@ -298,14 +251,9 @@ const ToolPage: FC<{ id: string }> = ({ id }) => {
         loading={false}
         listPath="/tools"
         listName="tools"
-        error={error}
+        error={readError}
         failed={readFailed}
-        onRetry={() => {
-          // show the spinner while the tool is read again
-          setError('');
-          setLoading(true);
-          void load();
-        }}
+        onRetry={() => void toolQuery.refetch()}
         other={other ?? undefined}
       />
     );
@@ -369,16 +317,13 @@ const ToolPage: FC<{ id: string }> = ({ id }) => {
                     let refusal = '';
                     if (await deleteEntity(version.id, (message) => (refusal = message))) deleted.push(version.version);
                     else {
-                      // the versions deleted before this refusal are gone, so say so and read the list again
+                      // the versions deleted before this refusal are gone, so say so; the action reads the list again
                       setError(partialDeleteMessage(refusal, deleted));
-                      await load();
                       return false;
                     }
                   }
-                  const gone = await deleteEntity(tool.id, setError);
-                  if (gone) void navigate('/tools');
-                  // a refused delete leaves the tool in place, so read it again
-                  else await load();
+                  // a refused delete leaves the tool in place, and the action reads it again
+                  if (await deleteEntity(tool.id, setError)) void navigate('/tools');
                   return false;
                 },
                 '',
@@ -466,7 +411,7 @@ const ToolPage: FC<{ id: string }> = ({ id }) => {
             setArea('versions');
             setNotice('');
             setError('');
-            setSelected(instanceId);
+            setChosen(instanceId);
           }}
           onRun={(instanceId) => void navigate(`/launch?tab=tool&tool=${tool.id}&instance=${instanceId}`)}
           onDeprecate={(instanceId, deprecated) =>
@@ -539,7 +484,7 @@ const ToolPage: FC<{ id: string }> = ({ id }) => {
             style={{ minHeight: '14rem' }}
             value={publishSpec}
             disabled={editReason !== ''}
-            onChange={(event) => setPublishSpec(event.target.value)}
+            onChange={(event) => setPublishDraft(event.target.value)}
           />
         </Field>
         {editReason === '' && publishProblem !== '' && publishVersion.trim() !== '' && (
@@ -586,7 +531,7 @@ const ToolPage: FC<{ id: string }> = ({ id }) => {
             data-testid="edit-description"
             value={description}
             disabled={editReason !== ''}
-            onChange={(event) => setDescription(event.target.value)}
+            onChange={(event) => setDescriptionDraft(event.target.value)}
           />
         </Field>
         <Field>

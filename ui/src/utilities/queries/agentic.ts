@@ -108,6 +108,80 @@ export function useAgenticListQuery<T extends AnyAgenticEntity>(
   return { items: query.data?.items ?? [], error: query.data?.error ?? '', loading: enabled && query.isPending, reload };
 }
 
+/** A failed read of one entity: the formatted message and the HTTP status (0 when the server gave no response). */
+export class AgenticReadError extends Error {
+  /** The HTTP status of the failed request, or 0 when the server gave no response */
+  status: number;
+
+  /**
+   * Describe a failed entity read.
+   *
+   * @param message - The formatted message of the failure.
+   * @param status - The HTTP status of the failed request.
+   */
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'AgenticReadError';
+    this.status = status;
+  }
+}
+
+/**
+ * Read one entity by id, throwing when it can't be read so a query keeps the entity it read before.
+ *
+ * @template T - The entity type.
+ * @param id - The entity's id.
+ * @returns The entity.
+ * @throws {AgenticReadError} When the entity is missing, hidden, or the read failed.
+ */
+export async function fetchAgenticEntity<T extends AnyAgenticEntity>(id: string): Promise<T> {
+  let message = '';
+  let status = 0;
+  const found = await getAgenticEntity<T>(
+    id,
+    (error) => (message = error),
+    (code) => (status = code),
+  );
+  if (!found) throw new AgenticReadError(message || `Get Entity: ${id} could not be read`, status);
+  return found;
+}
+
+/**
+ * Get the query options that read one entity through the shared entity cache.
+ *
+ * A failed read is not retried: a missing or hidden entity stays so, and the page offers its own retry. A failed reread
+ * keeps the entity read before, so an entity deleted while it is shown doesn't flash an error before the page moves on.
+ *
+ * @template T - The entity type.
+ * @param id - The entity's id.
+ * @returns The query options.
+ */
+export function agenticEntityQuery<T extends AnyAgenticEntity>(id: string) {
+  return { queryKey: agenticKeys.entity(id), queryFn: () => fetchAgenticEntity<T>(id), staleTime: AGENTIC_LIST_STALE_MS, retry: false };
+}
+
+/** One entity read through the cache, with why it can't be read. */
+export interface AgenticEntityRead<T> {
+  /** The entity, `null` when it can't be read, or `undefined` while it is read (or no id was given) */
+  entity: T | null | undefined;
+  /** Why the entity can't be read, or an empty string */
+  error: string;
+}
+
+/**
+ * Read one entity by id through the query cache; an entity that couldn't be read is read again when it is asked for again.
+ *
+ * @template T - The entity type.
+ * @param id - The entity's id; an empty id reads nothing.
+ * @returns The entity and the message of a read that never succeeded.
+ */
+export function useAgenticEntityRead<T extends AnyAgenticEntity>(id: string): AgenticEntityRead<T> {
+  const query = useQuery({ ...agenticEntityQuery<T>(id), enabled: id !== '' });
+  // an entity read before stays shown when a later reread fails
+  if (query.data !== undefined) return { entity: query.data, error: '' };
+  return query.isError ? { entity: null, error: query.error.message } : { entity: undefined, error: '' };
+}
+
 /**
  * Read several entities by id through the query cache, all at once, telling an entity still being read from one that
  * can't be read.
@@ -118,16 +192,13 @@ export function useAgenticListQuery<T extends AnyAgenticEntity>(
  */
 export function useAgenticEntityReads<T extends AnyAgenticEntity>(ids: string[]): Record<string, T | null | undefined> {
   const wanted = [...new Set(ids.filter((id) => id !== ''))];
-  const queries = useQueries({
-    queries: wanted.map((id) => ({
-      queryKey: agenticKeys.entity(id),
-      queryFn: () => getAgenticEntity<T>(id, () => undefined),
-      staleTime: AGENTIC_LIST_STALE_MS,
-    })),
-  });
+  // an entity that can't be read is not read again on every mount, only once it goes stale or a change invalidates it
+  const queries = useQueries({ queries: wanted.map((id) => ({ ...agenticEntityQuery<T>(id), retryOnMount: false })) });
   const found: Record<string, T | null | undefined> = {};
   wanted.forEach((id, index) => {
-    found[id] = queries[index].data;
+    const query = queries[index];
+    // an entity read before stays when a later reread fails
+    found[id] = query.data ?? (query.isError ? null : undefined);
   });
   return found;
 }
