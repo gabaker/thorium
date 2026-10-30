@@ -104,6 +104,8 @@ impl Detection for SignatureAnomaly {
                 source: HitSource::Native,
                 artifact: None,
                 context: None,
+                // unstamped here; the registry runner names native producers
+                detection: None,
             },
             // no digest candidate parsed at all: structural fact, low grade
             _ => DetectionHit {
@@ -128,6 +130,8 @@ impl Detection for SignatureAnomaly {
                 source: HitSource::Native,
                 artifact: None,
                 context: None,
+                // unstamped here; the registry runner names native producers
+                detection: None,
             },
         };
         Ok(vec![hit])

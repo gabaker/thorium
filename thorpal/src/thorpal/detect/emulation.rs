@@ -27,7 +27,7 @@ use crate::thorpal::detect::context::AnalysisContext;
 use crate::thorpal::detect::decode;
 use crate::thorpal::detect::detections::defense_evasion::T1027;
 use crate::thorpal::detect::detections::{
-    ArtifactClass, DetectionHit, EvidenceKind, HitArtifact, HitSource, high, medium,
+    DetectionHit, EvidenceKind, HitArtifact, HitSource, high, medium,
 };
 
 /// The wall-clock budget for the whole emulation stage.
@@ -627,6 +627,7 @@ mod tests {
     use super::*;
 
     use crate::thorpal::detect::context::fmt_addr;
+    use crate::thorpal::detect::detections::ArtifactClass;
 
     /// Build a minimal instruction for the harvest tests.
     ///
@@ -889,7 +890,7 @@ mod tests {
         let ctx = AnalysisContext::build(ghidra, &sample)
             .await
             .expect("context");
-        let prior = crate::thorpal::detect::detections::run_all(&ctx)
+        let (prior, _) = crate::thorpal::detect::detections::run_all_with_roster(&ctx)
             .await
             .expect("detections");
         let candidates = select_candidates(&prior);

@@ -16,10 +16,14 @@
 //! transcript tail, `*.tmp` siblings, and sessions renamed mid-scan.
 
 mod app;
-mod drill;
-mod model;
-mod scan;
-mod views;
+// the model, scanner, drill-down, and rendering helpers are shared with the
+// telemetry commands, which reuse the same read-only fold (one streaming pass
+// serves them all), the same single-session replay views, and the same
+// clip/bar primitives so the TUIs stay one visual family
+pub(in crate::handlers::ai) mod drill;
+pub(in crate::handlers::ai) mod model;
+pub(in crate::handlers::ai) mod scan;
+pub(in crate::handlers::ai) mod views;
 
 use thorium::{CtlConf, Error};
 use thorpal::SessionStore;

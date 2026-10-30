@@ -11,6 +11,7 @@ mod pricing;
 mod session;
 mod setup;
 mod summary;
+mod telemetry;
 mod tui;
 mod usage;
 
@@ -62,5 +63,8 @@ pub async fn handle(args: &Args, cmd: &Ai) -> Result<(), Error> {
         // itself because the wizard may be creating the very first config
         Ai::Setup(cmd) => setup::handle(args, cmd).await,
         Ai::Batch(cmd) => batch::handle(args, cmd).await,
+        // export privacy-safe telemetry bundles; the handler loads config
+        // best-effort itself so boxes with no thorctl config can still export
+        Ai::Telemetry(cmd) => telemetry::handle(args, cmd).await,
     }
 }

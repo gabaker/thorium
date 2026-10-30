@@ -383,6 +383,8 @@ fn parse_question(raw: &serde_json::Value) -> Result<SeedQuestion, String> {
         title,
         body,
         tasks,
+        // promoted detector scripts ask for their questions explicitly
+        origin: "script",
     })
 }
 

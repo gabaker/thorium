@@ -319,6 +319,10 @@ pub enum ThorPalEvent {
         agent: String,
         /// The human-readable error describing why the turn failed.
         error: String,
+        /// The provider's request id for the failed request, when the error
+        /// preserved one (the id provider support asks for). The `error` text
+        /// embeds the same id; this field spares consumers from parsing it out.
+        request_id: Option<String>,
     },
     /// A completion request hit a transient provider fault (e.g. a 429
     /// throttle) and is backing off before its next attempt.
@@ -327,8 +331,10 @@ pub enum ThorPalEvent {
     /// `retry` module), so a consumer can render one live,
     /// in-place status line per retry episode -- an attempt counter, the time
     /// since the last attempt, and a countdown to the next -- instead of a
-    /// scrolling log line per attempt. Like [`ThorPalEvent::ToolLog`], this is
-    /// live telemetry and is never persisted to the session transcript.
+    /// scrolling log line per attempt. Each attempt is also persisted as an
+    /// `llm_retry` transcript line so offline telemetry can count throttle
+    /// storms and total backoff time (an episode is bounded by the retry
+    /// budget, so the line volume is too).
     LlmRetrying {
         /// The display name of the agent whose request is retrying (e.g. `"main"`).
         agent: String,
@@ -341,6 +347,9 @@ pub enum ThorPalEvent {
         max_attempts: u32,
         /// A short human-readable summary of the fault (e.g. `"429 Too Many Requests"`).
         error: String,
+        /// The provider's request id for the attempt that just failed, when
+        /// the error preserved one (the id provider support asks for).
+        request_id: Option<String>,
         /// When the attempt that just failed was observed.
         last_attempt_at: DateTime<Utc>,
         /// When the next attempt will fire.
@@ -384,6 +393,9 @@ pub enum ThorPalEvent {
         level: u8,
         /// A short human-readable summary of the kill (e.g. `"403 Forbidden"`).
         error: String,
+        /// The provider's request id for the killed request, when the error
+        /// preserved one (what the proxy team asks for when chasing a kill).
+        request_id: Option<String>,
     },
     /// Report generation stepped down its content-filter ladder.
     ///
@@ -404,9 +416,10 @@ pub enum ThorPalEvent {
     /// fault or spends its whole transient-retry budget: every agent's next
     /// request parks on the same gate, so one event describes the whole
     /// session's state. Re-emitted with updated fields after each failed
-    /// probe so a consumer refreshes its banner in place. Like
-    /// [`ThorPalEvent::LlmRetrying`], this is live telemetry and is never
-    /// persisted to the session transcript.
+    /// probe so a consumer refreshes its banner in place. Only the initial
+    /// publish (`probe_attempts == 0`) is persisted, as a `provider_paused`
+    /// transcript line; probe refreshes are live banner updates whose tally
+    /// lands on the matching [`ThorPalEvent::SessionResumed`] instead.
     SessionPaused {
         /// Why the session paused.
         kind: super::gate::PauseKind,
@@ -414,6 +427,9 @@ pub enum ThorPalEvent {
         agent: String,
         /// A short human-readable summary of the fault (e.g. `"401 Unauthorized"`).
         error: String,
+        /// The provider's request id for the most recent fault, when the error
+        /// preserved one. Mirrors `error`: overwritten by each failed probe.
+        request_id: Option<String>,
         /// When the pause began.
         since: DateTime<Utc>,
         /// How many automatic probes have failed since the pause began.
@@ -429,5 +445,9 @@ pub enum ThorPalEvent {
         /// Whether the provider actually recovered (`false` means the operator
         /// aborted the pause and the parked requests surfaced their errors).
         recovered: bool,
+        /// How long the session was paused, in milliseconds.
+        paused_ms: u64,
+        /// How many automatic probes failed over the whole pause.
+        probe_attempts: u32,
     },
 }

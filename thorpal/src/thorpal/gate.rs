@@ -57,6 +57,19 @@ fn probe_schedule(delay: std::time::Duration) -> (tokio::time::Instant, DateTime
     (tokio::time::Instant::now() + delay, wall)
 }
 
+/// How long a pause that began at `since` has lasted, in milliseconds
+///
+/// Clamped at zero so a wall clock stepping backwards mid-pause can never
+/// produce a bogus duration on the resume event.
+///
+/// # Arguments
+///
+/// * `since` - When the pause began
+fn paused_ms_since(since: DateTime<Utc>) -> u64 {
+    // clamp a backwards wall-clock step to a zero-length pause
+    u64::try_from((Utc::now() - since).num_milliseconds()).unwrap_or(0)
+}
+
 /// A caller-supplied credential refresher run before each auth-pause probe.
 ///
 /// Returns a freshly-credentialed provider config (e.g. thorctl re-reads its
@@ -67,7 +80,11 @@ pub type CredentialRefresher =
     Arc<dyn Fn() -> BoxFuture<'static, Result<AiProviderConfig, anyhow::Error>> + Send + Sync>;
 
 /// Why a session paused instead of failing.
+///
+/// Serialized into `provider_paused`/`provider_resumed` transcript lines, so
+/// the variants rename to snake_case to match the transcript's conventions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PauseKind {
     /// The provider rejected the request's credentials (401/403, an expired
     /// AWS security token, a missing credential chain).
@@ -101,6 +118,9 @@ pub enum PauseStatus {
         agent: String,
         /// A short human-readable summary of the fault.
         error: String,
+        /// The provider's request id for the most recent fault, when the error
+        /// preserved one. Mirrors `error`: overwritten by each failed probe.
+        request_id: Option<String>,
         /// When the pause began.
         since: DateTime<Utc>,
         /// How many automatic probes have failed since the pause began.
@@ -155,6 +175,11 @@ struct PauseState {
     agent: String,
     /// A short human-readable summary of the most recent fault.
     error: String,
+    /// The provider's request id for the most recent fault, when the error
+    /// preserved one. Overwritten alongside `error` by each failed probe so
+    /// the id always matches the summary shown beside it; earlier ids stay
+    /// in the file log's per-attempt warnings.
+    request_id: Option<String>,
     /// When the pause began.
     since: DateTime<Utc>,
     /// How many automatic probes have failed since the pause began.
@@ -548,6 +573,7 @@ impl ProviderGate {
     /// * `kind` - Why the request wants the session paused
     /// * `agent` - The display name of the agent whose request failed
     /// * `error` - A short human-readable summary of the fault
+    /// * `request_id` - The provider's request id for the fault, when preserved
     /// * `token` - The failed probe's token, when this request was the prober
     #[instrument(name = "ProviderGate::pause_and_park", skip_all, fields(agent = %agent, ?kind))]
     pub(crate) async fn pause_and_park(
@@ -555,6 +581,7 @@ impl ProviderGate {
         kind: PauseKind,
         agent: &str,
         error: String,
+        request_id: Option<String>,
         token: Option<ProbeToken>,
     ) -> GatePass {
         // a shutting-down session never pauses: the request fails fast as
@@ -588,6 +615,7 @@ impl ProviderGate {
                         kind,
                         agent: agent.to_owned(),
                         error,
+                        request_id,
                         since: Utc::now(),
                         probe_attempts: 0,
                         tick: 0,
@@ -610,6 +638,8 @@ impl ProviderGate {
                     pause.tick += 1;
                     pause.tick_claimed = false;
                     pause.error = error;
+                    // keep the id in lockstep with the summary it belongs to
+                    pause.request_id = request_id;
                     // back the probes off exponentially, capped
                     let exponent = pause.probe_attempts.min(8);
                     let delay = PROBE_BASE_DELAY
@@ -630,11 +660,13 @@ impl ProviderGate {
         drop(token);
         // announce the (re-)pause outside the lock
         if let Some(pause) = announce {
-            // one warning per transition is the file log's whole record
+            // one warning per transition is the file log's whole record; the
+            // summary strips the provider request id, so log it as its own field
             tracing::warn!(
                 ?kind,
                 agent,
                 error = %pause.error,
+                request_id = pause.request_id.as_deref().unwrap_or("-"),
                 probe_attempts = pause.probe_attempts,
                 "provider requests paused; waiting for recovery or the operator"
             );
@@ -658,23 +690,26 @@ impl ProviderGate {
         if let Some(mut token) = token {
             token.armed = false;
         }
-        // resume everyone when the gate was paused
+        // resume everyone when the gate was paused, keeping what the durable
+        // resume line reports: the kind, the pause start, and the probe tally
         let resumed = {
             let mut state = self.lock();
             match &state.mode {
                 Mode::Paused(pause) => {
-                    let kind = pause.kind;
+                    let ended = (pause.kind, pause.since, pause.probe_attempts);
                     state.mode = Mode::Running;
-                    Some(kind)
+                    Some(ended)
                 }
                 Mode::Running => None,
             }
         };
-        if let Some(kind) = resumed {
+        if let Some((kind, since, probe_attempts)) = resumed {
             tracing::info!(?kind, "provider requests resumed");
             self.emit(ThorPalEvent::SessionResumed {
                 kind,
                 recovered: true,
+                paused_ms: paused_ms_since(since),
+                probe_attempts,
             });
             let _ = self.status.send(PauseStatus::Running);
             self.notify();
@@ -700,18 +735,19 @@ impl ProviderGate {
         // resume only an outage pause: the provider answering ends it
         let resumed = {
             let mut state = self.lock();
-            if matches!(
-                &state.mode,
-                Mode::Paused(pause) if pause.kind == PauseKind::RetryBudgetExhausted
-            ) {
-                state.mode = Mode::Running;
-                Some(PauseKind::RetryBudgetExhausted)
-            } else {
+            match &state.mode {
+                Mode::Paused(pause) if pause.kind == PauseKind::RetryBudgetExhausted => {
+                    // keep what the durable resume line reports before the
+                    // pause state is dropped with the mode flip
+                    let ended = (pause.kind, pause.since, pause.probe_attempts);
+                    state.mode = Mode::Running;
+                    Some(ended)
+                }
                 // an auth pause (or a running gate) is left untouched
-                None
+                _ => None,
             }
         };
-        if let Some(kind) = resumed {
+        if let Some((kind, since, probe_attempts)) = resumed {
             // the outcome was the report; keep the (now moot) claim from
             // being released as idle
             if let Some(mut token) = token {
@@ -721,6 +757,8 @@ impl ProviderGate {
             self.emit(ThorPalEvent::SessionResumed {
                 kind,
                 recovered: true,
+                paused_ms: paused_ms_since(since),
+                probe_attempts,
             });
             let _ = self.status.send(PauseStatus::Running);
             self.notify();
@@ -788,6 +826,7 @@ impl ProviderGate {
             kind,
             agent,
             error,
+            request_id,
             since,
             probe_attempts,
             next_probe_wall,
@@ -797,6 +836,7 @@ impl ProviderGate {
             kind: *kind,
             agent: agent.clone(),
             error: error.clone(),
+            request_id: request_id.clone(),
             since: *since,
             probe_attempts: *probe_attempts,
             next_probe_at: *next_probe_wall,
@@ -805,6 +845,7 @@ impl ProviderGate {
             kind: *kind,
             agent: agent.clone(),
             error: error.clone(),
+            request_id: request_id.clone(),
             since: *since,
             probe_attempts: *probe_attempts,
             next_probe_at: *next_probe_wall,
@@ -878,20 +919,24 @@ impl PauseController {
             let mut state = self.gate.lock();
             match &state.mode {
                 Mode::Paused(pause) => {
-                    let kind = pause.kind;
+                    // keep what the durable resume line reports: the kind,
+                    // the pause start, and the probe tally
+                    let ended = (pause.kind, pause.since, pause.probe_attempts);
                     // mark the episode aborted so its waiters surface errors
                     state.aborted_episode = Some(state.episode);
                     state.mode = Mode::Running;
-                    Some(kind)
+                    Some(ended)
                 }
                 Mode::Running => None,
             }
         };
-        if let Some(kind) = aborted {
+        if let Some((kind, since, probe_attempts)) = aborted {
             tracing::warn!(?kind, "provider pause aborted by the operator");
             self.gate.emit(ThorPalEvent::SessionResumed {
                 kind,
                 recovered: false,
+                paused_ms: paused_ms_since(since),
+                probe_attempts,
             });
             let _ = self.gate.status.send(PauseStatus::Running);
             self.gate.notify();
@@ -971,9 +1016,59 @@ mod tests {
         // the pauser is tokenless: it is an ordinary failing request
         let gate = Arc::clone(gate);
         tokio::spawn(async move {
-            gate.pause_and_park(PauseKind::Auth, "main", "401".to_owned(), None)
+            gate.pause_and_park(PauseKind::Auth, "main", "401".to_owned(), None, None)
                 .await
         })
+    }
+
+    /// The pause pipeline carries the provider request id end to end
+    #[tokio::test(start_paused = true)]
+    async fn pause_carries_the_provider_request_id() {
+        let (gate, mut rx) = test_gate(None).await;
+        let controller = gate.controller();
+        let mut status = controller.status();
+        // a failing request pauses with its fault's request id
+        let pauser = {
+            let gate = Arc::clone(&gate);
+            tokio::spawn(async move {
+                gate.pause_and_park(
+                    PauseKind::Auth,
+                    "main",
+                    "401".to_owned(),
+                    Some("req-pause".to_owned()),
+                    None,
+                )
+                .await
+            })
+        };
+        // the watch status mirrors the id alongside its summary
+        status.changed().await.expect("a pause status change");
+        match &*status.borrow() {
+            PauseStatus::Paused {
+                error, request_id, ..
+            } => {
+                assert_eq!(error, "401");
+                assert_eq!(request_id.as_deref(), Some("req-pause"));
+            }
+            PauseStatus::Running => panic!("the gate should be paused"),
+        }
+        // the announced event carries the same id
+        match rx.try_recv().expect("a session paused event") {
+            ThorPalEvent::SessionPaused {
+                error, request_id, ..
+            } => {
+                assert_eq!(error, "401");
+                assert_eq!(request_id.as_deref(), Some("req-pause"));
+            }
+            other => panic!("expected SessionPaused, got {other:?}"),
+        }
+        // abort the pause so the parked request joins cleanly
+        controller.abort();
+        let pass = timeout(SETTLE, pauser)
+            .await
+            .expect("the pauser should settle")
+            .expect("the pauser should join");
+        assert!(matches!(pass, GatePass::Abort));
     }
 
     /// An abort landing while the prober holds the claim aborts the parked
@@ -1019,7 +1114,13 @@ mod tests {
         };
         // the prober's own failure joins the abort instead of re-pausing
         let pass = gate
-            .pause_and_park(PauseKind::Auth, "main", "still 401".to_owned(), Some(token))
+            .pause_and_park(
+                PauseKind::Auth,
+                "main",
+                "still 401".to_owned(),
+                None,
+                Some(token),
+            )
             .await;
         assert!(matches!(pass, GatePass::Abort));
         // the gate stayed running: one pause, one non-recovered resume, and
@@ -1108,8 +1209,14 @@ mod tests {
         let joiner = {
             let gate = Arc::clone(&gate);
             tokio::spawn(async move {
-                gate.pause_and_park(PauseKind::Auth, "stale", "late 401".to_owned(), Some(stale))
-                    .await
+                gate.pause_and_park(
+                    PauseKind::Auth,
+                    "stale",
+                    "late 401".to_owned(),
+                    None,
+                    Some(stale),
+                )
+                .await
             })
         };
         // let the joiner run its report and park (no timers elapse here)
@@ -1158,7 +1265,7 @@ mod tests {
         assert!(matches!(gate.admit(&None).await, GatePass::Abort));
         // a pause-worthy fault aborts instead of parking the dying process
         let pass = gate
-            .pause_and_park(PauseKind::Auth, "main", "401".to_owned(), None)
+            .pause_and_park(PauseKind::Auth, "main", "401".to_owned(), None, None)
             .await;
         assert!(matches!(pass, GatePass::Abort));
     }

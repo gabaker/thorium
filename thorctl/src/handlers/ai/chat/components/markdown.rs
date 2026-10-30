@@ -122,7 +122,7 @@ pub(super) fn markdown_rows(markdown: &str, width: usize, base: Style) -> Vec<Ve
 /// * `markdown` - The markdown text to render
 /// * `width` - The number of columns each line may use
 /// * `base` - The style for text the markdown leaves unstyled
-pub(super) fn markdown_lines(markdown: &str, width: usize, base: Style) -> Vec<Line<'static>> {
+pub(crate) fn markdown_lines(markdown: &str, width: usize, base: Style) -> Vec<Line<'static>> {
     // wrap into rows then lift each row of spans into a line
     markdown_rows(markdown, width, base)
         .into_iter()

@@ -598,6 +598,23 @@ pub(super) fn reinject_secrets(
     }
 }
 
+/// Render a provider request id as a ` (request id: ...)` line suffix
+///
+/// Matches rig's own Display wording so one grep pattern covers the stderr
+/// lines, the file log, and persisted transcript error strings. An absent id
+/// renders as nothing so lines never promise an id the provider withheld.
+///
+/// # Arguments
+///
+/// * `request_id` - The provider request id the event carried, if any
+fn fmt_request_id(request_id: &Option<String>) -> String {
+    match request_id {
+        // mirror rig's " (request id: ...)" suffix wording exactly
+        Some(id) => format!(" (request id: {id})"),
+        None => String::new(),
+    }
+}
+
 /// Print ThorPal run events as plain progress lines on stderr
 ///
 /// The printer drains the session's event channel until every sender clone
@@ -691,24 +708,36 @@ pub(super) async fn print_events(mut events: UnboundedReceiver<ThorPalEvent>) {
                     eprintln!("[tool] {agent} -> {tool} FAILED");
                 }
             }
-            // a turn failed after exhausting its retry budget
-            ThorPalEvent::TurnFailed { agent, error } => eprintln!("[error] {agent}: {error}"),
-            // a provider request is backing off before another attempt
+            // a turn failed after exhausting its retry budget; the error text
+            // already embeds the request id when one was preserved
+            ThorPalEvent::TurnFailed { agent, error, .. } => {
+                eprintln!("[error] {agent}: {error}");
+            }
+            // a provider request is backing off before another attempt; the id
+            // is appended after the stable wording so the batch throttle
+            // counter's line match never changes
             ThorPalEvent::LlmRetrying {
                 agent,
                 attempt,
                 max_attempts,
                 error,
+                request_id,
                 ..
-            } => eprintln!("[retry] {agent} attempt {attempt}/{max_attempts}: {error}"),
+            } => eprintln!(
+                "[retry] {agent} attempt {attempt}/{max_attempts}: {error}{}",
+                fmt_request_id(&request_id)
+            ),
             // a content filter killed a request; a scrubbed retry fired
             ThorPalEvent::LlmScrubbed {
                 agent,
                 level,
                 error,
+                request_id,
                 ..
             } => eprintln!(
-                "[scrubbed] {agent}: content filter blocked a request ({error}); retrying at scrub level {level}"
+                "[scrubbed] {agent}: content filter blocked a request ({error}); \
+                 retrying at scrub level {level}{}",
+                fmt_request_id(&request_id)
             ),
             // report generation stepped down its content-filter ladder
             ThorPalEvent::ReportDegraded { rung, detail } => {
@@ -719,15 +748,21 @@ pub(super) async fn print_events(mut events: UnboundedReceiver<ThorPalEvent>) {
             ThorPalEvent::SessionPaused {
                 kind,
                 error,
+                request_id,
                 probe_attempts,
                 next_probe_at,
                 ..
             } => eprintln!(
-                "[paused] {kind}: {error} ({probe_attempts} failed probe(s); next probe at {})",
+                "[paused] {kind}: {error}{} ({probe_attempts} failed probe(s); next probe at {})",
+                fmt_request_id(&request_id),
                 next_probe_at.format("%H:%M:%S UTC")
             ),
-            // the pause resolved, one way or the other
-            ThorPalEvent::SessionResumed { kind, recovered } => {
+            // the pause resolved, one way or the other (the duration and probe
+            // tally ride the event for the transcript; the stable wording here
+            // stays untouched)
+            ThorPalEvent::SessionResumed {
+                kind, recovered, ..
+            } => {
                 if recovered {
                     eprintln!("[resumed] {kind} recovered");
                 } else {

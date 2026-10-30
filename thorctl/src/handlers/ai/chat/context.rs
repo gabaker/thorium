@@ -20,6 +20,19 @@ pub enum ChatEntry {
         /// The message text
         text: String,
     },
+    /// A failure surfaced to the user with click-to-expand detail
+    Failure {
+        /// The id a click uses to toggle this failure's detail rows
+        id: Uuid,
+        /// The display name of the agent that hit the failure, if known
+        agent: Option<String>,
+        /// The compact one-line summary shown in the log
+        summary: String,
+        /// The provider's request id for the failed request, when preserved
+        request_id: Option<String>,
+        /// The full error text behind the summary, when it says more
+        detail: Option<String>,
+    },
     /// A tool call made by an agent
     ToolCall {
         /// The id used to match this call with its result
@@ -101,6 +114,35 @@ impl ChatContext {
         self.push(ChatEntry::Ai {
             agent,
             text: msg.into(),
+        });
+    }
+
+    /// Add a failure with click-to-expand detail to the chat log
+    ///
+    /// The summary renders as a compact error line; the request id and full
+    /// error text (when present) stay behind a click so provider bodies never
+    /// flood the log.
+    ///
+    /// # Arguments
+    ///
+    /// * `summary` - The compact one-line summary of the failure
+    /// * `agent` - The display name of the agent that hit the failure, if known
+    /// * `request_id` - The provider's request id, when the error preserved one
+    /// * `detail` - The full error text, when it says more than the summary
+    pub fn add_failure(
+        &self,
+        summary: impl Into<String>,
+        agent: Option<String>,
+        request_id: Option<String>,
+        detail: Option<String>,
+    ) {
+        // failures mint their own id so clicks can toggle their detail rows
+        self.push(ChatEntry::Failure {
+            id: Uuid::new_v4(),
+            agent,
+            summary: summary.into(),
+            request_id,
+            detail,
         });
     }
 

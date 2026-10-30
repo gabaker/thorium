@@ -25,7 +25,7 @@ use std::sync::Arc;
 use rig::tool::ToolContext;
 
 use super::library::ScriptLibrary;
-use super::memories::{MemoryKind, MemoryLibrary, MemoryMeta};
+use super::memories::{MemoryKind, MemoryMeta};
 
 /// Redacts library content at render time for blinded or deny-listed runs.
 ///
@@ -50,6 +50,11 @@ pub struct LibraryRedactor {
     /// model-visible memory surface, because its content can reveal the
     /// family under analysis even after name/token redaction
     blind_families: Vec<String>,
+    /// The unambiguous placeholder-to-canonical-token pairs for save-path
+    /// un-redaction, sorted by placeholder for determinism; a placeholder two
+    /// canonical tokens collide on (the ids are only 16 bits) is excluded, so
+    /// a quoted placeholder never restores to the wrong family
+    restores: Vec<(String, String)>,
 }
 
 impl LibraryRedactor {
@@ -100,8 +105,27 @@ impl LibraryRedactor {
         // family renders one stable id
         let mut tokens: Vec<(String, String)> = Vec::new();
         let mut seen = std::collections::HashSet::new();
+        // collect each canonical's placeholder so saves can restore quoted
+        // placeholders back to real tokens; a placeholder two canonicals
+        // collide on restores to neither, since picking one would silently
+        // rewrite text to the wrong family
+        let mut restore_map: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
         for canonical in cleaned {
             let placeholder = token_placeholder(&canonical);
+            match restore_map.entry(placeholder.clone()) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    // a second canonical makes this placeholder ambiguous
+                    tracing::warn!(
+                        placeholder,
+                        "deny-token placeholder collision; it will not un-redact"
+                    );
+                    entry.insert(None);
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(Some(canonical.clone()));
+                }
+            }
             for variant in token_variants(&canonical) {
                 if variant.len() >= 3 && seen.insert(variant.clone()) {
                     tokens.push((variant, placeholder.clone()));
@@ -110,6 +134,12 @@ impl LibraryRedactor {
         }
         // longest first so "darkgatev2" wins over "darkgate" at the same spot
         tokens.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
+        // flatten the unambiguous restore pairs, sorted for determinism
+        let mut restores: Vec<(String, String)> = restore_map
+            .into_iter()
+            .filter_map(|(placeholder, token)| token.map(|token| (placeholder, token)))
+            .collect();
+        restores.sort();
         // a run with nothing to redact runs without a redactor at all
         if !anonymized && tokens.is_empty() {
             return None;
@@ -118,6 +148,7 @@ impl LibraryRedactor {
             anonymized,
             tokens,
             blind_families,
+            restores,
         }))
     }
 
@@ -173,6 +204,30 @@ impl LibraryRedactor {
         let mut out = text.to_owned();
         for (token, placeholder) in &self.tokens {
             out = replace_token(&out, token, placeholder);
+        }
+        out
+    }
+
+    /// Restores canonical deny tokens over their `fam-<4 hex>` placeholders
+    ///
+    /// The save path's inverse of [`LibraryRedactor::redact_text`]: a model in
+    /// a blinded run quotes placeholders out of redacted renders, and without
+    /// this restore they would persist into cross-run storage, where they are
+    /// dead weight to every other run and defeat
+    /// [`LibraryRedactor::hides_family_intel`] (which needs the real token in
+    /// the stored source). Restored tokens carry the normalized lowercase
+    /// canonical spelling; a placeholder two canonicals collide on passes
+    /// through untouched (save validation rejects it with guidance instead).
+    /// Text with no placeholders passes through byte-exact.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The model-supplied text to restore
+    pub fn unredact_text(&self, text: &str) -> String {
+        // splice each known placeholder back to its canonical token
+        let mut out = text.to_owned();
+        for (placeholder, token) in &self.restores {
+            out = replace_token(&out, placeholder, token);
         }
         out
     }
@@ -369,47 +424,6 @@ impl LibraryRedactor {
         }
     }
 
-    /// Resolves a neutral memory id back to the real memory name
-    ///
-    /// Mirrors [`LibraryRedactor::resolve_alias`] over the memory library's
-    /// listing (builtins included): only names this redactor would actually
-    /// render neutral resolve, and two names hashing to the same id is an
-    /// error rather than a silent pick.
-    ///
-    /// # Arguments
-    ///
-    /// * `memories` - The memory library whose names to scan
-    /// * `name` - The neutral id to resolve
-    pub async fn resolve_memory_alias(
-        &self,
-        memories: &MemoryLibrary,
-        name: &str,
-    ) -> Result<Option<String>, anyhow::Error> {
-        // only neutral-id-shaped names can be aliases at all
-        if !is_neutral_memory_id(name) {
-            return Ok(None);
-        }
-        // scan the names for the (unique) one rendering as this id
-        let mut resolved = None;
-        for entry in memories.list().await? {
-            // skip names this redactor renders plainly
-            if !(self.anonymized || self.is_denied(&entry.name)) {
-                continue;
-            }
-            if neutral_memory_id(&entry.name) == name {
-                // two names hashing identically must surface, never pick one
-                if resolved.is_some() {
-                    anyhow::bail!(
-                        "the neutral id '{name}' is ambiguous: two memories \
-                         hash to it"
-                    );
-                }
-                resolved = Some(entry.name);
-            }
-        }
-        Ok(resolved)
-    }
-
     /// Pulls the shared redactor out of a [`ToolContext`], if one is set
     ///
     /// A run without a redactor (every unblinded, deny-list-less run) is the
@@ -451,7 +465,7 @@ pub(crate) fn neutral_script_id(name: &str) -> String {
 /// # Arguments
 ///
 /// * `name` - The name to test
-fn is_neutral_script_id(name: &str) -> bool {
+pub(crate) fn is_neutral_script_id(name: &str) -> bool {
     // `lib-` plus exactly 8 lowercase hex chars
     name.len() == 12
         && name.starts_with("lib-")
@@ -484,13 +498,55 @@ pub(crate) fn neutral_memory_id(name: &str) -> String {
 /// # Arguments
 ///
 /// * `name` - The name to test
-fn is_neutral_memory_id(name: &str) -> bool {
+pub(crate) fn is_neutral_memory_id(name: &str) -> bool {
     // `mem-` plus exactly 8 lowercase hex chars
     name.len() == 12
         && name.starts_with("mem-")
         && name[4..]
             .chars()
             .all(|ch| matches!(ch, '0'..='9' | 'a'..='f'))
+}
+
+/// Finds the first blinded-run artifact shape anywhere in a text
+///
+/// Matches `fam-` plus at least 4 hex chars and `mem-`/`lib-`/`session-` plus
+/// at least 8, mid-word included -- baked corruption routinely lands inside
+/// identifiers (`CreateRfam-d517hread`, `Global\fam-0a08`, `fam-bc2c-style`)
+/// -- returning the matched slice for an instructive error. The shapes are
+/// exact-prefix plus exact-minimum-hex, so prose like "family-intel" or names
+/// like "mem-decode-loop" never match. Used by save validation to reject
+/// placeholder residue the save path could not resolve.
+///
+/// # Arguments
+///
+/// * `text` - The text to scan
+pub(crate) fn find_placeholder_shape(text: &str) -> Option<String> {
+    // the placeholder prefixes paired with their required hex-run lengths
+    const SHAPES: [(&str, usize); 4] = [("fam-", 4), ("mem-", 8), ("lib-", 8), ("session-", 8)];
+    // walk every byte position so mid-word hits are found too
+    let bytes = text.as_bytes();
+    for index in 0..bytes.len() {
+        for (prefix, hex) in SHAPES {
+            // the prefix and its full hex run must both fit from here
+            let end = index + prefix.len();
+            if end + hex > bytes.len() {
+                continue;
+            }
+            // match the prefix case-insensitively at this position
+            if !bytes[index..end].eq_ignore_ascii_case(prefix.as_bytes()) {
+                continue;
+            }
+            // require the full hex run immediately after the prefix
+            if bytes[end..end + hex]
+                .iter()
+                .all(|byte| byte.is_ascii_hexdigit())
+            {
+                // the matched span is pure ASCII, so the slice is valid UTF-8
+                return Some(text[index..end + hex].to_owned());
+            }
+        }
+    }
+    None
 }
 
 /// The spelling variants one canonical deny token must also match
@@ -762,6 +818,94 @@ mod tests {
         // a blinded session neutralizes every memory name
         let blinded = LibraryRedactor::new(true, Vec::new(), Vec::new()).expect("blinded");
         assert!(blinded.hides_memory("stackstring-recovery"));
+    }
+
+    /// Un-redaction restores canonical tokens over their placeholders
+    #[test]
+    fn unredact_restores_canonical_tokens() {
+        let redactor = LibraryRedactor::new(false, vec!["darkgate".to_owned()], Vec::new())
+            .expect("a deny list builds a redactor");
+        // a scrub round-trips back to the lowercase canonical spelling
+        let scrubbed = redactor.redact_text("DarkGate config");
+        assert_eq!(redactor.unredact_text(&scrubbed), "darkgate config");
+        // a placeholder baked mid-identifier restores mid-identifier too
+        let baked = format!("CreateR{}hread", token_placeholder("emotet"));
+        let restoring = LibraryRedactor::new(false, vec!["emotet".to_owned()], Vec::new())
+            .expect("a deny list builds a redactor");
+        assert_eq!(restoring.unredact_text(&baked), "CreateRemotethread");
+        // a blind-family-only redactor restores its family tokens as well
+        let blind = LibraryRedactor::new(false, Vec::new(), vec!["darkgate".to_owned()])
+            .expect("a blind-family list builds a redactor");
+        assert_eq!(
+            blind.unredact_text(&format!("{} beacon", token_placeholder("darkgate"))),
+            "darkgate beacon"
+        );
+        // placeholder-free text passes through byte-exact, multi-byte included
+        assert_eq!(
+            redactor.unredact_text("Ghidra’s decoder"),
+            "Ghidra’s decoder"
+        );
+    }
+
+    /// A placeholder two canonical tokens collide on never un-redacts
+    #[test]
+    fn unredact_skips_collided_placeholders() {
+        // brute-force two distinct tokens sharing one 16-bit placeholder
+        let mut by_placeholder: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut pair = None;
+        for index in 0.. {
+            let token = format!("tok{index}");
+            if let Some(other) = by_placeholder.insert(token_placeholder(&token), token.clone()) {
+                pair = Some((other, token));
+                break;
+            }
+        }
+        let (first, second) = pair.expect("the 16-bit space must collide");
+        let placeholder = token_placeholder(&first);
+        assert_eq!(placeholder, token_placeholder(&second));
+        // a redactor holding both tokens leaves their shared placeholder alone
+        let redactor = LibraryRedactor::new(false, vec![first, second], Vec::new())
+            .expect("a deny list builds a redactor");
+        let text = format!("the {placeholder} loader");
+        assert_eq!(redactor.unredact_text(&text), text);
+    }
+
+    /// The placeholder-shape scan hits baked artifacts and nothing else
+    #[test]
+    fn find_placeholder_shape_matches_exact_shapes() {
+        // standalone and mid-word placeholder shapes all match
+        for text in [
+            "fam-0a08",
+            "the Global\\fam-0a08 mutex",
+            "CreateRfam-d517hread",
+            "fam-bc2c-style loaders",
+            "see mem-e0171a8a route 4",
+            "run lib-12ab34cd first",
+            "promoted in session-11a0d38f",
+        ] {
+            assert!(find_placeholder_shape(text).is_some(), "missed: {text}");
+        }
+        // the matched slice is the exact shape, usable in error text
+        assert_eq!(
+            find_placeholder_shape("the Global\\fam-0a08 mutex").as_deref(),
+            Some("fam-0a08")
+        );
+        // prose and real names that merely resemble the prefixes never match
+        for text in [
+            "family-intel notes",
+            "fam-fireball",
+            "mem-decode-loop walkthrough",
+            "memory pressure",
+            "lib-rary humor",
+            "session-notes",
+            "fam-0a0 (too short)",
+        ] {
+            assert!(
+                find_placeholder_shape(text).is_none(),
+                "false positive: {text}"
+            );
+        }
     }
 
     /// Blind families hide matching family intel and nothing else

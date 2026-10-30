@@ -16,7 +16,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use ghidra_cli::Ghidra;
 use ghidra_cli::models::{
-    Function, GraphResult, Instruction, ListOptions, ProgramInfo, StringData, Symbol, XRef,
+    Function, Instruction, ListOptions, ProgramInfo, StringData, Symbol, XRef,
 };
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -70,43 +70,6 @@ pub fn section_at(sections: &[Section], addr: u64) -> Option<&Section> {
 pub fn is_executable_addr(sections: &[Section], addr: u64) -> bool {
     // an unmapped address is not evidence of anything, so do not act on it
     section_at(sections, addr).is_none_or(Section::is_executable)
-}
-
-/// Resolve a function name to its entry-point address against a function list.
-///
-/// The pure core of [`AnalysisContext::function_by_name`]. The query is normalized
-/// (trimmed, with a trailing call-style `()` stripped) and matched exactly against
-/// the Ghidra name first, then case-insensitively. Matching is deliberately
-/// conservative — no fuzzy/substring matching — so a mis-typed name resolves to
-/// `None` (the caller keeps the flag at sample scope) rather than to the wrong
-/// function.
-///
-/// # Arguments
-///
-/// * `functions` - The program's functions (entry point + name)
-/// * `name` - The function name to resolve (as Ghidra reports it)
-pub fn resolve_function_by_name(functions: &[Function], name: &str) -> Option<u64> {
-    // normalize: trim, then drop a trailing call-style "()" the model may append
-    let query = name.trim().trim_end_matches("()").trim();
-    // nothing to match on an empty query
-    if query.is_empty() {
-        return None;
-    }
-    // the parsed entry of a function, reused for both match passes
-    let entry_of = |f: &Function| parse_addr(&f.entry_point).or_else(|| parse_addr(&f.address));
-    // exact match on the Ghidra name wins (Go names are unique and shown verbatim)
-    if let Some(entry) = functions
-        .iter()
-        .find(|f| f.name == query)
-        .and_then(entry_of)
-    {
-        return Some(entry);
-    }
-    // fall back to a case-insensitive match for a casing-only difference
-    functions
-        .iter()
-        .find(|f| f.name.eq_ignore_ascii_case(query))
-        .and_then(entry_of)
 }
 
 /// Decode a hex string (no `0x` prefix) into raw bytes.
@@ -361,8 +324,6 @@ pub struct AnalysisContext {
     decomp_failed: Mutex<HashMap<u64, String>>,
     /// Memoized callers (CALL xrefs) of a function, keyed by entry-point address.
     callers_cache: Mutex<HashMap<u64, Vec<XRef>>>,
-    /// Memoized whole-program call graph (fetched at most once).
-    graph_cache: Mutex<Option<GraphResult>>,
     /// Memoized "is this function an import thunk?" result, keyed by entry address.
     thunk_cache: Mutex<HashMap<u64, bool>>,
     /// Memoized bytes of every initialized memory block (fetched at most once).
@@ -477,7 +438,6 @@ impl AnalysisContext {
             decomp_cache: Mutex::new(HashMap::new()),
             decomp_failed: Mutex::new(HashMap::new()),
             callers_cache: Mutex::new(HashMap::new()),
-            graph_cache: Mutex::new(None),
             thunk_cache: Mutex::new(HashMap::new()),
             section_bytes_cache: Mutex::new(None),
             sections_cache: Mutex::new(None),
@@ -621,21 +581,6 @@ impl AnalysisContext {
             .iter()
             .find(|f| parse_addr(&f.entry_point).or_else(|| parse_addr(&f.address)) == Some(entry))
             .map(|f| f.name.as_str())
-    }
-
-    /// Return the entry address of the function with the given name, if known.
-    ///
-    /// The reverse of [`function_name`](AnalysisContext::function_name). Used by the
-    /// LLM enrichment (`crate::llm`) to attribute a finding to a function the model
-    /// referenced by name (e.g. `botlib_SendMessage`) rather than by address. See
-    /// [`resolve_function_by_name`] for the matching rules.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - The function name to resolve (as Ghidra reports it)
-    pub fn function_by_name(&self, name: &str) -> Option<u64> {
-        // delegate to the pure resolver over the cached function list
-        resolve_function_by_name(&self.functions, name)
     }
 
     /// Disassemble **every** function in the program (cached) and return each
@@ -876,26 +821,6 @@ impl AnalysisContext {
         Ok(sites)
     }
 
-    /// Fetch the whole-program call graph once and cache it.
-    ///
-    /// Used by the reachability validator to compute the set of functions
-    /// reachable from the program's entry point(s).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the bridge call-graph query fails.
-    #[instrument(name = "AnalysisContext::call_graph", skip_all, err(Debug))]
-    pub async fn call_graph(&self) -> Result<GraphResult> {
-        // fast path: return the cached graph if we already fetched it
-        if let Some(cached) = self.graph_cache.lock().await.as_ref() {
-            return Ok(cached.clone());
-        }
-        // build the whole-program call graph (unbounded) and cache it
-        let graph = self.ghidra.graph.calls(None, None).await?;
-        *self.graph_cache.lock().await = Some(graph.clone());
-        Ok(graph)
-    }
-
     /// Disassemble a function once and cache the result.
     ///
     /// The bridge's `disasm` starts at the entry and returns up to `count`
@@ -1050,58 +975,6 @@ impl AnalysisContext {
             .insert(entry, result.code.clone());
         Ok(result.code)
     }
-
-    /// Forget the cached decompilation of the given functions.
-    ///
-    /// [`decompile_fn`](Self::decompile_fn) memoizes forever, which is right while the
-    /// program is static but wrong once something *writes* to it: the markup pass adds
-    /// PLATE/PRE comments, and the decompiler renders comments inline, so a copy
-    /// cached before the write no longer matches the program. Dropping those entries
-    /// makes the next decompile return the annotated listing.
-    ///
-    /// Both maps are cleared. A function whose decompilation previously *failed* is
-    /// re-tried rather than replaying the old refusal — the retry costs a timeout at
-    /// worst, and is bounded by the flagged set.
-    ///
-    /// # Arguments
-    ///
-    /// * `entries` - The function entry-point addresses to forget
-    #[instrument(name = "AnalysisContext::invalidate_decompile", skip_all)]
-    pub async fn invalidate_decompile<I: IntoIterator<Item = u64>>(&self, entries: I) -> usize {
-        // take both locks up front: an entry may be in either map, never both
-        let mut cache = self.decomp_cache.lock().await;
-        let mut failed = self.decomp_failed.lock().await;
-        // drop the stale answers now that we hold both maps
-        forget_decompilations(&mut cache, &mut failed, entries)
-    }
-}
-
-/// Remove the given entries from both decompilation caches, returning how many were
-/// actually holding an answer.
-///
-/// The pure core of [`AnalysisContext::invalidate_decompile`], split out so it can be
-/// tested without a live Ghidra bridge.
-///
-/// # Arguments
-///
-/// * `cache` - The successful-decompilation cache
-/// * `failed` - The failed-decompilation cache
-/// * `entries` - The function entry-point addresses to forget
-fn forget_decompilations<I: IntoIterator<Item = u64>>(
-    cache: &mut HashMap<u64, String>,
-    failed: &mut HashMap<u64, String>,
-    entries: I,
-) -> usize {
-    // count only the entries that were actually holding a stale answer
-    let mut dropped = 0usize;
-    for entry in entries {
-        // a cached success and a cached refusal are equally stale after a write, and
-        // an entry never sits in both maps, so either removal counts once
-        if cache.remove(&entry).is_some() || failed.remove(&entry).is_some() {
-            dropped += 1;
-        }
-    }
-    dropped
 }
 
 #[cfg(test)]
@@ -1149,57 +1022,6 @@ mod tests {
         }
     }
 
-    /// Build a minimal function with the given name + entry for name-lookup tests.
-    fn func(name: &str, entry: &str) -> Function {
-        Function {
-            name: name.to_string(),
-            address: entry.to_string(),
-            size: 0x10,
-            signature: None,
-            entry_point: entry.to_string(),
-            calling_convention: None,
-            parameters: Vec::new(),
-            local_variables: Vec::new(),
-            calls: Vec::new(),
-            called_by: Vec::new(),
-            decompiled: None,
-            comment: None,
-        }
-    }
-
-    /// `resolve_function_by_name` matches exactly, strips a trailing `()`, and falls
-    /// back to a case-insensitive match, but never fuzzy-matches an unknown name.
-    #[test]
-    fn resolve_function_by_name_matches_and_normalizes() {
-        let functions = vec![
-            func("botlib_SendMessage", "62b100"),
-            func("main.Init", "62ae10"),
-        ];
-        // exact match resolves to the entry
-        assert_eq!(
-            resolve_function_by_name(&functions, "botlib_SendMessage"),
-            Some(0x62b100)
-        );
-        // a trailing call-style "()" (as an LLM may write it) is stripped
-        assert_eq!(
-            resolve_function_by_name(&functions, "botlib_SendMessage()"),
-            Some(0x62b100)
-        );
-        // surrounding whitespace is trimmed
-        assert_eq!(
-            resolve_function_by_name(&functions, "  main.Init  "),
-            Some(0x62ae10)
-        );
-        // a casing-only difference falls back to the case-insensitive pass
-        assert_eq!(
-            resolve_function_by_name(&functions, "BOTLIB_SENDMESSAGE"),
-            Some(0x62b100)
-        );
-        // an unknown / empty name resolves to None (no fuzzy matching)
-        assert_eq!(resolve_function_by_name(&functions, "botlib_Send"), None);
-        assert_eq!(resolve_function_by_name(&functions, ""), None);
-    }
-
     /// A lone `JMP` body is a thunk; anything else is not.
     #[test]
     fn is_thunk_body_detects_single_jmp() {
@@ -1237,42 +1059,5 @@ mod tests {
         assert!(!is_executable_addr(&sections, 0x1800190b8));
         // an address outside the block table is kept (nothing is proven about it)
         assert!(is_executable_addr(&sections, 0x400000));
-    }
-
-    /// Invalidation clears *both* decompilation caches, so a function whose earlier
-    /// decompilation failed is re-tried against the annotated program rather than
-    /// replaying the old refusal.
-    #[test]
-    fn forget_decompilations_drops_both_cache_maps() {
-        // one function decompiled, one refused, one untouched by the markup pass
-        let mut cache = HashMap::from([
-            (0x401000, "int good(void) {}".to_string()),
-            (0x403000, "int untouched(void) {}".to_string()),
-        ]);
-        let mut failed = HashMap::from([(0x402000, "decompiler timeout".to_string())]);
-        // the markup pass annotated the first two
-        let dropped = forget_decompilations(&mut cache, &mut failed, [0x401000, 0x402000]);
-        // both were holding a stale answer
-        assert_eq!(dropped, 2);
-        // the cached success is gone
-        assert!(!cache.contains_key(&0x401000));
-        // so is the cached failure
-        assert!(failed.is_empty());
-        // the function nothing was written to keeps its cached decompilation
-        assert!(cache.contains_key(&0x403000));
-    }
-
-    /// Entries that were never decompiled are not counted, so the `invalidated=N` log
-    /// line reports real work rather than the size of the flagged set.
-    #[test]
-    fn forget_decompilations_ignores_entries_it_never_cached() {
-        // nothing has been decompiled yet
-        let mut cache = HashMap::new();
-        let mut failed = HashMap::new();
-        // invalidating anyway is harmless and reports zero
-        assert_eq!(
-            forget_decompilations(&mut cache, &mut failed, [0x401000]),
-            0
-        );
     }
 }

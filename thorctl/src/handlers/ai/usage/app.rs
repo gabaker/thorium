@@ -241,6 +241,9 @@ impl UsageApp {
             self.pricing.clone(),
             self.event_tx.clone(),
             rescan_rx,
+            // the usage TUI never needs the telemetry exporter's counters
+            false,
+            UsageEvent::Scan,
         ));
         // spawn the slow ticker keeping live rows and relative times fresh
         tokio::spawn(ticker(self.event_tx.clone()));

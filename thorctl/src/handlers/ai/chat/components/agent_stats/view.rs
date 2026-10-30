@@ -676,6 +676,10 @@ fn drill_matches(entry: &ChatEntry, members: &BTreeSet<String>, owned: &mut Hash
         ChatEntry::Ai {
             agent: Some(agent), ..
         } => members.contains(agent),
+        // an attributed failure belongs to the agent that hit it
+        ChatEntry::Failure {
+            agent: Some(agent), ..
+        } => members.contains(agent),
         // a member's tool call also claims its id for log/result correlation
         ChatEntry::ToolCall {
             id,

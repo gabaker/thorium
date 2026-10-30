@@ -1,24 +1,18 @@
-//! File identity — what the sample **is**, as opposed to what it does.
+//! Executable-header facts — what the sample's header **declares**.
 //!
-//! Everything in this module is a *fact* read off the bytes: hashes, size,
-//! entropy, the section table, the import hash, and whatever the executable
-//! header declares. None of it carries suspicion and none of it produces a
-//! finding. That separation matters: a high-entropy section or a zeroed build
-//! timestamp is a measurement, and turning a measurement into an accusation is
-//! how a report ends up asserting things it cannot support. The detections that
-//! *do* draw conclusions (see [`crate::thorpal::detect::detections::defense_evasion`]) read these
+//! Everything in this module is a *fact* read off the bytes: the declared build
+//! timestamp, the section table and its on-disk extents, and the signing and
+//! debug directories. None of it carries suspicion and none of it produces a
+//! finding. That separation matters: a zeroed build timestamp is a measurement,
+//! and turning a measurement into an accusation is how a report ends up
+//! asserting things it cannot support. The detections that *do* draw
+//! conclusions (see [`crate::thorpal::detect::detections::defense_evasion`]) read these
 //! same facts and combine several of them before saying anything.
 //!
-//! Two sources are combined:
-//!
-//! * **Ghidra's memory map** ([`AnalysisContext::sections`]) — the loaded,
-//!   virtual view. Format-agnostic, and the only place permissions and real
-//!   loaded bytes (hence per-section entropy) come from.
-//! * **The raw file** ([`AnalysisContext::raw_bytes`]) — what Ghidra's loaded
-//!   image is not. Ghidra drops the format header, drops anything appended past
-//!   the last mapped section, and re-lays sections at their virtual addresses, so
-//!   the declared build timestamp, the on-disk section extents, the import table
-//!   order, and the overlay are only visible here.
+//! The raw file is read directly because Ghidra's loaded image drops the format
+//! header, drops anything appended past the last mapped section, and re-lays
+//! sections at their virtual addresses — the declared build timestamp and the
+//! on-disk section extents are only visible here.
 //!
 //! Header parsing is a direct read of the handful of fields that matter, gated on
 //! the format Ghidra detected — deliberately not a full format library. It is
@@ -26,110 +20,11 @@
 //! than to guess, because a malformed header is itself common in this corpus and
 //! a wrong answer is worse than no answer.
 
-use md5::Md5;
-use sha1::Sha1;
-use sha2::{Digest, Sha256, Sha512};
-
-use crate::thorpal::detect::context::{AnalysisContext, Section};
-use crate::thorpal::detect::decode::shannon_entropy;
-
 /// The maximum number of section-table entries parsed out of a header.
 ///
 /// A well-formed image has a few dozen; a corrupt or hostile header can declare
 /// 65535, each costing a bounds-checked read.
 const MAX_HEADER_SECTIONS: usize = 256;
-
-/// The maximum number of import-table entries folded into the import hash.
-///
-/// Bounds a malformed import directory that claims an unterminated thunk array.
-const MAX_IMPORTS: usize = 4096;
-
-/// One section as the report presents it: the loaded view, plus its on-disk
-/// extent when the header could be read.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct SectionSummary {
-    /// The block name (`.text`, `__TEXT`, …).
-    pub name: String,
-    /// The virtual address the block is loaded at.
-    pub address: String,
-    /// The number of bytes the block occupies in memory.
-    pub virtual_size: u64,
-    /// The number of bytes the block occupies in the file, when the header
-    /// declared one for a section of this name.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub raw_size: Option<u64>,
-    /// The block's permissions as Ghidra reports them (e.g. `rwx`).
-    pub permissions: String,
-    /// Whether the block carries bytes on disk (an uninitialized block reserves a
-    /// virtual range and nothing else).
-    pub initialized: bool,
-    /// The Shannon entropy of the block's bytes, for initialized blocks.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub entropy: Option<f32>,
-    /// Whether the entropy above was measured over only the leading part of the
-    /// block, because reading it hit the per-block byte cap.
-    ///
-    /// Worth stating rather than hiding: an entropy figure over a prefix answers a
-    /// different question than one over the whole block, and a packed payload is
-    /// exactly the case where the block is large enough for the cap to bite.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub entropy_partial: bool,
-}
-
-/// Data appended to the file past the end of every section the header declares.
-///
-/// Entirely ordinary on its own — installers, self-extracting archives, and
-/// signed binaries all carry one — but it is where an appended payload lives, so
-/// its size and entropy are worth stating.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct OverlayInfo {
-    /// The file offset the overlay begins at.
-    pub offset: u64,
-    /// The number of bytes past that offset.
-    pub size: u64,
-    /// The Shannon entropy of those bytes.
-    pub entropy: f32,
-}
-
-/// Everything the report knows about the sample as a file.
-///
-/// [`Default`] yields the empty identity — every hash blank and no sections — for
-/// the case where the sample's bytes could not be read at all.
-#[derive(Debug, Clone, Default, serde::Serialize)]
-pub struct FileIdentity {
-    /// The file size in bytes.
-    pub size: u64,
-    /// The MD5 of the file bytes.
-    pub md5: String,
-    /// The SHA-1 of the file bytes.
-    pub sha1: String,
-    /// The SHA-256 of the file bytes.
-    pub sha256: String,
-    /// The SHA-512 of the file bytes.
-    pub sha512: String,
-    /// The Shannon entropy of the whole file (bits per byte, 0.0–8.0).
-    pub entropy: f32,
-    /// The build timestamp the header declares, as an ISO-8601 UTC string.
-    ///
-    /// Absent when the format carries no timestamp, when the header could not be
-    /// read, or when the field is zero — reproducible-build toolchains zero it
-    /// deliberately, so an absent timestamp is not by itself an anomaly.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub build_timestamp: Option<String>,
-    /// The import hash: MD5 over the ordered, lower-cased `library.function` list
-    /// from the import table.
-    ///
-    /// The standard construction, so it is comparable with the value other tools
-    /// report for the same file. Absent for formats with no import directory and
-    /// for images whose import table could not be read.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub imphash: Option<String>,
-    /// Data appended past the last section, when there is any.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub overlay: Option<OverlayInfo>,
-    /// The section table, in load order.
-    pub sections: Vec<SectionSummary>,
-}
 
 /// One section exactly as the executable header declares it.
 ///
@@ -172,9 +67,6 @@ pub struct FormatHeader {
     pub entry_point: Option<u64>,
     /// The section table exactly as declared, in table order.
     pub sections: Vec<HeaderSection>,
-    /// The ordered, lower-cased `library.function` import list backing the import
-    /// hash. Empty when the format has no import directory.
-    pub imports: Vec<String>,
     /// The security directory's `(file offset, size)`, when a PE declares one.
     ///
     /// Unlike every other data directory, entry 4 holds a FILE OFFSET, not an
@@ -214,126 +106,6 @@ impl FormatHeader {
             entry >= section.address && entry < section.address.saturating_add(section.virtual_size)
         })
     }
-
-    /// The import hash over [`imports`](FormatHeader::imports), when there is one.
-    pub fn imphash(&self) -> Option<String> {
-        // no import directory (or an empty one) means no import hash
-        if self.imports.is_empty() {
-            return None;
-        }
-        // the standard construction: MD5 over the comma-joined entries
-        Some(hex(
-            Md5::digest(self.imports.join(",").as_bytes()).as_slice()
-        ))
-    }
-}
-
-/// Collect the sample's file identity.
-///
-/// Infallible by design: every input is optional enrichment, so a missing memory
-/// map or an unreadable header costs the corresponding fields and nothing else.
-/// The hashes and entropy are the only part that can fail outright, and only if
-/// the sample cannot be read at all — in which case the caller already has bigger
-/// problems and gets zeroed hashes plus a warning.
-///
-/// # Arguments
-///
-/// * `ctx` - The analysis context (raw bytes + memory map)
-#[tracing::instrument(name = "fileinfo::collect", skip_all)]
-pub async fn collect(ctx: &AnalysisContext) -> FileIdentity {
-    // the raw file: hashes, entropy, header, overlay
-    let raw = match ctx.raw_bytes().await {
-        Ok(raw) => raw,
-        Err(error) => {
-            tracing::warn!(?error, "sample bytes unavailable; file identity is empty");
-            Default::default()
-        }
-    };
-    // the loaded view: names, permissions, per-section entropy
-    let sections = match ctx.sections().await {
-        Ok(sections) => sections,
-        Err(error) => {
-            tracing::warn!(?error, "memory map unavailable; omitting the section table");
-            Vec::new()
-        }
-    };
-    // read whatever the format header declares (None when it cannot be trusted)
-    let header = parse_header(&raw, ctx.program.executable_format.as_deref());
-    build(&raw, &sections, header.as_ref())
-}
-
-/// Assemble the identity from already-gathered inputs.
-///
-/// Split out from [`collect`] so it can be unit-tested without a Ghidra bridge.
-///
-/// # Arguments
-///
-/// * `raw` - The sample's file bytes
-/// * `sections` - The loaded memory map
-/// * `header` - The parsed format header, when one could be read
-fn build(raw: &[u8], sections: &[Section], header: Option<&FormatHeader>) -> FileIdentity {
-    // index the header's declared on-disk extents by section name so the loaded
-    // blocks below can pick up their raw sizes
-    let raw_sizes: Vec<(&str, u64)> = header
-        .map(|header| {
-            header
-                .sections
-                .iter()
-                .map(|section| (section.name.as_str(), section.raw_size))
-                .collect()
-        })
-        .unwrap_or_default();
-    // render each loaded block, pairing it with its declared on-disk extent
-    let sections = sections
-        .iter()
-        .map(|section| SectionSummary {
-            name: section.name.clone(),
-            address: crate::thorpal::detect::context::fmt_addr(section.base),
-            virtual_size: section.size,
-            // match on the trimmed name: header names are NUL-padded fixed fields
-            raw_size: raw_sizes
-                .iter()
-                .find(|(name, _)| *name == section.name.trim())
-                .map(|(_, size)| *size),
-            permissions: section.permissions.clone(),
-            initialized: section.is_initialized,
-            entropy: section.entropy(),
-            entropy_partial: section.truncated,
-        })
-        .collect();
-    FileIdentity {
-        size: raw.len() as u64,
-        md5: hex(Md5::digest(raw).as_slice()),
-        sha1: hex(Sha1::digest(raw).as_slice()),
-        sha256: hex(Sha256::digest(raw).as_slice()),
-        sha512: hex(Sha512::digest(raw).as_slice()),
-        entropy: shannon_entropy(raw),
-        build_timestamp: header.and_then(|h| h.timestamp).map(format_timestamp),
-        imphash: header.and_then(FormatHeader::imphash),
-        overlay: header.and_then(|h| overlay(raw, h)),
-        sections,
-    }
-}
-
-/// Describe the bytes past the last declared section, when there are any.
-///
-/// # Arguments
-///
-/// * `raw` - The sample's file bytes
-/// * `header` - The parsed format header
-fn overlay(raw: &[u8], header: &FormatHeader) -> Option<OverlayInfo> {
-    let end = header.image_end()?;
-    // nothing past the image (or a header that declares more than the file holds,
-    // which is a malformed image rather than an overlay)
-    if end >= raw.len() as u64 {
-        return None;
-    }
-    let bytes = &raw[end as usize..];
-    Some(OverlayInfo {
-        offset: end,
-        size: bytes.len() as u64,
-        entropy: shannon_entropy(bytes),
-    })
 }
 
 /// Parse the executable header for the fields this tool reads.
@@ -363,7 +135,8 @@ pub fn parse_header(raw: &[u8], format: Option<&str>) -> Option<FormatHeader> {
 // PE
 // ===========================================================================
 
-/// Parse the PE fields this tool reads: build timestamp, section extents, imports.
+/// Parse the PE fields this tool reads: build timestamp, section extents, and the
+/// signing and debug directories.
 ///
 /// # Arguments
 ///
@@ -396,15 +169,9 @@ fn parse_pe(raw: &[u8]) -> Option<FormatHeader> {
     // the section table follows the optional header
     let table = opt.checked_add(opt_size)?;
     let sections = parse_pe_sections(raw, table, section_count);
-    // the import directory is entry 1 of the data directories, which start after
-    // the fixed part of the optional header (112 bytes for PE32, 128 for PE32+)
+    // the data directories start after the fixed part of the optional header
+    // (96 bytes for PE32, 112 for PE32+)
     let dirs = opt + if plus { 112 } else { 96 };
-    let import_rva = read_u32(raw, dirs + 8).unwrap_or(0);
-    let imports = if import_rva == 0 {
-        Vec::new()
-    } else {
-        parse_pe_imports(raw, &sections, import_rva, plus)
-    };
     // how many data directories the header actually declares bounds the reads
     // below (entry 4 = security, entry 6 = debug)
     let dir_count = read_u32(raw, opt + if plus { 108 } else { 92 }).unwrap_or(0) as usize;
@@ -434,7 +201,6 @@ fn parse_pe(raw: &[u8]) -> Option<FormatHeader> {
         // likewise a zero entry point (a DLL may legitimately have none)
         entry_point: (entry_point != 0).then_some(u64::from(entry_point)),
         sections,
-        imports,
         security_dir,
         // the checksum sits at a fixed offset in both optional-header flavours
         checksum_offset: Some((opt + 64) as u64),
@@ -454,11 +220,9 @@ pub(crate) struct PeTimestamp {
 
 /// Read the PE build timestamp (and its REPRO marker) from a head window.
 ///
-/// Reuses [`parse_pe`] over the leading bytes (its import walk degrades to
-/// empty when the directories sit past the head, which is fine here), then
-/// follows the already-resolved debug directory with one bounded targeted
-/// read to look for `IMAGE_DEBUG_TYPE_REPRO`. Returns `None` when the head
-/// is not a PE.
+/// Reuses [`parse_pe`] over the leading bytes, then follows the
+/// already-resolved debug directory with one bounded targeted read to look
+/// for `IMAGE_DEBUG_TYPE_REPRO`. Returns `None` when the head is not a PE.
 ///
 /// # Arguments
 ///
@@ -604,113 +368,15 @@ fn rva_to_offset(sections: &[HeaderSection], rva: u32) -> Option<usize> {
         .map(|section| (section.raw_offset + (rva - section.address)) as usize)
 }
 
-/// Walk the PE import directory into the ordered `library.function` list the
-/// import hash is computed over.
-///
-/// Follows the standard construction: the library name lower-cased with a
-/// `.dll`/`.ocx`/`.sys` extension stripped, each imported symbol lower-cased, and
-/// an ordinal import rendered as `ord<n>`. Order is the import table's own, which
-/// is why this reads the file rather than Ghidra's (symbol-table-ordered) import
-/// list — a differently-ordered list hashes to a value nothing else will match.
-///
-/// # Arguments
-///
-/// * `raw` - The sample's file bytes
-/// * `sections` - The section table, for RVA translation
-/// * `directory_rva` - The import directory's relative virtual address
-/// * `plus` - Whether this is a PE32+ image (64-bit thunks)
-fn parse_pe_imports(
-    raw: &[u8],
-    sections: &[HeaderSection],
-    directory_rva: u32,
-    plus: bool,
-) -> Vec<String> {
-    let mut out = Vec::new();
-    let Some(directory) = rva_to_offset(sections, directory_rva) else {
-        return out;
-    };
-    // each descriptor is 20 bytes; an all-zero descriptor terminates the array
-    for i in 0..MAX_IMPORTS {
-        let entry = directory + i * 20;
-        let (Some(lookup_rva), Some(name_rva), Some(thunk_rva)) = (
-            read_u32(raw, entry),
-            read_u32(raw, entry + 12),
-            read_u32(raw, entry + 16),
-        ) else {
-            break;
-        };
-        // the terminating descriptor
-        if name_rva == 0 && thunk_rva == 0 {
-            break;
-        }
-        // the library name, lower-cased with its extension stripped
-        let Some(library) = rva_to_offset(sections, name_rva).and_then(|at| cstring(raw, at))
-        else {
-            continue;
-        };
-        let library = strip_module_extension(&library.to_ascii_lowercase());
-        // prefer the import lookup table (never overwritten by the loader) and
-        // fall back to the address table for images that only have the latter
-        let thunks = if lookup_rva != 0 {
-            lookup_rva
-        } else {
-            thunk_rva
-        };
-        let Some(mut thunk) = rva_to_offset(sections, thunks) else {
-            continue;
-        };
-        // walk the thunk array to its zero terminator
-        let width = if plus { 8 } else { 4 };
-        while out.len() < MAX_IMPORTS {
-            let value = if plus {
-                read_u64(raw, thunk)
-            } else {
-                read_u32(raw, thunk).map(u64::from)
-            };
-            let Some(value) = value.filter(|value| *value != 0) else {
-                break;
-            };
-            // the high bit marks an import by ordinal; otherwise the value is an
-            // RVA to a hint/name table entry (a 2-byte hint then the name)
-            let ordinal_bit = if plus { 1 << 63 } else { 1 << 31 };
-            let symbol = if value & ordinal_bit != 0 {
-                format!("ord{}", value & 0xffff)
-            } else {
-                match rva_to_offset(sections, value as u32).and_then(|at| cstring(raw, at + 2)) {
-                    Some(name) => name.to_ascii_lowercase(),
-                    // an unresolvable name would silently shorten the list and
-                    // change the hash, so abandon the whole import table instead
-                    None => return Vec::new(),
-                }
-            };
-            out.push(format!("{library}.{symbol}"));
-            thunk += width;
-        }
-    }
-    out
-}
-
-/// Strip a module filename's extension, for the import-hash construction.
-///
-/// # Arguments
-///
-/// * `library` - The lower-cased library name
-fn strip_module_extension(library: &str) -> String {
-    // only the three module extensions are stripped; anything else is part of the name
-    match library.rsplit_once('.') {
-        Some((stem, "dll" | "ocx" | "sys")) => stem.to_string(),
-        _ => library.to_string(),
-    }
-}
-
 // ===========================================================================
 // ELF
 // ===========================================================================
 
 /// Parse the ELF fields this tool reads: the section extents.
 ///
-/// ELF carries no build timestamp and no import directory, so the header only
-/// contributes its section table (which is what the overlay calculation needs).
+/// ELF carries no build timestamp, so the header only contributes its section
+/// table (which feeds [`FormatHeader::image_end`] for the packing detection's
+/// overlay measure).
 ///
 /// # Arguments
 ///
@@ -813,7 +479,6 @@ fn parse_elf(raw: &[u8]) -> Option<FormatHeader> {
         timestamp: None,
         entry_point: (entry_point != 0).then_some(entry_point),
         sections: out,
-        imports: Vec::new(),
         // the PE-only directories have no ELF equivalent here
         security_dir: None,
         checksum_offset: None,
@@ -919,8 +584,8 @@ fn section_name(field: &[u8]) -> String {
 
 /// Render bytes as a lower-case hex string.
 ///
-/// Shared with the raw-file tools (see [`crate::thorpal::tools::file`]), which
-/// render their streamed digests the same way.
+/// The shared digest renderer for the raw-file and decode tools (see
+/// [`crate::thorpal::tools::file`]).
 ///
 /// # Arguments
 ///
@@ -960,7 +625,7 @@ fn format_timestamp(seconds: u32) -> String {
 mod tests {
     use super::*;
 
-    /// A minimal but well-formed PE32 image with two sections and one import.
+    /// A minimal but well-formed PE32 image with two sections.
     ///
     /// Built byte-by-byte so the parser is exercised against a real layout rather
     /// than a mock: the assertions below would not catch a field-offset error if
@@ -975,12 +640,10 @@ mod tests {
         raw[0x86..0x88].copy_from_slice(&2u16.to_le_bytes());
         raw[0x88..0x8c].copy_from_slice(&1_600_000_000u32.to_le_bytes());
         raw[0x94..0x96].copy_from_slice(&224u16.to_le_bytes());
-        // optional header: PE32 magic, the entry point, and the import directory
+        // optional header: PE32 magic and the entry point
         let opt = 0x98;
         raw[opt..opt + 2].copy_from_slice(&0x10bu16.to_le_bytes());
         raw[opt + 16..opt + 20].copy_from_slice(&0x1020u32.to_le_bytes());
-        let dirs = opt + 96;
-        raw[dirs + 8..dirs + 12].copy_from_slice(&0x2000u32.to_le_bytes());
         // section table: .text (RVA 0x1000, file 0x400) and .rdata (RVA 0x2000, file 0x500)
         let table = opt + 224;
         for (i, (name, vaddr, roff, flags)) in [
@@ -998,25 +661,10 @@ mod tests {
             raw[entry + 20..entry + 24].copy_from_slice(&roff.to_le_bytes());
             raw[entry + 36..entry + 40].copy_from_slice(&flags.to_le_bytes());
         }
-        // .rdata contents (file 0x500 = RVA 0x2000): one import descriptor naming
-        // KERNEL32.dll, a lookup table with one named thunk, then the terminator
-        let put32 = |raw: &mut Vec<u8>, at: usize, v: u32| {
-            raw[at..at + 4].copy_from_slice(&v.to_le_bytes())
-        };
-        put32(&mut raw, 0x500, 0x2040); // OriginalFirstThunk -> lookup table
-        put32(&mut raw, 0x50c, 0x2060); // Name -> "KERNEL32.dll"
-        put32(&mut raw, 0x510, 0x2050); // FirstThunk
-        // the lookup table at RVA 0x2040 (file 0x540): one entry, then the terminator
-        put32(&mut raw, 0x540, 0x2080);
-        // the hint/name entry at RVA 0x2080 (file 0x580): a 2-byte hint then the name
-        raw[0x582..0x582 + 13].copy_from_slice(b"GetProcAddre\0");
-        // the library name at RVA 0x2060 (file 0x560)
-        raw[0x560..0x560 + 13].copy_from_slice(b"KERNEL32.dll\0");
         raw
     }
 
-    /// The PE parser reads the timestamp, the section extents, and the imports in
-    /// import-table order.
+    /// The PE parser reads the timestamp and the section extents.
     #[test]
     fn parse_pe_reads_header_fields() {
         let header = parse_header(&pe_fixture(), Some("Portable Executable (PE)"))
@@ -1049,13 +697,6 @@ mod tests {
             header.entry_section().map(|s| s.name.as_str()),
             Some(".text")
         );
-        // the library keeps its lower-cased stem, the symbol its lower-cased name
-        assert_eq!(header.imports, vec!["kernel32.getprocaddre".to_string()]);
-        // the import hash is MD5 over the comma-joined list
-        assert_eq!(
-            header.imphash(),
-            Some(hex(Md5::digest(b"kernel32.getprocaddre").as_slice()))
-        );
     }
 
     /// A zero timestamp reads as "not declared" — reproducible-build toolchains
@@ -1087,62 +728,6 @@ mod tests {
         // a format with no header worth reading
         assert!(parse_header(&pe_fixture(), Some("Mac OS X Mach-O")).is_none());
         assert!(parse_header(&pe_fixture(), None).is_none());
-    }
-
-    /// The import hash matches the standard construction, including the extension
-    /// strip and the `ord<n>` rendering.
-    #[test]
-    fn imphash_follows_the_standard_construction() {
-        let header = FormatHeader {
-            imports: vec![
-                "ws2_32.ord23".to_string(),
-                "kernel32.loadlibrarya".to_string(),
-            ],
-            ..Default::default()
-        };
-        assert_eq!(
-            header.imphash(),
-            Some(hex(
-                Md5::digest(b"ws2_32.ord23,kernel32.loadlibrarya").as_slice()
-            ))
-        );
-        // no import table means no import hash, rather than the MD5 of nothing
-        assert_eq!(FormatHeader::default().imphash(), None);
-    }
-
-    /// Module extensions are stripped for the hash; other trailing text is not.
-    #[test]
-    fn strip_module_extension_only_strips_module_extensions() {
-        assert_eq!(strip_module_extension("kernel32.dll"), "kernel32");
-        assert_eq!(strip_module_extension("comctl32.ocx"), "comctl32");
-        assert_eq!(strip_module_extension("null.sys"), "null");
-        // a version-suffixed shared object is not a module extension
-        assert_eq!(strip_module_extension("libc.so.6"), "libc.so.6");
-        assert_eq!(strip_module_extension("api-ms-win-crt"), "api-ms-win-crt");
-    }
-
-    /// The overlay is the run of bytes past the last declared section.
-    #[test]
-    fn overlay_measures_bytes_past_the_last_section() {
-        let header = FormatHeader {
-            sections: vec![HeaderSection {
-                name: ".text".to_string(),
-                address: 0x1000,
-                virtual_size: 0x100,
-                raw_offset: 0x400,
-                raw_size: 0x100,
-                flags: 0,
-            }],
-            ..Default::default()
-        };
-        // a file that ends exactly at the image end has no overlay
-        assert!(overlay(&vec![0u8; 0x500], &header).is_none());
-        // ...and one that runs past it reports the remainder
-        let found = overlay(&vec![0u8; 0x600], &header).expect("an overlay is present");
-        assert_eq!(found.offset, 0x500);
-        assert_eq!(found.size, 0x100);
-        // a header declaring more than the file holds is malformed, not an overlay
-        assert!(overlay(&vec![0u8; 0x100], &header).is_none());
     }
 
     /// Timestamp anomalies classify REPRO, future, zero, and ancient stamps.
@@ -1202,81 +787,5 @@ mod tests {
         assert_eq!(format_timestamp(1_582_934_400), "2020-02-29T00:00:00Z");
         // the 32-bit ceiling
         assert_eq!(format_timestamp(u32::MAX), "2106-02-07T06:28:15Z");
-    }
-
-    /// `build` folds the loaded view and the header into one identity, pairing each
-    /// block with its declared on-disk extent.
-    #[test]
-    fn build_pairs_loaded_blocks_with_declared_extents() {
-        let sections = vec![
-            Section {
-                name: ".text".to_string(),
-                base: 0x40_1000,
-                end: 0x40_1100,
-                size: 0x100,
-                permissions: "r-x".to_string(),
-                is_initialized: true,
-                is_loaded: true,
-                bytes: vec![0x90; 0x100],
-                truncated: false,
-            },
-            Section {
-                name: ".bss".to_string(),
-                base: 0x40_2000,
-                end: 0x40_3000,
-                size: 0x1000,
-                permissions: "rw-".to_string(),
-                is_initialized: false,
-                is_loaded: true,
-                bytes: Vec::new(),
-                truncated: false,
-            },
-        ];
-        let header = FormatHeader {
-            timestamp: Some(1_600_000_000),
-            entry_point: Some(0x1000),
-            sections: vec![HeaderSection {
-                name: ".text".to_string(),
-                address: 0x1000,
-                virtual_size: 0x100,
-                raw_offset: 0x400,
-                raw_size: 0x100,
-                flags: 0,
-            }],
-            imports: vec!["kernel32.loadlibrarya".to_string()],
-            ..Default::default()
-        };
-        let identity = build(&vec![0u8; 0x500], &sections, Some(&header));
-        assert_eq!(identity.size, 0x500);
-        // every hash is present and the right width
-        assert_eq!(identity.md5.len(), 32);
-        assert_eq!(identity.sha1.len(), 40);
-        assert_eq!(identity.sha256.len(), 64);
-        assert_eq!(identity.sha512.len(), 128);
-        assert_eq!(
-            identity.build_timestamp.as_deref(),
-            Some("2020-09-13T12:26:40Z")
-        );
-        assert!(identity.imphash.is_some());
-        // the initialized block gets its declared raw size and an entropy reading
-        assert_eq!(identity.sections[0].raw_size, Some(0x100));
-        assert_eq!(identity.sections[0].entropy, Some(0.0));
-        // the uninitialized block has neither — and is still reported, because a
-        // block that reserves space without carrying bytes is itself a signal
-        assert_eq!(identity.sections[1].raw_size, None);
-        assert_eq!(identity.sections[1].entropy, None);
-        assert!(!identity.sections[1].initialized);
-    }
-
-    /// With no header, the identity still carries the hashes and the loaded view.
-    #[test]
-    fn build_survives_without_a_header() {
-        let identity = build(b"abcd", &[], None);
-        assert_eq!(identity.size, 4);
-        assert_eq!(identity.md5, "e2fc714c4727ee9395f324cd2e7f331f");
-        assert_eq!(identity.build_timestamp, None);
-        assert_eq!(identity.imphash, None);
-        assert!(identity.overlay.is_none());
-        assert!(identity.sections.is_empty());
     }
 }

@@ -3,6 +3,9 @@
 //! Associations are directional relationships between two objects in Thorium.
 
 use chrono::prelude::*;
+// the ScyllaStoreAsStr derive's generated code parses the stored column with
+// the unqualified `FromStr` name, so the import rides the derive's feature
+#[cfg(feature = "scylla-utils")]
 use std::str::FromStr;
 use uuid::Uuid;
 
@@ -961,6 +964,7 @@ impl AssociationListParams {
 
 /// The number of associations in one partition of the associations table, read to rebuild its
 /// census
+#[cfg(feature = "scylla-utils")]
 #[derive(Debug)]
 #[cfg_attr(
     feature = "scylla-utils",

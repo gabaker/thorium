@@ -27,8 +27,8 @@ use thorpal::{
 use crate::handlers::ai::chat::{ActivityIntervals, estimate_tokens, now_ms, usage_remainder};
 use crate::handlers::ai::pricing::CostModel;
 use crate::handlers::ai::session::to_thorpal_provider;
+use crate::handlers::ai::telemetry::fold::TelemetryFold;
 
-use super::app::UsageEvent;
 use super::model::{
     AgentWindow, HourBucket, HourKey, SessionSummary, cost_of_tokens, hour_key, role_of,
 };
@@ -296,6 +296,9 @@ pub struct SessionFold {
     tool_calls: u64,
     /// Model turns recorded by usage lines
     turns: u64,
+    /// The telemetry-only accumulator, allocated when this scan feeds the
+    /// telemetry exporter (the usage TUI's folds carry none and pay nothing)
+    telemetry: Option<Box<TelemetryFold>>,
 }
 
 impl SessionFold {
@@ -309,6 +312,17 @@ impl SessionFold {
             name,
             ..SessionFold::default()
         }
+    }
+
+    /// Opts this fold into gathering the telemetry exporter's counters
+    ///
+    /// Usage scans never call this, so their folds skip the telemetry work
+    /// entirely; the exporter's folds collect failure signatures in memory
+    /// whatever the chosen level, so the tier choice never forces a re-scan.
+    pub fn with_telemetry(mut self) -> Self {
+        // allocate the accumulator the fold pass feeds
+        self.telemetry = Some(Box::default());
+        self
     }
 
     /// Drops every transcript-derived accumulator for a full re-read
@@ -331,6 +345,10 @@ impl SessionFold {
         self.tools = BTreeMap::new();
         self.tool_calls = 0;
         self.turns = 0;
+        // a telemetry-gathering fold restarts with a fresh accumulator
+        if self.telemetry.is_some() {
+            self.telemetry = Some(Box::default());
+        }
     }
 
     /// Gets or creates an agent's window and widens it to a stamp
@@ -403,6 +421,11 @@ impl SessionFold {
             self.first_ts = Some(self.first_ts.map_or(ts, |first| first.min(ts)));
             self.last_ts = Some(self.last_ts.map_or(ts, |last| last.max(ts)));
             self.activity.record(ts, ts);
+        }
+        // a telemetry-gathering fold tallies its own counters off the same
+        // line, so the exporter rides this one streaming pass
+        if let Some(telemetry) = self.telemetry.as_mut() {
+            telemetry.observe(&line.item, ts);
         }
         match &line.item {
             // a tool call: count it, weigh its args, and open its interval
@@ -519,11 +542,24 @@ impl SessionFold {
             | TranscriptItem::ReviewFlag { agent, .. } => {
                 self.touch(agent, ts);
             }
-            // swarm bounds and report degradations only mark session activity
+            // provider-stall lines widen their agent's window; the telemetry
+            // counters over them arrive with the telemetry fold
+            TranscriptItem::LlmRetry { agent, .. }
+            | TranscriptItem::LlmRetryResolved { agent, .. }
+            | TranscriptItem::ProviderPaused { agent, .. } => {
+                self.touch(agent, ts);
+            }
+            // swarm bounds, report degradations, pause endings, manifest
+            // lines, and detector rosters (none carry an agent) only mark
+            // session activity; the telemetry fold above consumes the
+            // telemetry-bearing ones
             TranscriptItem::SwarmStarted { .. }
             | TranscriptItem::SwarmFinished { .. }
             | TranscriptItem::ReportDegraded { .. }
-            | TranscriptItem::SessionResumed { .. } => {}
+            | TranscriptItem::SessionResumed { .. }
+            | TranscriptItem::ProviderResumed { .. }
+            | TranscriptItem::ToolsOffered { .. }
+            | TranscriptItem::DetectorsRun { .. } => {}
         }
     }
 
@@ -747,6 +783,11 @@ impl SessionFold {
             tool_calls: self.tool_calls,
             turns: (self.turns > 0).then_some(self.turns),
             hours,
+            // a telemetry-gathering fold hands the exporter its counters too
+            telemetry: self
+                .telemetry
+                .as_ref()
+                .map(|fold| Box::new(fold.summarize(self.meta.as_ref()))),
             live,
             // exact only when estimation had nothing left to distribute
             exact_hours: remainder.is_empty() && self.unstamped.is_empty(),
@@ -841,11 +882,15 @@ pub enum ScanUpdate {
 /// * `pricing` - The config's best-effort pricing context
 /// * `tx` - The app's event channel updates are sent over
 /// * `rescan` - The channel an operator's refresh key nudges
-pub async fn run_scanner(
+/// * `telemetry` - Whether folds also gather the telemetry exporter's counters
+/// * `wrap` - How the caller's event type wraps a scan update
+pub async fn run_scanner<E: Send + 'static>(
     root: PathBuf,
     pricing: PricingCtx,
-    tx: AsyncSender<UsageEvent>,
+    tx: AsyncSender<E>,
     mut rescan: tokio::sync::mpsc::Receiver<()>,
+    telemetry: bool,
+    wrap: impl Fn(ScanUpdate) -> E + Send + 'static,
 ) {
     // the incremental fold state per session, keyed by directory name
     let mut folds: HashMap<String, SessionFold> = HashMap::new();
@@ -865,11 +910,7 @@ pub async fn run_scanner(
             .collect();
         for name in gone {
             folds.remove(&name);
-            if tx
-                .send(UsageEvent::Scan(ScanUpdate::Removed(name)))
-                .await
-                .is_err()
-            {
+            if tx.send(wrap(ScanUpdate::Removed(name))).await.is_err() {
                 return;
             }
         }
@@ -879,20 +920,26 @@ pub async fn run_scanner(
             // surface initial-pass progress so a cold 2 GB store shows life
             if first_pass
                 && tx
-                    .send(UsageEvent::Scan(ScanUpdate::Progress { done, total }))
+                    .send(wrap(ScanUpdate::Progress { done, total }))
                     .await
                     .is_err()
             {
                 return;
             }
-            let fold = folds
-                .entry(name.clone())
-                .or_insert_with(|| SessionFold::new(name.clone()));
+            let fold = folds.entry(name.clone()).or_insert_with(|| {
+                // telemetry scans gather the exporter's counters alongside
+                let fold = SessionFold::new(name.clone());
+                if telemetry {
+                    fold.with_telemetry()
+                } else {
+                    fold
+                }
+            });
             match fold.refresh(&root, &pricing).await {
                 // something changed: ship the fresh summary
                 Ok(Some(summary)) => {
                     if tx
-                        .send(UsageEvent::Scan(ScanUpdate::Loaded(Box::new(summary))))
+                        .send(wrap(ScanUpdate::Loaded(Box::new(summary))))
                         .await
                         .is_err()
                     {
@@ -908,11 +955,7 @@ pub async fn run_scanner(
         }
         first_pass = false;
         // tell the app the pass settled so initial progress can clear
-        if tx
-            .send(UsageEvent::Scan(ScanUpdate::PassDone))
-            .await
-            .is_err()
-        {
+        if tx.send(wrap(ScanUpdate::PassDone)).await.is_err() {
             return;
         }
         // wait out the poll interval, or an operator's explicit rescan nudge
@@ -921,6 +964,35 @@ pub async fn run_scanner(
             _ = rescan.recv() => {}
         }
     }
+}
+
+/// Folds every session under a root once, for headless telemetry exports
+///
+/// Strictly read-only like the scanner loop, but sequential and one-shot:
+/// each session folds fully with the telemetry counters on, and sessions
+/// whose directories vanish mid-read (a rename race) are skipped rather than
+/// failing the export.
+///
+/// # Arguments
+///
+/// * `root` - The sessions root to scan
+/// * `pricing` - The config's best-effort pricing context
+pub async fn scan_once(root: &Path, pricing: &PricingCtx) -> Vec<SessionSummary> {
+    // list the session dirs; a missing root simply holds no sessions
+    let names = match thorpal::SessionStore::list(root).await {
+        Ok(names) => names,
+        Err(_) => Vec::new(),
+    };
+    // fold each session fully in one pass
+    let mut summaries = Vec::with_capacity(names.len());
+    for name in names {
+        let mut fold = SessionFold::new(name).with_telemetry();
+        // a fresh fold always reports changed state on success
+        if let Ok(Some(summary)) = fold.refresh(root, pricing).await {
+            summaries.push(summary);
+        }
+    }
+    summaries
 }
 
 #[cfg(test)]
@@ -1085,6 +1157,128 @@ mod tests {
         let window = summary.agents.get("main").expect("an agent window");
         assert_eq!(window.totals.input_tokens, 1_000);
         assert!(window.cost.is_some());
+    }
+
+    /// Provider-stall lines mark activity but never disturb the usage math
+    #[test]
+    fn stall_lines_leave_usage_undisturbed() {
+        let mut fold = SessionFold::new("stalled".to_owned());
+        // the same two checkpoints as the exact-session test, with the whole
+        // retry/pause lifecycle interleaved between them
+        fold.fold_line(&usage_line("main", 600, 60, 10 * HOUR_MS));
+        fold.fold_line(&TranscriptLine {
+            ts: Some(10 * HOUR_MS + 1_000),
+            item: TranscriptItem::LlmRetry {
+                agent: "main".to_owned(),
+                retry_id: "main#1".to_owned(),
+                attempt: 1,
+                max_attempts: 12,
+                error: "429 Too Many Requests".to_owned(),
+                request_id: None,
+                backoff_ms: 2_000,
+            },
+        });
+        fold.fold_line(&TranscriptLine {
+            ts: Some(10 * HOUR_MS + 3_000),
+            item: TranscriptItem::LlmRetryResolved {
+                agent: "main".to_owned(),
+                retry_id: "main#1".to_owned(),
+                attempts: 2,
+                succeeded: true,
+            },
+        });
+        fold.fold_line(&TranscriptLine {
+            ts: Some(10 * HOUR_MS + 4_000),
+            item: TranscriptItem::ProviderPaused {
+                pause: thorpal::PauseKind::Auth,
+                agent: "main".to_owned(),
+                error: "401 Unauthorized".to_owned(),
+                request_id: None,
+            },
+        });
+        fold.fold_line(&TranscriptLine {
+            ts: Some(10 * HOUR_MS + 64_000),
+            item: TranscriptItem::ProviderResumed {
+                pause: thorpal::PauseKind::Auth,
+                recovered: true,
+                paused_ms: 60_000,
+                probe_attempts: 0,
+            },
+        });
+        fold.fold_line(&usage_line("main", 400, 40, 11 * HOUR_MS));
+        fold.lean = Some(LeanSnapshot {
+            provider: Some(bedrock_provider()),
+            model: Some("claude-opus-5-5".to_owned()),
+            usage: ledger("main", 1_000, 100),
+        });
+        let summary = fold.summarize(&PricingCtx::default(), false);
+        // the usage math matches the stall-free exact session: same turns,
+        // same totals, same two populated hour buckets, nothing estimated
+        assert!(summary.exact_hours);
+        assert_eq!(summary.turns, Some(2));
+        assert_eq!(summary.totals.input_tokens, 1_000);
+        let input_sum: f64 = summary.hours.values().map(|bucket| bucket.input).sum();
+        assert!((input_sum - 1_000.0).abs() < 1e-6);
+        assert_eq!(
+            summary
+                .hours
+                .values()
+                .filter(|bucket| bucket.input > 0.0)
+                .count(),
+            2
+        );
+        // the stall lines named only the main agent, so no window appeared
+        assert_eq!(summary.agents.len(), 1);
+    }
+
+    /// Offered-tool manifests union per role across a session's process runs
+    #[test]
+    fn offered_manifests_union_per_role() {
+        let mut fold = SessionFold::new("offered".to_owned()).with_telemetry();
+        // two process runs recorded different rosters for one role (a binary
+        // upgrade mid-session), plus a second role's manifest
+        fold.fold_line(&TranscriptLine {
+            ts: Some(10 * HOUR_MS),
+            item: TranscriptItem::ToolsOffered {
+                role: "ReverseEngineer".to_owned(),
+                tools: vec!["decomp_function".to_owned(), "think".to_owned()],
+                version: "0.1.0".to_owned(),
+            },
+        });
+        fold.fold_line(&TranscriptLine {
+            ts: Some(11 * HOUR_MS),
+            item: TranscriptItem::ToolsOffered {
+                role: "ReverseEngineer".to_owned(),
+                tools: vec!["memory_map".to_owned(), "think".to_owned()],
+                version: "0.2.0".to_owned(),
+            },
+        });
+        fold.fold_line(&TranscriptLine {
+            ts: Some(11 * HOUR_MS),
+            item: TranscriptItem::ToolsOffered {
+                role: "main".to_owned(),
+                tools: vec!["reverse_engineer".to_owned()],
+                version: "0.2.0".to_owned(),
+            },
+        });
+        // each role's roster is the union across its manifests, surfaced on
+        // the telemetry summary the exporter consumes
+        let summary = fold.summarize(&PricingCtx::default(), false);
+        let telemetry = summary.telemetry.expect("a telemetry summary");
+        let re = telemetry
+            .tools_offered
+            .get("ReverseEngineer")
+            .expect("a roster");
+        assert_eq!(re.len(), 3);
+        assert!(re.contains(&"decomp_function".to_owned()));
+        assert!(re.contains(&"memory_map".to_owned()));
+        assert!(re.contains(&"think".to_owned()));
+        let main = telemetry.tools_offered.get("main").expect("a roster");
+        assert_eq!(main.len(), 1);
+        // the newest manifest's harness version wins
+        assert_eq!(telemetry.harness_version.as_deref(), Some("0.2.0"));
+        // manifest lines name no agent, so no per-agent window appeared
+        assert!(fold.windows.is_empty());
     }
 
     /// With no usage lines the ledger distributes over estimate weights

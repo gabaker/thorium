@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use super::AiProviderConfig;
 use super::agents::Workflow;
-use super::tools::forum::{AnalystAsk, Comment, Post, ReviewFlag, Task};
+use super::tools::forum::{AnalystAsk, Comment, NodeProvenance, Post, ReviewFlag, Task};
 use super::tools::ghidra::GhidraSettings;
 
 /// The schema version the current serializer writes.
@@ -169,6 +169,11 @@ pub struct ForumSnapshot {
     /// snapshots written before review flags existed).
     #[serde(default)]
     pub flags: Vec<ReviewFlag>,
+    /// Structured provenance for detector-seeded nodes, in stable node order
+    /// (absent in snapshots written before provenance existed, and in
+    /// sessions whose seeding was disabled).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detector_provenance: Vec<NodeProvenance>,
     /// The next id the forum would hand out to a newly created comment.
     pub next_comment_id: usize,
     /// The next id the forum would hand out to a newly created task (0 in

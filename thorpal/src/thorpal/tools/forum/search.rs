@@ -68,7 +68,7 @@ pub(crate) struct ForumTokenizer {
 
 impl ForumTokenizer {
     /// Creates the forum tokenizer
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         // the forum is technical English, so fix the language up front rather
         // than paying for per-text language detection
         let inner = DefaultTokenizer::builder()

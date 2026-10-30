@@ -39,9 +39,10 @@ use components::{AskModal, AskModalState, AskOutcome, ReportSettings, TabBar, Th
 // the stats and gantt views with their logs and transcript folds, the replay
 // helpers, the shared formatting primitives, and the text input widget
 pub(super) use components::{
-    ActivityIntervals, AgentStatsLog, AgentStatsView, GanttLog, GanttView, SideRegistry, TextBox,
-    Theme, TimeMap, TraversalLog, ViewOutcome, estimate_tokens, fmt_cost, fmt_duration, now_ms,
-    replay_transcript, replayed_usage, usage_remainder, with_thousands,
+    ActivityIntervals, AgentStatsLog, AgentStatsView, GanttLog, GanttView, ShortcutMenu,
+    SideRegistry, TextBox, Theme, TimeMap, TraversalLog, ViewOutcome, estimate_tokens, fmt_cost,
+    fmt_duration, markdown_lines, now_ms, replay_transcript, replayed_usage, usage_remainder,
+    with_thousands, wrap_words,
 };
 pub(super) use context::{ChatContext, ChatEntry};
 pub(super) use events::{AppEvent, ScrollEvent};
@@ -432,10 +433,6 @@ impl App {
                 // stop our refresh worker
                 self.animate_home.store(false, Ordering::Relaxed);
             }
-            // process a tool call failure by surfacing it to the user as
-            // an assistant bubble rather than silently dropping it (main-turn
-            // failures only; side turns bubble into their own tabs directly)
-            AppEvent::ToolCallFailure { error } => self.tabs[0].push_error(&error),
             // Change the main tab's active content kind
             AppEvent::SetActiveTabKind(kind) => self.set_active_tab_kind(kind),
             // refresh every tab's message board with the forum's latest state

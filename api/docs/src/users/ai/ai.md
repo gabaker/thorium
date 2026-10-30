@@ -110,20 +110,23 @@ $ thorctl analyze chat /path/to/suspicious_binary
 
 The recording below is a real end-to-end session over the evaluation corpus's
 Stealc v2 sample, played at full length (only
-idle gaps are compressed): the `ai` settings are persisted into the default thorctl
-config once, the full reverse-engineering prompt the
-evaluation uses is pasted straight into the home screen,
-the agents run the whole analysis — about 41 minutes and roughly $170 — and after a
-look at the usage overlay the session ends by writing its report with `/report`.
-[Reports](#reports) shows resuming the saved session later.
+idle gaps are compressed) and recorded cold, with no state from any earlier run:
+the session starts straight from the chat command on a fresh Ghidra project, the
+import and auto-analysis stream on camera, and the [detectors](#detectors) seed
+the forum before the agents begin. With a provider already
+[configured](#configuring-a-provider), the full reverse-engineering prompt the
+evaluation uses is pasted straight into the home
+screen, the agents run the whole analysis — about 80 minutes and roughly $220 —
+and after a look at the usage overlay the session ends by writing its report with
+`/report`. [Reports](#reports) shows resuming the saved session later.
 
 <link rel="stylesheet" href="../../static_resources/asciinema/asciinema-player.css">
-<div id="cast-analyze-chat"></div>
+<div id="cast-analyze-chat" class="cast-player"></div>
 <script src="../../static_resources/asciinema/asciinema-player.min.js"></script>
 <script>
   AsciinemaPlayer.create('../../static_resources/asciinema/analyze-chat.cast',
     document.getElementById('cast-analyze-chat'),
-    { cols: 120, rows: 34, idleTimeLimit: 2, poster: 'npt:0:10', preload: true });
+    { cols: 150, rows: 42, idleTimeLimit: 2, poster: 'npt:0:10', preload: true });
 </script>
 
 This opens a terminal UI where you can converse with ThorPal about the binary while its
@@ -169,11 +172,11 @@ The live message board where the agents post findings and raise questions: `j`/`
 the posts, `Enter` folds and unfolds one, and `r`/`?`/`t` reply, ask a question, or add
 a task to steer the analysis.
 
-<div id="cast-chat-forum"></div>
+<div id="cast-chat-forum" class="cast-player"></div>
 <script>
   AsciinemaPlayer.create('../../static_resources/asciinema/chat-forum.cast',
     document.getElementById('cast-chat-forum'),
-    { cols: 120, rows: 34, idleTimeLimit: 2, poster: 'npt:0:05', preload: true });
+    { cols: 150, rows: 42, idleTimeLimit: 2, poster: 'npt:0:05', preload: true });
 </script>
 
 #### Forum search — `Space`+`s`
@@ -181,11 +184,11 @@ a task to steer the analysis.
 A helix-style split picker over the whole forum: type a query, watch the hits re-rank
 live, and `Enter` jumps to the selected hit in the sidebar with the match highlighted.
 
-<div id="cast-chat-search"></div>
+<div id="cast-chat-search" class="cast-player"></div>
 <script>
   AsciinemaPlayer.create('../../static_resources/asciinema/chat-search.cast',
     document.getElementById('cast-chat-search'),
-    { cols: 120, rows: 34, idleTimeLimit: 2, poster: 'npt:0:05', preload: true });
+    { cols: 150, rows: 42, idleTimeLimit: 2, poster: 'npt:0:05', preload: true });
 </script>
 
 #### The usage overlay — `Space`+`u`
@@ -193,11 +196,11 @@ live, and `Enter` jumps to the selected hit in the sidebar with the match highli
 Per-agent cost and activity: `Tab`/`j`/`k` select an agent, `←`/`→` switch the metric,
 and `Enter` drills into that agent's own conversation.
 
-<div id="cast-chat-usage"></div>
+<div id="cast-chat-usage" class="cast-player"></div>
 <script>
   AsciinemaPlayer.create('../../static_resources/asciinema/chat-usage.cast',
     document.getElementById('cast-chat-usage'),
-    { cols: 120, rows: 34, idleTimeLimit: 2, poster: 'npt:0:05', preload: true });
+    { cols: 150, rows: 42, idleTimeLimit: 2, poster: 'npt:0:05', preload: true });
 </script>
 
 #### The timeline — `Space`+`t`
@@ -208,11 +211,11 @@ an agent reveals its individual tool calls, and on a tool call opens a detail pa
 the call's status, arguments, and full result (`j`/`k` scroll it, `Esc` backs out).
 `h`/`l` pan the time window, `+`/`-` zoom, and `0` re-fits the whole run.
 
-<div id="cast-chat-timeline"></div>
+<div id="cast-chat-timeline" class="cast-player"></div>
 <script>
   AsciinemaPlayer.create('../../static_resources/asciinema/chat-timeline.cast',
     document.getElementById('cast-chat-timeline'),
-    { cols: 120, rows: 34, idleTimeLimit: 2, poster: 'npt:0:05', preload: true });
+    { cols: 150, rows: 42, idleTimeLimit: 2, poster: 'npt:0:05', preload: true });
 </script>
 
 #### The traversal graph — `Space`+`g`
@@ -225,11 +228,11 @@ back to follow mode). `r` replays the whole walk from the start (`<`/`>` change 
 replay speed, `G` jumps back to the live state), and `H` switches to a visit-frequency
 heat view.
 
-<div id="cast-chat-traversal"></div>
+<div id="cast-chat-traversal" class="cast-player"></div>
 <script>
   AsciinemaPlayer.create('../../static_resources/asciinema/chat-traversal.cast',
     document.getElementById('cast-chat-traversal'),
-    { cols: 120, rows: 34, idleTimeLimit: 2, poster: 'npt:0:05', preload: true });
+    { cols: 150, rows: 42, idleTimeLimit: 2, poster: 'npt:0:05', preload: true });
 </script>
 
 Useful flags:
@@ -299,11 +302,11 @@ The recording below resumes the finished [Stealc v2 session](#chatting-about-a-b
 with `--resume` — the saved conversation and forum replay instantly, at no model cost —
 and writes its report with `/report`:
 
-<div id="cast-resume-report"></div>
+<div id="cast-resume-report" class="cast-player"></div>
 <script>
   AsciinemaPlayer.create('../../static_resources/asciinema/resume-report.cast',
     document.getElementById('cast-resume-report'),
-    { cols: 120, rows: 34, idleTimeLimit: 2, poster: 'npt:0:08', preload: true });
+    { cols: 150, rows: 42, idleTimeLimit: 2, poster: 'npt:0:08', preload: true });
 </script>
 
 The report's structure comes from a markdown template. The builtin template covers an
@@ -361,19 +364,20 @@ $ thorctl analyze batch run --dir /path/to/batch --max-concurrency 2  # cap the 
 $ thorctl analyze batch status --dir /path/to/batch     # per-unit status, usage, and cost
 ```
 
-The recording below is a real two-unit run: the
-Stealc v2 and
+The recording below is a real two-unit run, recorded cold with no state from any
+earlier run: the Stealc v2 and
 QUICKBIND samples from the
-evaluation corpus are staged by sha256 out of
-their dataset zips and evaluated end to end with the full reverse-engineering prompt.
-Idle time is compressed for playback; the pool really ran for about 51 minutes and the
-two sessions together cost about $219.
+evaluation corpus are staged by sha256 out
+of their dataset zips and evaluated end to end — blind, under the shuffled aliases
+the manifest's `name_template` turns into session names — with the full
+reverse-engineering prompt. Idle time is compressed for playback; the pool really
+ran for about 54 minutes and the two sessions together cost about $244.
 
-<div id="cast-analyze-batch"></div>
+<div id="cast-analyze-batch" class="cast-player"></div>
 <script>
   AsciinemaPlayer.create('../../static_resources/asciinema/analyze-batch.cast',
     document.getElementById('cast-analyze-batch'),
-    { cols: 110, rows: 30, idleTimeLimit: 2, poster: 'npt:0:15', preload: true });
+    { cols: 150, rows: 42, idleTimeLimit: 2, poster: 'npt:0:15', preload: true });
 </script>
 
 Each unit becomes one headless `thorctl analyze chat` session (multi-sample units pass every
@@ -444,6 +448,23 @@ ai:
 
 Each field is dollars per million tokens, and a partial block tweaks just the rates it
 names.
+
+## The Usage TUI
+---
+
+`thorctl analyze usage` opens a standalone, read-only viewer over everything under
+`~/.thorium/sessions`, folding each saved session's transcript into token, cost, and
+tool statistics without touching the stores. It cycles seven screens — overview,
+sessions, usage, timeline, heatmap, trend, and models — and drilling into a session
+replays its transcript through the same per-agent stats and gantt views the chat TUI
+offers live. Prices come from the same table [cost tracking](#cost-tracking) uses,
+loaded best-effort: with no thorctl config at all the viewer still runs, just without
+dollar columns.
+
+```bash
+$ thorctl analyze usage                         # explore your local sessions
+$ thorctl analyze usage --sessions-root ./copy  # inspect a copied store
+```
 
 ## Reliability and Logs
 ---

@@ -162,14 +162,15 @@ runs. See [Memories](./memories.md) for the full story; in brief:
 
 | Tool | What it does |
 |------|--------------|
-| `list_memories` | List every memory (builtins included) with its name, kind, and description |
-| `search_memories` | Search every memory (headers included) for a case-insensitive substring |
-| `read_memory` | Read a memory's full source by name |
-| `save_memory` | Save a durable generic lesson into the library (collision-checked, content-guarded) |
+| `list_memories` | Page the library (builtins included) with `kind`/`tag` filters, clipped descriptions, and the filtered total |
+| `search_memories` | Ranked lexical search (BM25 unioned with exact substring matching), top hits with matched lines, offset paging, byte-capped |
+| `read_memory` | Read a memory's full source by name; `mem-<8 hex>` ids resolve to the memory they alias |
+| `save_memory` | Save a durable generic lesson into the library (collision-checked, content-guarded, placeholder-healing) |
 
 In the builtin workflow every sub-agent reads memories, but only the Researcher holds
 `save_memory` (the others disable it via `disabled_tools`), so the library stays curated.
-Memory-enabled agents also get a per-spawn memory index in their task prompts and a
+Memory-enabled agents also get a per-spawn memory index in their task prompts — its 25
+slots ranked against the spawn's own goal and task text, recency-filled — and a
 generated recall-discipline preamble section.
 
 ## Forum Tools

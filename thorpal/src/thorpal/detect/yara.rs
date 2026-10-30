@@ -183,6 +183,8 @@ pub fn scan(rules_path: &Path, raw: &[u8]) -> Result<Vec<DetectionHit>, anyhow::
             source: HitSource::Yara,
             artifact: None,
             context: None,
+            // unstamped here; the registry runner names native producers
+            detection: None,
         });
     }
     tracing::info!(

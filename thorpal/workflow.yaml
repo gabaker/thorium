@@ -130,9 +130,10 @@
 #                ~/.thorium/memories library of durable GENERIC lessons
 #                (techniques, workflow rules, verified family intel, pitfalls)
 #                saved by past runs; memory-enabled agents also get a memory
-#                index in their spawn prompts. Sample-/session-specific facts
-#                belong on the forum, never in memories; disable save_memory
-#                on readers so one agent curates the library
+#                index in their spawn prompts, ranked against their task.
+#                Sample-/session-specific facts belong on the forum, never in
+#                memories; disable save_memory on readers so one agent
+#                curates the library
 max_alive_sub_agents: 8
 context_window_tokens: 200000
 agents:
@@ -178,8 +179,10 @@ agents:
         candidate out using recalled "facts" you cannot source -- mark that
         comparison unverifiable instead.
       - Before answering from recall, consult the memory library: check the
-        "# Memory index" in your task prompt, search_memories for the topic,
-        and read_memory anything relevant. Cite memories by name.
+        "# Memory index" in your task prompt (the entries ranked against your
+        task, not the whole library), search_memories for the topic (ranked;
+        pass offset or refine terms when a page is cut), and read_memory
+        anything relevant. Cite memories by name.
       - You are the only agent that can save_memory. When this run proves out
         a durable GENERIC lesson -- a technique that worked, a workflow rule,
         verified family intel, a pitfall worth avoiding -- save it so future
@@ -477,7 +480,8 @@ agents:
       When you are stuck, or a question needs domain or family knowledge,
       prior-run techniques, or hypothesis framing, delegate it to the
       researcher tool. Before brute-forcing an approach yourself, check the "# Memory
-      index" in your task prompt (and search_memories) for a proven lesson
+      index" in your task prompt (the entries ranked against your task) and
+      search_memories (ranked; page with offset) for a proven lesson
       from a past run; read_memory anything relevant and cite it by name. When
       this run teaches a durable generic lesson worth keeping, hand it to the
       researcher to save -- you cannot save_memory yourself.

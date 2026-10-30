@@ -218,6 +218,9 @@ pub struct SessionSummary {
     pub turns: Option<u64>,
     /// The session's spend bucketed by local day/hour
     pub hours: BTreeMap<HourKey, HourBucket>,
+    /// The telemetry exporter's extra counters, boxed off the usage TUI's hot
+    /// path and `None` for every scan that did not ask for them
+    pub telemetry: Option<Box<crate::handlers::ai::telemetry::fold::TelemetrySummary>>,
     /// Whether any of the session's files changed in the last ~2 minutes
     pub live: bool,
     /// Whether every hour bucket came from exact per-turn usage lines

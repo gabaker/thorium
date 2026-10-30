@@ -67,31 +67,42 @@ scripts shadow library scripts.
 
 | Tool | What it does |
 |------|--------------|
-| `list_memories` | List every memory (builtins included) with its name, kind, and description |
-| `search_memories` | Search every memory (headers included) for a case-insensitive substring |
-| `read_memory` | Read a memory's full source by name |
+| `list_memories` | Page through the library (builtins included) with `kind`/`tag` filters and `offset`/`limit` paging; descriptions clip to a readable length and the result reports the filtered total |
+| `search_memories` | Ranked lexical search: BM25 over names/tags/descriptions/bodies unioned with exact substring matching (hex constants and literal strings match verbatim); returns the top hits (default 8, max 25) with matched lines, the total match count, offset paging, and a result byte budget |
+| `read_memory` | Read a memory's full source by name; a `mem-<8 hex>` id resolves to the memory it aliases |
 | `save_memory` | Save a durable generic lesson (researcher-only in the builtin workflow) |
 
-Memory-enabled agents also get a **memory index** — one line per memory, capped
-at 25 with a pointer at `list_memories` — injected into their spawn prompts
-next to the forum context, rendered fresh per spawn so memories saved earlier
-in the same run show up for later delegations. Their preambles carry a
-generated recall-discipline section: consult the index before re-deriving a
-technique or asserting facts from recall, cite memories by name, and treat
-memories as prior-run knowledge that must be verified against *this* sample
-before it becomes a conclusion.
+Memory-enabled agents also get a **memory index** — one line per memory (name,
+kind, clipped first description line), capped at 25 — injected into their spawn
+prompts next to the forum context. The 25 slots are **selected for the
+delegation**: entries rank against the spawn's goal and task text with the same
+lexical scorer `search_memories` uses (over rendered names, tags, and
+descriptions), and any remaining slots fill newest-save-first, so what a
+sub-agent sees inline tracks its task rather than the alphabet. The index is
+rendered fresh per spawn, so memories saved earlier in the same run show up for
+later delegations, and the trailing line points at `search_memories` and the
+paged `list_memories` for the rest. Agent preambles carry a generated
+recall-discipline section: consult the index before re-deriving a technique or
+asserting facts from recall, cite memories by name, and treat memories as
+prior-run knowledge that must be verified against *this* sample before it
+becomes a conclusion.
 
 `save_memory` validates before writing: a non-empty description and body
 (capped at 16KB — distill the lesson, don't archive raw output; a body that is
-nothing but a stale header strips to empty and is refused), at most 8 tags
+nothing but a stale header strips to empty and is refused), at most 16 tags
 with no control characters (a newline in a tag could splice extra lines into
 the rendered header, so it is refused and the rendered header is additionally
 re-parsed to prove it round-trips before anything lands on disk), and a
 **generic-content guard** that refuses 32+ character hex runs containing a
-letter (sample hashes/raw IOCs; long decimal constants stay fine) and any
-mention of this run's sample names or session name. Name
-technique/workflow/pitfall memories by TECHNIQUE, never by family —
-family-named memories render as opaque neutral ids in blinded runs. A
+letter (sample hashes/raw IOCs; long decimal constants stay fine), any mention
+of this run's sample names or session name, and any **blinded-run placeholder
+residue** — a `fam-<4 hex>`, `mem-<8 hex>`, `lib-<8 hex>`, or
+`session-<8 hex>` shape anywhere in the text (see the healing rules below for
+what gets rewritten automatically first). Name technique/workflow/pitfall
+memories by TECHNIQUE, never by family — family-named memories render as
+opaque neutral ids in blinded runs, and when the run holds the deny-token
+list, a family-derived name or tag on a generic kind is refused outright so
+family fingerprints cannot dodge blind-family hiding by mis-filing. A
 `family-intel` memory is the one exception: it should carry the family's name
 and aliases in its name and tags, so family-blinded evaluations can withhold
 exactly that family's intel (see below) — and because a sample or session is
@@ -118,6 +129,26 @@ names into blinded runs, so memories follow the same rules from day one):
   `mem-<8 hex of sha256(name)>` id (resolvable back through the tools), and
   the `--redact-tokens` deny list scrubs family tokens out of memory text with
   stable `fam-<4 hex>` placeholders, exactly like library scripts.
+- **Saves heal what reads re-redact.** A model in a blinded run only ever sees
+  placeholders, so text it quotes back into `save_memory` would otherwise bake
+  them permanently into cross-run storage — dead weight to every other run,
+  and fatal to blind-family hiding, which matches the *stored* source. The
+  save path therefore restores quoted `fam-<4 hex>` placeholders to the real
+  deny tokens before anything lands on disk — safe because reads re-scrub
+  tokens, so the saving run's own view never changes. Quoted `mem-`/`lib-` ids
+  rewrite to real names only when the redactor renders those names *plainly*:
+  bodies are not name-scanned on render, so a healed hidden name would read
+  straight back — an id-to-name decoder — which means under `--anonymize` ids
+  never heal and a save quoting one is refused with rewrite guidance (cite
+  memories by topic in blinded saves). Everything the heal cannot resolve is
+  refused rather than persisted, every validation whose error echoes content
+  runs *before* healing on the model's own text, and post-heal failures
+  (size caps, residue) report no content and no byte counts — either could
+  leak a restored token or its length. The same resolution works on the read
+  side: a baked `mem-<8 hex>` cross-reference from an old blinded save
+  resolves in production reads too, and resolution always filters blind-hidden
+  intel first, so a guessed hash can never probe the blind list — hidden and
+  missing ids reject identically, and the save response reports no byte count.
 - **`--blind-family <NAME>`** (repeat the flag for each alias) hides matching
   `family-intel` memories *entirely*: a family-intel memory whose name or
   content matches any blind token is treated as nonexistent by every surface

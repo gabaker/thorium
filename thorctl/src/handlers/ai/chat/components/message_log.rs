@@ -49,6 +49,21 @@ pub enum EntryKind {
     },
     /// An error surfaced to the user (e.g. a failed turn)
     Error(String),
+    /// A failure with click-to-expand detail (e.g. a failed turn's full error)
+    ///
+    /// The summary renders as a compact error line; a click toggles the
+    /// request id and full error text beneath it so provider bodies never
+    /// flood the log.
+    Failure {
+        /// The id a click uses to toggle this failure's detail rows
+        id: Uuid,
+        /// The compact one-line summary of the failure
+        summary: String,
+        /// The provider's request id for the failed request, when preserved
+        request_id: Option<String>,
+        /// The full error text behind the summary, when it says more
+        detail: Option<String>,
+    },
     /// A tool call and any results, classified for rendering by its tool name
     ///
     /// The `think` tool renders as prominent thinking, the forum tools render as
@@ -74,25 +89,32 @@ pub enum EntryKind {
 }
 
 impl EntryKind {
-    /// Whether this entry is a routine tool call the user can expand/collapse
+    /// Whether this entry holds detail the user can expand/collapse
     ///
-    /// Only a generic tool call is clickable; a user message, response, error,
-    /// thinking block, or forum post is always shown in full.
+    /// Generic tool calls and failures carrying more than their summary are
+    /// clickable; a user message, response, plain error, thinking block, or
+    /// forum post is always shown in full.
     fn is_expandable(&self) -> bool {
-        // only a generic (non-think, non-forum) tool call collapses
         match self {
+            // only a generic (non-think, non-forum) tool call collapses
             EntryKind::Tool { name, .. } => {
                 name != THINK_TOOL && !FORUM_TOOLS.contains(&name.as_str())
             }
+            // a failure expands only when it holds more than its summary
+            EntryKind::Failure {
+                request_id, detail, ..
+            } => request_id.is_some() || detail.is_some(),
             _ => false,
         }
     }
 
-    /// The tool-call id this entry owns, if it is an expandable tool call
-    fn tool_id(&self) -> Option<Uuid> {
-        // only an expandable tool call carries an id a click can toggle
+    /// The id this entry's rows carry for click routing, if it is expandable
+    fn click_id(&self) -> Option<Uuid> {
+        // only an expandable entry carries an id a click can toggle
         match self {
-            EntryKind::Tool { id, .. } if self.is_expandable() => Some(*id),
+            EntryKind::Tool { id, .. } | EntryKind::Failure { id, .. } if self.is_expandable() => {
+                Some(*id)
+            }
             _ => None,
         }
     }
@@ -178,6 +200,24 @@ impl MessageBubble {
                         agent: agent.clone(),
                         text: text.clone(),
                     }
+                };
+                EntryFold::New(Box::new(MessageBubble::new(content)))
+            }
+            ChatEntry::Failure {
+                id,
+                summary,
+                request_id,
+                detail,
+                // the agent is already woven into the summary text; it exists
+                // on the entry for the stats drill-down's attribution only
+                agent: _,
+            } => {
+                // build the expandable failure entry
+                let content = EntryKind::Failure {
+                    id: *id,
+                    summary: summary.clone(),
+                    request_id: request_id.clone(),
+                    detail: detail.clone(),
                 };
                 EntryFold::New(Box::new(MessageBubble::new(content)))
             }
@@ -283,9 +323,9 @@ impl MessageBubble {
         expanded: &HashSet<Uuid>,
         log_expanded: &HashSet<Uuid>,
     ) {
-        // the tool-call this entry owns (if any), tagged onto every emitted row
+        // the click id this entry owns (if any), tagged onto every emitted row
         // so a click anywhere on the entry toggles the right part of it
-        let id = self.content.tool_id();
+        let id = self.content.click_id();
         // reserve a right margin so text never touches the terminal edge
         let width = area.width.saturating_sub(1).max(1) as usize;
         // build the styled lines for this entry based on its class
@@ -346,6 +386,22 @@ impl MessageBubble {
             EntryKind::Error(text) => {
                 as_entry_rows(styled_block(text, width, theme.messages.error))
             }
+            // a failure with detail behind a click: compact head, expand for
+            // the request id and the full error text
+            EntryKind::Failure {
+                id,
+                summary,
+                request_id,
+                detail,
+            } => as_entry_rows(render_failure(
+                summary,
+                request_id.as_deref(),
+                detail.as_deref(),
+                self.content.is_expandable(),
+                expanded.contains(id),
+                width,
+                theme,
+            )),
             // a tool call, whose render class comes from its tool name
             EntryKind::Tool {
                 id,
@@ -480,11 +536,6 @@ impl MessageLog {
     /// Jump to bottom and follow new content.
     pub fn end(&mut self) {
         self.follow = true;
-    }
-
-    /// Whether the view is currently pinned to bottom.
-    pub fn is_following(&self) -> bool {
-        self.follow
     }
 
     /// Clear all messages in our message log
@@ -686,7 +737,7 @@ impl MessageLog {
         if let Some(bubble) = self
             .bubbles
             .iter_mut()
-            .find(|bubble| bubble.is_tool_call(id))
+            .find(|bubble| bubble.content.click_id() == Some(id))
         {
             bubble.dirty = true;
         }
@@ -1002,6 +1053,58 @@ fn styled_block(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
         .collect()
 }
 
+/// Render a failure entry: a compact head line with its detail behind a click
+///
+/// The head is the summary in the prominent error style with the tool rows'
+/// expansion marker when the entry holds more (a request id or the full error
+/// text). Expanding adds a `request id:` line and the full error text in the
+/// dim tool style, so provider bodies stay out of the log until asked for.
+///
+/// # Arguments
+///
+/// * `summary` - The compact one-line summary of the failure
+/// * `request_id` - The provider's request id, when the error preserved one
+/// * `detail` - The full error text, when it says more than the summary
+/// * `expandable` - Whether this entry has detail rows a click can toggle
+/// * `expanded` - Whether the user has expanded this entry's detail
+/// * `width` - The maximum display width for each line
+/// * `theme` - The theme used to style the lines
+fn render_failure(
+    summary: &str,
+    request_id: Option<&str>,
+    detail: Option<&str>,
+    expandable: bool,
+    expanded: bool,
+    width: usize,
+    theme: &Arc<Theme>,
+) -> Vec<Line<'static>> {
+    // the head stays compact: the warning glyph, the summary, and the
+    // expansion marker only when a click has something to reveal
+    let head = if expandable {
+        let marker = if expanded { "▾" } else { "▸" };
+        format!("⚠ {summary} {marker}")
+    } else {
+        format!("⚠ {summary}")
+    };
+    let mut lines = styled_block(&head, width, theme.messages.error);
+    // the detail rows render only while expanded
+    if expanded {
+        // the request id is what provider support asks for first
+        if let Some(id) = request_id {
+            lines.extend(styled_block(
+                &format!("request id: {id}"),
+                width,
+                theme.messages.tool,
+            ));
+        }
+        // the full error text, dim so the summary stays the loud part
+        if let Some(detail) = detail {
+            lines.extend(styled_block(detail, width, theme.messages.tool));
+        }
+    }
+    lines
+}
+
 // ---------------- tool-call formatting ----------------
 
 /// Summarize a tool call's result by size, or its running/empty status
@@ -1177,6 +1280,99 @@ mod tests {
             }
             _ => panic!("the entry must still be a tool call"),
         }
+    }
+
+    /// Flatten rendered lines into one string for content assertions
+    ///
+    /// # Arguments
+    ///
+    /// * `lines` - The rendered lines to flatten
+    fn flatten(lines: &[Line<'static>]) -> String {
+        // join every span's text across every line
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    /// A failure folds into a compact expandable entry that reveals its
+    /// request id and full error text only when expanded
+    #[test]
+    fn failure_expands_to_its_request_id_and_detail() {
+        // fold a failure carrying an id and a long detail into an entry
+        let id = Uuid::new_v4();
+        let failure = ChatEntry::Failure {
+            id,
+            agent: Some("main".to_string()),
+            summary: "main: 429 Too Many Requests".to_string(),
+            request_id: Some("req-test".to_string()),
+            detail: Some("CompletionError: the full provider body".to_string()),
+        };
+        let bubble = match MessageBubble::from_msg(&failure, &mut []) {
+            EntryFold::New(bubble) => *bubble,
+            _ => panic!("a failure must fold into a new entry"),
+        };
+        // the entry is expandable and owns its click id
+        assert!(bubble.content.is_expandable());
+        assert_eq!(bubble.content.click_id(), Some(id));
+        let theme = Arc::new(Theme::default());
+        // collapsed: only the compact head renders, marked expandable
+        let collapsed = render_failure(
+            "main: 429 Too Many Requests",
+            Some("req-test"),
+            Some("CompletionError: the full provider body"),
+            true,
+            false,
+            80,
+            &theme,
+        );
+        let flat = flatten(&collapsed);
+        assert!(flat.contains("⚠ main: 429 Too Many Requests"));
+        assert!(flat.contains('▸'));
+        assert!(!flat.contains("req-test"));
+        // expanded: the request id and the full detail text appear
+        let expanded = render_failure(
+            "main: 429 Too Many Requests",
+            Some("req-test"),
+            Some("CompletionError: the full provider body"),
+            true,
+            true,
+            80,
+            &theme,
+        );
+        let flat = flatten(&expanded);
+        assert!(flat.contains('▾'));
+        assert!(flat.contains("request id: req-test"));
+        assert!(flat.contains("the full provider body"));
+    }
+
+    /// A failure holding nothing beyond its summary is not clickable
+    #[test]
+    fn bare_failure_is_not_expandable() {
+        // a short failure with no id and no detail has nothing to reveal
+        let content = EntryKind::Failure {
+            id: Uuid::new_v4(),
+            summary: "main: 429 Too Many Requests".to_string(),
+            request_id: None,
+            detail: None,
+        };
+        assert!(!content.is_expandable());
+        // without a click id its rows never route a click
+        assert_eq!(content.click_id(), None);
+        // and its head renders without an expansion marker
+        let theme = Arc::new(Theme::default());
+        let lines = render_failure(
+            "main: 429 Too Many Requests",
+            None,
+            None,
+            false,
+            false,
+            80,
+            &theme,
+        );
+        let flat = flatten(&lines);
+        assert_eq!(flat, "⚠ main: 429 Too Many Requests");
     }
 
     /// A response renders its markdown styled and wrapped within the width

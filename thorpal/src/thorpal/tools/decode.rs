@@ -3221,7 +3221,7 @@ fn scan_stack_region(
     let mut cache: [Option<u8>; 8] = [None; 8];
     let mut runs: Vec<StackRun> = Vec::new();
     let mut offset = 0usize;
-    let mut flush = |run: StackRun, out: &mut Vec<(StackBuffer, Vec<u8>)>| {
+    let flush = |run: StackRun, out: &mut Vec<(StackBuffer, Vec<u8>)>| {
         // reconstruct the frame span the run covered
         if run.stores < min_stores || run.writes.is_empty() {
             return;

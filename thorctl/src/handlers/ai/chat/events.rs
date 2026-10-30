@@ -2,7 +2,6 @@
 
 use crossterm::event::Event;
 use kanal::AsyncSender;
-use thorium::client::Error;
 
 use crate::handlers::ai::chat::ActiveTabKind;
 
@@ -10,8 +9,6 @@ use crate::handlers::ai::chat::ActiveTabKind;
 pub enum AppEvent {
     /// A terminal event (keyboard, mouse, resize, etc.)
     Terminal(Event),
-    /// A tool call failed
-    ToolCallFailure { error: Error },
     /// Turn the home page into a Chat page
     HomeToChat,
     /// Set the active page

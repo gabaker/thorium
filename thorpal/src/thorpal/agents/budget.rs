@@ -109,8 +109,6 @@ pub(crate) struct ReservedExtension {
     pub requested: usize,
     /// The justification the agent gave
     pub justification: String,
-    /// When the reservation was made
-    pub at: DateTime<Utc>,
 }
 
 /// One extension request a sub-agent made during an invocation
@@ -734,7 +732,6 @@ impl TurnBudgetState {
         let reservation = ReservedExtension {
             requested,
             justification: justification.clone(),
-            at: Utc::now(),
         };
         *self
             .reservation

@@ -16,6 +16,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::events::ThorPalEvent;
+use super::gate::PauseKind;
 
 /// One persisted transcript line: a displayable item plus an optional capture time
 ///
@@ -50,11 +51,13 @@ impl TranscriptLine {
 /// One durable, displayable item of a session's transcript.
 ///
 /// Mirrors the subset of [`ThorPalEvent`]s a consumer renders as chat-log
-/// entries, plus per-turn usage checkpoints so token timelines survive a
-/// restart; purely presentational events (forum refreshes, live tool logs,
-/// retry progress) are not transcript items. Items are serialized tagged by
-/// `kind` so the JSONL file stays self-describing and future variants can be
-/// skipped by older readers.
+/// entries, plus checkpoints that exist for offline telemetry rather than
+/// display: per-turn usage lines so token timelines survive a restart, and
+/// retry/pause lines so provider stalls stay countable after the live stream
+/// is gone. Purely presentational events (forum refreshes, live tool logs,
+/// pending analyst asks) are not transcript items. Items are serialized
+/// tagged by `kind` so the JSONL file stays self-describing and future
+/// variants can be skipped by older readers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TranscriptItem {
@@ -237,14 +240,23 @@ pub enum TranscriptItem {
         agent: String,
         /// The human-readable error describing why the turn failed.
         error: String,
+        /// The provider's request id for the failed request, when the error
+        /// preserved one.
+        ///
+        /// Older transcripts predate this field, so it defaults to `None`
+        /// (the `error` text embeds the same id when one was captured).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// A resume barrier: a later process reopened this session here.
     ///
-    /// Appended by the session restore itself (never mapped from an event --
-    /// [`ThorPalEvent::SessionResumed`] is live pause telemetry and stays
-    /// unpersisted), so a replay can tell debris a dead run left behind (the
-    /// terminal failure tail before a barrier) apart from this run's live
-    /// records and hide it from the chat log.
+    /// Appended by the session restore itself, never mapped from an event --
+    /// the live [`ThorPalEvent::SessionResumed`] is a provider-pause ending
+    /// and persists as [`TranscriptItem::ProviderResumed`] instead, so this
+    /// kind stays exclusively the process-restore barrier a replay keys on to
+    /// tell debris a dead run left behind (the terminal failure tail before a
+    /// barrier) apart from this run's live records and hide it from the chat
+    /// log.
     SessionResumed {
         /// Whether the resumed session carried an interrupted turn whose
         /// delegations the resume continues.
@@ -261,6 +273,19 @@ pub enum TranscriptItem {
         agent: String,
         /// The scrub level the retry escalated to (1 = defang, 2 = deep).
         level: u8,
+        /// The retry episode this scrub belongs to, correlating it with the
+        /// episode's `llm_retry`/`llm_retry_resolved` lines so offline
+        /// telemetry can report what scrubbing rescued and what it cost.
+        ///
+        /// Older transcripts predate this field, so it defaults to `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_id: Option<String>,
+        /// The provider's request id for the killed request, when the error
+        /// preserved one (what the proxy team asks for when chasing a kill).
+        ///
+        /// Older transcripts predate this field, so it defaults to `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Report generation stepped down its content-filter ladder.
     ///
@@ -299,6 +324,134 @@ pub enum TranscriptItem {
         /// The short title naming what needs review.
         title: String,
     },
+    /// A completion attempt hit a transient provider fault and backed off.
+    ///
+    /// Durable (one line per failed attempt, bounded by the episode's retry
+    /// budget) so offline telemetry can count throttle storms and sum the
+    /// backoff time a run spent waiting on the provider instead of analyzing.
+    LlmRetry {
+        /// The display name of the agent whose request is retrying.
+        agent: String,
+        /// The episode key correlating this attempt with its siblings and the
+        /// episode's closing `llm_retry_resolved` line.
+        retry_id: String,
+        /// The attempt that just failed (1-based).
+        attempt: u32,
+        /// The attempt budget before the error is surfaced as fatal.
+        max_attempts: u32,
+        /// A short human-readable summary of the fault (e.g. `"429 Too Many Requests"`).
+        error: String,
+        /// The provider's request id for the attempt that just failed, when
+        /// the error preserved one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        /// How long this attempt backs off before the next one fires, in
+        /// milliseconds.
+        backoff_ms: u64,
+    },
+    /// A retry episode ended: the request succeeded or its budget ran out.
+    ///
+    /// Durable so offline telemetry can count episodes (distinct from
+    /// attempts) and their outcomes without pairing `llm_retry` lines by hand.
+    LlmRetryResolved {
+        /// The display name of the agent whose request was retrying.
+        agent: String,
+        /// The episode key from the episode's `llm_retry` lines.
+        retry_id: String,
+        /// How many attempts the episode consumed in total.
+        attempts: u32,
+        /// Whether the request finally succeeded (`false` means the budget
+        /// ran out or a fatal error ended the episode).
+        succeeded: bool,
+    },
+    /// The whole session paused, waiting for the provider to become usable.
+    ///
+    /// Durable once per pause episode (the initial publish only -- probe
+    /// refreshes are live banner updates), so offline telemetry can count
+    /// outages and auth stalls; the pause's duration and probe tally land on
+    /// the matching [`TranscriptItem::ProviderResumed`] line.
+    ProviderPaused {
+        /// Why the session paused.
+        pause: PauseKind,
+        /// The display name of the agent whose request first hit the fault.
+        agent: String,
+        /// A short human-readable summary of the fault (e.g. `"401 Unauthorized"`).
+        error: String,
+        /// The provider's request id for the fault, when the error preserved
+        /// one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// A provider pause ended: a probe succeeded or the operator aborted.
+    ///
+    /// Durable so offline telemetry can measure how long a session stalled on
+    /// the provider (rather than the analysis) and how many probes it took.
+    /// Deliberately a distinct kind from the `session_resumed` restore
+    /// barrier, which replay consumers key on to hide dead-run debris.
+    ProviderResumed {
+        /// Why the session had paused.
+        pause: PauseKind,
+        /// Whether the provider actually recovered (`false` means the
+        /// operator aborted the pause and the parked requests surfaced their
+        /// errors).
+        recovered: bool,
+        /// How long the session was paused, in milliseconds.
+        paused_ms: u64,
+        /// How many automatic probes failed over the whole pause.
+        probe_attempts: u32,
+    },
+    /// The resolved tool roster a role's agents were offered this process run.
+    ///
+    /// Appended once per built role (plus `"main"`) at build time, never
+    /// mapped from a live event: group names expand against the registry
+    /// compiled into the running binary and MCP servers advertise their tools
+    /// only at connect time, so without this line the offered roster cannot
+    /// be reconstructed offline and "offered but never called" is
+    /// unanswerable. Every instance of a role shares the one built agent, so
+    /// a per-role line is the per-agent truth; a resumed session appends a
+    /// fresh set, keeping roster drift across binary upgrades visible.
+    ToolsOffered {
+        /// The role whose agents are offered these tools (e.g.
+        /// `"ReverseEngineer"`, or `"main"` for the main agent).
+        role: String,
+        /// The sorted model-visible names of every tool offered, always-on
+        /// orchestration tools and MCP-prefixed names included.
+        tools: Vec<String>,
+        /// The thorpal crate version that resolved this roster.
+        version: String,
+    },
+    /// The native detector roster one seeding pass ran.
+    ///
+    /// Appended once per seeding pass (once per sample in a multi-sample
+    /// session), never mapped from a live event. The registry compiled into
+    /// the recording binary is what ran -- a later reader's registry may
+    /// differ -- so this line is what makes "detectors that never fired"
+    /// answerable offline, zero-hit detections included.
+    DetectorsRun {
+        /// The scoped sibling program this pass seeded, or `None` for the
+        /// primary sample's pass.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sample: Option<String>,
+        /// Every registry detection's outcome for this pass.
+        detectors: Vec<DetectorRunLine>,
+        /// The thorpal crate version whose registry ran.
+        version: String,
+    },
+}
+
+/// One registry detection's durable outcome inside a `detectors_run` line
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetectorRunLine {
+    /// The detection's stable registry name (e.g. `"debugger_evasion"`).
+    pub name: String,
+    /// The ATT&CK technique id the detection evidences.
+    pub technique: String,
+    /// How many hits the detection produced.
+    #[serde(default)]
+    pub hits: u32,
+    /// Whether the detection failed instead of completing.
+    #[serde(default)]
+    pub failed: bool,
 }
 
 /// True for the agents that own a whole conversation, whose per-turn text
@@ -318,15 +471,17 @@ fn is_conversation_agent(agent: &str) -> bool {
 }
 
 impl TranscriptItem {
-    /// Maps an event onto its durable transcript item, if it is displayable
+    /// Maps an event onto its durable transcript item, if one is persisted
     ///
     /// Mirrors the live display rules a consumer applies: a conversation-root
     /// agent's per-turn `AgentMessage` text is skipped (the final answer
     /// arrives as a scoped `RunFinished` and would otherwise duplicate), and
-    /// purely presentational events (`ForumUpdated`, live tool logs, retry
-    /// progress) are not transcript items at all, while per-turn
-    /// `UsageUpdated` checkpoints are persisted so token timelines survive a
-    /// restart.
+    /// purely presentational events (`ForumUpdated`, live tool logs, pending
+    /// analyst asks) are not transcript items at all. Telemetry checkpoints
+    /// are persisted beyond what a consumer displays: per-turn `UsageUpdated`
+    /// lines so token timelines survive a restart, and retry/pause lines so
+    /// provider stalls stay countable offline (a pause's probe refreshes stay
+    /// live-only -- the initial publish and the resume carry the whole story).
     ///
     /// # Arguments
     ///
@@ -451,16 +606,32 @@ impl TranscriptItem {
                 result: result.clone(),
                 success: *success,
             }),
-            // a failed turn renders as an inline error, so it is durable too
-            ThorPalEvent::TurnFailed { agent, error } => Some(TranscriptItem::TurnFailed {
+            // a failed turn renders as an inline error, so it is durable too,
+            // structured request id included so offline consumers are spared
+            // parsing it back out of the error text
+            ThorPalEvent::TurnFailed {
+                agent,
+                error,
+                request_id,
+            } => Some(TranscriptItem::TurnFailed {
                 agent: agent.clone(),
                 error: error.clone(),
+                request_id: request_id.clone(),
             }),
             // a scrubbed retry is durable so audits can count the
-            // content-filter class without banner archaeology
-            ThorPalEvent::LlmScrubbed { agent, level, .. } => Some(TranscriptItem::LlmScrubbed {
+            // content-filter class without banner archaeology; the episode key
+            // joins it to the retry lines so rescues stay attributable
+            ThorPalEvent::LlmScrubbed {
+                agent,
+                retry_id,
+                level,
+                request_id,
+                ..
+            } => Some(TranscriptItem::LlmScrubbed {
                 agent: agent.clone(),
                 level: *level,
+                retry_id: Some(retry_id.clone()),
+                request_id: request_id.clone(),
             }),
             // a report degradation is durable next to the stored report
             ThorPalEvent::ReportDegraded { rung, detail } => Some(TranscriptItem::ReportDegraded {
@@ -506,16 +677,78 @@ impl TranscriptItem {
                     title: title.clone(),
                 })
             }
-            // forum refreshes, live tool log lines, retry progress, and pending
-            // analyst asks are not chat-log items (they are live telemetry, not
+            // each failed transient attempt is durable so offline telemetry
+            // can count throttle storms and sum backoff time; the wall-clock
+            // pair collapses to the one delta the fold needs
+            ThorPalEvent::LlmRetrying {
+                agent,
+                retry_id,
+                attempt,
+                max_attempts,
+                error,
+                request_id,
+                last_attempt_at,
+                next_attempt_at,
+            } => Some(TranscriptItem::LlmRetry {
+                agent: agent.clone(),
+                retry_id: retry_id.clone(),
+                attempt: *attempt,
+                max_attempts: *max_attempts,
+                error: error.clone(),
+                request_id: request_id.clone(),
+                // clamp a backwards schedule to a zero backoff
+                backoff_ms: u64::try_from((*next_attempt_at - *last_attempt_at).num_milliseconds())
+                    .unwrap_or(0),
+            }),
+            // the episode's close is durable so episodes and their outcomes
+            // count without pairing attempt lines by hand
+            ThorPalEvent::LlmRetryResolved {
+                agent,
+                retry_id,
+                attempts,
+                succeeded,
+            } => Some(TranscriptItem::LlmRetryResolved {
+                agent: agent.clone(),
+                retry_id: retry_id.clone(),
+                attempts: *attempts,
+                succeeded: *succeeded,
+            }),
+            // only a pause's initial publish is durable; the re-emissions
+            // after each failed probe are live banner refreshes whose tally
+            // lands on the resume line instead
+            ThorPalEvent::SessionPaused {
+                kind,
+                agent,
+                error,
+                request_id,
+                probe_attempts,
+                ..
+            } => (*probe_attempts == 0).then(|| TranscriptItem::ProviderPaused {
+                pause: *kind,
+                agent: agent.clone(),
+                error: error.clone(),
+                request_id: request_id.clone(),
+            }),
+            // a pause's end is durable with the whole episode's cost; this is
+            // deliberately NOT the `session_resumed` restore barrier, which
+            // replay consumers key on to hide dead-run debris
+            ThorPalEvent::SessionResumed {
+                kind,
+                recovered,
+                paused_ms,
+                probe_attempts,
+            } => Some(TranscriptItem::ProviderResumed {
+                pause: *kind,
+                recovered: *recovered,
+                paused_ms: *paused_ms,
+                probe_attempts: *probe_attempts,
+            }),
+            // forum refreshes, live tool log lines, and pending analyst asks
+            // are not transcript items (they are live telemetry, not
             // conversation; a pending ask lands durably once it resolves)
             ThorPalEvent::ForumUpdated { .. }
             | ThorPalEvent::AnalystAskPending { .. }
-            | ThorPalEvent::ToolLog { .. }
-            | ThorPalEvent::LlmRetrying { .. }
-            | ThorPalEvent::LlmRetryResolved { .. }
-            | ThorPalEvent::SessionPaused { .. }
-            | ThorPalEvent::SessionResumed { .. } => None,
+            | ThorPalEvent::ToolLog { .. } => None,
         }
     }
 }
@@ -599,10 +832,45 @@ mod tests {
             TranscriptItem::TurnFailed {
                 agent: "main".to_owned(),
                 error: "boom".to_owned(),
+                request_id: Some("req-77aa".to_owned()),
             },
             TranscriptItem::LlmScrubbed {
                 agent: "ReverseEngineer(Europa)".to_owned(),
                 level: 1,
+                retry_id: Some("ReverseEngineer(Europa)#3".to_owned()),
+                request_id: Some("req-42cc".to_owned()),
+            },
+            TranscriptItem::LlmRetry {
+                agent: "main".to_owned(),
+                retry_id: "main#1".to_owned(),
+                attempt: 2,
+                max_attempts: 12,
+                error: "429 Too Many Requests".to_owned(),
+                request_id: Some("req-13bb".to_owned()),
+                backoff_ms: 2_000,
+            },
+            TranscriptItem::LlmRetryResolved {
+                agent: "main".to_owned(),
+                retry_id: "main#1".to_owned(),
+                attempts: 3,
+                succeeded: true,
+            },
+            TranscriptItem::ProviderPaused {
+                pause: PauseKind::Auth,
+                agent: "main".to_owned(),
+                error: "401 Unauthorized".to_owned(),
+                request_id: Some("req-90dd".to_owned()),
+            },
+            TranscriptItem::ProviderResumed {
+                pause: PauseKind::RetryBudgetExhausted,
+                recovered: true,
+                paused_ms: 184_000,
+                probe_attempts: 2,
+            },
+            TranscriptItem::ToolsOffered {
+                role: "ReverseEngineer".to_owned(),
+                tools: vec!["decomp_function".to_owned(), "think".to_owned()],
+                version: "0.1.0".to_owned(),
             },
             TranscriptItem::Assistant {
                 text: "done".to_owned(),
@@ -846,5 +1114,239 @@ mod tests {
             line: "[Ghidra stdout] analyzing".to_owned(),
         };
         assert!(TranscriptItem::from_event(&log).is_none());
+    }
+
+    /// Retry attempts and pause boundaries map onto durable lines: every
+    /// attempt and episode close persists, a pause persists only on its
+    /// initial publish, and a pause ending persists with the episode's cost
+    #[test]
+    fn retry_and_pause_lines_are_durable() {
+        // a failed attempt maps with its backoff collapsed to one delta
+        let last_attempt_at = chrono::Utc::now();
+        let retrying = ThorPalEvent::LlmRetrying {
+            agent: "main".to_owned(),
+            retry_id: "main#1".to_owned(),
+            attempt: 2,
+            max_attempts: 12,
+            error: "429 Too Many Requests".to_owned(),
+            request_id: Some("req-13bb".to_owned()),
+            last_attempt_at,
+            next_attempt_at: last_attempt_at + chrono::Duration::milliseconds(2_000),
+        };
+        let item = TranscriptItem::from_event(&retrying).expect("attempt should persist");
+        assert!(matches!(
+            &item,
+            TranscriptItem::LlmRetry { attempt: 2, backoff_ms: 2_000, request_id: Some(id), .. }
+                if id == "req-13bb"
+        ));
+        // the serialized line carries the new kind tag
+        let encoded = serde_json::to_string(&item).expect("item should serialize");
+        assert!(encoded.contains(r#""kind":"llm_retry""#));
+        // a backwards schedule clamps to a zero backoff instead of panicking
+        let backwards = ThorPalEvent::LlmRetrying {
+            agent: "main".to_owned(),
+            retry_id: "main#1".to_owned(),
+            attempt: 3,
+            max_attempts: 12,
+            error: "429 Too Many Requests".to_owned(),
+            request_id: None,
+            last_attempt_at,
+            next_attempt_at: last_attempt_at - chrono::Duration::milliseconds(5),
+        };
+        assert!(matches!(
+            TranscriptItem::from_event(&backwards),
+            Some(TranscriptItem::LlmRetry { backoff_ms: 0, .. })
+        ));
+        // an episode close maps with its outcome
+        let resolved = ThorPalEvent::LlmRetryResolved {
+            agent: "main".to_owned(),
+            retry_id: "main#1".to_owned(),
+            attempts: 3,
+            succeeded: true,
+        };
+        assert!(matches!(
+            TranscriptItem::from_event(&resolved),
+            Some(TranscriptItem::LlmRetryResolved {
+                attempts: 3,
+                succeeded: true,
+                ..
+            })
+        ));
+        // a pause's initial publish persists with its snake_case kind
+        let paused = ThorPalEvent::SessionPaused {
+            kind: PauseKind::Auth,
+            agent: "main".to_owned(),
+            error: "401 Unauthorized".to_owned(),
+            request_id: Some("req-90dd".to_owned()),
+            since: last_attempt_at,
+            probe_attempts: 0,
+            next_probe_at: last_attempt_at + chrono::Duration::seconds(60),
+        };
+        let item = TranscriptItem::from_event(&paused).expect("initial pause should persist");
+        let encoded = serde_json::to_string(&item).expect("item should serialize");
+        assert!(encoded.contains(r#""kind":"provider_paused""#));
+        assert!(encoded.contains(r#""pause":"auth""#));
+        // a probe refresh of the same pause is a live banner update only
+        let refreshed = ThorPalEvent::SessionPaused {
+            kind: PauseKind::Auth,
+            agent: "main".to_owned(),
+            error: "401 Unauthorized".to_owned(),
+            request_id: None,
+            since: last_attempt_at,
+            probe_attempts: 1,
+            next_probe_at: last_attempt_at + chrono::Duration::seconds(120),
+        };
+        assert!(TranscriptItem::from_event(&refreshed).is_none());
+        // a pause ending persists the episode's whole cost under its own kind
+        // (never the `session_resumed` restore barrier replay keys on)
+        let resumed = ThorPalEvent::SessionResumed {
+            kind: PauseKind::RetryBudgetExhausted,
+            recovered: false,
+            paused_ms: 184_000,
+            probe_attempts: 2,
+        };
+        let item = TranscriptItem::from_event(&resumed).expect("pause end should persist");
+        assert!(matches!(
+            &item,
+            TranscriptItem::ProviderResumed {
+                recovered: false,
+                paused_ms: 184_000,
+                probe_attempts: 2,
+                ..
+            }
+        ));
+        let encoded = serde_json::to_string(&item).expect("item should serialize");
+        assert!(encoded.contains(r#""kind":"provider_resumed""#));
+        assert!(encoded.contains(r#""pause":"retry_budget_exhausted""#));
+        assert!(!encoded.contains(r#""kind":"session_resumed""#));
+    }
+
+    /// Scrub and turn-failure lines carry their retry episode and request id,
+    /// older lines without those keys still parse, and absent ids are omitted
+    /// from the encoding entirely
+    #[test]
+    fn scrub_and_turn_failure_lines_link_their_episode() {
+        // a live scrub maps with its episode key and request id attached
+        let scrubbed = ThorPalEvent::LlmScrubbed {
+            agent: "ReverseEngineer(Europa)".to_owned(),
+            retry_id: "ReverseEngineer(Europa)#3".to_owned(),
+            level: 2,
+            error: "403 Forbidden".to_owned(),
+            request_id: Some("req-42cc".to_owned()),
+        };
+        let item = TranscriptItem::from_event(&scrubbed).expect("scrub should persist");
+        assert!(matches!(
+            &item,
+            TranscriptItem::LlmScrubbed { level: 2, retry_id: Some(retry), request_id: Some(req), .. }
+                if retry == "ReverseEngineer(Europa)#3" && req == "req-42cc"
+        ));
+        // a live turn failure maps with its structured request id attached
+        let failed = ThorPalEvent::TurnFailed {
+            agent: "main".to_owned(),
+            error: "boom (request id: req-77aa)".to_owned(),
+            request_id: Some("req-77aa".to_owned()),
+        };
+        assert!(matches!(
+            TranscriptItem::from_event(&failed),
+            Some(TranscriptItem::TurnFailed { request_id: Some(id), .. }) if id == "req-77aa"
+        ));
+        // old lines predating the linkage keys still parse with none
+        let old_scrub = r#"{"kind":"llm_scrubbed","agent":"main","level":1}"#;
+        let parsed: TranscriptLine =
+            serde_json::from_str(old_scrub).expect("old line should parse");
+        assert!(matches!(
+            &parsed.item,
+            TranscriptItem::LlmScrubbed {
+                retry_id: None,
+                request_id: None,
+                ..
+            }
+        ));
+        let old_failure = r#"{"kind":"turn_failed","agent":"main","error":"boom"}"#;
+        let parsed: TranscriptLine =
+            serde_json::from_str(old_failure).expect("old line should parse");
+        assert!(matches!(
+            &parsed.item,
+            TranscriptItem::TurnFailed {
+                request_id: None,
+                ..
+            }
+        ));
+        // an absent id is omitted from the encoding, not written as null
+        let bare = TranscriptItem::TurnFailed {
+            agent: "main".to_owned(),
+            error: "boom".to_owned(),
+            request_id: None,
+        };
+        let encoded = serde_json::to_string(&bare).expect("item should serialize");
+        assert!(!encoded.contains("request_id"));
+    }
+
+    /// A detector roster round-trips under its own kind and is never mapped
+    /// from a live event (it is appended directly after each seeding pass)
+    #[test]
+    fn detectors_run_lines_are_seeding_appends() {
+        // a roster line round-trips with zero-hit and failed entries intact
+        let item = TranscriptItem::DetectorsRun {
+            sample: Some("payload.dll".to_owned()),
+            detectors: vec![
+                DetectorRunLine {
+                    name: "debugger_evasion".to_owned(),
+                    technique: "T1622".to_owned(),
+                    hits: 3,
+                    failed: false,
+                },
+                DetectorRunLine {
+                    name: "packing".to_owned(),
+                    technique: "T1027.002".to_owned(),
+                    hits: 0,
+                    failed: true,
+                },
+            ],
+            version: "9.9.9".to_owned(),
+        };
+        let encoded = serde_json::to_string(&item).expect("item should serialize");
+        assert!(encoded.contains(r#""kind":"detectors_run""#));
+        let decoded: TranscriptItem = serde_json::from_str(&encoded).expect("item should parse");
+        let TranscriptItem::DetectorsRun {
+            sample, detectors, ..
+        } = decoded
+        else {
+            panic!("expected a detectors_run item");
+        };
+        assert_eq!(sample.as_deref(), Some("payload.dll"));
+        assert_eq!(detectors.len(), 2);
+        assert_eq!(detectors[1].hits, 0);
+        assert!(detectors[1].failed);
+        // the primary pass's line omits the sample key entirely
+        let primary = TranscriptItem::DetectorsRun {
+            sample: None,
+            detectors: Vec::new(),
+            version: "9.9.9".to_owned(),
+        };
+        let encoded = serde_json::to_string(&primary).expect("item should serialize");
+        assert!(!encoded.contains("sample"));
+    }
+
+    /// An offered-tool manifest round-trips under its own kind and is never
+    /// mapped from a live event (it is appended directly at build time)
+    #[test]
+    fn tools_offered_lines_are_build_time_appends() {
+        // the manifest round-trips with its roster order intact
+        let item = TranscriptItem::ToolsOffered {
+            role: "main".to_owned(),
+            tools: vec!["create_post".to_owned(), "think".to_owned()],
+            version: "9.9.9".to_owned(),
+        };
+        let encoded = serde_json::to_string(&item).expect("item should serialize");
+        assert!(encoded.contains(r#""kind":"tools_offered""#));
+        let decoded: TranscriptItem = serde_json::from_str(&encoded).expect("item should parse");
+        assert!(matches!(
+            &decoded,
+            TranscriptItem::ToolsOffered { role, tools, version }
+                if role == "main"
+                    && tools == &["create_post".to_owned(), "think".to_owned()]
+                    && version == "9.9.9"
+        ));
     }
 }

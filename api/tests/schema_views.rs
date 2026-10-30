@@ -16,8 +16,8 @@ use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use thorium::models::schema::{
     ApplyError, ApplyOptions, ApplyTarget, ColumnRole, RangeDifference, RangeSelection, RangeSide,
-    RecreateReport, TOKEN_RANGES, TableDef, VerifyOptions, VerifyReport, ViewCheck, ViewDef,
-    ViewError, ViewState, apply, declared_views, range_of, recreate_statements, recreate_views,
+    RecreateReport, TOKEN_RANGES, VerifyOptions, VerifyReport, ViewCheck, ViewDef, ViewError,
+    ViewState, apply, declared_views, range_of, recreate_statements, recreate_views,
     recreate_warning, resolve_views, token_range, verify_views,
 };
 use thorium::test_utilities::{self, CONF};

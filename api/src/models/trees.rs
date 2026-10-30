@@ -352,6 +352,7 @@ impl TreeRelatedQuery {
     }
 
     /// Clear all values in this related query
+    #[cfg(feature = "api")]
     pub(crate) fn clear(&mut self) {
         // clear our tags
         self.tags.clear();
@@ -856,6 +857,7 @@ impl FromStr for Directionality {
 }
 
 /// A branch between nodes in a relationship tree
+#[cfg(feature = "api")]
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct UnhashedTreeBranch {
@@ -867,6 +869,7 @@ pub struct UnhashedTreeBranch {
     pub direction: Directionality,
 }
 
+#[cfg(feature = "api")]
 impl UnhashedTreeBranch {
     /// Create a new branch between two nodes that is not yet hashed
     ///

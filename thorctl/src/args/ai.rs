@@ -59,6 +59,9 @@ pub enum Ai {
     /// Run pooled headless evaluations and regenerate the evaluation figures
     #[clap(subcommand)]
     Batch(Batch),
+    /// Export privacy-safe ThorPal telemetry bundles from saved sessions
+    #[clap(subcommand)]
+    Telemetry(Telemetry),
 }
 
 /// Chat with ThorPal about a local binary
@@ -235,6 +238,96 @@ mod tests {
         // and it stays optional
         let chat = Chat::try_parse_from(["chat", "bin"]).unwrap();
         assert!(chat.redact_tokens.is_none());
+    }
+
+    /// Telemetry export defaults to the content-free level over every session
+    #[test]
+    fn telemetry_export_defaults_are_level_zero_everything() {
+        // a bare export is level 0, every session, interactive, default path
+        let Telemetry::Export(export) = Telemetry::try_parse_from(["telemetry", "export"]).unwrap()
+        else {
+            panic!("expected the export verb");
+        };
+        assert_eq!(export.level, 0);
+        assert!(export.session.is_empty());
+        assert!(export.sessions_root.is_none());
+        assert!(export.redact_tokens.is_none());
+        assert!(export.out.is_none());
+        assert!(!export.yes);
+    }
+
+    /// Telemetry export accepts only the two defined bundle levels
+    #[test]
+    fn telemetry_export_levels_are_bounded() {
+        // level 1 opts into normalized failure signatures
+        let Telemetry::Export(export) =
+            Telemetry::try_parse_from(["telemetry", "export", "--level", "1"]).unwrap()
+        else {
+            panic!("expected the export verb");
+        };
+        assert_eq!(export.level, 1);
+        // anything past the defined tiers is rejected at parse time
+        assert!(Telemetry::try_parse_from(["telemetry", "export", "--level", "2"]).is_err());
+    }
+
+    /// Telemetry explore takes bundle files, or a sessions root with none
+    #[test]
+    fn telemetry_explore_takes_bundles_or_a_root() {
+        // bare explore walks the local store
+        let Telemetry::Explore(explore) =
+            Telemetry::try_parse_from(["telemetry", "explore"]).unwrap()
+        else {
+            panic!("expected the explore verb");
+        };
+        assert!(explore.bundles.is_empty());
+        assert!(explore.sessions_root.is_none());
+        // bundle files merge; a copied store swaps the root instead
+        let Telemetry::Explore(explore) =
+            Telemetry::try_parse_from(["telemetry", "explore", "a.json", "b.json.gz"]).unwrap()
+        else {
+            panic!("expected the explore verb");
+        };
+        assert_eq!(explore.bundles.len(), 2);
+        // bundles and a sessions root are different sources; both is an error
+        assert!(
+            Telemetry::try_parse_from([
+                "telemetry",
+                "explore",
+                "a.json",
+                "--sessions-root",
+                "./copy"
+            ])
+            .is_err()
+        );
+    }
+
+    /// Telemetry export sessions repeat per name and headless flags combine
+    #[test]
+    fn telemetry_export_sessions_repeat_and_combine_headless() {
+        // each exported session is its own flag occurrence, like blind-family
+        let Telemetry::Export(export) = Telemetry::try_parse_from([
+            "telemetry",
+            "export",
+            "--session",
+            "alpha",
+            "--session",
+            "beta",
+            "--sessions-root",
+            "./copy",
+            "--redact-tokens",
+            "deny.txt",
+            "--out",
+            "bundle.json.gz",
+            "--yes",
+        ])
+        .unwrap() else {
+            panic!("expected the export verb");
+        };
+        assert_eq!(export.session, ["alpha", "beta"]);
+        assert_eq!(export.sessions_root, Some(PathBuf::from("./copy")));
+        assert_eq!(export.redact_tokens, Some(PathBuf::from("deny.txt")));
+        assert_eq!(export.out, Some(PathBuf::from("bundle.json.gz")));
+        assert!(export.yes);
     }
 
     /// The blind-family list repeats per alias and rides resumes too
@@ -588,6 +681,75 @@ pub struct BatchStatus {
     /// The run number to summarize (defaults to the latest run)
     #[clap(long)]
     pub run: Option<u32>,
+}
+
+/// The offline-telemetry commands: export privacy-safe bundles compiled from
+/// saved ThorPal sessions, and explore bundles or a local store
+#[derive(Parser, Debug)]
+pub enum Telemetry {
+    /// Export a privacy-safe telemetry bundle from saved ThorPal sessions
+    Export(TelemetryExport),
+    /// Explore telemetry bundles, or the local session store with no args
+    Explore(TelemetryExplore),
+}
+
+/// Export a privacy-safe telemetry bundle from saved ThorPal sessions
+///
+/// Folds each session's transcript and forum into counts, token totals,
+/// histograms, and enum tallies -- never message text, tool arguments or
+/// results, forum prose, file names, or paths -- then renders the exact bytes
+/// that would leave the machine and writes them only after confirmation
+/// (`--yes` skips the TUI for scripted exports). Strictly read-only over the
+/// sessions root, like `thorctl analyze usage`.
+#[derive(Parser, Debug)]
+pub struct TelemetryExport {
+    /// The bundle level: 0 is strictly content-free, 1 adds normalized
+    /// failure signatures (bounded multi-line, defanged, number-scrubbed
+    /// prefixes of failing tool results)
+    #[clap(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=1))]
+    pub level: u8,
+    /// Export only these sessions by name (repeat the flag for each session;
+    /// defaults to every session under the root)
+    #[clap(long, value_name = "NAME")]
+    pub session: Vec<String>,
+    /// The sessions root to scan instead of ~/.thorium/sessions (for fixtures
+    /// and inspecting copied stores)
+    #[clap(long, value_name = "DIR")]
+    pub sessions_root: Option<PathBuf>,
+    /// A file of deny tokens (one case-insensitive token per line, `#`
+    /// comments allowed) scrubbed out of every exported string before the
+    /// preview renders; the list itself never leaves the machine and is never
+    /// persisted
+    #[clap(long, value_name = "FILE")]
+    pub redact_tokens: Option<PathBuf>,
+    /// Write the bundle to this path (a `.gz` suffix gzips the same bytes);
+    /// defaults to thorpal-telemetry-<UTC timestamp>.json in the working
+    /// directory
+    #[clap(long, value_name = "FILE")]
+    pub out: Option<PathBuf>,
+    /// Skip the interactive flow: apply redaction, write the bundle, and
+    /// print one stable machine-parseable summary line on stderr
+    #[clap(long)]
+    pub yes: bool,
+}
+
+/// Explore telemetry bundles, or the local session store with no args
+///
+/// Opens a read-only TUI cycling six screens -- fleet overview, tool league
+/// table, failure signatures, stuck points, detector outcomes, and token
+/// economics -- over the merged bundles, or over the local sessions root
+/// (computing the same aggregates on the fly) when no bundle is given.
+/// Session drill-down is available only over a local store: bundles carry no
+/// messages to replay, by design.
+#[derive(Parser, Debug)]
+pub struct TelemetryExplore {
+    /// The bundle files to merge and explore (plain or gzipped); omit to
+    /// explore the local sessions root instead
+    pub bundles: Vec<PathBuf>,
+    /// The sessions root to scan instead of ~/.thorium/sessions when no
+    /// bundle is given (for fixtures and inspecting copied stores)
+    #[clap(long, value_name = "DIR", conflicts_with = "bundles")]
+    pub sessions_root: Option<PathBuf>,
 }
 
 /// Regenerate the evaluation figures and the spliced aggregate table from the

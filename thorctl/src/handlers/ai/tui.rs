@@ -200,3 +200,29 @@ where
     #[cfg(not(unix))]
     drop(quit);
 }
+
+/// Sends a redraw event once a second so relative figures stay fresh
+///
+/// The shared slow ticker behind the telemetry TUIs: none of them animates
+/// anything faster than once a second, and a send failure just means the app
+/// is gone, so the loop quietly ends with it.
+///
+/// # Arguments
+///
+/// * `sender` - The channel to request redraws over
+/// * `redraw` - Builds the consumer's redraw event
+pub(super) async fn redraw_ticker<E, R>(sender: AsyncSender<E>, redraw: R)
+where
+    E: Send + 'static,
+    R: Fn() -> E + Send + 'static,
+{
+    // keep ticking for the life of the app
+    loop {
+        // sleep for 1s between frames; these TUIs animate nothing faster
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        // try to send a redraw event; a failure just means the app is gone
+        if sender.send(redraw()).await.is_err() {
+            return;
+        }
+    }
+}

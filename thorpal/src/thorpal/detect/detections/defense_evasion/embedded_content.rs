@@ -134,6 +134,8 @@ fn build_hit(header: Option<&FormatHeader>, embedded: Embedded) -> DetectionHit 
         source: HitSource::Native,
         artifact: None,
         context: None,
+        // unstamped here; the registry runner names native producers
+        detection: None,
     }
 }
 
