@@ -71,14 +71,21 @@ export interface AgenticListQueryState<T> extends AgenticListRead<T> {
  * @template T - The entity type of the kind.
  * @param kind - The kind to list.
  * @param enabled - Whether to read the list; a disabled list reads nothing and reports empty, not loading.
+ * @param readOnMount - Whether every mount reads the list again even while the cached list is fresh, showing the
+ *   cached list until the new one arrives; a page that lists what other pages create or delete wants this.
  * @returns The entities, the error of an incomplete read, whether the first read is in flight, and a reload.
  */
-export function useAgenticListQuery<T extends AnyAgenticEntity>(kind: AgenticKinds, enabled = true): AgenticListQueryState<T> {
+export function useAgenticListQuery<T extends AnyAgenticEntity>(
+  kind: AgenticKinds,
+  enabled = true,
+  readOnMount = false,
+): AgenticListQueryState<T> {
   const client = useQueryClient();
   const query = useQuery({
     queryKey: agenticKeys.list(kind),
     queryFn: () => fetchAgenticList<T>(kind),
     staleTime: AGENTIC_LIST_STALE_MS,
+    refetchOnMount: readOnMount ? 'always' : true,
     enabled,
   });
   const reload = useCallback(() => void client.invalidateQueries({ queryKey: agenticKeys.list(kind) }), [client, kind]);

@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 // project imports
 import { NamedInstance, Notice, REQUEST_WATCH, requestedNotice, watchRequestedInstance } from '@components/agentic/instances';
 import { Severity } from '@components/shared/alerts/AlertBanner';
-import { listAllAgentic, requestInstance } from '@thorpi/agentic';
+import { requestInstance } from '@thorpi/agentic';
 import { sampleFileNames } from '@components/agentic/runs/display';
 import { getFileDetails } from '@thorpi/files';
 import { getGroup } from '@thorpi/groups';
@@ -16,60 +16,21 @@ import {
   pipelineCreateBlockReason,
 } from '@utilities/agentic/access';
 import { useAuth } from '@utilities/auth';
+import { AgenticListQueryState, useAgenticListQuery } from '@utilities/queries/agentic';
 import { canEditEntityInGroups } from '@utilities/permissions';
 import { AgenticKinds, AnyAgenticEntity } from '@models/agentic';
 import { Group } from '@models/groups';
 
-/** The state of a list of entities loaded for a page. */
-export interface AgenticListState<T> {
-  /** The entities read so far */
-  items: T[];
-  /** Whether a load is in flight */
-  loading: boolean;
-  /** The last error message, or an empty string */
-  error: string;
-  /** Read the list again */
-  reload: () => void;
-}
-
 /**
- * Load every entity of one kind the user can see and expose a reload.
+ * Load every entity of one kind the user can see and expose a reload, reading the list again on every mount so a list
+ * page shows what other pages created or deleted.
  *
+ * @template T - The entity type of the kind.
  * @param kind - The kind of entity to load.
  * @returns The items, loading flag, last error, and a reload callback.
  */
-export function useAgenticList<T extends AnyAgenticEntity>(kind: AgenticKinds): AgenticListState<T> {
-  const [items, setItems] = useState<T[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [tick, setTick] = useState(0);
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError('');
-    void listAllAgentic<T>(kind, [], (message) => {
-      // a load that was superseded or unmounted must not report its errors over the current one
-      if (!cancelled) setError(message);
-    })
-      .then((all) => {
-        if (!cancelled) {
-          setItems(all);
-          setLoading(false);
-        }
-      })
-      .catch((reason: unknown) => {
-        // a reply the listing could not read ends the load with an error rather than leaving it loading forever
-        if (!cancelled) {
-          setError(`List ${kind}: unexpected reply (${reason instanceof Error ? reason.message : String(reason)})`);
-          setLoading(false);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [kind, tick]);
-  const reload = useCallback(() => setTick((value) => value + 1), []);
-  return { items, loading, error, reload };
+export function useAgenticList<T extends AnyAgenticEntity>(kind: AgenticKinds): AgenticListQueryState<T> {
+  return useAgenticListQuery<T>(kind, true, true);
 }
 
 /**
