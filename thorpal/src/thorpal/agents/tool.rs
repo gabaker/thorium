@@ -40,6 +40,7 @@ use crate::thorpal::tools::constants::{self, ConstantTracker};
 use crate::thorpal::tools::forum::{
     ForumContextMode, ForumContextSettings, ForumState, scan_references,
 };
+use crate::thorpal::tools::memories::search::{MemoryDoc, clip_chars, rank_memory_docs};
 use crate::thorpal::tools::registry::EnabledTools;
 use crate::thorpal::usage::UsageLedger;
 
@@ -925,22 +926,36 @@ async fn linked_forum_context(context: &ToolContext, goal: &str, task: &str) -> 
 /// The most memories the spawn-prompt index lists before capping
 const MEMORY_INDEX_CAP: usize = 25;
 
+/// The length (in chars) each spawn-index line's summary is clipped to
+const MEMORY_INDEX_LINE_CHARS: usize = 160;
+
 /// Renders the memory-index section for a sub-agent spawn, if enabled
 ///
 /// `None` means nothing is injected: the spawned agent's resolved toolset has
 /// no memory tools, the run has no memory library, or the library is empty
 /// (after the blind-family filter). Otherwise the index lists one line per
-/// memory -- name, kind, and the first description line -- rendered through
-/// the run's redactor like every other memory surface, capped at
-/// [`MEMORY_INDEX_CAP`] entries with a pointer at `list_memories` for the
-/// rest. The index is rendered fresh per spawn, so memories saved earlier in
-/// the same run show up for later delegations.
+/// memory -- name, kind, and the first description line, clipped -- rendered
+/// through the run's redactor like every other memory surface. The
+/// [`MEMORY_INDEX_CAP`] slots are SELECTED FOR THE DELEGATION: entries rank
+/// against the spawn's goal+task text with the same lexical scorer
+/// `search_memories` uses (over names, tags, and descriptions only -- a
+/// routing index must not load every body on every spawn), and any remaining
+/// slots fill newest-save-first, so an alphabetical accident never decides
+/// what a sub-agent gets to see. The index is rendered fresh per spawn, so
+/// memories saved earlier in the same run show up for later delegations.
 ///
 /// # Arguments
 ///
 /// * `context` - The invocation's tool context carrying the library
 /// * `enabled` - The resolved registry tool names of the sub-agent being run
-async fn memory_index_context(context: &ToolContext, enabled: &EnabledTools) -> Option<String> {
+/// * `goal` - The delegation's top-level goal text
+/// * `task` - The delegation's task text
+async fn memory_index_context(
+    context: &ToolContext,
+    enabled: &EnabledTools,
+    goal: &str,
+    task: &str,
+) -> Option<String> {
     // only an agent that can read memories gets the index
     if !enabled.0.contains("list_memories") {
         return None;
@@ -955,10 +970,11 @@ async fn memory_index_context(context: &ToolContext, enabled: &EnabledTools) -> 
             return None;
         }
     };
-    // render each visible entry through the run's redactor, when one is set
+    // build one scorable doc per visible entry, rendered through the run's
+    // redactor so ranking sees exactly what the sub-agent will see
     let redactor = LibraryRedactor::try_from_context(context);
-    let mut lines = Vec::with_capacity(entries.len().min(MEMORY_INDEX_CAP));
-    let mut total = 0;
+    let mut docs = Vec::with_capacity(entries.len());
+    let mut summaries = Vec::with_capacity(entries.len());
     for entry in &entries {
         // blind-hidden family intel must never surface, even as a name; the
         // shared filter fails closed on unreadable candidates, exactly like
@@ -968,31 +984,83 @@ async fn memory_index_context(context: &ToolContext, enabled: &EnabledTools) -> 
         {
             continue;
         }
-        total += 1;
-        // cap the index; the trailing line points at the full listing
-        if lines.len() >= MEMORY_INDEX_CAP {
-            continue;
-        }
-        // one compact line per memory: name, kind, first description line
-        let (name, description) = match &redactor {
+        // render the scored fields exactly as the model would see them
+        let (display, description, tags) = match &redactor {
             Some(redactor) => (
                 redactor.display_memory_name(&entry.name),
                 redactor.redact_text(&entry.description),
+                entry
+                    .tags
+                    .iter()
+                    .map(|tag| redactor.redact_text(tag))
+                    .collect::<Vec<_>>()
+                    .join(" "),
             ),
-            None => (entry.name.clone(), entry.description.clone()),
+            None => (
+                entry.name.clone(),
+                entry.description.clone(),
+                entry.tags.join(" "),
+            ),
         };
-        let summary = description.lines().next().unwrap_or_default().to_owned();
-        lines.push(format!("- {name} [{}]: {summary}", entry.kind.label()));
+        // the index line carries the first description line, clipped
+        let summary = clip_chars(
+            description.lines().next().unwrap_or_default(),
+            MEMORY_INDEX_LINE_CHARS,
+        );
+        summaries.push(summary);
+        // the scorable text is the RENDERED fields only: ranking on a raw
+        // (possibly family-derived) name would let a guessed family term in
+        // the task text boost a denied memory into the index -- a deny-list
+        // oracle built out of line selection
+        docs.push(MemoryDoc {
+            name: entry.name.clone(),
+            display: display.clone(),
+            kind: entry.kind,
+            promoted_at: entry.promoted_at.clone(),
+            text: format!("{display} {tags} {description}"),
+        });
     }
     // an empty (or fully hidden) library injects nothing
-    if lines.is_empty() {
+    if docs.is_empty() {
         return None;
     }
-    // note what was dropped so the cap never reads as the whole library
-    if total > lines.len() {
+    // rank against the delegation's own goal+task text, matched slots first
+    let ranked = rank_memory_docs(&docs, &format!("{goal} {task}"));
+    let mut picked: Vec<usize> = ranked
+        .iter()
+        .map(|scored| scored.index)
+        .take(MEMORY_INDEX_CAP)
+        .collect();
+    // fill any free slots newest-save-first, so recency (not alphabetical
+    // accident) decides what an unmatched spawn gets to see
+    if picked.len() < MEMORY_INDEX_CAP {
+        let mut rest: Vec<usize> = (0..docs.len())
+            .filter(|index| !picked.contains(index))
+            .collect();
+        rest.sort_by(|a, b| {
+            docs[*b]
+                .promoted_at
+                .cmp(&docs[*a].promoted_at)
+                .then(docs[*a].name.cmp(&docs[*b].name))
+        });
+        picked.extend(rest.into_iter().take(MEMORY_INDEX_CAP - picked.len()));
+    }
+    // one compact line per selected memory: name, kind, clipped summary
+    let mut lines = Vec::with_capacity(picked.len() + 1);
+    for index in &picked {
         lines.push(format!(
-            "({} more -- call list_memories for the full index)",
-            total - lines.len()
+            "- {} [{}]: {}",
+            docs[*index].display,
+            docs[*index].kind.label(),
+            summaries[*index]
+        ));
+    }
+    // note what was dropped so the cap never reads as the whole library
+    if docs.len() > picked.len() {
+        lines.push(format!(
+            "({} more memories -- search_memories ranks them by topic; \
+             list_memories pages the full index)",
+            docs.len() - picked.len()
         ));
     }
     Some(lines.join("\n"))
@@ -1385,7 +1453,7 @@ pub(crate) async fn run_sub_agent(
         Some(_) => RESUME_SUB_AGENT_PROMPT.to_owned(),
         None => {
             let mut full_prompt = format!("Top-level goal: {goal}\n\nYour task: {task}");
-            if let Some(section) = memory_index_context(&context, enabled).await {
+            if let Some(section) = memory_index_context(&context, enabled, &goal, &task).await {
                 full_prompt.push_str("\n\n# Memory index\n\n");
                 full_prompt.push_str(&section);
             }
@@ -1786,6 +1854,212 @@ mod tests {
             record.finish_ok("the answer", Vec::new());
         }
         record
+    }
+
+    /// Seeds one dated memory into a library for index tests
+    ///
+    /// # Arguments
+    ///
+    /// * `memories` - The library to seed into
+    /// * `name` - The bare memory name
+    /// * `promoted_at` - The save date the recency fill orders on
+    /// * `tags` - The search tags to file it under
+    /// * `description` - The header description
+    async fn seed_dated(
+        memories: &crate::thorpal::store::memories::MemoryLibrary,
+        name: &str,
+        promoted_at: &str,
+        tags: Vec<String>,
+        description: &str,
+    ) {
+        // build the header directly so each seed carries a distinct date
+        let meta = crate::thorpal::store::memories::MemoryMeta {
+            kind: crate::thorpal::store::memories::MemoryKind::Technique,
+            tags,
+            description: description.to_owned(),
+            promoted_from: "seed-session".to_owned(),
+            promoted_at: promoted_at.to_owned(),
+        };
+        memories
+            .save(name, &format!("{}\nseed body\n", meta.render(name)))
+            .await
+            .expect("seed memory");
+    }
+
+    /// The spawn index is task-conditioned, capped, and recency-filled
+    #[tokio::test]
+    async fn memory_index_is_task_conditioned_and_capped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let memories = MemoryLibrary::open(dir.path().join("memories"))
+            .await
+            .expect("library should open");
+        // more same-dated fillers than the cap, plus dated outliers
+        for index in 0..30 {
+            seed_dated(
+                &memories,
+                &format!("zz-filler-{index:02}"),
+                "2026-10-20",
+                vec!["filler".to_owned()],
+                &format!("Filler lesson number {index:02}."),
+            )
+            .await;
+        }
+        seed_dated(
+            &memories,
+            "aa-old-alpha",
+            "2026-01-01",
+            vec!["old".to_owned()],
+            "An old lesson that only alphabetical order would surface.",
+        )
+        .await;
+        seed_dated(
+            &memories,
+            "zz-newest",
+            "2026-10-26",
+            vec!["fresh".to_owned()],
+            "The newest saved lesson.",
+        )
+        .await;
+        seed_dated(
+            &memories,
+            "xor-keystream-recovery",
+            "2026-10-05",
+            vec!["xor".to_owned(), "keystream".to_owned()],
+            "Recovering an xor keystream from a decode loop.",
+        )
+        .await;
+        let mut context = ToolContext::new();
+        context.insert(Arc::clone(&memories));
+        let enabled = EnabledTools(Arc::new(std::collections::BTreeSet::from([
+            "list_memories",
+        ])));
+        // a task about xor keystreams puts the matching memory first
+        let index = memory_index_context(
+            &context,
+            &enabled,
+            "triage the sample",
+            "recover the xor keystream",
+        )
+        .await
+        .expect("an index renders");
+        let lines: Vec<&str> = index.lines().collect();
+        assert!(lines[0].contains("xor-keystream-recovery"), "{index}");
+        // the cap holds, with one trailing pointer at the ranked search
+        assert!(lines.len() <= MEMORY_INDEX_CAP + 1, "{} lines", lines.len());
+        assert!(
+            lines.last().expect("lines").contains("search_memories"),
+            "{index}"
+        );
+        // a zero-signal task fills by recency, not alphabetical order
+        let index = memory_index_context(&context, &enabled, "qqq", "qqq")
+            .await
+            .expect("an index renders");
+        let lines: Vec<&str> = index.lines().collect();
+        assert!(lines[0].contains("zz-newest"), "{index}");
+        assert!(
+            !index.contains("aa-old-alpha"),
+            "alphabetical order must not decide the fill: {index}"
+        );
+        // a denied NAME must not rank by its raw text: the scorable doc is
+        // rendered fields only, so a task naming the family cannot pull the
+        // denied memory to the top through a name it never gets to see
+        seed_dated(
+            &memories,
+            "darkgate-loader-notes",
+            "2026-10-21",
+            vec!["loaders".to_owned()],
+            "Notes on a loader's import walk.",
+        )
+        .await;
+        let deny = crate::thorpal::store::redact::LibraryRedactor::new(
+            false,
+            vec!["darkgate".to_owned()],
+            Vec::new(),
+        )
+        .expect("redactor");
+        context.insert(deny);
+        let index = memory_index_context(&context, &enabled, "triage", "the darkgate payload")
+            .await
+            .expect("an index renders");
+        let first = index.lines().next().expect("lines");
+        assert!(
+            !first.contains(&crate::thorpal::store::redact::neutral_memory_id(
+                "darkgate-loader-notes"
+            )),
+            "a raw-name match must not rank a denied memory first: {index}"
+        );
+        // blind-hidden family intel never surfaces, and the overflow count
+        // reflects only visible entries
+        let intel = crate::thorpal::store::memories::MemoryMeta::promoted_now(
+            crate::thorpal::store::memories::MemoryKind::FamilyIntel,
+            vec!["darkgate".to_owned()],
+            "Verified DarkGate traits.",
+            "seed-session",
+        );
+        memories
+            .save(
+                "darkgate-intel",
+                &format!("{}\nDarkGate uses act=*.\n", intel.render("darkgate-intel")),
+            )
+            .await
+            .expect("seed intel");
+        let blind = crate::thorpal::store::redact::LibraryRedactor::new(
+            false,
+            Vec::new(),
+            vec!["darkgate".to_owned()],
+        )
+        .expect("redactor");
+        context.insert(blind);
+        let index = memory_index_context(&context, &enabled, "g", "t")
+            .await
+            .expect("an index renders");
+        assert!(
+            !index.contains(&crate::thorpal::store::redact::neutral_memory_id(
+                "darkgate-intel"
+            )),
+            "hidden intel surfaced in the index: {index}"
+        );
+        // 35 visible entries (34 seeded + 1 builtin; the hidden intel never
+        // counts), 25 listed: 10 overflow
+        assert!(
+            index.contains("(10 more"),
+            "visible-only overflow count: {index}"
+        );
+        // a blinded run renders the selected names as neutral ids
+        let redactor =
+            crate::thorpal::store::redact::LibraryRedactor::new(true, Vec::new(), Vec::new())
+                .expect("redactor");
+        context.insert(redactor);
+        let index = memory_index_context(
+            &context,
+            &enabled,
+            "triage the sample",
+            "recover the xor keystream",
+        )
+        .await
+        .expect("an index renders");
+        assert!(
+            index.lines().next().expect("lines").starts_with("- mem-"),
+            "{index}"
+        );
+        // an agent without memory tools gets no index at all
+        assert!(
+            memory_index_context(&context, &EnabledTools::default(), "g", "t")
+                .await
+                .is_none()
+        );
+        // a fresh library still indexes the compiled-in builtins (and only
+        // them), so the index is never silently empty while builtins exist
+        let empty = MemoryLibrary::open(dir.path().join("empty"))
+            .await
+            .expect("library should open");
+        let mut bare = ToolContext::new();
+        bare.insert(empty);
+        let index = memory_index_context(&bare, &enabled, "g", "t")
+            .await
+            .expect("builtins alone still index");
+        assert_eq!(index.lines().count(), 1, "{index}");
+        assert!(index.contains("resolve_aarch64_adrp_add_pairs"), "{index}");
     }
 
     /// The goal-tool argument parser recovers the live tool's shape

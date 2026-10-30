@@ -7,6 +7,20 @@
     --content-max-width: min(1800px, 96%);
 }
 
+/* The one post-hoc size knob for every embedded asciinema demo: the player
+ * defaults to fit:'width', scaling the terminal font so the recording's
+ * columns exactly fill its container, so capping the container width scales
+ * every cast's rendered font without re-recording. Lower this variable to
+ * shrink the demos (e.g. 1250px ≈ 13.5px type for a 150-column cast); the
+ * recordings' cols×rows (content density) are the only thing baked in. */
+:root {
+    --cast-max-width: 1800px;
+}
+.cast-player {
+    max-width: var(--cast-max-width);
+    margin: 0 auto;
+}
+
 /* Let tables use the full widened content area instead of hugging their
  * natural width, and keep long evidence cells wrapping instead of forcing
  * the whole table wider than the page. */

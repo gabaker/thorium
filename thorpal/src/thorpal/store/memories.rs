@@ -553,11 +553,130 @@ pub(crate) fn validate_body(body: &str) -> Result<(), String> {
 /// * `text` - The combined model-supplied text (name, tags, description, body)
 /// * `kind` - The kind being saved, exempting family intel from name matching
 /// * `forbidden` - This run's sample stems and session name
-pub(crate) fn validate_generic(
+pub(crate) fn validate_generic_terms(
     text: &str,
     kind: MemoryKind,
     forbidden: &[String],
 ) -> Result<(), String> {
+    // a 32+ char hex run is a hash or raw IOC, never generic knowledge
+    check_hex_run(text)?;
+    // family intel must name its family even when the sample/session does too
+    if kind == MemoryKind::FamilyIntel {
+        return Ok(());
+    }
+    // the sample or session name ties the lesson to this run
+    check_forbidden_terms(text, forbidden)
+}
+
+/// Rejects blinded-run placeholder residue in a memory's persisted text
+///
+/// A `fam-`/`mem-`/`lib-`/`session-<hex>` shape baked into stored text is
+/// dead weight in every other run and, for family intel, defeats blind-family
+/// hiding -- so this applies to every kind, family intel included. The save
+/// path runs it AFTER healing: whatever could resolve was already rewritten,
+/// so anything still here is unresolvable and must be re-worded. Echoing the
+/// matched shape is safe -- healing only ever inserts plainly-rendered names
+/// and restored deny tokens, neither of which carries a placeholder shape the
+/// model has not already seen.
+///
+/// # Arguments
+///
+/// * `text` - The healed text about to persist
+pub(crate) fn validate_no_placeholders(text: &str) -> Result<(), String> {
+    // anything placeholder-shaped that survived healing is unresolvable
+    if let Some(shape) = super::redact::find_placeholder_shape(text) {
+        return Err(format!(
+            "memories must be self-contained across runs: '{shape}' is a \
+             blinded-run redaction placeholder/alias that resolves nowhere \
+             else -- rewrite the lesson without it (name the memory, script, \
+             or family by its visible name, or describe it by topic; if it \
+             came from text quoted out of an older memory, re-derive that \
+             passage in your own words)"
+        ));
+    }
+    Ok(())
+}
+
+/// Re-checks the size caps on healed text with echo-free errors
+///
+/// Healing can lengthen text (a placeholder restores to a longer real token,
+/// an id to a longer real name), so the caps are re-enforced after it -- but
+/// the model-visible checks already ran on the pre-heal text, and an error
+/// here must echo NO content and NO byte counts: either could leak a restored
+/// token's spelling or length into a blinded run.
+///
+/// # Arguments
+///
+/// * `description` - The healed description about to persist
+/// * `tags` - The healed tags about to persist
+/// * `body` - The healed body about to persist
+pub(crate) fn validate_healed_caps(
+    description: &str,
+    tags: &[String],
+    body: &str,
+) -> Result<(), String> {
+    // the description cap keeps the header a header rather than a novel
+    if description.len() > MAX_DESCRIPTION_LEN {
+        return Err(
+            "restoring blinded placeholders pushed the description over its \
+             size cap; shorten the description and try again"
+                .to_owned(),
+        );
+    }
+    // tags stay search hints, not prose
+    if tags.iter().any(|tag| tag.len() > MAX_TAG_LEN) {
+        return Err(
+            "restoring blinded placeholders pushed a tag over its size cap; \
+             shorten or drop that tag and try again"
+                .to_owned(),
+        );
+    }
+    // the body cap keeps recalling a memory cheap in future runs
+    if body.len() > MAX_BODY_LEN {
+        return Err(
+            "restoring blinded placeholders pushed the body over its size \
+             cap; distill the lesson further and try again"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+/// Rejects run-specific content in a memory's name
+///
+/// The name-side slice of [`validate_generic`]: the hex-run and
+/// run-specific-term rules hold, but the placeholder-shape rule is skipped --
+/// legacy names embedding old alias ids (`mem-<8 hex>-addendum`) must stay
+/// resave-healable in place, and whole-name placeholder shapes are refused
+/// separately by the save tool.
+///
+/// # Arguments
+///
+/// * `name` - The memory name being published
+/// * `kind` - The kind being saved, exempting family intel from name matching
+/// * `forbidden` - This run's sample stems and session name
+pub(crate) fn validate_name_generic(
+    name: &str,
+    kind: MemoryKind,
+    forbidden: &[String],
+) -> Result<(), String> {
+    // a hash-length hex run can hide in a name just like in text
+    check_hex_run(name)?;
+    // family intel is routinely named after its family and the sample is
+    // routinely named after the family too, so the term check is skipped
+    if kind == MemoryKind::FamilyIntel {
+        return Ok(());
+    }
+    // the sample or session name ties the lesson to this run
+    check_forbidden_terms(name, forbidden)
+}
+
+/// Rejects a text carrying a hash-length hex run
+///
+/// # Arguments
+///
+/// * `text` - The text to scan
+fn check_hex_run(text: &str) -> Result<(), String> {
     // a 32+ char hex run is a hash or raw IOC, never generic knowledge
     if let Some(run) = find_hex_run(text, MIN_HEX_RUN) {
         return Err(format!(
@@ -566,10 +685,16 @@ pub(crate) fn validate_generic(
              memory (describe the technique and use placeholders instead)"
         ));
     }
-    // family intel must name its family even when the sample/session does too
-    if kind == MemoryKind::FamilyIntel {
-        return Ok(());
-    }
+    Ok(())
+}
+
+/// Rejects a text containing any of this run's sample or session names
+///
+/// # Arguments
+///
+/// * `text` - The text to scan
+/// * `forbidden` - This run's sample stems and session name
+fn check_forbidden_terms(text: &str, forbidden: &[String]) -> Result<(), String> {
     // the sample or session name ties the lesson to this run
     let lowered = text.to_lowercase();
     for term in forbidden {
@@ -641,6 +766,11 @@ pub struct MemoryEntry {
     pub kind: MemoryKind,
     /// What the memory teaches and when it applies, from its header
     pub description: String,
+    /// The lowercase search tags this memory is filed under
+    pub tags: Vec<String>,
+    /// The date (YYYY-MM-DD) this memory was last saved; empty when the
+    /// header carries none, so recency ordering puts it last
+    pub promoted_at: String,
 }
 
 /// The persistent, cross-run memory library on disk.
@@ -814,6 +944,8 @@ impl MemoryLibrary {
                         name: (*name).to_owned(),
                         kind: meta.kind,
                         description: meta.description,
+                        tags: meta.tags,
+                        promoted_at: meta.promoted_at,
                     },
                 )
             })
@@ -842,6 +974,8 @@ impl MemoryLibrary {
                             name: name.to_owned(),
                             kind: meta.kind,
                             description: meta.description,
+                            tags: meta.tags,
+                            promoted_at: meta.promoted_at,
                         },
                     );
                 }
@@ -1029,12 +1163,12 @@ mod tests {
     fn generic_content_guard() {
         // a 32+ char hex run reads as a hash and is refused for every kind
         let hash = format!("the sample 3f2a{} dropped it", "ab".repeat(16));
-        let err = validate_generic(&hash, MemoryKind::Technique, &[]).unwrap_err();
+        let err = validate_generic_terms(&hash, MemoryKind::Technique, &[]).unwrap_err();
         assert!(err.contains("hash"), "unexpected error: {err}");
-        assert!(validate_generic(&hash, MemoryKind::FamilyIntel, &[]).is_err());
+        assert!(validate_generic_terms(&hash, MemoryKind::FamilyIntel, &[]).is_err());
         // short hex runs (addresses, constants) stay fine
         assert!(
-            validate_generic(
+            validate_generic_terms(
                 "the marker 0xA00000 at 0x401000",
                 MemoryKind::Technique,
                 &[]
@@ -1043,11 +1177,11 @@ mod tests {
         );
         // a long pure-decimal constant is not a hash and stays fine
         let decimal = format!("the constant {}", "9".repeat(40));
-        assert!(validate_generic(&decimal, MemoryKind::Technique, &[]).is_ok());
+        assert!(validate_generic_terms(&decimal, MemoryKind::Technique, &[]).is_ok());
         // the sample stem and session name are refused case-insensitively
         let forbidden = vec!["KeenTroll_dropper".to_owned(), "mwater-triage".to_owned()];
         assert!(
-            validate_generic(
+            validate_generic_terms(
                 "seen in keentroll_dropper",
                 MemoryKind::Technique,
                 &forbidden
@@ -1055,7 +1189,7 @@ mod tests {
             .is_err()
         );
         assert!(
-            validate_generic(
+            validate_generic_terms(
                 "during mwater-triage we saw",
                 MemoryKind::Workflow,
                 &forbidden
@@ -1063,11 +1197,12 @@ mod tests {
             .is_err()
         );
         assert!(
-            validate_generic("a clean generic lesson", MemoryKind::Technique, &forbidden).is_ok()
+            validate_generic_terms("a clean generic lesson", MemoryKind::Technique, &forbidden)
+                .is_ok()
         );
         // family intel must name its family even when the sample does too
         assert!(
-            validate_generic(
+            validate_generic_terms(
                 "keentroll_dropper traits",
                 MemoryKind::FamilyIntel,
                 &forbidden
@@ -1076,13 +1211,59 @@ mod tests {
         );
         // terms too short to mean anything never match
         assert!(
-            validate_generic(
+            validate_generic_terms(
                 "a body with the letter a",
                 MemoryKind::Technique,
                 &["a".to_owned()]
             )
             .is_ok()
         );
+    }
+
+    /// Residual blinded-run placeholders are rejected regardless of kind.
+    #[test]
+    fn validate_generic_rejects_residual_placeholders() {
+        // every placeholder shape rejects (the check is kind-independent)
+        for text in [
+            "see mem-e0171a8a route 4",
+            "run lib-12ab34cd first",
+            "the Global\\fam-0a08 mutex",
+            "promoted in session-11a0d38f",
+        ] {
+            let err = validate_no_placeholders(text).unwrap_err();
+            assert!(err.contains("placeholder"), "unexpected error: {err}");
+        }
+        // ordinary prose and short constants never trip the scan
+        assert!(
+            validate_no_placeholders("the 0x4bd seed; memory pressure; family-intel notes").is_ok()
+        );
+    }
+
+    /// Healed-size cap errors carry no content and no byte counts.
+    #[test]
+    fn healed_cap_errors_echo_nothing() {
+        // an over-cap healed description rejects without echoing it
+        let long = "secret".repeat(MAX_DESCRIPTION_LEN / 6 + 1);
+        let err = validate_healed_caps(&long, &[], "body").unwrap_err();
+        assert!(!err.contains("secret"), "content echoed: {err}");
+        assert!(
+            !err.contains(&long.len().to_string()),
+            "length echoed: {err}"
+        );
+        // an over-cap healed tag rejects the same silent way
+        let tag = vec!["secret".repeat(MAX_TAG_LEN / 6 + 1)];
+        let err = validate_healed_caps("d", &tag, "body").unwrap_err();
+        assert!(!err.contains("secret"), "content echoed: {err}");
+        // an over-cap healed body rejects the same silent way
+        let body = "secret".repeat(MAX_BODY_LEN / 6 + 1);
+        let err = validate_healed_caps("d", &[], &body).unwrap_err();
+        assert!(!err.contains("secret"), "content echoed: {err}");
+        assert!(
+            !err.contains(&body.len().to_string()),
+            "length echoed: {err}"
+        );
+        // in-cap values pass untouched
+        assert!(validate_healed_caps("d", &["tag".to_owned()], "body").is_ok());
     }
 
     /// Fence recognition agrees between parse and the header rewriters.
@@ -1189,6 +1370,12 @@ mod tests {
             .expect("saved memory listed");
         assert_eq!(entry.kind, MemoryKind::Pitfall);
         assert!(entry.description.contains("family lore"));
+        // the entry carries the header's tags and save date for recall tooling
+        assert_eq!(
+            entry.tags,
+            vec!["attribution".to_owned(), "citation-hygiene".to_owned()]
+        );
+        assert_eq!(entry.promoted_at, "2026-10-21");
         // names come back sorted
         let names: Vec<&str> = listing.iter().map(|entry| entry.name.as_str()).collect();
         let mut sorted = names.clone();

@@ -578,6 +578,10 @@ pub struct ProgramOp<'session> {
 }
 
 /// The lock side a [`ProgramOp`] holds for its lifetime.
+// the variants' guard payloads are held for their Drop, never read: dropping
+// them is what releases the session's program lock, so dead_code is a false
+// positive here
+#[allow(dead_code)]
 enum ProgramOpGuard<'session> {
     /// A main-program operation, concurrent with other main-program ops.
     Shared(RwLockReadGuard<'session, ()>),

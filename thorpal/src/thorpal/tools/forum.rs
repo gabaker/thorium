@@ -33,6 +33,7 @@ use crate::thorpal::tools::constants::{ConstantTracker, MAX_FINISH_CONSTANTS};
 /// BM25 lexical search over the forum (backs `search_forum` and the TUI)
 mod search;
 
+pub(crate) use search::ForumTokenizer;
 pub use search::{SearchHit, match_ranges, search_terms};
 
 /// How a comment's evidence relates to whatever it is replying to
@@ -390,6 +391,63 @@ pub struct TaskCompletion {
     pub author: String,
 }
 
+/// Structured detector provenance for one seeded forum node
+///
+/// Seeding flattens each finding's technique, confidence, suspicion, and
+/// source into template text the model reads; this record keeps the same
+/// facts structured so offline telemetry never has to parse them back out.
+/// It is persisted in `forum.json` beside the posts and deliberately kept out
+/// of every model-visible forum view -- it costs the model zero tokens.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeProvenance {
+    /// The seeded node this provenance describes
+    pub node: ParentRef,
+    /// The seeding shape: `bucket`, `finding`, `rollup`, `question`, or
+    /// `annotation`
+    #[serde(default)]
+    pub shape: String,
+    /// What derived a seeded question: `derived`, `script`, `format`, or
+    /// `prior_toolkit` (absent for non-question shapes)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_origin: Option<String>,
+    /// One record per finding the node carries, possibly empty
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<FindingProvenance>,
+}
+
+/// One detector finding's structured facts, as seeded
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindingProvenance {
+    /// The ATT&CK technique id the finding evidences (e.g. `"T1497.003"`)
+    #[serde(default)]
+    pub technique: String,
+    /// The confidence label: `fact`, `likely`, `unsure`, or `untrusted`
+    #[serde(default)]
+    pub confidence: String,
+    /// The numeric suspicion score (higher is more suspicious)
+    #[serde(default)]
+    pub suspicion: i64,
+    /// The producing analysis: `native`, `capa`, `llm`, `script`, `yara`, or
+    /// `emulation`
+    #[serde(default)]
+    pub source: String,
+    /// The producing detection's stable name: a native registry name, or the
+    /// library script name for script hits (exporters copy this only when
+    /// `source == "native"`, so script names stay local)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detection: Option<String>,
+    /// How many backing sites the finding carries beyond its primary address
+    #[serde(default)]
+    pub sites: u64,
+    /// The recovered artifact's class key (e.g. `network_endpoint`), when the
+    /// finding carried one -- never the artifact's value
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_class: Option<String>,
+    /// Whether the finding was suppressed into the runtime-noise rollup
+    #[serde(default)]
+    pub suppressed: bool,
+}
+
 /// One selectable option offered to the analyst by the `ask_analyst` tool
 ///
 /// Derives a JSON schema through rig's re-exported `schemars` (the same path
@@ -586,8 +644,11 @@ const MAX_SEARCH_LIMIT: usize = 25;
 // width text is wrapped to when rendering the boxed on-disk forum
 const BOX_INNER_WIDTH: usize = 86;
 
-/// The author attributed to a question a human operator injects into the forum
-const USER_AUTHOR: &str = "user";
+/// The author every user-planted question and task is attributed to.
+///
+/// Exported so offline telemetry can classify forum entries by author the
+/// same way it classifies detector-seeded ones via [`crate::DETECTOR_AUTHOR`].
+pub const USER_AUTHOR: &str = "user";
 
 /// The most `ask_analyst` questions one run may record, so a looping model can
 /// neither stall an interactive session nor flood the review queue
@@ -695,6 +756,11 @@ pub struct ForumState {
     /// questions left and nothing more to ask; the control loop reads-and-clears
     /// it each iteration.
     finish_requested: AtomicBool,
+    /// Structured provenance for detector-seeded nodes, keyed by the node
+    /// each record describes. Written only by the seeding wrappers, carried
+    /// in snapshots for offline telemetry, and never part of any
+    /// model-visible view.
+    provenance: RwLock<HashMap<ParentRef, NodeProvenance>>,
     /// The session store the forum is persisted into (as `forum.json`) after
     /// every mutation, installed once at build time when the run has a store.
     /// Left unset for a consumer that wants no on-disk persistence.
@@ -726,6 +792,8 @@ impl ForumState {
             // no engine is fitted until the first search asks for one
             search_cache: Mutex::new(None),
             finish_requested: AtomicBool::new(false),
+            // provenance appears only once detector seeding writes it
+            provenance: RwLock::new(HashMap::new()),
             store: OnceLock::new(),
             events: OnceLock::new(),
         }
@@ -1106,6 +1174,95 @@ impl ForumState {
         self.comments.write().await.insert(id, comment.clone());
         // mirror and report the change now that the write lock is released
         self.after_mutation(ParentRef::Comment(id)).await;
+        Ok(comment)
+    }
+
+    /// Seeds a detector post and records its structured provenance
+    ///
+    /// Builds on [`ForumState::seed_post`]; the provenance record is keyed by
+    /// the created post and re-flushed to disk so `forum.json` always carries
+    /// it. The record never joins any model-visible view.
+    ///
+    /// # Arguments
+    ///
+    /// * `author` - The author to attribute the post to (e.g. `"detector"`)
+    /// * `name` - The unique, space-free reference name for the post
+    /// * `title` - A short title for the post
+    /// * `body` - The body of the post
+    /// * `kind` - Whether this post states something or asks a question
+    /// * `shape` - The seeding shape (`bucket`, `rollup`, `question`, ...)
+    /// * `question_origin` - What derived a seeded question, when one did
+    /// * `findings` - The structured facts of the findings the post carries
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(skip_all, err(Debug))]
+    pub async fn seed_detector_post(
+        &self,
+        author: String,
+        name: String,
+        title: String,
+        body: String,
+        kind: Kind,
+        shape: &str,
+        question_origin: Option<String>,
+        findings: Vec<FindingProvenance>,
+    ) -> Result<Post, ToolExecutionError> {
+        // seed the post itself first so a duplicate name changes nothing
+        let post = self.seed_post(author, name, title, body, kind).await?;
+        // record the provenance under the node the post actually became
+        let node = ParentRef::Post(post.name.clone());
+        let record = NodeProvenance {
+            node: node.clone(),
+            shape: shape.to_owned(),
+            question_origin,
+            findings,
+        };
+        self.provenance.write().await.insert(node, record);
+        // re-flush so the on-disk forum carries the provenance immediately
+        self.flush_forum_to_disk().await;
+        Ok(post)
+    }
+
+    /// Seeds a detector comment and records its structured provenance
+    ///
+    /// Builds on [`ForumState::seed_comment`]; the provenance record is keyed
+    /// by the created comment's id and re-flushed to disk. The record never
+    /// joins any model-visible view.
+    ///
+    /// # Arguments
+    ///
+    /// * `author` - The author to attribute the comment to (e.g. `"detector"`)
+    /// * `parent` - The post or comment this comment replies to
+    /// * `body` - The body of the comment
+    /// * `stance` - How this comment's evidence relates to its parent
+    /// * `kind` - Whether this comment states something or asks a question
+    /// * `shape` - The seeding shape (normally `finding`)
+    /// * `findings` - The structured facts of the findings the comment carries
+    #[instrument(skip_all, err(Debug))]
+    pub async fn seed_detector_comment(
+        &self,
+        author: String,
+        parent: ParentRef,
+        body: String,
+        stance: Stance,
+        kind: Kind,
+        shape: &str,
+        findings: Vec<FindingProvenance>,
+    ) -> Result<Comment, ToolExecutionError> {
+        // seed the comment first so a bad parent changes nothing
+        let comment = self
+            .seed_comment(author, parent, body, stance, kind)
+            .await?;
+        // record the provenance under the id the comment actually got
+        let node = ParentRef::Comment(comment.id);
+        let record = NodeProvenance {
+            node: node.clone(),
+            shape: shape.to_owned(),
+            question_origin: None,
+            findings,
+        };
+        self.provenance.write().await.insert(node, record);
+        // re-flush so the on-disk forum carries the provenance immediately
+        self.flush_forum_to_disk().await;
         Ok(comment)
     }
 
@@ -2491,6 +2648,16 @@ impl ForumState {
         // and the analyst records so asks and flags survive a resume
         let asks = self.asks.read().await.values().cloned().collect();
         let flags = self.flags.read().await.values().cloned().collect();
+        // clone the detector provenance in a stable node order so snapshots
+        // serialize deterministically (the backing map is unordered)
+        let mut detector_provenance: Vec<NodeProvenance> =
+            self.provenance.read().await.values().cloned().collect();
+        detector_provenance.sort_by(|a, b| match (&a.node, &b.node) {
+            (ParentRef::Post(a), ParentRef::Post(b)) => a.cmp(b),
+            (ParentRef::Comment(a), ParentRef::Comment(b)) => a.cmp(b),
+            (ParentRef::Post(_), ParentRef::Comment(_)) => std::cmp::Ordering::Less,
+            (ParentRef::Comment(_), ParentRef::Post(_)) => std::cmp::Ordering::Greater,
+        });
         // read the scalars the control loop consults so they round-trip too
         ForumSnapshot {
             posts,
@@ -2498,6 +2665,7 @@ impl ForumState {
             tasks,
             asks,
             flags,
+            detector_provenance,
             next_comment_id: self.next_comment_id.load(Ordering::SeqCst),
             next_task_id: self.next_task_id.load(Ordering::SeqCst),
             next_ask_id: self.next_ask_id.load(Ordering::SeqCst),
@@ -2551,6 +2719,13 @@ impl ForumState {
             let mut flags = self.flags.write().await;
             for flag in snapshot.flags {
                 flags.insert(flag.id, flag);
+            }
+        }
+        // load the detector provenance back keyed by its described nodes
+        {
+            let mut provenance = self.provenance.write().await;
+            for record in snapshot.detector_provenance {
+                provenance.insert(record.node.clone(), record);
             }
         }
         // continue revisions past the newest restored item so later changes
@@ -3767,6 +3942,77 @@ mod tests {
     /// unique-prefix / shared-id workarounds the old statics forced.
     fn forum() -> ForumState {
         ForumState::new()
+    }
+
+    /// Detector provenance snapshots, restores, and never joins a model view
+    #[tokio::test]
+    async fn provenance_round_trips_and_stays_out_of_views() {
+        let forum = forum();
+        // seed a detector post and comment carrying structured provenance
+        let finding = FindingProvenance {
+            technique: "T1027".to_owned(),
+            confidence: "likely".to_owned(),
+            suspicion: 40,
+            source: "native".to_owned(),
+            detection: Some("packing".to_owned()),
+            sites: 2,
+            artifact_class: None,
+            suppressed: false,
+        };
+        forum
+            .seed_detector_post(
+                "detector".to_owned(),
+                "fn-00401000".to_owned(),
+                "Packed stub".to_owned(),
+                "Static detectors flagged this function.".to_owned(),
+                Kind::Statement,
+                "bucket",
+                None,
+                vec![finding.clone()],
+            )
+            .await
+            .expect("the post should seed");
+        forum
+            .seed_detector_comment(
+                "detector".to_owned(),
+                ParentRef::Post("fn-00401000".to_owned()),
+                "[T1027 Obfuscated Files] packed".to_owned(),
+                Stance::Neutral,
+                Kind::Statement,
+                "finding",
+                vec![finding],
+            )
+            .await
+            .expect("the comment should seed");
+        // the snapshot carries both records in a stable node order
+        let snapshot = forum.snapshot().await;
+        assert_eq!(snapshot.detector_provenance.len(), 2);
+        assert!(matches!(
+            &snapshot.detector_provenance[0].node,
+            ParentRef::Post(name) if name == "fn-00401000"
+        ));
+        // the records survive a serde round trip and a restore
+        let encoded = serde_json::to_string(&snapshot).expect("snapshot should serialize");
+        let decoded: crate::thorpal::resume::ForumSnapshot =
+            serde_json::from_str(&encoded).expect("snapshot should parse");
+        let fresh = ForumState::new();
+        fresh.restore(decoded).await;
+        let again = fresh.snapshot().await;
+        assert_eq!(again.detector_provenance, snapshot.detector_provenance);
+        // a legacy snapshot without the field parses as empty provenance
+        let legacy = r#"{"posts":[],"comments":[],"next_comment_id":1,"finish_requested":false}"#;
+        let parsed: crate::thorpal::resume::ForumSnapshot =
+            serde_json::from_str(legacy).expect("legacy snapshot should parse");
+        assert!(parsed.detector_provenance.is_empty());
+        // no model-visible view ever carries the structured records: neither
+        // the whole-forum view nor a single post's thread serializes them
+        let view = serde_json::to_value(forum.view().await).expect("view should serialize");
+        let text = view.to_string();
+        assert!(
+            !text.contains("provenance"),
+            "the forum view leaked: {text}"
+        );
+        assert!(!text.contains("suspicion"), "the forum view leaked: {text}");
     }
 
     #[tokio::test]

@@ -13,9 +13,25 @@ use std::collections::BTreeMap;
 pub struct ShortcutMenuBuilder {
     ///  The different shortcut options
     pub options: BTreeMap<char, String>,
+    /// The overlay's title, when a consumer overrides the chat default
+    pub title: Option<String>,
 }
 
 impl ShortcutMenuBuilder {
+    /// Set the overlay's title (builder style)
+    ///
+    /// The default stays the chat home page's `" Home Shortcuts "`, so the
+    /// other TUIs reusing this menu name themselves without touching chat.
+    ///
+    /// # Arguments
+    ///
+    /// * `title` - The title to render on the overlay's top border
+    pub fn title(mut self, title: impl Into<String>) -> Self {
+        // record the override; build falls back to the chat default
+        self.title = Some(title.into());
+        self
+    }
+
     /// Add a new short to our shortcut menu
     ///
     /// # Arguments
@@ -58,11 +74,17 @@ impl ShortcutMenuBuilder {
             // add this renderable line for this option
             renderable.push(line);
         }
+        // keep the chat home page's historical title by default
+        let title = self.title.unwrap_or_else(|| " Home Shortcuts ".to_owned());
+        // the box must fit the title too, not just the widest option row, so
+        // a short menu under a long title never clips it
+        longest = longest.max(title.chars().count());
         // build our shortcut meny
         ShortcutMenu {
             options: renderable,
             longest: longest as u16,
             active: false,
+            title,
         }
     }
 }
@@ -75,6 +97,8 @@ pub struct ShortcutMenu {
     pub longest: u16,
     /// Whether this menu is visible  and shortcut mode is active
     pub active: bool,
+    /// The title rendered on the overlay's top border
+    pub title: String,
 }
 
 impl ShortcutMenu {
@@ -82,6 +106,7 @@ impl ShortcutMenu {
     pub fn builder() -> ShortcutMenuBuilder {
         ShortcutMenuBuilder {
             options: BTreeMap::default(),
+            title: None,
         }
     }
 
@@ -112,7 +137,7 @@ impl ShortcutMenu {
             let overlay_area = Rect::new(x, y, self.longest + 3, height);
             // Create the overlay block with medium dark gray background
             let block = Block::default()
-                .title(" Home Shortcuts ")
+                .title(self.title.as_str())
                 .title_alignment(Alignment::Center)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Gray))
@@ -135,6 +160,25 @@ mod tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    /// A consumer-set title renders instead of the chat default
+    #[test]
+    fn custom_titles_render_on_the_overlay() {
+        // a menu titled for another TUI keeps its own name on the border
+        let mut menu = ShortcutMenu::builder()
+            .title(" Explore Shortcuts ")
+            .add('h', "help")
+            .build();
+        menu.toggle();
+        let text = draw(&menu, 60, 12);
+        assert!(text.contains("Explore Shortcuts"), "got {text:?}");
+        assert!(!text.contains("Home Shortcuts"));
+        // an untitled menu keeps the chat home page's historical title
+        let mut plain = ShortcutMenu::builder().add('h', "help").build();
+        plain.toggle();
+        let text = draw(&plain, 60, 12);
+        assert!(text.contains("Home Shortcuts"), "got {text:?}");
+    }
 
     /// Draws the menu on one frame and returns the buffer's visible text
     fn draw(menu: &ShortcutMenu, width: u16, height: u16) -> String {

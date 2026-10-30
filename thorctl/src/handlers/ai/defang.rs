@@ -7,4 +7,4 @@
 //! `report.md` stays pristine, and the report ladder refangs defanged model
 //! replies back to pristine form with the same rules.
 
-pub use thorpal::{defang, refang};
+pub use thorpal::defang;

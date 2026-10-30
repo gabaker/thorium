@@ -569,30 +569,37 @@ fn memory_tools_preamble(resolved: &[&'static ToolEntry]) -> Option<&'static str
 const MEMORY_RECALL_PREAMBLE: &str = "## Cross-run memory library\n\n\
     You have access to a persistent library of GENERIC knowledge saved by past \
     analysis runs: techniques, workflow rules, verified family intel, and \
-    pitfalls. Your task prompt may open with a \"# Memory index\" section \
-    listing each memory's name, kind, and summary. Consult the index (and \
-    search_memories) BEFORE re-deriving a technique or asserting facts from \
-    recall, and read_memory anything that looks relevant -- cite memories by \
-    name when you use them. Memories are knowledge from PRIOR runs, not \
-    evidence about this binary: verify a memory's claims against this sample \
-    before promoting them to conclusions.";
+    pitfalls. Your task prompt may open with a \"# Memory index\" section: the \
+    library entries SELECTED FOR YOUR TASK (ranked against it, recency-filled), \
+    not the whole library. Consult the index and search_memories (ranked; pass \
+    offset for more, refine terms when a page is cut) BEFORE re-deriving a \
+    technique or asserting facts from recall, and read_memory anything that \
+    looks relevant -- cite memories by name when you use them. list_memories \
+    pages the full catalog with kind/tag filters. Memories are knowledge from \
+    PRIOR runs, not evidence about this binary: verify a memory's claims \
+    against this sample before promoting them to conclusions.";
 
 /// The recall section plus the curation duty for `save_memory` holders
 const MEMORY_RECALL_PREAMBLE_WITH_SAVE: &str = "## Cross-run memory library\n\n\
     You have access to a persistent library of GENERIC knowledge saved by past \
     analysis runs: techniques, workflow rules, verified family intel, and \
-    pitfalls. Your task prompt may open with a \"# Memory index\" section \
-    listing each memory's name, kind, and summary. Consult the index (and \
-    search_memories) BEFORE re-deriving a technique or asserting facts from \
-    recall, and read_memory anything that looks relevant -- cite memories by \
-    name when you use them. Memories are knowledge from PRIOR runs, not \
-    evidence about this binary: verify a memory's claims against this sample \
-    before promoting them to conclusions.\n\n\
+    pitfalls. Your task prompt may open with a \"# Memory index\" section: the \
+    library entries SELECTED FOR YOUR TASK (ranked against it, recency-filled), \
+    not the whole library. Consult the index and search_memories (ranked; pass \
+    offset for more, refine terms when a page is cut) BEFORE re-deriving a \
+    technique or asserting facts from recall, and read_memory anything that \
+    looks relevant -- cite memories by name when you use them. list_memories \
+    pages the full catalog with kind/tag filters. Memories are knowledge from \
+    PRIOR runs, not evidence about this binary: verify a memory's claims \
+    against this sample before promoting them to conclusions.\n\n\
     You are also this library's curator: when a run surfaces a durable, \
     generic lesson (a technique that worked, a workflow rule, verified family \
     intel, a pitfall), save it with save_memory. Never save sample-specific \
     facts -- hashes, paths, decoded strings, or session details belong on the \
-    forum, not in cross-run memory.";
+    forum, not in cross-run memory -- and never paste fam-/mem-/lib-/session- \
+    placeholder ids into a memory: they are blinded-run render artifacts, and \
+    a save carrying unresolvable ones is refused. Reference other memories and \
+    scripts by the names your tools show you.";
 
 /// Compute a build order over a workflow's delegation graph (callees first)
 ///

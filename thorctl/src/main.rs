@@ -1,6 +1,9 @@
 //! A CLI tool for working with Thorium
 
 #![feature(os_str_slice)]
+// the ThorPal chat worker's agent futures nest deeply enough that computing their async
+// state-machine layout overflows the default query depth limit; raise it
+#![recursion_limit = "256"]
 
 use clap::Parser;
 use thorium::{CtlConf, Error};

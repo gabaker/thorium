@@ -1514,3 +1514,52 @@ async fn blinded_runs_hide_raw_stems_everywhere() {
         "the teach message confirms existence: {error}"
     );
 }
+
+/// Baked lib-<8 hex> ids resolve on reads even without a redactor
+#[tokio::test]
+async fn neutral_script_ids_resolve_without_a_redactor() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (mut context, library) = context_with_library(dir.path()).await;
+    // seed one library script a prior blinded run would have cited by id
+    library
+        .save(
+            "decode_helper",
+            "//! name: decode_helper\n//! description: a helper\nprint(1);\n",
+        )
+        .await
+        .expect("seed library script");
+    // a production (redactor-less) read follows the baked id to the stem
+    let id = neutral_script_id("decode_helper");
+    let source = read_script(&mut context, id.clone())
+        .await
+        .expect("baked ids must resolve in production");
+    assert!(source.contains("decode_helper"), "{source}");
+    // an unknown id still misses with the plain two-place error
+    let error = read_script(&mut context, neutral_script_id("never-saved"))
+        .await
+        .expect_err("an unknown id must miss");
+    assert!(
+        error.to_string().contains("list_scripts"),
+        "unexpected: {error}"
+    );
+}
+
+/// Baked lib- ids of clean stems resolve under a deny-only redactor too
+#[tokio::test]
+async fn neutral_script_ids_resolve_under_deny_only_redactors() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // a deny-listed (but not anonymized) run: clean stems render plainly
+    let (mut context, library) = context_with_redactor(dir.path(), false, &["darkgate"]).await;
+    library
+        .save(
+            "decode_helper",
+            "//! name: decode_helper\n//! description: a helper\nprint(1);\n",
+        )
+        .await
+        .expect("seed library script");
+    // the clean stem's baked id resolves even though the stem renders plainly
+    let source = read_script(&mut context, neutral_script_id("decode_helper"))
+        .await
+        .expect("clean-stem ids must resolve under deny-only redactors");
+    assert!(source.contains("decode_helper"), "{source}");
+}

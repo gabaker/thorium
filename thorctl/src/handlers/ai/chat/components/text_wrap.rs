@@ -59,7 +59,7 @@ pub(super) fn wrap_unicode_preserve_ws(input: &str, max_width: usize) -> Vec<Str
 ///
 /// * `input` - The string to word wrap
 /// * `max_width` - The maximum allowable width for each line
-pub(super) fn wrap_words(input: &str, max_width: usize) -> Vec<String> {
+pub(crate) fn wrap_words(input: &str, max_width: usize) -> Vec<String> {
     // short circuit if our max width is 0
     if max_width == 0 {
         return vec![String::new()];

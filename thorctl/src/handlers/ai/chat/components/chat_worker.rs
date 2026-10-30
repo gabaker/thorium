@@ -107,8 +107,6 @@ pub struct PauseBanner {
     pub kind: String,
     /// A short human-readable summary of the fault.
     pub error: String,
-    /// When the pause began.
-    pub since: DateTime<Utc>,
     /// How many automatic probes have failed since the pause began.
     pub probe_attempts: u32,
     /// When the next automatic probe fires.
@@ -831,11 +829,28 @@ pub(crate) fn replay_transcript(
                 }
             }
             // a failed turn comes back as the same inline error bubble
-            TranscriptItem::TurnFailed { agent, error } => {
-                ctx_for(&agent).add_ai_from(format!("⚠ {error}"), Some(agent));
+            TranscriptItem::TurnFailed {
+                agent,
+                error,
+                request_id,
+            } => {
+                // replay the failure as the same compact, click-to-expand
+                // entry the live run showed, structured request id included
+                // (older lines without one degrade to the embedded id in the
+                // error text behind the click)
+                let summary = failure_summary(&error);
+                let detail = (summary != error).then_some(error);
+                ctx_for(&agent).add_failure(
+                    format!("{agent}: {summary}"),
+                    Some(agent),
+                    request_id,
+                    detail,
+                );
             }
-            // a scrubbed retry comes back as the same breadcrumb it was shown as
-            TranscriptItem::LlmScrubbed { agent, level } => {
+            // a scrubbed retry comes back as the same breadcrumb it was shown
+            // as (the episode and request ids ride the line for offline
+            // telemetry, not for the chat log)
+            TranscriptItem::LlmScrubbed { agent, level, .. } => {
                 ctx_for(&agent).add_ai_from(
                     format!(
                         "⚠ {agent}: content filter blocked a request; retried \
@@ -874,6 +889,49 @@ pub(crate) fn replay_transcript(
             // marks where a later process picked the session back up (the
             // suppression pass above already consumed it)
             TranscriptItem::SessionResumed { .. } => {}
+            // retry attempts and episode closes are offline telemetry; live
+            // rendering showed only a transient throbber line, never a chat
+            // bubble, so replay mirrors that silence
+            TranscriptItem::LlmRetry { .. } | TranscriptItem::LlmRetryResolved { .. } => {}
+            // an offered-tool manifest is offline telemetry with no live
+            // rendering at all, so replay shows nothing either
+            TranscriptItem::ToolsOffered { .. } => {}
+            // a detector roster is offline telemetry the same way
+            TranscriptItem::DetectorsRun { .. } => {}
+            // a pause's first landing comes back as the same log line the
+            // live run added under its banner (the banner itself is live-only)
+            TranscriptItem::ProviderPaused {
+                pause,
+                agent,
+                error,
+                request_id,
+            } => {
+                ctx_for_scope(&None).add_failure(
+                    format!(
+                        "session paused — {pause}: {error} (first hit by {agent}). \
+                         Probing automatically; /retry probes now, /abort fails the \
+                         parked requests instead."
+                    ),
+                    Some(agent),
+                    request_id,
+                    None,
+                );
+            }
+            // a pause's end comes back as the same one-line outcome the live
+            // run showed when the banner cleared
+            TranscriptItem::ProviderResumed {
+                pause, recovered, ..
+            } => {
+                if recovered {
+                    ctx_for_scope(&None).add_ai(format!("▶ session resumed — {pause} recovered"));
+                } else {
+                    ctx_for_scope(&None).add_ai(
+                        "⚠ provider pause aborted — the parked requests surface \
+                         their errors"
+                            .to_owned(),
+                    );
+                }
+            }
         }
     }
     // the session that wrote this transcript is gone, so anything still open
@@ -990,8 +1048,9 @@ pub(crate) fn usage_remainder(
 /// session skips seeding and says so), then loops receiving requests: a chat
 /// message is added to the context as a user bubble and run through
 /// [`Session::chat`], whose answer is added back as an assistant bubble, while
-/// a report request generates and writes a report. A turn's error becomes a
-/// [`AppEvent::ToolCallFailure`]. When an auto-report path was configured, a
+/// a report request generates and writes a report. A failed turn is only
+/// logged; the event drain renders the engine's `TurnFailed` bubble for it.
+/// When an auto-report path was configured, a
 /// report is generated exactly once after the first settled turn in which the
 /// agent has requested to finish. When the user channel closes (the TUI quit),
 /// the session is finished best-effort so Ghidra flushes.
@@ -1381,8 +1440,7 @@ async fn run_report(
 /// and busy flag land in the side's context and activity, the turn runs
 /// through [`Session::side_chat`] (the side's own lock serializes turns within
 /// one side), and the answer -- or a routed `⚠` bubble on failure -- lands back
-/// in the side's context. The global [`AppEvent::ToolCallFailure`] is
-/// deliberately not used: a side turn's failure belongs in its own tab, not
+/// in the side's context: a side turn's failure belongs in its own tab, not
 /// the main one.
 ///
 /// # Arguments
@@ -1656,6 +1714,26 @@ impl LiveCalls {
 /// * `pause_banner` - The shared pause banner raised while the session pauses
 /// * `carry` - A resumed session's replayed open calls, seeded so live
 ///   results can close the dead run's bubbles
+/// Flatten a full error onto one compact line for a failure entry's summary
+///
+/// The full text stays behind the entry's click-to-expand detail; the summary
+/// just has to name the fault without ballooning the chat log (provider error
+/// bodies run to kilobytes).
+///
+/// # Arguments
+///
+/// * `error` - The full error text to summarize
+fn failure_summary(error: &str) -> String {
+    // flatten the error text onto one line and keep it short
+    let flat = error.replace('\n', " ");
+    if flat.chars().count() > 120 {
+        let truncated: String = flat.chars().take(117).collect();
+        format!("{truncated}...")
+    } else {
+        flat
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn drain_events(
     mut events_rx: UnboundedReceiver<ThorPalEvent>,
@@ -1870,12 +1948,25 @@ async fn drain_events(
             ThorPalEvent::UserMessage { .. } => {}
             // the final response is added by the prompt/side task, so skip it here
             ThorPalEvent::RunFinished { .. } => {}
-            // a turn failed after exhausting its retries: surface it inline as a
-            // prominent error attributed to the agent, prefixed with the warning
-            // glyph the message log classifies as an error entry, so the run
-            // reports the failure rather than appearing to hang
-            ThorPalEvent::TurnFailed { agent, error } => {
-                ctx_for(&agent).add_ai_from(format!("⚠ {error}"), Some(agent));
+            // a turn failed after exhausting its retries: surface it inline as
+            // a compact, click-to-expand error attributed to the agent, so the
+            // run reports the failure without flooding the log -- the provider
+            // request id and the full error text sit behind the click
+            ThorPalEvent::TurnFailed {
+                agent,
+                error,
+                request_id,
+            } => {
+                // keep the full text behind the click only when it says more
+                // than the compact summary already shows
+                let summary = failure_summary(&error);
+                let detail = (summary != error).then_some(error);
+                ctx_for(&agent).add_failure(
+                    format!("{agent}: {summary}"),
+                    Some(agent),
+                    request_id,
+                    detail,
+                );
             }
             // the forum changed: hand the message board a fresh view of it
             ThorPalEvent::ForumUpdated { target } => {
@@ -1892,6 +1983,10 @@ async fn drain_events(
                 attempt,
                 max_attempts,
                 error,
+                // the one-row throbber strip has no room for a request id; a
+                // retried fault's ids live in the thorctl-ai log, and a fatal
+                // outcome surfaces its id on the TurnFailed entry
+                request_id: _,
                 last_attempt_at,
                 next_attempt_at,
             } => {
@@ -1916,17 +2011,24 @@ async fn drain_events(
                 act_for(&agent).clear_retry(&retry_id);
             }
             // a content filter killed a request and a scrubbed retry fired:
-            // one chat-log line per escalation keeps the recovery visible
+            // one compact chat-log line per escalation keeps the recovery
+            // visible, with the killed request's id behind a click
             ThorPalEvent::LlmScrubbed {
                 agent,
                 level,
                 error,
+                request_id,
                 ..
             } => {
-                context.add_ai(format!(
-                    "⚠ {agent}: content filter blocked a request ({error}); \
-                     retrying at scrub level {level}"
-                ));
+                context.add_failure(
+                    format!(
+                        "{agent}: content filter blocked a request ({error}); \
+                         retrying at scrub level {level}"
+                    ),
+                    Some(agent),
+                    request_id,
+                    None,
+                );
             }
             // report generation stepped down its content-filter ladder: one
             // chat-log line per degradation keeps the loss visible
@@ -1940,30 +2042,39 @@ async fn drain_events(
                 kind,
                 agent,
                 error,
-                since,
+                request_id,
                 probe_attempts,
                 next_probe_at,
+                ..
             } => {
                 let mut banner = pause_banner
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if banner.is_none() {
-                    context.add_ai(format!(
-                        "⏸ session paused — {kind}: {error} (first hit by {agent}). \
-                         Probing automatically; /retry probes now, /abort fails the \
-                         parked requests instead."
-                    ));
+                    context.add_failure(
+                        format!(
+                            "session paused — {kind}: {error} (first hit by {agent}). \
+                             Probing automatically; /retry probes now, /abort fails the \
+                             parked requests instead."
+                        ),
+                        Some(agent),
+                        request_id,
+                        None,
+                    );
                 }
                 *banner = Some(PauseBanner {
                     kind: kind.to_string(),
                     error,
-                    since,
                     probe_attempts,
                     next_probe_at,
                 });
             }
-            // the pause ended: clear the banner and say how it ended
-            ThorPalEvent::SessionResumed { kind, recovered } => {
+            // the pause ended: clear the banner and say how it ended (the
+            // duration and probe tally ride the event for the transcript, not
+            // the chat log)
+            ThorPalEvent::SessionResumed {
+                kind, recovered, ..
+            } => {
                 *pause_banner
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
@@ -2181,6 +2292,78 @@ mod tests {
         assert!(
             matches!(&entries[7], ChatEntry::Ai { agent: Some(agent), text }
                 if agent == "main" && text == "done")
+        );
+    }
+
+    /// Provider-stall lines replay the way live rendering showed them: retry
+    /// attempts and episode closes stay out of the chat log, a pause's first
+    /// landing comes back as its click-to-expand failure entry, and the
+    /// pause's end comes back as its one-line outcome
+    #[test]
+    fn replay_renders_stall_lines_like_live() {
+        // replay a transcript holding the whole stall lifecycle
+        let context = ChatContext::default();
+        replay_transcript(
+            as_lines(vec![
+                TranscriptItem::User {
+                    text: "analyze this".to_owned(),
+                    scope: None,
+                },
+                TranscriptItem::LlmRetry {
+                    agent: "main".to_owned(),
+                    retry_id: "main#1".to_owned(),
+                    attempt: 1,
+                    max_attempts: 12,
+                    error: "429 Too Many Requests".to_owned(),
+                    request_id: Some("req-13bb".to_owned()),
+                    backoff_ms: 2_000,
+                },
+                TranscriptItem::LlmRetryResolved {
+                    agent: "main".to_owned(),
+                    retry_id: "main#1".to_owned(),
+                    attempts: 2,
+                    succeeded: true,
+                },
+                TranscriptItem::ProviderPaused {
+                    pause: thorpal::PauseKind::Auth,
+                    agent: "main".to_owned(),
+                    error: "401 Unauthorized".to_owned(),
+                    request_id: Some("req-90dd".to_owned()),
+                },
+                TranscriptItem::ProviderResumed {
+                    pause: thorpal::PauseKind::Auth,
+                    recovered: true,
+                    paused_ms: 60_000,
+                    probe_attempts: 1,
+                },
+                TranscriptItem::TurnFailed {
+                    agent: "main".to_owned(),
+                    error: "boom".to_owned(),
+                    request_id: Some("req-77aa".to_owned()),
+                },
+            ]),
+            &context,
+            &SideRegistry::default(),
+            &TraversalLog::default(),
+            &AgentStatsLog::default(),
+            &GanttLog::default(),
+            &BTreeSet::new(),
+        );
+        // the retry lines added nothing; the pause, its end, and the turn
+        // failure rendered exactly like their live counterparts
+        let entries = context.access();
+        assert_eq!(entries.len(), 4);
+        assert!(matches!(&entries[0], ChatEntry::User(text) if text == "analyze this"));
+        assert!(
+            matches!(&entries[1], ChatEntry::Failure { summary, request_id: Some(id), .. }
+                if summary.contains("session paused — provider auth failed: 401 Unauthorized")
+                    && id == "req-90dd")
+        );
+        assert!(matches!(&entries[2], ChatEntry::Ai { text, .. }
+                if text.contains("session resumed — provider auth failed recovered")));
+        assert!(
+            matches!(&entries[3], ChatEntry::Failure { summary, request_id: Some(id), .. }
+                if id == "req-77aa" && summary.starts_with("main: "))
         );
     }
 
@@ -2500,6 +2683,7 @@ mod tests {
             line(TranscriptItem::TurnFailed {
                 agent: "main".to_owned(),
                 error: "mid-run budget death".to_owned(),
+                request_id: None,
             }),
             line(TranscriptItem::Assistant {
                 text: "recovered and continued".to_owned(),
@@ -2531,6 +2715,7 @@ mod tests {
             line(TranscriptItem::TurnFailed {
                 agent: "main".to_owned(),
                 error: "401 Unauthorized".to_owned(),
+                request_id: None,
             }),
             // the resume barrier a later process appended
             line(TranscriptItem::SessionResumed { interrupted: true }),
@@ -2606,6 +2791,7 @@ mod tests {
             line(TranscriptItem::TurnFailed {
                 agent: "main".to_owned(),
                 error: "401 Unauthorized".to_owned(),
+                request_id: None,
             }),
         ];
         let hidden = replay_suppressions(&transcript, &BTreeSet::new());

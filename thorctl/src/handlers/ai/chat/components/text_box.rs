@@ -26,8 +26,6 @@ pub struct TextBox {
     /// Whether the content renders masked (every char shown as `•`), for
     /// secrets; the content itself and the cursor math are untouched
     pub masked: bool,
-    /// Vertical scroll offset for the text box
-    pub scroll_y: u16,
     /// The area for this text box on screen
     pub area: Option<Rect>,
 }
@@ -44,33 +42,12 @@ impl Default for TextBox {
             cursor_absolute: 0,
             is_focused: false,
             masked: false,
-            scroll_y: 0,
             area: None,
         }
     }
 }
 
 impl TextBox {
-    /// Create a new home page
-    ///
-    /// # Arguments
-    ///
-    /// * `content` - the content to set for this home page
-    pub fn new(content: impl Into<String>) -> Self {
-        TextBox {
-            title: None,
-            content: content.into(),
-            placeholder: String::default(),
-            cursor_x: 0,
-            cursor_y: 0,
-            cursor_absolute: 0,
-            is_focused: true,
-            masked: false,
-            scroll_y: 0,
-            area: None,
-        }
-    }
-
     /// Set the title for this text box
     ///
     /// # Arguments

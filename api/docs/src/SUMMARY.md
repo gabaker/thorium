@@ -65,6 +65,10 @@
             - [Integrated Tools](./users/ai/ghidra/integrated_tools.md)
             - [Candidate Tools](./users/ai/ghidra/candidate_tools.md)
             - [Preseed Detectors](./users/ai/ghidra/detectors.md)
+        - [Telemetry](./users/ai/telemetry/telemetry.md)
+            - [Possible Today](./users/ai/telemetry/possible_today.md)
+            - [Future Work](./users/ai/telemetry/future_work.md)
+            - [Telemetry TUI](./users/ai/telemetry/tui.md)
     - [More on Children (Samples)](./developers/children.md)
 
 # Legacy Images and Pipelines

@@ -196,8 +196,13 @@ fn is_content_filtered(err: &PromptError) -> bool {
 /// * `err` - The prompt error to summarize
 fn summarize_prompt_error(err: &PromptError) -> String {
     match err {
-        // completion failures reuse the retry layer's status-line summary
-        PromptError::CompletionError(inner) => retry::error_summary(inner),
+        // completion failures reuse the retry layer's status-line summary,
+        // suffixed with the provider request id when the error preserved one
+        // (degradation notes are rare enough that the id rides inline)
+        PromptError::CompletionError(inner) => match retry::request_id(inner) {
+            Some(id) => format!("{} (request id: {id})", retry::error_summary(inner)),
+            None => retry::error_summary(inner),
+        },
         // anything else flattens onto one bounded line
         other => {
             let text = other.to_string().replace('\n', " ");

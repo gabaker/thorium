@@ -19,21 +19,25 @@ use ghidra_cli::Ghidra;
 use crate::thorpal::detect::confidence::Confidence;
 use crate::thorpal::detect::context::{AnalysisContext, fmt_addr};
 use crate::thorpal::detect::detections::{
-    self, ArtifactClass, DetectionHit, EvidenceKind, confidence_rank,
+    self, ArtifactClass, DetectionHit, DetectorRun, EvidenceKind, confidence_rank,
 };
 use crate::thorpal::detect::emulation;
 use crate::thorpal::detect::provenance_types::CallContext;
 use crate::thorpal::detect::script_detections::{self, ScriptDetector};
 use crate::thorpal::detect::toolchain::Toolchain;
-use crate::thorpal::tools::forum::{ForumState, Kind, ParentRef, QuestionStatus, Stance};
+use crate::thorpal::tools::forum::{
+    FindingProvenance, ForumState, Kind, ParentRef, QuestionStatus, Stance,
+};
 use crate::thorpal::tools::scripts::ScriptHost;
 
 /// The author every seeded post and comment is attributed to.
 ///
 /// Shared with the forum's report appendix renderer (see
 /// [`crate::thorpal::tools::forum::ForumState::report_appendix`]), which elides
-/// detector-authored bodies while keeping agent findings verbatim.
-pub(crate) const SEED_AUTHOR: &str = "detector";
+/// detector-authored bodies while keeping agent findings verbatim, and
+/// exported (as `DETECTOR_AUTHOR`) so offline telemetry can identify
+/// detector-seeded forum records by the same reserved name.
+pub const SEED_AUTHOR: &str = "detector";
 
 /// The greatest number of backing sites listed in a comment before truncating.
 const MAX_SITES_LISTED: usize = 8;
@@ -149,12 +153,12 @@ pub async fn seed_forum_from_detectors(
     host: Option<ScriptHost>,
     yara_rules: Option<&Path>,
     scope: Option<&SampleScope>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<SeedReport> {
     // build the analysis context over a cheap clone of the shared connection so the
     // agent's later tool calls keep reusing the same analyzed database
     let ctx = AnalysisContext::build(ghidra.clone(), binary).await?;
     // run every registered detection; this logs and skips per-detector failures
-    let mut hits = detections::run_all(&ctx).await?;
+    let (mut hits, roster) = detections::run_all_with_roster(&ctx).await?;
     // scan with the operator's YARA rules when configured; the budgeted,
     // failure-isolated scan (see yara_seed_hits) degrades to no hits
     if let Some(rules) = yara_rules {
@@ -186,10 +190,11 @@ pub async fn seed_forum_from_detectors(
         hits.extend(script_hits);
         script_questions = questions;
     }
-    // nothing to seed means the agent simply starts cold, as before
+    // nothing to seed means the agent simply starts cold, as before -- the
+    // roster still reports, since zero-hit detections are telemetry too
     if hits.is_empty() && script_questions.is_empty() {
         tracing::info!("no detector findings; forum left unseeded");
-        return Ok(());
+        return Ok(SeedReport { roster });
     }
     // classify runtime-library noise once over every source's hits: a hit in
     // recognizable runtime code is weakened a step and gains the runtime note
@@ -245,7 +250,17 @@ pub async fn seed_forum_from_detectors(
         let questions = merge_questions(script_questions, derive_questions(&buckets));
         seed_question_posts(forum, questions, scope).await;
     }
-    Ok(())
+    Ok(SeedReport { roster })
+}
+
+/// What one seeding pass reports back to its caller
+///
+/// Seeding itself is best-effort and logs its own failures; the report exists
+/// so the caller can persist the pass's detector roster as telemetry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeedReport {
+    /// Every registry detection's outcome, zero-hit detections included
+    pub roster: Vec<DetectorRun>,
 }
 
 /// Scan a sample with the operator's YARA rules under the seed budget.
@@ -382,12 +397,15 @@ pub(crate) async fn seed_failed_primary_annotation(
     );
     // the annotation is an asserted fact about the seeding, so a statement
     forum
-        .seed_post(
+        .seed_detector_post(
             SEED_AUTHOR.to_string(),
             "primary-not-loaded".to_string(),
             format!("Primary sample '{program}' is not loaded in Ghidra"),
             body,
             Kind::Statement,
+            "annotation",
+            None,
+            Vec::new(),
         )
         .await?;
     Ok(())
@@ -538,12 +556,21 @@ async fn seed_suppressed_rollup(
     );
     // the rollup is an asserted fact about the seeding, so it is a statement
     forum
-        .seed_post(
+        .seed_detector_post(
             SEED_AUTHOR.to_string(),
             scoped_name(scope, "runtime-noise"),
             scoped_title(scope, title),
             body,
             Kind::Statement,
+            "rollup",
+            None,
+            // record every suppressed finding structurally (bounded well past
+            // the body's line cap, so telemetry sees what the text truncates)
+            suppressed
+                .iter()
+                .take(500)
+                .map(|hit| finding_provenance(hit, true))
+                .collect(),
         )
         .await?;
     Ok(())
@@ -591,12 +618,18 @@ async fn seed_bucket(
     // asserted facts, so every evidence post is a statement — the targeted
     // questions derived from the strongest findings are seeded separately.
     forum
-        .seed_post(
+        .seed_detector_post(
             SEED_AUTHOR.to_string(),
             name.clone(),
             scoped_title(scope, title),
             body,
             Kind::Statement,
+            "bucket",
+            None,
+            // the post's provenance rolls up every finding it fronts
+            hits.iter()
+                .map(|hit| finding_provenance(hit, false))
+                .collect(),
         )
         .await?;
     // attach one comment per finding under the freshly-created post
@@ -604,12 +637,14 @@ async fn seed_bucket(
         // detectors assert evidence; they take no position on a parent claim, and
         // their findings are statements of fact rather than questions
         forum
-            .seed_comment(
+            .seed_detector_comment(
                 SEED_AUTHOR.to_string(),
                 ParentRef::Post(name.clone()),
                 comment_body(hit),
                 Stance::Neutral,
                 Kind::Statement,
+                "finding",
+                vec![finding_provenance(hit, false)],
             )
             .await?;
     }
@@ -734,6 +769,33 @@ fn confidence_label(confidence: Confidence) -> &'static str {
     }
 }
 
+/// Reduces one detection hit to its structured provenance record
+///
+/// The record mirrors exactly what the seeded template text flattens --
+/// technique, confidence, suspicion, source, sites, artifact class -- so
+/// offline telemetry reads these facts instead of parsing them back out.
+///
+/// # Arguments
+///
+/// * `hit` - The hit to record
+/// * `suppressed` - Whether the hit was suppressed into the noise rollup
+fn finding_provenance(hit: &DetectionHit, suppressed: bool) -> FindingProvenance {
+    FindingProvenance {
+        technique: hit.technique.id.to_string(),
+        confidence: confidence_label(hit.confidence).to_owned(),
+        suspicion: hit.suspicion,
+        source: hit.source.key().to_owned(),
+        detection: hit.detection.clone(),
+        sites: hit.sites.len() as u64,
+        // only the class key is recorded, never the recovered value
+        artifact_class: hit
+            .artifact
+            .as_ref()
+            .map(|artifact| artifact.class.key().to_owned()),
+        suppressed,
+    }
+}
+
 // ===========================================================================
 // Derived questions (the hybrid half of seeding)
 // ===========================================================================
@@ -754,6 +816,11 @@ pub(crate) struct SeedQuestion {
     pub(crate) body: String,
     /// The completion-gate check tasks seeded under this question, possibly empty
     pub(crate) tasks: Vec<String>,
+    /// What derived this question, recorded as provenance: `derived` for the
+    /// finding-driven questions, `format` for file-format triage leads,
+    /// `script` for promoted detector scripts, `prior_toolkit` for prior
+    /// toolkit matches
+    pub(crate) origin: &'static str,
 }
 
 /// The most container entries quoted in the container-payload question body.
@@ -989,6 +1056,7 @@ pub(crate) fn container_question(
         title: title.to_string(),
         body,
         tasks,
+        origin: "format",
     })
 }
 
@@ -1077,6 +1145,7 @@ pub(crate) fn script_question(format: &str) -> Option<SeedQuestion> {
         title: title.to_string(),
         body: format!("Identified format: {format}.\n{advice}"),
         tasks,
+        origin: "format",
     })
 }
 
@@ -1224,6 +1293,7 @@ fn unpack_question(buckets: &BTreeMap<Option<u64>, Vec<DetectionHit>>) -> Option
              your trial decodes — an untested wall claim does not close this question"
                 .to_string(),
         ],
+        origin: "derived",
     })
 }
 
@@ -1287,6 +1357,7 @@ pub(crate) fn prior_toolkit_question(matches: &[(String, String)]) -> Option<See
              post the recovered artifacts as evidence"
                 .to_string(),
         ],
+        origin: "prior_toolkit",
     })
 }
 
@@ -1338,6 +1409,7 @@ fn gate_questions(buckets: &BTreeMap<Option<u64>, Vec<DetectionHit>>) -> Vec<See
                      decompiled path"
                 ),
             ],
+            origin: "derived",
         });
         // a couple of gates are plenty; the statement posts carry the rest
         if questions.len() == MAX_GATE_QUESTIONS {
@@ -1394,6 +1466,7 @@ fn decoded_config_question(
              evidence"
                 .to_string(),
         ],
+        origin: "derived",
     })
 }
 
@@ -1431,6 +1504,7 @@ fn crypto_key_question(buckets: &BTreeMap<Option<u64>, Vec<DetectionHit>>) -> Op
         ),
         // no seeded checks in v1: a wrong gate here is worse than no gate
         tasks: Vec::new(),
+        origin: "derived",
     })
 }
 
@@ -1485,6 +1559,7 @@ fn c2_question(buckets: &BTreeMap<Option<u64>, Vec<DetectionHit>>) -> Option<See
         ),
         // no seeded checks in v1: a wrong gate here is worse than no gate
         tasks: Vec::new(),
+        origin: "derived",
     })
 }
 
@@ -1523,6 +1598,7 @@ fn ransomware_question(buckets: &BTreeMap<Option<u64>, Vec<DetectionHit>>) -> Op
         ),
         // no seeded checks in v1: a wrong gate here is worse than no gate
         tasks: Vec::new(),
+        origin: "derived",
     })
 }
 
@@ -1558,6 +1634,7 @@ fn evasion_question(buckets: &BTreeMap<Option<u64>, Vec<DetectionHit>>) -> Optio
         ),
         // no seeded checks in v1: a wrong gate here is worse than no gate
         tasks: Vec::new(),
+        origin: "derived",
     })
 }
 
@@ -1589,18 +1666,22 @@ pub(crate) async fn seed_question_posts(
             title,
             body,
             mut tasks,
+            origin,
         } = question;
         // namespace the fixed question names under the sample's scope so a
         // sibling's q-* posts cannot collide with the main sample's
         let name = scoped_name(scope, &name);
         // every derived question starts open so the question loop drives it
         if let Err(error) = forum
-            .seed_post(
+            .seed_detector_post(
                 SEED_AUTHOR.to_string(),
                 name.clone(),
                 scoped_title(scope, title),
                 body,
                 Kind::Question(QuestionStatus::Unsolved),
+                "question",
+                Some(origin.to_owned()),
+                Vec::new(),
             )
             .await
         {
@@ -1676,7 +1757,108 @@ mod tests {
             source: HitSource::Native,
             artifact: None,
             context: None,
+            // unstamped here; the registry runner names native producers
+            detection: None,
         }
+    }
+
+    /// The seeded finding lines keep their exact shapes: thorctl's telemetry
+    /// fold parses `Site: ... | confidence: ... | suspicion: ...` and
+    /// `Sites (n):` out of legacy stores, so rewording them breaks it
+    #[test]
+    fn seeded_finding_lines_keep_their_parsed_shapes() {
+        let mut strong = hit(T1486, Some(0x401000), high());
+        strong.sites = vec![0x401010, 0x401020];
+        let body = comment_body(&strong);
+        // the single finding line: Site | confidence | suspicion
+        let site_line = body
+            .lines()
+            .find(|line| line.starts_with("Site: "))
+            .expect("a Site line");
+        let shape = regex::Regex::new(
+            r"^Site: \S+ \| confidence: (fact|likely|unsure|untrusted) \| suspicion: -?\d+$",
+        )
+        .expect("a valid shape regex");
+        assert!(shape.is_match(site_line), "got {site_line:?}");
+        // the backing-sites line: Sites (n):
+        assert!(
+            body.lines().any(|line| line.starts_with("Sites (2):")),
+            "got {body:?}"
+        );
+    }
+
+    /// Seeded buckets and questions record their structured provenance
+    #[tokio::test]
+    async fn seeding_records_structured_provenance() {
+        let forum = ForumState::new();
+        // one strong finding carrying sites, an artifact, and a producer name
+        let mut strong = hit(T1486, Some(0x401000), high());
+        strong.sites = vec![0x401010, 0x401020, 0x401030];
+        strong.detection = Some("ransomware_behavior".to_owned());
+        strong.artifact = Some(HitArtifact {
+            class: ArtifactClass::SymmetricKey,
+            value: "SECRET-VALUE-NEVER-RECORDED".to_owned(),
+            role: None,
+            detail: None,
+        });
+        // seed the bucket: one post plus one comment per finding
+        seed_bucket(None, &forum, Some(0x401000), &[strong.clone()], None)
+            .await
+            .expect("the bucket should seed");
+        // and one derived question with its origin
+        seed_question_posts(
+            &forum,
+            vec![SeedQuestion {
+                name: "q-unpack".to_owned(),
+                title: "Can the payload be unpacked?".to_owned(),
+                body: "See #fn-00401000.".to_owned(),
+                tasks: Vec::new(),
+                origin: "derived",
+            }],
+            None,
+        )
+        .await;
+        // the snapshot carries structured records for every seeded node
+        let snapshot = forum.snapshot().await;
+        assert_eq!(snapshot.detector_provenance.len(), 3);
+        // the bucket post's record fronts the finding's structured facts
+        let post = snapshot
+            .detector_provenance
+            .iter()
+            .find(|record| record.node == ParentRef::Post("fn-00401000".to_owned()))
+            .expect("the bucket post's record");
+        assert_eq!(post.shape, "bucket");
+        assert_eq!(post.findings.len(), 1);
+        let finding = &post.findings[0];
+        assert_eq!(finding.technique, T1486.id);
+        assert_eq!(finding.confidence, confidence_label(strong.confidence));
+        assert_eq!(finding.suspicion, strong.suspicion);
+        assert_eq!(finding.source, "native");
+        assert_eq!(finding.detection.as_deref(), Some("ransomware_behavior"));
+        assert_eq!(finding.sites, 3);
+        // only the artifact's class key is recorded, never its value (the
+        // value still lives in the comment BODY the analyst reads -- the
+        // structured records themselves must never duplicate it)
+        assert_eq!(finding.artifact_class.as_deref(), Some("symmetric_key"));
+        let records = serde_json::to_string(&snapshot.detector_provenance)
+            .expect("provenance should serialize");
+        assert!(!records.contains("SECRET-VALUE-NEVER-RECORDED"));
+        // the finding comment carries the same record under its own id
+        let comment = snapshot
+            .detector_provenance
+            .iter()
+            .find(|record| matches!(record.node, ParentRef::Comment(_)))
+            .expect("the finding comment's record");
+        assert_eq!(comment.shape, "finding");
+        assert_eq!(comment.findings.len(), 1);
+        // the question records its origin
+        let question = snapshot
+            .detector_provenance
+            .iter()
+            .find(|record| record.node == ParentRef::Post("q-unpack".to_owned()))
+            .expect("the question's record");
+        assert_eq!(question.shape, "question");
+        assert_eq!(question.question_origin.as_deref(), Some("derived"));
     }
 
     /// Pure runtime-noise buckets suppress; signal, artifacts, and the
@@ -1760,7 +1942,7 @@ mod tests {
         let ctx = AnalysisContext::build(ghidra, std::path::Path::new(&binary))
             .await
             .expect("context should build");
-        let mut hits = detections::run_all(&ctx)
+        let (mut hits, _) = detections::run_all_with_roster(&ctx)
             .await
             .expect("detections should run");
         let total = hits.len();
@@ -2326,6 +2508,7 @@ mod tests {
             title: format!("{name} title"),
             body: format!("{name} body"),
             tasks: Vec::new(),
+            origin: "derived",
         }
     }
 

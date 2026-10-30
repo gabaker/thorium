@@ -2,7 +2,7 @@
 //! form, and that a keyspace this release creates or an older release created compares with the
 //! current snapshot without drift beyond the registered legacy objects
 
-use elasticsearch::indices::{IndicesCreateParts, IndicesDeleteParts, IndicesGetMappingParts};
+use elasticsearch::indices::{IndicesDeleteParts, IndicesGetMappingParts};
 use scylla::client::session::Session;
 use std::path::PathBuf;
 use thorium::models::backends::setup;

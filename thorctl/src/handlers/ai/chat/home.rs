@@ -40,20 +40,6 @@ impl Default for Home {
 }
 
 impl Home {
-    /// Create a new home page
-    ///
-    /// # Arguments
-    ///
-    /// * `prompt` - the prompt to set for this home page
-    pub fn new(prompt: impl Into<String>) -> Self {
-        // start with a default home page
-        let mut home = Home::default();
-        // update our prompt
-        home.prompt.placeholder = prompt.into();
-        // return our new home page
-        home
-    }
-
     /// Insert pasted text into the prompt when it has the keyboard
     ///
     /// # Arguments

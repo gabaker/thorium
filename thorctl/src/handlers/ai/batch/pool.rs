@@ -2244,7 +2244,12 @@ mod tests {
     fn write_manifest(dir: &Path, blind: bool, units: &[&str]) -> BatchConf {
         // every unit gets one on-disk sample under samples/
         std::fs::create_dir_all(dir.join("samples")).unwrap();
-        let mut yaml = format!("prompt: analyze\nblind: {blind}\nstagger_secs: 0\nunits:\n");
+        // pin the free-disk floor to zero: with the default 15 GiB floor a
+        // nearly-full host parks every launch in the disk hold and the tests
+        // hang forever instead of running their stubs
+        let mut yaml = format!(
+            "prompt: analyze\nblind: {blind}\nstagger_secs: 0\ndisk_free_min_gb: 0\nunits:\n"
+        );
         for unit in units {
             std::fs::write(dir.join("samples").join(unit), b"bytes").unwrap();
             yaml.push_str(&format!(

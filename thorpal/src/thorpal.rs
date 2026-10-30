@@ -1136,6 +1136,9 @@ impl ThorPalBuilder {
                 self.forum_context,
                 self.analyst_asks,
             )?);
+            // record the roster this role's instances will actually be
+            // offered, now that every attachment is on the built agent
+            append_tools_manifest(&self.store, &config.name, &sub_agent).await;
             // the dedicated pool nested invocations of this agent draw from
             let pool = Arc::new(Semaphore::new(config.max_nested_alive.max(1)));
             built.insert(config.tool_name(), (sub_agent, enabled, pool));
@@ -1224,11 +1227,15 @@ impl ThorPalBuilder {
             self.forum.set_store(Arc::clone(store));
         }
 
+        // build the main agent first so its offered roster can be recorded
+        let agent = agent.build();
+        // record the main agent's roster under the one "main" role
+        append_tools_manifest(&self.store, "main", &agent).await;
         // assemble the finished ThorPal, moving the shared state onto it
         Ok(ThorPal {
             dead_delegations: std::sync::Mutex::new(Vec::new()),
             gate,
-            agent: agent.build(),
+            agent,
             memory,
             sides: tokio::sync::Mutex::new(BTreeMap::new()),
             conversation_id: MAIN_CONVERSATION_ID.to_owned(),
@@ -1238,7 +1245,6 @@ impl ThorPalBuilder {
             workflow,
             store: self.store,
             library: self.library,
-            main_max_turns: self.main_max_turns,
             memories: self.memories,
             redactor: self.redactor,
             forum: self.forum,
@@ -1254,6 +1260,99 @@ impl ThorPalBuilder {
             mcp: tokio::sync::Mutex::new(mcp_connections),
             interrupted: tokio::sync::Mutex::new(None),
         })
+    }
+}
+
+/// Appends a role's offered-tool manifest to the session transcript
+///
+/// The roster an agent is actually offered exists only at build time (group
+/// names expand against the compiled-in registry, MCP servers advertise their
+/// tools at connect time), so this line is what makes "offered but never
+/// called" answerable offline. Best-effort like the resume barrier: a failed
+/// roster read or append is logged and skipped so telemetry can never fail a
+/// build. Appended once per built role per process run, which keeps roster
+/// drift across resumes under different binaries visible.
+///
+/// # Arguments
+///
+/// * `store` - The session store to append to, when one is installed
+/// * `role` - The role this roster belongs to (e.g. `"main"`)
+/// * `agent` - The built agent whose provider-facing roster is recorded
+async fn append_tools_manifest(store: &Option<Arc<SessionStore>>, role: &str, agent: &Agent) {
+    // without a store there is no transcript to append to
+    let Some(store) = store else {
+        return;
+    };
+    // resolve the provider-facing roster the model will actually be offered
+    let tools = match agent.tool_definitions(None).await {
+        // reduce the definitions to sorted, deduplicated tool names
+        Ok(defs) => {
+            let names: std::collections::BTreeSet<String> =
+                defs.into_iter().map(|def| def.name).collect();
+            names.into_iter().collect::<Vec<String>>()
+        }
+        Err(err) => {
+            tracing::warn!(?err, role, "failed to resolve the offered-tool roster");
+            return;
+        }
+    };
+    // stamp the manifest with the crate version that resolved this roster
+    let item = transcript::TranscriptItem::ToolsOffered {
+        role: role.to_owned(),
+        tools,
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+    };
+    let line = transcript::TranscriptLine::stamped(item);
+    // append best-effort: a lost manifest costs telemetry, never the build
+    if let Err(err) = store.append_transcript(&line).await {
+        tracing::warn!(?err, role, "failed to record the offered-tool manifest");
+    }
+}
+
+impl ThorPal {
+    /// Appends a seeding pass's detector roster to the session transcript
+    ///
+    /// The registry compiled into this binary is what ran, so the roster is
+    /// recorded per pass (per sample in a multi-sample session) -- that is
+    /// what makes "detectors that never fired" answerable offline. Appended
+    /// best-effort like the tools-offered manifest: a lost roster costs
+    /// telemetry, never the seeding.
+    ///
+    /// # Arguments
+    ///
+    /// * `report` - The seeding pass's report naming each detection that ran
+    /// * `sample` - The scoped sibling program seeded, or `None` for the primary
+    #[instrument(name = "ThorPal::append_detectors_run", skip_all)]
+    async fn append_detectors_run(&self, report: seed::SeedReport, sample: Option<&str>) {
+        // without a store there is no transcript to append to
+        let Some(store) = &self.store else {
+            return;
+        };
+        // a pass that ran nothing (seeding disabled upstream) records nothing
+        if report.roster.is_empty() {
+            return;
+        }
+        // reduce the roster to its durable line form
+        let detectors = report
+            .roster
+            .iter()
+            .map(|run| transcript::DetectorRunLine {
+                name: run.name.to_owned(),
+                technique: run.technique.clone(),
+                hits: run.hits,
+                failed: run.failed,
+            })
+            .collect();
+        let item = transcript::TranscriptItem::DetectorsRun {
+            sample: sample.map(str::to_owned),
+            detectors,
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+        };
+        let line = transcript::TranscriptLine::stamped(item);
+        // append best-effort: a lost roster costs telemetry, never the run
+        if let Err(err) = store.append_transcript(&line).await {
+            tracing::warn!(?err, "failed to record the detector roster");
+        }
     }
 }
 
@@ -1289,8 +1388,6 @@ pub struct ThorPal {
     /// The persistent cross-session script library, or `None` to disable
     /// script promotion and library reuse
     library: Option<Arc<ScriptLibrary>>,
-    /// The main loop's turn-cap override, or `None` for the default 100.
-    main_max_turns: Option<usize>,
     /// The persistent cross-run memory library, or `None` to disable memory
     /// recall and saving
     memories: Option<Arc<MemoryLibrary>>,
@@ -1537,6 +1634,7 @@ impl ThorPal {
                     let _ = tx.send(events::ThorPalEvent::TurnFailed {
                         agent: "main".to_string(),
                         error: err.to_string(),
+                        request_id: err.provider_request_id().map(str::to_owned),
                     });
                 }
                 // salvage the failed turn's paid work into settled history so
@@ -1604,6 +1702,8 @@ impl ThorPal {
                          the context again",
                         tail.len()
                     ),
+                    // a local context-overflow drop has no provider request
+                    request_id: None,
                 };
                 let line = transcript::TranscriptLine::stamped(item);
                 if let Err(err) = store.append_transcript(&line).await {
@@ -1821,7 +1921,7 @@ impl ThorPal {
                 handle: tokio::runtime::Handle::current(),
             });
             // run the detectors and seed their findings onto this instance's forum
-            seed::seed_forum_from_detectors(
+            let report = seed::seed_forum_from_detectors(
                 ghidra,
                 &self.forum,
                 &binary,
@@ -1832,6 +1932,9 @@ impl ThorPal {
                 None,
             )
             .await?;
+            // record which detectors ran so offline telemetry can tell a
+            // detector that never fires from one that never ran
+            self.append_detectors_run(report, None).await;
         }
         // a multi-sample session seeds each sibling the same way, namespaced
         // so the fixed post names cannot collide with the main pass's
@@ -1915,7 +2018,7 @@ impl ThorPal {
         // nothing else runs during seeding, so the hold cannot contend
         let op = self.ghidra.op(Some(&scope.program)).await?;
         // run the native detectors, YARA, and emulation against the sibling
-        seed::seed_forum_from_detectors(
+        let report = seed::seed_forum_from_detectors(
             op.ghidra(),
             &self.forum,
             binary,
@@ -1925,7 +2028,11 @@ impl ThorPal {
             self.yara_rules.as_deref(),
             Some(scope),
         )
-        .await
+        .await?;
+        // record the sibling pass's roster under its scoped program name
+        self.append_detectors_run(report, Some(&scope.program))
+            .await;
+        Ok(())
     }
 
     /// Seeds the one-glance map of a multi-sample session's whole sample set
@@ -2007,12 +2114,15 @@ impl ThorPal {
         // the set map is an asserted fact about the session, so a statement
         if let Err(error) = self
             .forum
-            .seed_post(
+            .seed_detector_post(
                 "detector".to_string(),
                 "sample-set".to_string(),
                 "Sample set: related samples analyzed together".to_string(),
                 body,
                 tools::forum::Kind::Statement,
+                "annotation",
+                None,
+                Vec::new(),
             )
             .await
         {
@@ -2089,12 +2199,15 @@ impl ThorPal {
                 // logged and skipped rather than failing the whole seeding
                 if let Err(error) = self
                     .forum
-                    .seed_post(
+                    .seed_detector_post(
                         "detector".to_string(),
                         name,
                         title,
                         body,
                         tools::forum::Kind::Statement,
+                        "annotation",
+                        None,
+                        Vec::new(),
                     )
                     .await
                 {
@@ -2628,6 +2741,7 @@ impl ThorPal {
                     let _ = tx.send(events::ThorPalEvent::TurnFailed {
                         agent: agent_key,
                         error: err.to_string(),
+                        request_id: err.provider_request_id().map(str::to_owned),
                     });
                 }
                 // salvage what the error carries beyond the side's settled
@@ -3698,6 +3812,74 @@ mod tests {
             model: "model".to_owned(),
         };
         ThorPalBuilder::new(provider, settings)
+    }
+
+    /// The build appends one offered-tool manifest per role, plus `"main"`
+    #[tokio::test]
+    async fn build_records_offered_tool_manifests() {
+        // a store the build's manifests land in
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SessionStore::create(
+            dir.path().to_path_buf(),
+            None,
+            PathBuf::from("bin/target"),
+            "target".to_owned(),
+            false,
+            Vec::new(),
+        )
+        .await
+        .expect("store should create");
+        // build a run holding one file-tool agent with the store installed
+        let built = builder(None)
+            .agent(agent("A", vec!["file"]))
+            .session_store(Arc::clone(&store))
+            .build()
+            .await
+            .expect("build should succeed");
+        drop(built);
+        // exactly two manifests landed: the role's, then the main agent's
+        let lines = store.load_transcript().await.expect("load");
+        let manifests: Vec<_> = lines
+            .iter()
+            .filter_map(|line| match &line.item {
+                transcript::TranscriptItem::ToolsOffered {
+                    role,
+                    tools,
+                    version,
+                } => Some((role.clone(), tools.clone(), version.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(manifests.len(), 2, "one manifest per role plus main");
+        // the role's roster carries its whole registry group, in sorted
+        // order, plus the always-on orchestration tools beyond it
+        let (role, tools, version) = &manifests[0];
+        assert_eq!(role, "A");
+        for entry in tools::registry::group("file") {
+            assert!(
+                tools.iter().any(|name| name == entry.name),
+                "the file tool '{}' must be offered",
+                entry.name
+            );
+        }
+        assert!(
+            tools.len() > tools::registry::group("file").len(),
+            "always-on orchestration tools must be offered too"
+        );
+        assert!(
+            tools.windows(2).all(|pair| pair[0] < pair[1]),
+            "the roster must be sorted and deduplicated"
+        );
+        assert_eq!(version, env!("CARGO_PKG_VERSION"));
+        // the main agent's roster lands under the reserved "main" role
+        let (role, tools, version) = &manifests[1];
+        assert_eq!(role, "main");
+        assert!(!tools.is_empty(), "the main agent is never tool-less");
+        assert!(
+            tools.windows(2).all(|pair| pair[0] < pair[1]),
+            "the roster must be sorted and deduplicated"
+        );
+        assert_eq!(version, env!("CARGO_PKG_VERSION"));
     }
 
     /// MCP reference failures surface at build time with actionable errors,

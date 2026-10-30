@@ -1,0 +1,144 @@
+# AnalyzeDockerfile - a usage image for ThorPal (`thorctl analyze`)
+#
+# This image contains everything `thorctl analyze` (aliases `ai`/`si`) needs at
+# runtime except credentials: the statically linked thorctl binary (ThorPal and
+# the Ghidra bridge are libraries compiled into it), a full JDK 21 (Ghidra
+# OSGi-compiles the embedded bridge script at launch, so javac is required),
+# and a Ghidra install already configured via environment variables.
+#
+# Credentials and user state are never baked in. They arrive at runtime from
+# two bind mounts (see thorctl/run-analyze.sh):
+#   /home/thorpal/.thorium         - thorctl config (keys + ai provider block),
+#                                    sessions, memories, scripts, logs
+#   /home/thorpal/ghidra-projects  - Ghidra projects (analysis databases and
+#                                    anonymized staging; must contain no
+#                                    dot-prefixed path components)
+#
+# Sessions record absolute paths (sample, Ghidra install, project), so sessions
+# created in this image resume in later containers as long as the mount points
+# stay the same; sessions created on a host carry host paths and will not
+# resume in here. When bumping GHIDRA_VERSION remember that old sessions keep
+# the old install path pinned in their snapshots.
+#
+# Build (from the repo root):
+#   1. Statically compile thorctl (requires the nightly toolchain and the
+#      x86_64-unknown-linux-musl target; cargo fetches the rig and ghidra-cli
+#      forks from GitHub):
+#        RUSTFLAGS="-C target-feature=+aes,+sse2" \
+#          cargo build --release --target x86_64-unknown-linux-musl \
+#          --features vendored-openssl -p thorctl
+#   2. Build the image:
+#        docker build -f thorctl/AnalyzeDockerfile -t thorpal-analyze:latest .
+#      Behind a proxy add:
+#        --build-arg http_proxy --build-arg https_proxy --build-arg no_proxy
+#      Behind a TLS-intercepting proxy also add `--build-arg CURL_OPTS=-k`;
+#      the pinned sha256 below still guarantees the Ghidra zip's integrity.
+
+# ------------------------------------------------------------------------
+# Stage 1: fetch and extract a pinned Ghidra release
+# ------------------------------------------------------------------------
+FROM ubuntu:24.04 AS ghidra
+
+# proxy settings for environments without direct egress
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
+# the pinned Ghidra release; the bridge script uses 12.x-only APIs
+# (ghidra.pcode.emu), so do not downgrade below 12.1
+ARG GHIDRA_VERSION=12.1.4
+ARG GHIDRA_ZIP=ghidra_12.1.4_PUBLIC_20260921.zip
+ARG GHIDRA_SHA256=ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db
+ARG GHIDRA_URL=https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VERSION}_build/${GHIDRA_ZIP}
+# extra curl flags (e.g. -k behind a TLS-intercepting proxy; the sha256 pin
+# below still protects the artifact)
+ARG CURL_OPTS=
+
+# install just enough tooling to download and extract the release
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl unzip \
+ && rm -rf /var/lib/apt/lists/*
+
+# download the release, verify it against the pinned digest, and extract it;
+# unzip preserves the unix modes so support/analyzeHeadless stays executable
+RUN curl -fL ${CURL_OPTS} -o "/tmp/${GHIDRA_ZIP}" "${GHIDRA_URL}" \
+ && echo "${GHIDRA_SHA256}  /tmp/${GHIDRA_ZIP}" | sha256sum -c - \
+ && mkdir -p /opt/ghidra \
+ && unzip -q "/tmp/${GHIDRA_ZIP}" -d /opt/ghidra \
+ && rm "/tmp/${GHIDRA_ZIP}" \
+ && test -x "/opt/ghidra/ghidra_${GHIDRA_VERSION}_PUBLIC/support/analyzeHeadless"
+
+# ------------------------------------------------------------------------
+# Stage 2: the runtime image
+# ------------------------------------------------------------------------
+FROM ubuntu:24.04
+
+# proxy settings for environments without direct egress
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+ARG GHIDRA_VERSION=12.1.4
+
+LABEL org.opencontainers.image.title="thorpal-analyze" \
+      org.opencontainers.image.description="ThorPal (thorctl analyze) with Ghidra and JDK baked in; mount ~/.thorium and a Ghidra projects dir"
+
+# Ghidra needs a full JDK (javac + jdk.compiler, checked by the bridge) to
+# OSGi-compile the bridge GhidraScript at launch; fontconfig backs the JDK's
+# headless AWT font handling, ca-certificates backs outbound TLS, and vim-tiny
+# provides the `vi` the TUI's summary editor defaults to
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      openjdk-21-jdk-headless fontconfig ca-certificates vim-tiny \
+ && rm -rf /var/lib/apt/lists/*
+
+# replace the stock ubuntu uid-1000 user with a thorpal user so bind-mounted
+# state stays owned by the common first host user (uid/gid 1000)
+RUN userdel -r ubuntu \
+ && useradd --create-home --uid 1000 --user-group --shell /bin/bash thorpal \
+ && mkdir -p /home/thorpal/.thorium /home/thorpal/ghidra-projects /home/thorpal/samples \
+ && chown -R thorpal:thorpal /home/thorpal
+
+# the Ghidra install is read-only at runtime; root ownership is intentional
+COPY --from=ghidra /opt/ghidra /opt/ghidra
+
+# wire the baked Ghidra and JDK up for thorctl/ghidra-cli:
+# - GHIDRA_INSTALL (a clap env default) beats any ai.ghidra_install in the
+#   mounted config, so stale host paths never leak into the container; clap
+#   values are never written back to the config, so the mounted file stays
+#   untouched (it does make `--resume` print a harmless "--ghidra-install is
+#   ignored on resume" warning)
+# - the projects dir is deliberately NOT overridden via THORCTL__AI__* here:
+#   config-writing commands (thorctl config, analyze setup, tokens activate)
+#   persist such overlays back into the bind-mounted config file, and the
+#   built-in default already resolves to /home/thorpal/ghidra-projects — the
+#   bind mount — for this user (no dot-prefixed components; Ghidra 12.1+
+#   rejects hidden path elements in project paths)
+# - the JDK path is handed to the spawned analyzeHeadless JVM via JAVA_HOME
+# - the launch timeout covers the first-run OSGi compile of the bridge script
+ENV LANG=C.UTF-8 \
+    JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
+    GHIDRA_INSTALL=/opt/ghidra/ghidra_${GHIDRA_VERSION}_PUBLIC \
+    GHIDRA_CLI_LAUNCH_TIMEOUT=600
+
+USER thorpal
+WORKDIR /home/thorpal
+
+# warm Ghidra up once at build time: this proves the JDK/Ghidra pairing works
+# headless in this image and seeds ~/.config/ghidra (preferences, java choice,
+# system OSGi bundles) so first runs start faster; the grep is required because
+# analyzeHeadless exits 0 even when the import itself fails
+RUN mkdir -p /tmp/ghidra-warm \
+ && "${GHIDRA_INSTALL}/support/analyzeHeadless" /tmp/ghidra-warm warm \
+      -import /bin/ls -noanalysis -deleteProject 2>&1 | tee /tmp/warm.log \
+ && grep -q "REPORT: Import succeeded" /tmp/warm.log \
+ && rm -rf /tmp/ghidra-warm /tmp/warm.log
+
+# the statically linked thorctl (built on the host, see header); copied last
+# so rebuilding after a code change only invalidates this layer onward
+COPY --chown=root:root ./target/x86_64-unknown-linux-musl/release/thorctl /usr/local/bin/thorctl
+
+# fail the build early if the binary cannot execute in this image
+RUN thorctl --version
+
+ENTRYPOINT ["thorctl"]
+CMD ["analyze", "--help"]

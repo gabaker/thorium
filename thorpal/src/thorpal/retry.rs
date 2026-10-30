@@ -274,6 +274,20 @@ pub(crate) fn error_summary(err: &CompletionError) -> String {
     }
 }
 
+/// The provider request id a completion error preserved, when one exists.
+///
+/// Rig captures the id off the provider's response headers onto
+/// `ProviderResponse` errors; everything else (transport faults, parse
+/// errors) has none. Cloned so events can own it beyond the error's lifetime.
+///
+/// # Arguments
+///
+/// * `err` - The completion error to read the request id from
+pub(crate) fn request_id(err: &CompletionError) -> Option<String> {
+    // only provider-response errors carry a transport request id
+    err.provider_request_id().map(str::to_owned)
+}
+
 /// The delay before the next attempt.
 ///
 /// Kept pure (the jitter factor is an argument) so the pacing policy is unit
@@ -582,6 +596,7 @@ impl RetryingModel {
                                         retry_id: episode,
                                         level: level.as_u8(),
                                         error: error_summary(&err),
+                                        request_id: request_id(&err),
                                     });
                                     // no backoff: the block is deterministic
                                     // per payload, not a pacing fault
@@ -620,7 +635,13 @@ impl RetryingModel {
                         // park on the session-wide gate until a probe (maybe
                         // this request's own) recovers or the operator acts
                         match gate
-                            .pause_and_park(kind, &self.agent, error_summary(&err), token.take())
+                            .pause_and_park(
+                                kind,
+                                &self.agent,
+                                error_summary(&err),
+                                request_id(&err),
+                                token.take(),
+                            )
                             .await
                         {
                             // resumed: start over with a fresh attempt budget
@@ -696,6 +717,7 @@ impl RetryingModel {
                         attempt,
                         max_attempts: MAX_ATTEMPTS,
                         error: error_summary(&err),
+                        request_id: request_id(&err),
                         last_attempt_at: now,
                         next_attempt_at: now
                             + chrono::Duration::from_std(delay)
@@ -921,6 +943,36 @@ mod tests {
         }
         // nothing else rides the channel
         assert!(rx.try_recv().is_err());
+    }
+
+    /// A fault that preserved a provider request id reports it on its event
+    #[tokio::test(start_paused = true)]
+    async fn retrying_events_carry_the_provider_request_id() {
+        // one throttle carrying an id, one bare, then a success
+        let with_id = CompletionError::ProviderResponse(
+            ProviderResponseError::new(http::StatusCode::TOO_MANY_REQUESTS, "nope")
+                .with_provider_request_id(Some("req-test".to_owned())),
+        );
+        let (model, mut rx, request) = harness(vec![
+            Err(with_id),
+            Err(status_error(http::StatusCode::TOO_MANY_REQUESTS)),
+            Ok(ok_response()),
+        ]);
+        // the paused clock fast-forwards through both backoff sleeps
+        model.completion(request).await.expect("should recover");
+        // the id-bearing attempt reports its id; the bare one reports none
+        for expected in [Some("req-test".to_owned()), None] {
+            match rx.try_recv().expect("a retrying event per failed attempt") {
+                ThorPalEvent::LlmRetrying {
+                    error, request_id, ..
+                } => {
+                    // the summary keeps its stable status-line shape
+                    assert_eq!(error, "429 Too Many Requests");
+                    assert_eq!(request_id, expected);
+                }
+                other => panic!("expected LlmRetrying, got {other:?}"),
+            }
+        }
     }
 
     /// A fatal fault fails immediately, unretried and with no events
@@ -1243,13 +1295,59 @@ mod tests {
                     ..
                 } => saw_paused = true,
                 ThorPalEvent::SessionResumed {
-                    recovered: true, ..
-                } => saw_resumed = true,
+                    recovered: true,
+                    probe_attempts,
+                    ..
+                } => {
+                    // the first probe succeeded, so none failed on the way out
+                    assert_eq!(probe_attempts, 0, "no probe failed before recovery");
+                    saw_resumed = true;
+                }
                 _ => (),
             }
         }
         assert!(saw_paused, "the pause must be announced");
         assert!(saw_resumed, "the recovery must be announced");
+    }
+
+    /// A failed probe's tally rides the re-pause announcements and lands on
+    /// the final resume event
+    #[tokio::test(start_paused = true)]
+    async fn failed_probe_tally_lands_on_the_resume() {
+        // the request 401s (pause), the first probe 401s again (one failed
+        // probe), and the second probe recovers
+        let (model, _gate, mut rx, request) = gated_harness(vec![
+            Err(status_error(http::StatusCode::UNAUTHORIZED)),
+            Err(status_error(http::StatusCode::UNAUTHORIZED)),
+            Ok(ok_response()),
+        ])
+        .await;
+        // the paused clock rides out the pause and both probes
+        let response = model.completion(request).await.expect("should recover");
+        assert_eq!(response.choice, vec![AssistantContent::text("ok")]);
+        // the initial publish counts zero failed probes, the refresh counts
+        // one, and the resume carries the final tally
+        let mut publishes = Vec::new();
+        let mut resume_tally = None;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                ThorPalEvent::SessionPaused { probe_attempts, .. } => {
+                    publishes.push(probe_attempts);
+                }
+                ThorPalEvent::SessionResumed {
+                    recovered: true,
+                    probe_attempts,
+                    ..
+                } => resume_tally = Some(probe_attempts),
+                _ => (),
+            }
+        }
+        assert_eq!(publishes, vec![0, 1], "one initial publish, one refresh");
+        assert_eq!(
+            resume_tally,
+            Some(1),
+            "the failed probe lands on the resume"
+        );
     }
 
     /// A spent transient budget pauses instead of surfacing the error
@@ -1299,13 +1397,17 @@ mod tests {
             err.provider_response_status(),
             Some(http::StatusCode::UNAUTHORIZED)
         );
-        // the abort is announced as a non-recovery resume
+        // the abort is announced as a non-recovery resume with the (empty)
+        // probe tally of a pause ended before any probe fired
         let mut saw_abort = false;
         while let Ok(event) = rx.try_recv() {
             if let ThorPalEvent::SessionResumed {
-                recovered: false, ..
+                recovered: false,
+                probe_attempts,
+                ..
             } = event
             {
+                assert_eq!(probe_attempts, 0, "no probe ran before the abort");
                 saw_abort = true;
             }
         }

@@ -3,6 +3,9 @@
 use chrono::prelude::*;
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+// the ScyllaStoreAsStr derive's generated code parses the stored column with
+// the unqualified `FromStr` name, so the import rides the derive's feature
+#[cfg(feature = "scylla-utils")]
 use std::str::FromStr;
 use std::sync::LazyLock;
 use uuid::Uuid;
@@ -876,6 +879,8 @@ impl EventCacheStatusOpts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::str::FromStr;
 
     /// Build a tag map with a single group visible under one key/value
     ///

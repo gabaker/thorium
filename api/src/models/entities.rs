@@ -15,8 +15,8 @@ use strum::{AsRefStr, EnumDiscriminants, EnumString, IntoEnumIterator};
 use uuid::Uuid;
 
 use crate::models::{
-    CollectionEntity, CollectionEntityRequest, CollectionKind, Country, DeviceEntityRequest,
-    TagMap, TreeSupport, VendorEntity, VendorEntityRequest,
+    CollectionEntity, CollectionEntityRequest, CollectionKind, DeviceEntityRequest, TagMap,
+    TreeSupport, VendorEntity, VendorEntityRequest,
 };
 
 pub mod agents;
@@ -89,6 +89,8 @@ cfg_if::cfg_if! {
         use network_activity::{NetConState, TransportLayerProtocol};
         use rules::{SigmaActionToTake, YaraActionToTake};
         use shared::CriticalSector;
+        // the metadata form is api-only, so the country set it carries is too
+        use crate::models::Country;
         use super::{TagRequest, User, TagDeleteRequest, Group, GroupAllowAction, UnhashedTreeBranch};
         use crate::utils::{ApiError, Shared};
         use crate::models::Tree;

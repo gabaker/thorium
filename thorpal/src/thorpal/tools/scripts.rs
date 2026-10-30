@@ -38,7 +38,7 @@ use serde::Serialize;
 
 use crate::thorpal::store::SessionStore;
 use crate::thorpal::store::library::{LibraryEntry, ScriptLibrary, ScriptMeta, strip_header};
-use crate::thorpal::store::redact::LibraryRedactor;
+use crate::thorpal::store::redact::{LibraryRedactor, is_neutral_script_id, neutral_script_id};
 use crate::thorpal::tools::ghidra::GhidraSession;
 use crate::thorpal::tools::registry::EnabledTools;
 
@@ -361,22 +361,45 @@ async fn load_any(
             ScriptOrigin::Library,
         ));
     }
-    // a neutral id (what blinded runs render library names as) resolves back
-    // to the real stem it aliases, so read/run work on what list_scripts shows
-    if let (Some(library), Some(redactor)) = (library, redactor)
-        && let Some(real) = redactor
-            .resolve_alias(library, name)
-            .await
-            .map_err(|error| ToolExecutionError::invalid_args(error.to_string()))?
+    // a neutral id (what blinded runs render library names as, and what prior
+    // blinded runs baked into cross-run memory text) resolves back to the
+    // real stem it aliases -- with or without a redactor, and over EVERY
+    // stem, so baked lib-<8 hex> pointers stay followable in production,
+    // deny-only, and blinded runs alike. Scripts have no hidden class, so
+    // scanning every stem leaks nothing (a plainly-rendered stem's id adds
+    // no information the listing does not already show), and the resolved
+    // source still renders through the redactor
+    if let Some(library) = library
+        && is_neutral_script_id(name)
     {
-        let source = library
-            .load(&real)
+        // scan the stems for the (unique) one hashing to this id
+        let entries = library
+            .list()
             .await
             .map_err(|error| ToolExecutionError::invalid_args(error.to_string()))?;
-        return Ok((
-            render_library_source(&source, Some(redactor)),
-            ScriptOrigin::Library,
-        ));
+        let mut resolved = None;
+        for entry in entries {
+            if neutral_script_id(&entry.name) == name {
+                // two stems hashing identically must surface, never pick one
+                if resolved.is_some() {
+                    return Err(ToolExecutionError::invalid_args(format!(
+                        "the id '{name}' matches more than one library script; \
+                         use the names list_scripts shows"
+                    )));
+                }
+                resolved = Some(entry.name);
+            }
+        }
+        if let Some(real) = resolved {
+            let source = library
+                .load(&real)
+                .await
+                .map_err(|error| ToolExecutionError::invalid_args(error.to_string()))?;
+            return Ok((
+                render_library_source(&source, redactor),
+                ScriptOrigin::Library,
+            ));
+        }
     }
     // the name misses everywhere; say exactly where was checked
     Err(ToolExecutionError::invalid_args(format!(

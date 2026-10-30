@@ -103,8 +103,6 @@ impl Default for TabContent {
 
 /// A single tab in the application
 pub struct Tab {
-    /// The unique identifier for this tab
-    pub id: Uuid,
     /// The display label for this tab
     pub label: String,
     /// The side conversation this tab renders, or `None` for the main one
@@ -176,7 +174,6 @@ impl Tab {
         let gantt = GanttView::new(thor_chat.gantt.clone(), thor_chat.cost);
         // build a new tab around the supplied client, starting on the home page
         let mut tab = Tab {
-            id: Uuid::new_v4(),
             label: label.into(),
             scope: None,
             active: ActiveTabKind::Home,
@@ -234,7 +231,6 @@ impl Tab {
         let chat = Chat::for_side(&thor_chat, name);
         // assemble the tab, opening directly on the side's chat page
         let mut tab = Tab {
-            id: Uuid::new_v4(),
             label: format!("btw:{name}"),
             scope: Some(name.to_owned()),
             active: ActiveTabKind::Chat,
@@ -676,21 +672,6 @@ impl Tab {
             // the client owns the main handle both worker tasks write to
             None => self.thor_chat.activity.clone(),
         }
-    }
-
-    /// Surface an error to the user as an assistant bubble in the chat log
-    ///
-    /// ThorPal reports a failed analysis/turn as an
-    /// [`AppEvent::ToolCallFailure`](super::AppEvent); rendering it into the shared
-    /// context lets the user see *why* the run failed instead of the event being a
-    /// silent no-op.
-    ///
-    /// # Arguments
-    ///
-    /// * `error` - The error to show in the chat log
-    pub fn push_error(&self, error: &thorium::Error) {
-        // render the failure as an assistant bubble so it lands in the message log
-        self.thor_chat.context.add_ai(format!("⚠ {error}"));
     }
 
     /// Convert this tabs home page to a chat page

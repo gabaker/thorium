@@ -87,50 +87,7 @@ pub enum AttackTactic {
 }
 
 impl AttackTactic {
-    /// The ATT&CK tactic id (e.g. `"TA0005"`).
-    pub fn id(&self) -> &'static str {
-        // map each tactic to its canonical ATT&CK id
-        match self {
-            AttackTactic::Reconnaissance => "TA0043",
-            AttackTactic::ResourceDevelopment => "TA0042",
-            AttackTactic::InitialAccess => "TA0001",
-            AttackTactic::Execution => "TA0002",
-            AttackTactic::Persistence => "TA0003",
-            AttackTactic::PrivilegeEscalation => "TA0004",
-            AttackTactic::DefenseEvasion => "TA0005",
-            AttackTactic::CredentialAccess => "TA0006",
-            AttackTactic::Discovery => "TA0007",
-            AttackTactic::LateralMovement => "TA0008",
-            AttackTactic::Collection => "TA0009",
-            AttackTactic::CommandAndControl => "TA0011",
-            AttackTactic::Exfiltration => "TA0010",
-            AttackTactic::Impact => "TA0040",
-        }
-    }
-
-    /// The human-readable tactic name (e.g. `"Defense Evasion"`).
-    pub fn name(&self) -> &'static str {
-        // map each tactic to its display name
-        match self {
-            AttackTactic::Reconnaissance => "Reconnaissance",
-            AttackTactic::ResourceDevelopment => "Resource Development",
-            AttackTactic::InitialAccess => "Initial Access",
-            AttackTactic::Execution => "Execution",
-            AttackTactic::Persistence => "Persistence",
-            AttackTactic::PrivilegeEscalation => "Privilege Escalation",
-            AttackTactic::DefenseEvasion => "Defense Evasion",
-            AttackTactic::CredentialAccess => "Credential Access",
-            AttackTactic::Discovery => "Discovery",
-            AttackTactic::LateralMovement => "Lateral Movement",
-            AttackTactic::Collection => "Collection",
-            AttackTactic::CommandAndControl => "Command and Control",
-            AttackTactic::Exfiltration => "Exfiltration",
-            AttackTactic::Impact => "Impact",
-        }
-    }
-
-    /// Parse a tactic from its canonical ATT&CK display name (the inverse of
-    /// [`name`](AttackTactic::name)).
+    /// Parse a tactic from its canonical ATT&CK display name.
     ///
     /// The comparison is case-insensitive and whitespace-trimmed so a value from
     /// an LLM (see `crate::llm`) or capa maps cleanly. Returns `None` for an
@@ -279,6 +236,32 @@ pub enum HitSource {
     Emulation,
 }
 
+impl HitSource {
+    /// Every hit source, so readers can gate persisted keys against the
+    /// crate's own closed vocabulary instead of a hand-copied list
+    pub const ALL: [HitSource; 6] = [
+        Self::Native,
+        Self::Capa,
+        Self::Llm,
+        Self::Script,
+        Self::Yara,
+        Self::Emulation,
+    ];
+
+    /// The stable snake_case key naming this source in persisted provenance
+    pub fn key(self) -> &'static str {
+        // one fixed key per producer; persisted, so never reworded
+        match self {
+            Self::Native => "native",
+            Self::Capa => "capa",
+            Self::Llm => "llm",
+            Self::Script => "script",
+            Self::Yara => "yara",
+            Self::Emulation => "emulation",
+        }
+    }
+}
+
 /// What kind of concrete artifact a hit recovered from the sample.
 ///
 /// A detection hit answers *"what does this binary do?"*; an artifact answers
@@ -315,6 +298,24 @@ pub enum ArtifactClass {
 }
 
 impl ArtifactClass {
+    /// Every artifact class, so readers can gate persisted keys and parsed
+    /// labels against the crate's own closed vocabulary instead of a
+    /// hand-copied list
+    pub const ALL: [ArtifactClass; 12] = [
+        Self::NetworkEndpoint,
+        Self::UriPath,
+        Self::UserAgent,
+        Self::HttpHeader,
+        Self::HostIdentifier,
+        Self::SymmetricKey,
+        Self::AsymmetricPrivateKey,
+        Self::AsymmetricPublicKey,
+        Self::Certificate,
+        Self::DecodedData,
+        Self::ConfigRecord,
+        Self::Packer,
+    ];
+
     /// The section heading this class is rendered under in the report.
     pub fn label(self) -> &'static str {
         match self {
@@ -330,6 +331,25 @@ impl ArtifactClass {
             Self::DecodedData => "Decoded Data",
             Self::ConfigRecord => "Configuration Records",
             Self::Packer => "Packing",
+        }
+    }
+
+    /// The stable snake_case key naming this class in persisted provenance
+    pub fn key(self) -> &'static str {
+        // one fixed key per class; persisted, so never reworded
+        match self {
+            Self::NetworkEndpoint => "network_endpoint",
+            Self::UriPath => "uri_path",
+            Self::UserAgent => "user_agent",
+            Self::HttpHeader => "http_header",
+            Self::HostIdentifier => "host_identifier",
+            Self::SymmetricKey => "symmetric_key",
+            Self::AsymmetricPrivateKey => "asymmetric_private_key",
+            Self::AsymmetricPublicKey => "asymmetric_public_key",
+            Self::Certificate => "certificate",
+            Self::DecodedData => "decoded_data",
+            Self::ConfigRecord => "config_record",
+            Self::Packer => "packer",
         }
     }
 }
@@ -447,6 +467,11 @@ pub struct DetectionHit {
     /// result steers the sample's own control flow, and this is what records the
     /// difference for the validator, the report, and the LLM.
     pub context: Option<CallContext>,
+    /// The producing detection's stable name, when one stamped it: a native
+    /// registry name (see [`Detection::name`]), or the library script name
+    /// for script hits. `None` for producers that have no per-detection name
+    /// (capa imports, the LLM pass) and for hits that predate stamping.
+    pub detection: Option<String>,
 }
 
 impl DetectionHit {
@@ -517,6 +542,8 @@ impl DetectionHit {
             artifact: None,
             // unclassified until the provenance pass reads the surrounding code
             context: None,
+            // unstamped until the registry runner names its producer
+            detection: None,
         }
     }
 
@@ -574,49 +601,6 @@ impl DetectionHit {
         // record the full site list and return self for chaining
         self.sites = sites;
         self
-    }
-
-    /// Raise this hit one confidence step (and its suspicion); returns whether it
-    /// moved.
-    ///
-    /// Steps up the `Untrusted < Unsure < Likely < Fact` scale, saturating at
-    /// `Fact`. Shared by the post-detection validator (branch-confirmed checks) and
-    /// the capa corroboration pass (agreement between capa and a native detection) —
-    /// both of which speak to the hit itself. Corroboration that only speaks to the
-    /// surrounding function goes through [`DetectionHit::strengthen_to`] instead.
-    pub fn strengthen(&mut self) -> bool {
-        let r = confidence_rank(self.confidence);
-        // already at the ceiling — nothing to do
-        if r >= 3 {
-            return false;
-        }
-        self.confidence = confidence_from_rank(r + 1);
-        self.suspicion = (self.suspicion + 15).min(95);
-        true
-    }
-
-    /// Raise this hit one confidence step, but no further than `ceiling`; returns
-    /// whether it moved.
-    ///
-    /// For corroboration that is about a hit's *neighbourhood* rather than the hit
-    /// itself. "The function this sits in is packed with evasion indicators" is good
-    /// reason to believe an indicator in it is real, so it earns a step; it is not
-    /// reason to call the indicator a fact, because it is evidence about the company
-    /// the hit keeps and not about the hit. `Fact` is for evidence that bears on the
-    /// claim directly — an independent tool asserting the same thing, a decode that
-    /// validates itself — so a neighbourhood signal is capped below it. Without the
-    /// cap a heuristic recovery lands at the top of the scale for no reason beyond
-    /// its address.
-    ///
-    /// # Arguments
-    ///
-    /// * `ceiling` - The highest confidence this corroboration may reach
-    pub fn strengthen_to(&mut self, ceiling: Confidence) -> bool {
-        // already at or past what this class of corroboration can justify
-        if confidence_rank(self.confidence) >= confidence_rank(ceiling) {
-            return false;
-        }
-        self.strengthen()
     }
 
     /// Lower this hit one confidence step (and its suspicion); returns whether it
@@ -696,28 +680,49 @@ pub fn all() -> Vec<Box<dyn Detection>> {
     detections
 }
 
-/// Run every registered detection and collect all hits.
+/// One registry detection's outcome over a single seeding pass
 ///
-/// A detection that fails is logged at ERROR (naming the detection + technique)
-/// and skipped, and the remaining detections still run: one broken Ghidra query
-/// or parse must not sink the whole report, so the tool flags everything it can
-/// still analyze. When at least one detection failed, a summary line notes that
-/// the report is partial. This never returns an error.
+/// The full roster -- including detections that produced zero hits -- is what
+/// makes "detectors that never fired" answerable offline: the registry
+/// compiled into the recording binary may differ from any later reader's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetectorRun {
+    /// The detection's stable registry name (see [`Detection::name`])
+    pub name: &'static str,
+    /// The ATT&CK technique id the detection evidences
+    pub technique: String,
+    /// How many hits the detection produced
+    pub hits: u32,
+    /// Whether the detection failed instead of completing
+    pub failed: bool,
+}
+
+/// Runs every registered detection, reporting the roster that ran
+///
+/// A detection that fails is logged at ERROR (naming the detection and
+/// technique), recorded as failed on the roster, and skipped; the remaining
+/// detections still run, so one broken Ghidra query or parse never sinks the
+/// whole report. Every returned hit is stamped with its producing
+/// detection's name. This never returns an error for a detection failure.
 ///
 /// # Arguments
 ///
 /// * `ctx` - The shared analysis context
-#[instrument(name = "detections::run_all", skip_all)]
-pub async fn run_all(ctx: &AnalysisContext) -> anyhow::Result<Vec<DetectionHit>> {
+#[instrument(name = "detections::run_all_with_roster", skip_all)]
+pub async fn run_all_with_roster(
+    ctx: &AnalysisContext,
+) -> anyhow::Result<(Vec<DetectionHit>, Vec<DetectorRun>)> {
     // accumulate hits from each detection in registry order
     let mut hits = Vec::new();
-    // count detections that failed so we can note a partial report at the end
-    let mut failed = 0usize;
+    // record every detection's outcome, hit or miss, for the roster
+    let mut roster = Vec::new();
     for detection in all() {
         // run the detection; on failure, log and continue with the rest so a single
         // broken detection never aborts the whole tool
         match detection.run(ctx).await {
-            Ok(found) => {
+            Ok(mut found) => {
+                // stamp the producer onto every hit it returned
+                stamp_detection(detection.name(), &mut found);
                 // log one concise line with the detection's hit count
                 tracing::info!(
                     detection = detection.name(),
@@ -725,11 +730,22 @@ pub async fn run_all(ctx: &AnalysisContext) -> anyhow::Result<Vec<DetectionHit>>
                     count = found.len(),
                     "detection complete"
                 );
+                roster.push(DetectorRun {
+                    name: detection.name(),
+                    technique: detection.technique().id.to_string(),
+                    hits: found.len() as u32,
+                    failed: false,
+                });
                 hits.extend(found);
             }
             Err(error) => {
                 // record the failure and keep going
-                failed += 1;
+                roster.push(DetectorRun {
+                    name: detection.name(),
+                    technique: detection.technique().id.to_string(),
+                    hits: 0,
+                    failed: true,
+                });
                 tracing::error!(
                     detection = detection.name(),
                     technique = %detection.technique().id,
@@ -740,10 +756,26 @@ pub async fn run_all(ctx: &AnalysisContext) -> anyhow::Result<Vec<DetectionHit>>
         }
     }
     // note when the report is partial so the operator sees the degraded run
+    let failed = roster.iter().filter(|run| run.failed).count();
     if failed > 0 {
         tracing::warn!(failed, "some detections failed; report is partial");
     }
-    Ok(hits)
+    Ok((hits, roster))
+}
+
+/// Stamps the producing detection's name onto hits that lack one
+///
+/// # Arguments
+///
+/// * `name` - The detection's stable registry name
+/// * `hits` - The hits the detection just produced
+fn stamp_detection(name: &'static str, hits: &mut [DetectionHit]) {
+    // never overwrite a name a detection chose to set itself
+    for hit in hits {
+        if hit.detection.is_none() {
+            hit.detection = Some(name.to_owned());
+        }
+    }
 }
 
 // ===========================================================================
@@ -1610,6 +1642,59 @@ fn build_signature_hit(
 mod tests {
     use super::*;
 
+    /// The registry's detector names are stable, unique, and nonempty
+    #[test]
+    fn registry_names_are_unique() {
+        let detections = all();
+        assert!(!detections.is_empty());
+        let mut names: Vec<&'static str> = detections.iter().map(|d| d.name()).collect();
+        names.sort_unstable();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(names.len(), before, "detector names must be unique");
+        assert!(names.iter().all(|name| !name.is_empty()));
+    }
+
+    /// Stamping names a hit's producer without overwriting an explicit one
+    #[test]
+    fn stamping_names_producers_without_overwriting() {
+        // one unstamped hit and one a detection named itself (a script hit)
+        let mut hits = vec![
+            DetectionHit::new(
+                AttackTechnique {
+                    id: "T1622".into(),
+                    name: "Debugger Evasion".into(),
+                    tactic: AttackTactic::DefenseEvasion,
+                },
+                0x1000,
+                None,
+                (Confidence::Likely, 40),
+                "test",
+                "test",
+            ),
+            {
+                let mut named = DetectionHit::new(
+                    AttackTechnique {
+                        id: "T1622".into(),
+                        name: "Debugger Evasion".into(),
+                        tactic: AttackTactic::DefenseEvasion,
+                    },
+                    0x2000,
+                    None,
+                    (Confidence::Likely, 40),
+                    "test",
+                    "test",
+                );
+                named.detection = Some("my_script".to_owned());
+                named
+            },
+        ];
+        stamp_detection("debugger_evasion", &mut hits);
+        assert_eq!(hits[0].detection.as_deref(), Some("debugger_evasion"));
+        // an explicit name a producer set is never overwritten
+        assert_eq!(hits[1].detection.as_deref(), Some("my_script"));
+    }
+
     /// A minimal technique for building test hits.
     const TECH: AttackTechnique = AttackTechnique {
         id: Cow::Borrowed("T1486"),
@@ -1636,6 +1721,8 @@ mod tests {
             source: HitSource::Native,
             artifact: None,
             context: None,
+            // unstamped here; the registry runner names native producers
+            detection: None,
         };
         // a Rust runtime function classifies as runtime noise
         let classified =
@@ -1661,7 +1748,7 @@ mod tests {
         );
         // an existing context is never overwritten
         hit.artifact = None;
-        hit.context = Some(CallContext::GatesBranch);
+        hit.context = Some(CallContext::Runtime("preexisting".to_owned()));
         assert!(
             runtime_classification(Some(Toolchain::Rust), Some("core::fmt::write"), &hit).is_none()
         );
