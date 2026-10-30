@@ -93,13 +93,14 @@ export function useAgenticListQuery<T extends AnyAgenticEntity>(
 }
 
 /**
- * Read several entities by id through the query cache; an entity that can't be read is left out.
+ * Read several entities by id through the query cache, all at once, telling an entity still being read from one that
+ * can't be read.
  *
  * @template T - The entity type.
  * @param ids - The ids to read; empty ids are skipped.
- * @returns The entities read so far, by id.
+ * @returns Each entity by id: the entity, `null` when it can't be read, or `undefined` while it is read.
  */
-export function useAgenticEntities<T extends AnyAgenticEntity>(ids: string[]): Record<string, T | undefined> {
+export function useAgenticEntityReads<T extends AnyAgenticEntity>(ids: string[]): Record<string, T | null | undefined> {
   const wanted = [...new Set(ids.filter((id) => id !== ''))];
   const queries = useQueries({
     queries: wanted.map((id) => ({
@@ -108,9 +109,21 @@ export function useAgenticEntities<T extends AnyAgenticEntity>(ids: string[]): R
       staleTime: AGENTIC_LIST_STALE_MS,
     })),
   });
-  const found: Record<string, T | undefined> = {};
+  const found: Record<string, T | null | undefined> = {};
   wanted.forEach((id, index) => {
-    found[id] = queries[index].data ?? undefined;
+    found[id] = queries[index].data;
   });
   return found;
+}
+
+/**
+ * Read several entities by id through the query cache; an entity that can't be read is left out.
+ *
+ * @template T - The entity type.
+ * @param ids - The ids to read; empty ids are skipped.
+ * @returns The entities read so far, by id.
+ */
+export function useAgenticEntities<T extends AnyAgenticEntity>(ids: string[]): Record<string, T | undefined> {
+  const reads = useAgenticEntityReads<T>(ids);
+  return Object.fromEntries(Object.entries(reads).map(([id, entity]) => [id, entity ?? undefined]));
 }

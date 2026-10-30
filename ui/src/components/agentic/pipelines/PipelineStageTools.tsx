@@ -1,12 +1,10 @@
-import { FC, useEffect, useState } from 'react';
+import { FC } from 'react';
 import styled from 'styled-components';
 
 // project imports
-import { isStageConverted } from './stages';
+import { isStageConverted, StageBacking, stageBacking } from './stages';
 import { Badge, BadgeTone, EntityLink, Mono, Muted, Table } from '@components/agentic/shared';
-import { getAgenticEntity } from '@thorpi/agentic';
-import { toolVersionLabel } from '@utilities/agentic/display';
-import { AgenticKinds } from '@models/agentic';
+import { useAgenticEntities } from '@utilities/queries/agentic';
 import { Pipeline } from '@models/pipelines';
 import { Tool, ToolInstance } from '@models/tools';
 
@@ -35,16 +33,6 @@ const StageToolsTable = styled(Table)`
   }
 `;
 
-/** What a stage's tool id resolved to. */
-interface Resolved {
-  /** The tool's name */
-  name: string;
-  /** The tool's id, for the link */
-  toolId: string;
-  /** The pinned version, or `null` when the stage follows latest */
-  pinned: string | null;
-}
-
 /** Props for {@link PipelineStageTools}. */
 interface PipelineStageToolsProps {
   /** The pipeline whose stage tools are shown */
@@ -53,33 +41,16 @@ interface PipelineStageToolsProps {
 
 /** Show the tool backing each stage of a pipeline, and mark stages that still name an image no tool backs. */
 export const PipelineStageTools: FC<PipelineStageToolsProps> = ({ pipeline }) => {
-  const [resolved, setResolved] = useState<Record<string, Resolved>>({});
   const stages = pipeline.order.flat();
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      const found: Record<string, Resolved> = {};
-      for (const [stage, id] of Object.entries(pipeline.stage_tools ?? {})) {
-        const entity = await getAgenticEntity<Tool | ToolInstance>(id, () => undefined);
-        if (!entity) continue;
-        if (entity.kind === AgenticKinds.Tool) {
-          found[stage] = { name: entity.name, toolId: entity.id, pinned: null };
-        } else {
-          const instance = entity;
-          const tool = instance.metadata.ToolInstance.tool;
-          found[stage] = {
-            name: entity.name.split('@')[0],
-            toolId: tool,
-            pinned: toolVersionLabel(instance.metadata.ToolInstance.version),
-          };
-        }
-      }
-      if (!cancelled) setResolved(found);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [pipeline]);
+  const stageTools = pipeline.stage_tools ?? {};
+  // each id is read once through the shared entity cache, all at once, so a new pipeline object reads nothing again
+  const entities = useAgenticEntities<Tool | ToolInstance>(Object.values(stageTools));
+  const resolved: Record<string, StageBacking> = {};
+  for (const [stage, id] of Object.entries(stageTools)) {
+    const entity = entities[id];
+    const backing = entity ? stageBacking(entity) : null;
+    if (backing) resolved[stage] = backing;
+  }
   return (
     <StageToolsTable data-testid="stage-tools">
       <thead>

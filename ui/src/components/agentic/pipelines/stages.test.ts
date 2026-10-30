@@ -9,6 +9,7 @@ import {
   PipelineFormValues,
   pinStageInstances,
   retainStageTools,
+  stageBacking,
   stageToolChoices,
   pinnedVersionName,
   stageToolOptions,
@@ -18,7 +19,7 @@ import {
 } from './stages';
 import { AgenticKinds } from '@models/agentic';
 import { Pipeline } from '@models/pipelines';
-import { Tool, ToolKind } from '@models/tools';
+import { Tool, ToolInstance, ToolKind } from '@models/tools';
 
 const VALID: PipelineFormValues = {
   name: ' scan ',
@@ -259,5 +260,22 @@ describe('uniqueStageName', () => {
     expect(uniqueStageName('scan', ['other'])).toBe('scan');
     expect(uniqueStageName('scan', ['scan'])).toBe('scan-2');
     expect(uniqueStageName('scan', ['scan', 'scan-2'])).toBe('scan-3');
+  });
+});
+
+describe('stageBacking', () => {
+  it('names a tool that a stage follows at latest, and the tool and version of a pinned instance', () => {
+    const tool = { kind: AgenticKinds.Tool, id: 't1', name: 'scan' } as unknown as Tool;
+    expect(stageBacking(tool)).toEqual({ name: 'scan', toolId: 't1', pinned: null });
+    const instance = {
+      kind: AgenticKinds.ToolInstance,
+      id: 'i1',
+      name: 'scan@1.2.0',
+      metadata: { ToolInstance: { tool: 't1', version: { SemVer: '1.2.0' } } },
+    } as unknown as ToolInstance;
+    expect(stageBacking(instance)).toEqual({ name: 'scan', toolId: 't1', pinned: '1.2.0' });
+    // an id of another kind, or an answer without metadata, backs nothing
+    expect(stageBacking({ kind: AgenticKinds.Agent } as unknown as Tool)).toBeNull();
+    expect(stageBacking({ kind: AgenticKinds.ToolInstance } as unknown as ToolInstance)).toBeNull();
   });
 });

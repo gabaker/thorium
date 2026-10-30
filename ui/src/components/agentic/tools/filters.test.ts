@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
 // project imports
-import { addableGroups, deprecatedCount, filterTools, NO_TOOL_FILTER, stagesBackedBy, stillOffered } from './filters';
+import { addableGroups, deprecatedCount, filterTools, NO_TOOL_FILTER, pipelineUses, stagesBackedBy, stillOffered } from './filters';
 import { AgenticKinds } from '@models/agentic';
+import { Pipeline } from '@models/pipelines';
 import { Tool, ToolKind } from '@models/tools';
 
 /** Build a tool with the given name, kind, groups, and latest version. */
@@ -98,5 +99,16 @@ describe('stillOffered', () => {
   it('keeps nothing when nothing is chosen or offered', () => {
     expect(stillOffered([], ['minerva'])).toEqual([]);
     expect(stillOffered(['juno'], [])).toEqual([]);
+  });
+});
+
+describe('pipelineUses', () => {
+  it('lists the pipelines with a stage backed by the tool or one of its versions, with those stages', () => {
+    const pipelines: Pick<Pipeline, 'name' | 'group' | 'stage_tools'>[] = [
+      { name: 'p1', group: 'g', stage_tools: { b: 'v1', a: 't', c: 'other' } },
+      { name: 'p2', group: 'g', stage_tools: { x: 'other' } },
+      { name: 'p3', group: 'h', stage_tools: undefined },
+    ];
+    expect(pipelineUses(pipelines, ['t', 'v1'])).toEqual([{ name: 'p1', group: 'g', stages: ['a', 'b'] }]);
   });
 });

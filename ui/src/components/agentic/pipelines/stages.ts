@@ -1,8 +1,9 @@
 // project imports
 import { parsePositiveInt } from '@utilities/agentic/forms';
-import { Pipeline, PipelineCreate } from '@models/pipelines';
 import { toolVersionLabel } from '@utilities/agentic/display';
-import { Tool, ToolKind, ToolVersion } from '@models/tools';
+import { AgenticKinds } from '@models/agentic';
+import { Pipeline, PipelineCreate } from '@models/pipelines';
+import { Tool, ToolInstance, ToolKind, ToolVersion } from '@models/tools';
 
 /** One stage of a pipeline being edited. */
 export interface StageRow {
@@ -249,4 +250,32 @@ export function pinStageInstances(steps: StageStep[], instanceTool: Record<strin
  */
 export function isStageConverted(pipeline: Pick<Pipeline, 'stage_tools'>, stage: string): boolean {
   return pipeline.stage_tools !== undefined && stage in pipeline.stage_tools;
+}
+
+/** The tool a pipeline stage's tool id resolved to. */
+export interface StageBacking {
+  /** The tool's name */
+  name: string;
+  /** The tool's id, for the link */
+  toolId: string;
+  /** The pinned version, or `null` when the stage follows latest */
+  pinned: string | null;
+}
+
+/**
+ * Describe the tool behind a stage from the entity its tool id names.
+ *
+ * @param entity - The tool (the stage follows latest) or tool instance (the stage is pinned) the id names.
+ * @returns The tool's name, id, and pinned version, or `null` when the id names an entity of another kind.
+ */
+export function stageBacking(entity: Tool | ToolInstance): StageBacking | null {
+  if (entity.kind === AgenticKinds.Tool) return { name: entity.name, toolId: entity.id, pinned: null };
+  // an id of another kind backs no stage, and a render must not fail on its missing instance metadata
+  if (entity.kind !== AgenticKinds.ToolInstance || !entity.metadata?.ToolInstance) return null;
+  // an instance is named `<tool>@<version>`, so the tool's name is the part before the version
+  return {
+    name: entity.name.split('@')[0],
+    toolId: entity.metadata.ToolInstance.tool,
+    pinned: toolVersionLabel(entity.metadata.ToolInstance.version),
+  };
 }

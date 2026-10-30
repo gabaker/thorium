@@ -1,5 +1,6 @@
 // project imports
 import { toolVersionLabel } from '@utilities/agentic/display';
+import { Pipeline } from '@models/pipelines';
 import { Tool, ToolKind } from '@models/tools';
 
 /** The criteria the tool list can be narrowed by. */
@@ -60,6 +61,30 @@ export function stagesBackedBy(stageTools: Record<string, string> | undefined, i
     .filter(([, id]) => ids.includes(id))
     .map(([stage]) => stage)
     .sort();
+}
+
+/** A pipeline with stages backed by a tool. */
+export interface PipelineUse {
+  /** The pipeline's name */
+  name: string;
+  /** The pipeline's group */
+  group: string;
+  /** The stages the tool backs, sorted */
+  stages: string[];
+}
+
+/**
+ * Find the pipelines with stages backed by a tool, by the tool id or by one of its instance ids.
+ *
+ * @param pipelines - The pipelines of the tool's groups.
+ * @param ids - The tool id and every instance id of the tool.
+ * @returns Each pipeline with at least one backed stage, in the order given.
+ */
+export function pipelineUses(pipelines: Pick<Pipeline, 'name' | 'group' | 'stage_tools'>[], ids: string[]): PipelineUse[] {
+  return pipelines.flatMap((pipeline) => {
+    const stages = stagesBackedBy(pipeline.stage_tools, ids);
+    return stages.length > 0 ? [{ name: pipeline.name, group: pipeline.group, stages }] : [];
+  });
 }
 
 /**

@@ -1,3 +1,4 @@
+import { useQueryClient } from '@tanstack/react-query';
 import { FC, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import styled from 'styled-components';
@@ -29,7 +30,7 @@ import {
   TextArea,
 } from '@components/agentic/shared';
 import { ActionHint } from '@components/agentic/tools/ActionHint';
-import { addableGroups, stagesBackedBy, stillOffered } from '@components/agentic/tools/filters';
+import { addableGroups, pipelineUses, stillOffered } from '@components/agentic/tools/filters';
 import { ImagePinNote } from '@components/agentic/tools/ImagePinNote';
 import { PinnedBacking } from '@components/agentic/tools/PinnedBacking';
 import { ToolVersions } from '@components/agentic/tools/ToolVersions';
@@ -41,7 +42,6 @@ import TextInput from '@components/shared/inputs/TextInput';
 import Time from '@components/shared/Time';
 import { getAgenticEntity, listToolInstances } from '@thorpi/agentic';
 import { deleteEntity, updateEntity } from '@thorpi/entities';
-import { listPipelines } from '@thorpi/pipelines';
 import {
   deleteBlockReason,
   editBlockReason,
@@ -67,8 +67,9 @@ import {
 } from '@utilities/agentic/display';
 import { pinnedToolInstance } from '@utilities/agentic/pins';
 import { useAuth } from '@utilities/auth';
+import { agenticKeys, useAgenticEntityReads } from '@utilities/queries/agentic';
+import { usePipelineListQuery } from '@utilities/queries/pipelines';
 import { AgenticKinds } from '@models/agentic';
-import { Pipeline } from '@models/pipelines';
 import { Tool, ToolInstance, ToolKind, ToolVersion } from '@models/tools';
 
 /** The intro sentence of a section, set apart from the field that follows it. */
@@ -88,16 +89,6 @@ const Block = styled.div`
   margin-bottom: 1rem;
 `;
 
-/** A pipeline of the tool's groups that has stages backed by the tool. */
-interface PipelineUse {
-  /** The pipeline's name */
-  name: string;
-  /** The pipeline's group */
-  group: string;
-  /** The stages the tool backs */
-  stages: string[];
-}
-
 /** Where on the page the result of an action shows, so it appears beside the control that was used. */
 type FeedbackArea = 'page' | 'versions' | 'publish' | 'edit';
 
@@ -109,6 +100,7 @@ type FeedbackArea = 'page' | 'versions' | 'publish' | 'edit';
  */
 const ToolPage: FC<{ id: string }> = ({ id }) => {
   const navigate = useNavigate();
+  const client = useQueryClient();
   // a tool can only gain groups where the user may edit and that allow entities
   const myGroups = useEditableGroupNames();
   const { userInfo } = useAuth();
@@ -118,8 +110,14 @@ const ToolPage: FC<{ id: string }> = ({ id }) => {
   const editReason = editBlockReason(groupDetails, userInfo);
   // why the user couldn't delete a version another user submitted; empty when they could
   const othersVersionReason = deleteBlockReason(groupDetails, userInfo, '');
-  // who submitted each version: a name once read, or null when it can't be read
-  const [submitters, setSubmitters] = useState<Record<string, string | null>>({});
+  const versionIds = (tool?.metadata.Tool.instances ?? []).map((entry) => entry.id);
+  // who submitted each version matters only when the user can't delete versions others submitted; each version is read
+  // once, all at once, through the shared entity cache
+  const versionReads = useAgenticEntityReads<ToolInstance>(othersVersionReason === '' ? [] : versionIds);
+  // who submitted each version: a name once read, null when it can't be read, or undefined while it is read
+  const submitters = Object.fromEntries(
+    Object.entries(versionReads).map(([version, read]) => [version, read === undefined ? undefined : (read?.submitter ?? null)]),
+  );
   // deleting the tool deletes every version, so a version the user can't delete blocks it too
   const deleteReason = toolDeleteBlockReason(
     groupDetails,
@@ -128,7 +126,9 @@ const ToolPage: FC<{ id: string }> = ({ id }) => {
     (tool?.metadata.Tool.instances ?? []).map((entry) => submitters[entry.id]),
   );
   const [selected, setSelected] = useState('');
-  const [uses, setUses] = useState<PipelineUse[]>([]);
+  // the pipelines of the tool's groups, read through the cache every pipeline list shares
+  const pipelineList = usePipelineListQuery(tool?.groups ?? [], tool !== null);
+  const uses = useMemo(() => (tool ? pipelineUses(pipelineList.pipelines, [tool.id, ...versionIds]) : []), [tool, pipelineList.pipelines]);
   const [error, setError] = useState('');
   // the kind an opened id turned out to be when it is not a tool
   const [other, setOther] = useState<{ id: string; kind: string } | null>(null);
@@ -193,7 +193,8 @@ const ToolPage: FC<{ id: string }> = ({ id }) => {
     }).then((found) => {
       if (cancelled) return;
       setInstance(found);
-      if (found) setSubmitters((current) => ({ ...current, [found.id]: found.submitter }));
+      // the version read is shared, so its submitter is not read again
+      if (found) client.setQueryData(agenticKeys.entity(found.id), found);
       // start the publish form from the latest spec so a change is a small edit
       if (found && found.id === tool?.metadata.Tool.latest) {
         setPublishSpec((current) => (current === '' ? specToText(found.metadata.ToolInstance.spec) : current));
@@ -218,44 +219,6 @@ const ToolPage: FC<{ id: string }> = ({ id }) => {
       cancelled = true;
     };
   }, [selected, tool?.metadata.Tool.latest]);
-
-  // read who submitted each version when that decides whether the user may delete it
-  useEffect(() => {
-    if (!tool || othersVersionReason === '') return;
-    let cancelled = false;
-    const unread = (tool.metadata.Tool.instances ?? []).map((entry) => entry.id).filter((entry) => !(entry in submitters));
-    if (unread.length === 0) return;
-    void Promise.all(unread.map((entry) => getAgenticEntity<ToolInstance>(entry, () => undefined))).then((read) => {
-      if (cancelled) return;
-      setSubmitters((current) => {
-        const next = { ...current };
-        unread.forEach((entry, index) => {
-          next[entry] = read[index]?.submitter ?? null;
-        });
-        return next;
-      });
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [tool, othersVersionReason, submitters]);
-
-  // find the pipelines whose stages this tool backs
-  useEffect(() => {
-    if (!tool) return;
-    const ids = [tool.id, ...(tool.metadata.Tool.instances ?? []).map((entry) => entry.id)];
-    void (async () => {
-      const found: PipelineUse[] = [];
-      for (const group of tool.groups) {
-        const pipelines = (await listPipelines(group, () => undefined, true)) as Pipeline[] | null;
-        for (const pipeline of pipelines ?? []) {
-          const stages = stagesBackedBy(pipeline.stage_tools, ids);
-          if (stages.length > 0) found.push({ name: pipeline.name, group: pipeline.group, stages });
-        }
-      }
-      setUses(found);
-    })();
-  }, [tool]);
 
   /**
    * Run an action, then show its result beside the control it came from and read the tool again.
