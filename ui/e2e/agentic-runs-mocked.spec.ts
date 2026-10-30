@@ -256,11 +256,11 @@ test.describe('run pages (mocked)', () => {
     await mockAuth(page, { ...MOCK_USER, groups: ['a'] });
     let inFlight = 0;
     let most = 0;
-    // each request takes a second, so one sweep of five requests outlasts the refresh period
+    // each request takes 2.5 s, so one sweep of five requests (four at once, then one) takes about 5 s, outlasting the 3 s refresh period
     const slow = async (route: Route) => {
       inFlight += 1;
       most = Math.max(most, inFlight);
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      await new Promise((resolve) => setTimeout(resolve, 2_500));
       inFlight -= 1;
       return json(route, { details: [makeRun({ group: 'a', status: 'Started' })] });
     };
@@ -272,7 +272,9 @@ test.describe('run pages (mocked)', () => {
     await page.waitForTimeout(500);
     most = inFlight;
     await page.waitForTimeout(12_000);
-    expect(most).toBe(1);
+    // a sweep reads at most four listings at once, so more than four in flight would mean two sweeps overlapped
+    expect(most).toBeGreaterThan(1);
+    expect(most).toBeLessThanOrEqual(4);
   });
 
   test('a sweep where every request fails keeps the rows and keeps polling', async ({ page }) => {

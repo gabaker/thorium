@@ -26,6 +26,7 @@ import { Button, ButtonVariant } from '@components/shared/buttons';
 import { Tabs } from '@components/shared/tabs';
 import { listRunsByStatus, listRunsByTag, RunPage } from '@thorpi/runs';
 import { useAuth } from '@utilities/auth';
+import { mapWithConcurrency } from '@utilities/concurrency';
 import { rereadRuns } from '@utilities/queries/runs';
 import { isRunFinished, runKind } from '@utilities/runs';
 import { Reaction, ReactionStatus } from '@models/reactions';
@@ -53,6 +54,9 @@ const MAX_REFRESH_MS = 30_000;
 
 /** How much longer each reload of an unchanged list waits than the one before. */
 const REFRESH_BACKOFF = 1.5;
+
+/** The most listing pages read at once, so a user in many groups doesn't send every listing together. */
+const LIST_CONCURRENCY = 4;
 
 /** The listings read for each group: the workflow run tag, and each status. */
 const SOURCES: (typeof WORKFLOW_RUN_TAG | ReactionStatus)[] = [WORKFLOW_RUN_TAG, ...Object.values(ReactionStatus)];
@@ -116,7 +120,6 @@ export interface SweepRead {
 export async function readSweep(groups: string[], shown: Reaction[] | null, onError: (message: string) => void): Promise<SweepRead> {
   let failures = 0;
   let rereadFailures = 0;
-  let requests = 0;
   // count each failed listing read before reporting it
   const failed = (message: string) => {
     failures += 1;
@@ -129,15 +132,15 @@ export async function readSweep(groups: string[], shown: Reaction[] | null, onEr
   };
   const lists: Reaction[][] = [];
   const next: PageCursor[] = [];
-  for (const name of groups) {
-    for (const source of SOURCES) {
-      requests += 1;
-      const page = await readPage(name, source, undefined, failed);
-      if (!page) continue;
-      lists.push(page.runs);
-      if (page.cursor !== null) next.push({ group: name, source, cursor: page.cursor });
-    }
-  }
+  // every listing of every group, read a few at a time
+  const listings = groups.flatMap((group) => SOURCES.map((source) => ({ group, source })));
+  const requests = listings.length;
+  const pages = await mapWithConcurrency(listings, LIST_CONCURRENCY, ({ group, source }) => readPage(group, source, undefined, failed));
+  pages.forEach((page, index) => {
+    if (!page) return;
+    lists.push(page.runs);
+    if (page.cursor !== null) next.push({ ...listings[index], cursor: page.cursor });
+  });
   // the stale rows are read again only when some listing answered, so a refresh with the API down reads nothing more
   let reread: Reaction[] = [];
   let gone: string[] = [];
@@ -240,16 +243,17 @@ const RunBrowsing: FC = () => {
     setError('');
     const lists: Reaction[][] = [];
     const remaining: PageCursor[] = [];
-    for (const entry of more) {
-      const page = await readPage(entry.group, entry.source, entry.cursor, setError);
+    const pages = await mapWithConcurrency(more, LIST_CONCURRENCY, (entry) => readPage(entry.group, entry.source, entry.cursor, setError));
+    pages.forEach((page, index) => {
+      const entry = more[index];
       // a failed page keeps its cursor so the next click retries it
       if (!page) {
         remaining.push(entry);
-        continue;
+        return;
       }
       lists.push(page.runs);
       if (page.cursor !== null) remaining.push({ ...entry, cursor: page.cursor });
-    }
+    });
     // a group change while the pages were read makes them belong to rows no longer shown
     if (started !== epoch.current) return;
     setRuns((shown) => mergeRuns([shown, ...lists]));

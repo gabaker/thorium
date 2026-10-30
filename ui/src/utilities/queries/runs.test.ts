@@ -11,6 +11,7 @@ import {
   isGone,
   MAX_POLL_FAILURES,
   reactionKey,
+  REREAD_CONCURRENCY,
   rereadRuns,
   RunReadError,
   runRefetchInterval,
@@ -68,6 +69,21 @@ describe('rereadRuns', () => {
     // only the run the API cannot find is gone; a 401 keeps its row like any other failure
     expect(gone).toEqual(['deleted']);
     expect(errors).toEqual(['Get Reaction: signed-out', 'Get Reaction: flaky']);
+  });
+  it('reads a page of stale rows a few at a time instead of all at once', async () => {
+    let inFlight = 0;
+    let most = 0;
+    vi.mocked(getReaction).mockImplementation(async (_group, id) => {
+      inFlight += 1;
+      most = Math.max(most, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      inFlight -= 1;
+      return { id, group: 'g', status: ReactionStatus.Completed } as Reaction;
+    });
+    const shown = Array.from({ length: 20 }, (_, index) => ({ id: `r${index}`, group: 'g', status: ReactionStatus.Started }) as Reaction);
+    const { found } = await rereadRuns(shown, () => undefined);
+    expect(found).toHaveLength(20);
+    expect(most).toBe(REREAD_CONCURRENCY);
   });
 });
 

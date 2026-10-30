@@ -7,6 +7,7 @@ import { Query, QueryClient, useQuery, useQueryClient } from '@tanstack/react-qu
 import { getPipeline } from '@thorpi/pipelines';
 import { getReaction, getReactionLogs } from '@thorpi/reactions';
 import { getRunStageLogs, listSubRuns } from '@thorpi/runs';
+import { mapWithConcurrency } from '@utilities/concurrency';
 import { isRunFinished, recordedStageOrder, runKind } from '@utilities/runs';
 import { Reaction, StatusUpdate } from '@models/reactions';
 import { RunKind } from '@models/runs';
@@ -98,8 +99,11 @@ export async function fetchReaction(group: string, id: string): Promise<Reaction
   return found;
 }
 
+/** The most reads of runs by id in flight at once, so a page of stale rows doesn't burst the API. */
+export const REREAD_CONCURRENCY = 4;
+
 /**
- * Read runs again by id, one request per run, all at once.
+ * Read runs again by id, one request per run, at most {@link REREAD_CONCURRENCY} at once.
  *
  * @param runs - The runs to read again.
  * @param onError - Called with the message of each read that failed for a reason other than the run being gone.
@@ -108,18 +112,16 @@ export async function fetchReaction(group: string, id: string): Promise<Reaction
 export async function rereadRuns(runs: Reaction[], onError: (message: string) => void): Promise<{ found: Reaction[]; gone: string[] }> {
   const found: Reaction[] = [];
   const gone: string[] = [];
-  await Promise.all(
-    runs.map(async (run) => {
-      try {
-        found.push(await fetchReaction(run.group, run.id));
-      } catch (error: unknown) {
-        // only a run the API cannot find leaves the list; a refused read (an expired session answers 401) or any other
-        // failure keeps its row for the next refresh to retry
-        if (error instanceof RunReadError && error.status === 404) gone.push(run.id);
-        else onError(error instanceof Error ? error.message : String(error));
-      }
-    }),
-  );
+  await mapWithConcurrency(runs, REREAD_CONCURRENCY, async (run) => {
+    try {
+      found.push(await fetchReaction(run.group, run.id));
+    } catch (error: unknown) {
+      // only a run the API cannot find leaves the list; a refused read (an expired session answers 401) or any other
+      // failure keeps its row for the next refresh to retry
+      if (error instanceof RunReadError && error.status === 404) gone.push(run.id);
+      else onError(error instanceof Error ? error.message : String(error));
+    }
+  });
   return { found, gone };
 }
 

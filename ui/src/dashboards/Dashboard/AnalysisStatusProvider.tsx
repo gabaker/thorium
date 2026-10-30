@@ -3,6 +3,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 // project imports
 import { useDashboardData } from './DashboardDataProvider';
 import { useAuth } from '@utilities/auth';
+import { mapWithConcurrency } from '@utilities/concurrency';
 import { listReactions } from '@thorpi/reactions';
 import { Reaction } from '@models/reactions';
 
@@ -75,23 +76,14 @@ export async function fetchDashboardReactions(
   errorHandler: (error: string) => void,
 ): Promise<Reaction[]> {
   const byId = new Map<string, Reaction>();
-  // materialize every (group, file) pair, then drain them through a fixed set of workers so at most
-  // REACTIONS_CONCURRENCY lookups are in flight at once
+  // materialize every (group, file) pair, then drain them so at most REACTIONS_CONCURRENCY lookups are in flight at once
   const pairs: { group: string; sha256: string }[] = [];
   for (const group of groups) {
     for (const sha256 of sha256s) {
       pairs.push({ group, sha256 });
     }
   }
-  let next = 0;
-  const worker = async (): Promise<void> => {
-    while (next < pairs.length) {
-      // claim the next pair index atomically (single-threaded JS: the increment can't interleave)
-      const { group, sha256 } = pairs[next++];
-      await fetchPairReactions(group, sha256, byId, errorHandler);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(REACTIONS_CONCURRENCY, pairs.length) }, () => worker()));
+  await mapWithConcurrency(pairs, REACTIONS_CONCURRENCY, ({ group, sha256 }) => fetchPairReactions(group, sha256, byId, errorHandler));
   return Array.from(byId.values());
 }
 
