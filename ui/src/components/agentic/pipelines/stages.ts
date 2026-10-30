@@ -245,7 +245,7 @@ export function pinStageInstances(steps: StageStep[], instanceTool: Record<strin
  *
  * @param pipeline - The pipeline.
  * @param stage - The stage's name.
- * @returns `true` when the stage has a stage tool; a stage without one is a legacy image stage.
+ * @returns `true` when the stage has a stage tool; a stage without one names an image no tool backs.
  */
 export function isStageConverted(pipeline: Pick<Pipeline, 'stage_tools'>, stage: string): boolean {
   return pipeline.stage_tools !== undefined && stage in pipeline.stage_tools;

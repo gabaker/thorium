@@ -48,7 +48,7 @@ describe('addToolStage', () => {
     expect(second.order).toEqual(['scanner', 'scanner-2']);
     expect(second.stageTools).toEqual({ scanner: 'tool-scanner', 'scanner-2': 'tool-scanner' });
   });
-  it('avoids the name of a legacy image stage that has no tool', () => {
+  it('avoids the name of an image stage that has no tool', () => {
     const legacy: PipelineEdit = { order: ['scanner'], stageTools: {} };
     const added = addToolStage(legacy, SCANNER, PAST_END);
     expect(added.order).toEqual(['scanner', 'scanner-2']);

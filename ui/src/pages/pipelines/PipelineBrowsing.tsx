@@ -200,8 +200,8 @@ const PipelineBrowsing: FC = () => {
       <NoteRow>
         <AlertBanner severity={Severity.Info}>
           <span data-testid="pipelines-note">
-            Pipeline stages run tools. A stage marked <b>legacy</b> still names an image that no tool backs and cannot be run until a tool
-            is chosen for it.
+            Pipeline stages run tools. A pipeline marked <b>needs a tool</b> has a stage that still names an image that no tool backs and
+            cannot be run until a tool is chosen for it.
           </span>
         </AlertBanner>
       </NoteRow>

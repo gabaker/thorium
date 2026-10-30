@@ -108,7 +108,7 @@ const ToolBrowsing: FC = () => {
       <BannerSlot>
         <AlertBanner severity={Severity.Info}>
           Tools replace images. Each tool has immutable versions (tool instances); publish a new version to change what runs. Images created
-          before tools existed are still listed under the legacy Images page; pipelines run tools.
+          before tools existed are still listed on the Images page; pipelines run tools.
         </AlertBanner>
         {error !== '' && (
           <AlertBanner severity={Severity.Error}>

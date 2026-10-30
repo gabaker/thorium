@@ -53,6 +53,6 @@ export function buildPipelineRunRequest(inputs: PipelineRunInputs): ReactionRequ
 export function pipelineBlocker(pipeline: Pick<Pipeline, 'bans' | 'order' | 'stage_tools'>): string | null {
   if (pipeline.bans && Object.keys(pipeline.bans).length > 0) return 'The pipeline has bans and cannot be run';
   const missing = pipeline.order.flat().filter((stage) => !(pipeline.stage_tools && stage in pipeline.stage_tools));
-  if (missing.length > 0) return `These stages are legacy images with no tool: ${missing.join(', ')}`;
+  if (missing.length > 0) return `These stages name an image with no tool: ${missing.join(', ')}`;
   return null;
 }

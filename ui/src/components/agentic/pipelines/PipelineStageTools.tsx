@@ -51,7 +51,7 @@ interface PipelineStageToolsProps {
   pipeline: Pipeline;
 }
 
-/** Show the tool backing each stage of a pipeline, and mark stages that still run a legacy image. */
+/** Show the tool backing each stage of a pipeline, and mark stages that still name an image no tool backs. */
 export const PipelineStageTools: FC<PipelineStageToolsProps> = ({ pipeline }) => {
   const [resolved, setResolved] = useState<Record<string, Resolved>>({});
   const stages = pipeline.order.flat();
@@ -105,7 +105,7 @@ export const PipelineStageTools: FC<PipelineStageToolsProps> = ({ pipeline }) =>
                     </Muted>
                   )
                 ) : (
-                  <Badge $tone={BadgeTone.Legacy}>legacy image: no tool backs this stage</Badge>
+                  <Badge $tone={BadgeTone.Legacy}>needs a tool: no tool backs this stage</Badge>
                 )}
               </td>
               <td>

@@ -47,7 +47,7 @@ const CONVERTED = {
   stage_tools: { unpack: EXTRACT.id, scan: SCAN.id },
 };
 
-/** A pipeline of legacy image stages: its stages are image names and no tool backs them. */
+/** A pipeline of image stages: its stages are image names and no tool backs them. */
 const LEGACY = { group: MOCK_GROUP, name: 'legacy', creator: 'test', order: ['old-image'], sla: 86400, triggers: {} };
 
 /** The body of each PATCH the page sent, newest last. */
@@ -183,11 +183,11 @@ test.describe('pipeline order diagram', () => {
     expect(patches[0]['add_stage_tools']).toEqual({ extract: EXTRACT.id });
   });
 
-  test('a pipeline of legacy image stages shows its image stages and a stage added to it carries only its own tool', async ({ page }) => {
+  test('a pipeline of image stages shows its image stages and a stage added to it carries only its own tool', async ({ page }) => {
     const patches = await mockPipelines(page, [SCAN, EXTRACT]);
     await openPipeline(page, 1, 1);
     await expect(page.locator('.react-flow__node-imageStep')).toHaveText(['old-image']);
-    await expect(page.getByTestId('stage-tool-row-old-image')).toContainText('legacy image');
+    await expect(page.getByTestId('stage-tool-row-old-image')).toContainText('needs a tool');
     await openAddMenu(page);
     await page.getByRole('option', { name: 'scan · follow latest' }).click();
     await page.getByRole('button', { name: 'Apply' }).click();

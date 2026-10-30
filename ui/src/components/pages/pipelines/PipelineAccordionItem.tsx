@@ -103,8 +103,8 @@ const PipelineAccordionItem: FC<PipelineAccordionItemProps> = ({
         <div className="accordion-item-status">
           {pipeline.order.flat().some((stage) => !isStageConverted(pipeline, stage)) && (
             <OverlayTipRight tip="Some stages name an image that no tool backs, so this pipeline cannot be run.">
-              <Badge $tone={BadgeTone.Legacy} data-testid="legacy-badge">
-                legacy image
+              <Badge $tone={BadgeTone.Legacy} data-testid="needs-tool-badge">
+                needs a tool
               </Badge>
             </OverlayTipRight>
           )}

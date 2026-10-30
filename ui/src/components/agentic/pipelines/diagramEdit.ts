@@ -51,7 +51,7 @@ export function addToolStage(edit: PipelineEdit, option: StageToolOption, flowX:
  * @param edit - The pipeline as it is now.
  * @param step - The index of the stage's step.
  * @param parallel - The index of the stage within its step.
- * @returns The pipeline without the stage; a legacy stage with no tool is removed the same way.
+ * @returns The pipeline without the stage; a stage with no tool is removed the same way.
  */
 export function removeToolStage(edit: PipelineEdit, step: number, parallel: number): PipelineEdit {
   const order = removeImageAtPosition(edit.order, step, parallel);

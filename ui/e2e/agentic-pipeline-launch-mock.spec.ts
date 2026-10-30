@@ -3,7 +3,7 @@ import { test } from '@playwright/test';
 import { expect, fulfillJson, MOCK_GROUP } from './agentic-mocks';
 import { setupMockAuth } from './helpers';
 
-// a pipeline with a legacy image stage: the stage has no stage tool, so the API refuses to run it
+// a pipeline with an image stage: the stage has no stage tool, so the API refuses to run it
 const LEGACY_PIPELINE = { group: MOCK_GROUP, name: 'legacy-pipe', order: [['harvest']], sla: 3600, creator: 'test', bans: {} };
 
 test.describe('pipeline launch form', () => {

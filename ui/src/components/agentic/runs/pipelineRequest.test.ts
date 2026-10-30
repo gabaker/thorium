@@ -32,9 +32,7 @@ describe('pipelineBlocker', () => {
     expect(pipelineBlocker({ order: [['a']], stage_tools: { a: 't' }, bans: { x: ban } })).toMatch(/bans/);
   });
   it('names the stages with no tool', () => {
-    expect(pipelineBlocker({ order: [['a'], ['b', 'c']], stage_tools: { a: 't' } })).toBe(
-      'These stages are legacy images with no tool: b, c',
-    );
+    expect(pipelineBlocker({ order: [['a'], ['b', 'c']], stage_tools: { a: 't' } })).toBe('These stages name an image with no tool: b, c');
     expect(pipelineBlocker({ order: [['a']] })).toMatch(/a$/);
   });
 });
