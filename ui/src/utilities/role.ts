@@ -58,22 +58,28 @@ export interface RoleBadgeMeta {
   className: string;
 }
 
+/// Display metadata for a Thorium role badge
+export interface ThoriumRoleBadgeMeta extends RoleBadgeMeta {
+  /// The CSS colour of the badge, the same colour its class paints
+  color: string;
+}
+
 // Thorium-wide role badge styling, keyed by role
-const THORIUM_ROLE_BADGES: Record<RoleKey, RoleBadgeMeta> = {
-  [RoleKey.Admin]: { label: 'Admin', className: 'bg-maroon' },
-  [RoleKey.Analyst]: { label: 'Analyst', className: 'bg-goldenrod' },
-  [RoleKey.Developer]: { label: 'Developer', className: 'bg-corn-flower' },
-  [RoleKey.User]: { label: 'User', className: 'bg-cadet' },
-  [RoleKey.Disabled]: { label: 'Disabled', className: 'bg-grey' },
+const THORIUM_ROLE_BADGES: Record<RoleKey, ThoriumRoleBadgeMeta> = {
+  [RoleKey.Admin]: { label: 'Admin', className: 'bg-maroon', color: '#6f1f2b' },
+  [RoleKey.Analyst]: { label: 'Analyst', className: 'bg-goldenrod', color: 'goldenrod' },
+  [RoleKey.Developer]: { label: 'Developer', className: 'bg-corn-flower', color: 'cornflowerblue' },
+  [RoleKey.User]: { label: 'User', className: 'bg-cadet', color: 'cadetblue' },
+  [RoleKey.Disabled]: { label: 'Disabled', className: 'bg-grey', color: '#999999' },
 };
 
 /**
- * Get the badge display metadata (label + color class) for a user's Thorium role.
+ * Get the badge display metadata (label, color class, and colour) for a user's Thorium role.
  *
  * @param role - The serialized {@link ThoriumRole} to render a badge for.
- * @returns The {@link RoleBadgeMeta} for that role.
+ * @returns The {@link ThoriumRoleBadgeMeta} for that role.
  */
-export function getThoriumRoleBadge(role: ThoriumRole): RoleBadgeMeta {
+export function getThoriumRoleBadge(role: ThoriumRole): ThoriumRoleBadgeMeta {
   return THORIUM_ROLE_BADGES[getThoriumRole(role)];
 }
 

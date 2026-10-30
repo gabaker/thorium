@@ -38,7 +38,7 @@ const BADGE_RADIUS = 'var(--thorium-badge-radius, 4px)';
 const BADGE_RADIUS_SMALL = 'var(--thorium-badge-radius-sm, 3px)';
 
 /** The styled badge box; {@link Badge} maps its public props onto these transient ones. */
-const BadgeBox = styled.span<{ $tone: BadgeTone; $size: BadgeSize; $wrap: boolean; $count: boolean }>`
+const BadgeBox = styled.span<{ $color: string; $size: BadgeSize; $wrap: boolean; $count: boolean }>`
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -52,8 +52,8 @@ const BadgeBox = styled.span<{ $tone: BadgeTone; $size: BadgeSize; $wrap: boolea
   /* a line no taller than the cell text, so a badge in a table row doesn't push the row taller or off its baseline */
   line-height: 1.4;
   color: var(--thorium-text);
-  border: 1px solid ${({ $tone }) => BADGE_COLORS[$tone]};
-  background: color-mix(in srgb, ${({ $tone }) => BADGE_COLORS[$tone]} 22%, transparent);
+  border: 1px solid ${({ $color }) => $color};
+  background: color-mix(in srgb, ${({ $color }) => $color} 22%, transparent);
   ${({ $wrap }) =>
     $wrap
       ? css`
@@ -85,6 +85,8 @@ export interface BadgeProps extends React.HTMLAttributes<HTMLSpanElement> {
   wrap?: boolean;
   /** Whether the badge holds a count: a minimum width and digits of equal width */
   count?: boolean;
+  /** A CSS colour that replaces the tone's, for a badge whose colour is set per value (such as a role) */
+  color?: string;
 }
 
 /**
@@ -92,8 +94,15 @@ export interface BadgeProps extends React.HTMLAttributes<HTMLSpanElement> {
  * a run of badges is spaced by the gap of its container (`InlineList`), and it centres on the line it sits in.
  */
 export const Badge = forwardRef<HTMLSpanElement, BadgeProps>(
-  ({ tone, $tone, size = BadgeSize.Medium, wrap = false, count = false, ...rest }, ref) => (
-    <BadgeBox ref={ref} $tone={tone ?? $tone ?? BadgeTone.Neutral} $size={size} $wrap={wrap} $count={count} {...rest} />
+  ({ tone, $tone, size = BadgeSize.Medium, wrap = false, count = false, color, ...rest }, ref) => (
+    <BadgeBox
+      ref={ref}
+      $color={color ?? BADGE_COLORS[tone ?? $tone ?? BadgeTone.Neutral]}
+      $size={size}
+      $wrap={wrap}
+      $count={count}
+      {...rest}
+    />
   ),
 );
 

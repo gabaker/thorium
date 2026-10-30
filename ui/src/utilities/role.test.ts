@@ -68,10 +68,10 @@ describe('getThoriumRole', () => {
 
 describe('getThoriumRoleBadge', () => {
   it('returns a label and color for every role (Analyst included)', () => {
-    expect(getThoriumRoleBadge(ADMIN)).toEqual({ label: 'Admin', className: 'bg-maroon' });
-    expect(getThoriumRoleBadge(ANALYST)).toEqual({ label: 'Analyst', className: 'bg-goldenrod' });
-    expect(getThoriumRoleBadge(DEVELOPER)).toEqual({ label: 'Developer', className: 'bg-corn-flower' });
-    expect(getThoriumRoleBadge(USER)).toEqual({ label: 'User', className: 'bg-cadet' });
+    expect(getThoriumRoleBadge(ADMIN)).toEqual({ label: 'Admin', className: 'bg-maroon', color: '#6f1f2b' });
+    expect(getThoriumRoleBadge(ANALYST)).toEqual({ label: 'Analyst', className: 'bg-goldenrod', color: 'goldenrod' });
+    expect(getThoriumRoleBadge(DEVELOPER)).toEqual({ label: 'Developer', className: 'bg-corn-flower', color: 'cornflowerblue' });
+    expect(getThoriumRoleBadge(USER)).toEqual({ label: 'User', className: 'bg-cadet', color: 'cadetblue' });
   });
 });
 

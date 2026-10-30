@@ -1,9 +1,9 @@
 import { useRef, useState } from 'react';
-import { Col, Container, Form, Row } from 'react-bootstrap';
 import { MdAdd, MdDelete } from 'react-icons/md';
 import styled from 'styled-components';
 
 // project imports
+import { Select } from '@components/agentic/shared';
 import Page from '@components/pages/Page';
 import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
 import { Badge, BadgeTone } from '@components/shared/badges/Badge';
@@ -52,49 +52,54 @@ const PillGroup = styled.div`
   gap: ${BUTTON_BADGE_GAP};
 `;
 
+// One labelled row of the profile: the label column is two twelfths of the row, so every row's values share one left edge.
+const ProfileRow = styled.div`
+  display: grid;
+  grid-template-columns: calc((100% + 1.5rem) / 6) minmax(0, 1fr);
+  gap: 0;
+  padding: 0 0.75rem;
+  align-items: start;
+`;
+
+// The theme select, as wide as its longest theme name rather than the whole row.
+const ThemeSelect = styled(Select)`
+  width: auto;
+`;
+
 type RoleProps = {
   role: ThoriumRole;
 };
 
+// each Thorium role keeps its own badge colour, as the role badge map defines
 const Role: React.FC<RoleProps> = ({ role }) => {
   const badge = getThoriumRoleBadge(role);
   return (
-    <Container>
-      <Row>
-        <Col xs={2}>
-          <Subtitle>Role</Subtitle>
-        </Col>
-        <Col>
-          {badge && (
-            <Badge tone={BadgeTone.Accent} data-testid="profile-role">
-              {badge.label}
-            </Badge>
-          )}
-        </Col>
-      </Row>
-    </Container>
+    <ProfileRow>
+      <Subtitle>Role</Subtitle>
+      <div>
+        {badge && (
+          <Badge color={badge.color} data-testid="profile-role">
+            {badge.label}
+          </Badge>
+        )}
+      </div>
+    </ProfileRow>
   );
 };
 
 const Groups = ({ groups }: { groups: string[] | undefined }) => {
   return (
-    <Container>
-      <Row>
-        <Col xs={2}>
-          <Subtitle className="me-4">Groups</Subtitle>
-        </Col>
-        <Col>
-          <PillGroup>
-            {groups &&
-              [...groups].sort().map((group: string, idx: number) => (
-                <Badge key={idx} tone={BadgeTone.Accent} data-testid="profile-group">
-                  {group}
-                </Badge>
-              ))}
-          </PillGroup>
-        </Col>
-      </Row>
-    </Container>
+    <ProfileRow>
+      <Subtitle>Groups</Subtitle>
+      <PillGroup>
+        {groups &&
+          [...groups].sort().map((group: string, idx: number) => (
+            <Badge key={idx} tone={BadgeTone.Accent} data-testid="profile-group">
+              {group}
+            </Badge>
+          ))}
+      </PillGroup>
+    </ProfileRow>
   );
 };
 
@@ -108,37 +113,18 @@ const Theme = ({ theme }: { theme: string | undefined }) => {
     });
   };
   return (
-    <Container>
-      <Row>
-        <Col xs={2}>
-          <Subtitle>Theme</Subtitle>
-        </Col>
-        <Col className="d-flex justify-content-start">
-          <Form>
-            <Form.Group>
-              <Form.Select value={theme ? theme : ''} onChange={(e) => updateTheme(String(e.target.value))}>
-                {Themes.map((theme) => (
-                  <option key={theme} value={theme}>
-                    {theme}
-                  </option>
-                ))}
-              </Form.Select>
-            </Form.Group>
-          </Form>
-        </Col>
-      </Row>
-    </Container>
+    <ProfileRow>
+      <Subtitle>Theme</Subtitle>
+      <ThemeSelect aria-label="Theme" value={theme ? theme : ''} onChange={(e) => updateTheme(String(e.target.value))}>
+        {Themes.map((theme) => (
+          <option key={theme} value={theme}>
+            {theme}
+          </option>
+        ))}
+      </ThemeSelect>
+    </ProfileRow>
   );
 };
-
-// The label column is the same two twelfths wide as the Bootstrap rows above and below, so the values share one left edge.
-const MethodSection = styled.div`
-  display: grid;
-  grid-template-columns: calc((100% + 1.5rem) / 6) minmax(0, 1fr);
-  gap: 0;
-  padding: 0 0.75rem;
-  align-items: start;
-`;
 
 const MethodBadges = styled.div`
   display: flex;
@@ -157,7 +143,7 @@ const MethodGuidance = styled.p`
 // because the current API does not expose a user's linked providers on whoami.
 const SignInMethods: React.FC<{ local?: boolean; verified?: boolean }> = ({ local, verified }) => {
   return (
-    <MethodSection>
+    <ProfileRow>
       <Subtitle>Sign-in</Subtitle>
       <div>
         <MethodBadges>
@@ -170,7 +156,7 @@ const SignInMethods: React.FC<{ local?: boolean; verified?: boolean }> = ({ loca
           confirm linking it to your account.
         </MethodGuidance>
       </div>
-    </MethodSection>
+    </ProfileRow>
   );
 };
 
@@ -370,6 +356,7 @@ const ProfileImage = () => {
 // The username centred on the title row with the page-level controls right-aligned on the same row;
 // the empty first column balances the controls so the username stays centred.
 const ProfileHeader = styled.div`
+  padding-bottom: 1rem;
   display: grid;
   grid-template-columns: 1fr auto 1fr;
   align-items: center;
@@ -387,6 +374,18 @@ const ProfileControls = styled.div`
   justify-content: flex-end;
 `;
 
+// Centres the profile card in the page.
+const ProfileLayout = styled.div`
+  display: flex;
+  justify-content: center;
+`;
+
+// Centres the avatar column in the card.
+const AvatarRow = styled.div`
+  display: flex;
+  justify-content: center;
+`;
+
 const UserProfile = () => {
   const { userInfo, refreshUserInfo } = useAuth();
   const tokenList = useScopedTokens();
@@ -398,33 +397,35 @@ const UserProfile = () => {
   };
 
   return (
-    <Page title="Profile · Thorium" className="d-flex justify-content-center">
-      <ProfileCard>
-        <ProfileHeader className="pb-3">
-          <h2>{userInfo?.username}</h2>
-          <ProfileControls>
-            <ProfileRefreshButton refreshing={refreshing} onRefresh={handleRefresh} />
-          </ProfileControls>
-        </ProfileHeader>
-        <Row className="d-flex justify-content-center">
-          <ProfileImage />
-        </Row>
-        <hr />
-        {/* Group membership */}
-        <Groups groups={userInfo?.groups} />
-        <hr />
-        {/* Thorium role (not group role) */}
-        {userInfo && <Role role={userInfo.role} />}
-        <hr />
-        {/* User Token + Scoped Tokens */}
-        <TokenView list={tokenList} />
-        <hr />
-        {/* Sign-in methods (local password / SSO + verification status) */}
-        <SignInMethods local={userInfo?.local} verified={userInfo?.verified} />
-        <hr />
-        {/* UI Theme */}
-        <Theme theme={userInfo?.settings?.theme} />
-      </ProfileCard>
+    <Page title="Profile · Thorium">
+      <ProfileLayout>
+        <ProfileCard>
+          <ProfileHeader>
+            <h2>{userInfo?.username}</h2>
+            <ProfileControls>
+              <ProfileRefreshButton refreshing={refreshing} onRefresh={handleRefresh} />
+            </ProfileControls>
+          </ProfileHeader>
+          <AvatarRow>
+            <ProfileImage />
+          </AvatarRow>
+          <hr />
+          {/* Group membership */}
+          <Groups groups={userInfo?.groups} />
+          <hr />
+          {/* Thorium role (not group role) */}
+          {userInfo && <Role role={userInfo.role} />}
+          <hr />
+          {/* User Token + Scoped Tokens */}
+          <TokenView list={tokenList} />
+          <hr />
+          {/* Sign-in methods (local password / SSO + verification status) */}
+          <SignInMethods local={userInfo?.local} verified={userInfo?.verified} />
+          <hr />
+          {/* UI Theme */}
+          <Theme theme={userInfo?.settings?.theme} />
+        </ProfileCard>
+      </ProfileLayout>
     </Page>
   );
 };

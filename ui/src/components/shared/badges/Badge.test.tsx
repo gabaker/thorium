@@ -45,6 +45,15 @@ describe('Badge', () => {
     expect(markup).toContain('data-testid="b"');
     expect(render(<Badge $tone={BadgeTone.Error}>x</Badge>).css).toContain('var(--thorium-danger-bg)');
   });
+  it('draws a given colour in place of the tone, for a badge coloured per value', () => {
+    const custom = render(
+      <Badge tone={BadgeTone.Ok} color="goldenrod">
+        Analyst
+      </Badge>,
+    ).css;
+    expect(custom).toContain('border:1px solid goldenrod');
+    expect(custom).not.toContain('var(--thorium-ok-bg)');
+  });
   it('wraps the text of a WrapBadge', () => {
     expect(render(<WrapBadge>long</WrapBadge>).css).toContain('overflow-wrap:anywhere');
   });
