@@ -73,7 +73,7 @@ grep -q "pull access denied" <<<"$out" && grep -q "hook log line" <<<"$out" && !
 check "a failed CRD hook prints its pod events and logs" $?
 # deploy reports the hook only when the thorium chart's upgrade fails
 # shellcheck disable=SC2016
-grep -A3 'helm_cmd upgrade --install "$THORIUM_RELEASE"' "$minithor" | grep -q 'report_crd_hook_failure'
+grep -A6 'helm_cmd upgrade --install "$THORIUM_RELEASE"' "$minithor" | grep -q 'report_crd_hook_failure'
 check "deploy reports the CRD hook when helm fails" $?
 # deploy verifies the local image right after loading it (the patterns are literal minithor text)
 # shellcheck disable=SC2016

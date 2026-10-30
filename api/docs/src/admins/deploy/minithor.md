@@ -169,6 +169,7 @@ minithor [--namespace-prefix <prefix>] deploy [options]
 | `--set <key.path=value>` | Extra value for the thorium chart (repeatable), for example `--set operator.cluster.components.scaler=null` to omit the k8s scaler |
 | `--skip-operators` | Don't install or upgrade the infra-operators chart |
 | `--reset-infra` | Apply the rendered backing-service sizes and settings instead of keeping the running ones (see [Kept infra settings](#kept-infra-settings)) |
+| `--force-conflicts` | Have Helm take over the fields of the thorium chart's objects that other field managers own when its server-side apply conflicts with them (`helm --server-side=true --force-conflicts`; needs Helm 4 or later, see [Troubleshooting](#troubleshooting)) |
 | `--timeout <seconds>` | Timeout for each install and for the readiness wait (default 1800) |
 
 **Chart values.** The values come, in increasing precedence, from development defaults embedded in
@@ -504,6 +505,11 @@ a fresh deployment.
   the new Thorium image before upgrading; `deploy` prints its pods' events and logs when the
   upgrade fails. A Job whose pod never started (an image no node has or can pull) fails with
   `DeadlineExceeded` after `operator.crdHook.timeoutSeconds` (600 by default).
+- **`deploy` fails with `Apply failed with ... conflict`.** Helm 4 applies the chart server-side,
+  and a field another field manager owns conflicts: an operator that updated it (such as
+  `elastic-operator` on the `Elasticsearch` node sets) or `before-first-apply`, which holds the
+  fields an earlier client-side (Helm 3) apply set. `deploy` names the fields and prints the same
+  command with `--force-conflicts`, which has Helm take them over.
 - **Pods of a `--local-image` deployment never start on an Apple-silicon Mac.** The nodes are arm64,
   and an amd64 image Docker runs through Rosetta or QEMU emulation can't run on them; `deploy`
   stops after loading such an image. Pass `--image` with a registry image that has an arm64

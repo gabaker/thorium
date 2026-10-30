@@ -1258,6 +1258,9 @@ Other:
                               running ones (infra.redis.storage, infra.scylla.storage,
                               infra.elastic.{count,storage,javaOpts,resources.limits,config});
                               storage can only grow, and Scylla refuses any rack storage change
+  --force-conflicts           Have Helm take over the fields of the thorium chart's objects that
+                              other field managers own, when its server-side apply conflicts
+                              with them (helm --server-side=true --force-conflicts; Helm 4+)
   --timeout <seconds>         Timeout for each install and the readiness wait
                               (default: 1800)
 
@@ -2082,6 +2085,112 @@ keep_live_infra() {
     rm -rf "$tmp"
 }
 
+# Succeed when this helm can force server-side apply conflicts (--force-conflicts, Helm 4 and later)
+helm_supports_force_conflicts() { "$HELM" upgrade --help 2>/dev/null | grep -q -- '--force-conflicts'; }
+
+# Print the minithor deploy command with the given options and --force-conflicts, keeping the
+# global options and hiding credentials: a --password value, the password of any URL with one
+# (such as a --proxy or --toolbox URL, hidden up to the last @ before the host), and the value of
+# each entry of a --set or --set-string list whose key names a credential, password, secret,
+# token, or key. The argument after a flag that takes a value is always that flag's value, and the
+# --flag=value forms are hidden the same way
+#
+#   deploy_retry_command <deploy options...>
+deploy_retry_command() {
+    local cmd="minithor" arg want="" name flag value shown entry rest char key in_list
+    local url_hide='s#(://[^/?#@:]*):[^/?#]*@#\1:***@#g'
+    [ -n "$NAMESPACE_PREFIX" ] && cmd+=" --namespace-prefix $NAMESPACE_PREFIX"
+    [ "$MINIKUBE_PROFILE" != "minikube" ] && cmd+=" --profile $MINIKUBE_PROFILE"
+    cmd+=" deploy"
+    for arg in "$@"; do
+        # work out which flag this argument is the value of: the flag before it when that flag
+        # takes a value, the flag in front of it in a --flag=value argument, or none
+        name="" flag="" value="$arg"
+        if [ -n "$want" ]; then
+            name="$want"
+            want=""
+        elif [[ "$arg" == --*=* ]]; then
+            name="${arg%%=*}"
+            flag="$name="
+            value="${arg#*=}"
+        else
+            case "$arg" in
+                --chart|--operators-chart|--chart-version|--values|--set|--set-string|--set-file|--user|\
+                --password|--version|--image|--local-image|--registry-user|--toolbox|--banner|\
+                --docker-config|--bin|--proxy|--no-proxy|--timeout)
+                    want="$arg" ;;
+            esac
+        fi
+        case "$name" in
+            --password) shown="<password>" ;;
+            --set|--set-string)
+                # split the list on the commas helm splits on (not an escaped \, or one inside a
+                # {a,b} list value), hiding the URL passwords in each entry and the value of each
+                # entry whose key names a credential
+                shown="" entry="" in_list=false rest="$value"
+                while :; do
+                    char="${rest:0:1}"
+                    rest="${rest:1}"
+                    if [ "$char" = "\\" ]; then
+                        entry+="$char${rest:0:1}"
+                        rest="${rest:1}"
+                        continue
+                    fi
+                    if [ -z "$char" ] || { [ "$char" = "," ] && [ "$in_list" = false ]; }; then
+                        key="$(tr '[:upper:]' '[:lower:]' <<<"${entry%%=*}")"
+                        case "$key" in
+                            *credential*|*password*|*secret*|*token*|*key*)
+                                [[ "$entry" != *=* ]] || entry="${entry%%=*}=<hidden>" ;;
+                        esac
+                        entry="$(sed -E "$url_hide" <<<"$entry")"
+                        shown+="$entry$char"
+                        [ -n "$char" ] || break
+                        entry="" in_list=false
+                        continue
+                    fi
+                    # a value starting with { is a list that runs to the closing }
+                    [ "$char" = "{" ] && [[ "$entry" == *= && "${entry%=}" != *=* ]] && in_list=true
+                    [ "$char" = "}" ] && in_list=false
+                    entry+="$char"
+                done
+                ;;
+            *) shown="$(sed -E "$url_hide" <<<"$value")" ;;
+        esac
+        if [ "$shown" = "$value" ]; then
+            cmd+=" $(printf '%q' "$arg")"
+        else
+            # a hidden value is a placeholder to fill in, so it is shown single-quoted rather than escaped
+            shown="$flag$shown"
+            cmd+=" '${shown//"'"/"'\\''"}'"
+        fi
+    done
+    echo "$cmd --force-conflicts"
+}
+
+# Explain a server-side apply conflict in a failed helm upgrade's output, which happens when Helm
+# applies server-side (Helm 4) a field another field manager owns: an operator that updated it
+# (such as elastic-operator), or before-first-apply, which holds the fields a client-side apply
+# (Helm 3) set before
+#
+#   report_apply_conflicts <helm output file> <deploy options...>
+report_apply_conflicts() {
+    local output=$1
+    shift
+    grep -qE 'Apply failed with [0-9]+ conflicts?' "$output" || return 0
+    {
+        echo "Helm's server-side apply conflicts with fields other field managers own:"
+        grep -E 'conflicts? with "|^- \.' "$output" | sed 's/.*\(conflicts\{0,1\} with "\)/\1/; s/^/  /'
+        if helm_supports_force_conflicts; then
+            echo "Deploy again with --force-conflicts, which has Helm take those fields over (the operators"
+            echo "that own them keep reconciling them):"
+            echo "  $(deploy_retry_command "$@")"
+        else
+            echo "This helm ($HELM) can't take them over; install Helm 4 or later and deploy again with"
+            echo "--force-conflicts"
+        fi
+    } >&2
+}
+
 # The thorctl config deploy logs in to: thorctl's default config for the default profile,
 # and a separate one for any other profile so a deploy never replaces another cluster's login
 thorctl_config_path() {
@@ -2335,7 +2444,8 @@ cmd_deploy() {
     local image="" local_image="" image_repo="" pull_policy=""
     local registry_user="" toolbox="$DEFAULT_TOOLBOX_URL" banner="" docker_config=""
     local bin_dir="/usr/local/bin" kibana=true skip_operators=false thorctl=true
-    local timeout=1800 reset_infra=false
+    local timeout=1800 reset_infra=false force_conflicts=false
+    local -a deploy_args=("$@")
     local proxy="${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}"
     local extra_no_proxy=""
     local -a user_values=() user_sets=()
@@ -2366,6 +2476,7 @@ cmd_deploy() {
             --no-proxy)        need_value "$1" $#; extra_no_proxy="$2"; shift ;;
             --skip-operators)  skip_operators=true ;;
             --reset-infra)     reset_infra=true ;;
+            --force-conflicts) force_conflicts=true ;;
             --timeout)         need_value "$1" $#; need_number "$1" "$2"; timeout="$2"; shift ;;
             *) echo "Unknown option: $1"; usage_deploy; exit 1 ;;
         esac
@@ -2415,6 +2526,15 @@ cmd_deploy() {
     log "Preparing Helm and the charts"
     ensure_helm
     echo "Using helm $("$HELM" version --template '{{.Version}}') at $HELM"
+    # --force-conflicts has Helm's server-side apply take over fields other managers own
+    local -a conflict_args=()
+    if [ "$force_conflicts" = true ]; then
+        if ! helm_supports_force_conflicts; then
+            echo "ERROR: --force-conflicts needs Helm 4 or later, and $HELM doesn't support it" >&2
+            exit 1
+        fi
+        conflict_args=(--server-side=true --force-conflicts)
+    fi
     resolve_charts "$chart" "$operators_chart" "$chart_version"
     check_single_deployment
 
@@ -2547,8 +2667,13 @@ cmd_deploy() {
     fi
 
     log "Deploying Thorium into $THORIUM_NAMESPACE"
+    # helm's output is kept to explain a failure
+    local helm_output
+    helm_output="${MINITHOR_STATE_DIR}/helm-upgrade$(profile_suffix).log"
     if ! helm_cmd upgrade --install "$THORIUM_RELEASE" "$THORIUM_CHART" ${THORIUM_CHART_ARGS[@]+"${THORIUM_CHART_ARGS[@]}"} \
-        -n "$THORIUM_NAMESPACE" --create-namespace "${values_args[@]}" --reset-values --timeout "${timeout}s"; then
+        -n "$THORIUM_NAMESPACE" --create-namespace "${values_args[@]}" --reset-values --timeout "${timeout}s" \
+        ${conflict_args[@]+"${conflict_args[@]}"} 2>&1 | tee "$helm_output"; then
+        report_apply_conflicts "$helm_output" ${deploy_args[@]+"${deploy_args[@]}"}
         report_crd_hook_failure "$THORIUM_NAMESPACE"
         exit 1
     fi

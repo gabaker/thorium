@@ -93,6 +93,11 @@ Pass `--reset-infra` to apply the rendered values instead (storage can only grow
 refuses any change to its rack storage), or set a key such as `infra.redis.storage` with `--set`
 to change one setting on purpose.
 
+With Helm 4, which applies charts server-side, an upgrade can fail with `Apply failed with ...
+conflict` when another field manager (an operator, or `before-first-apply` for fields a Helm 3
+install set) owns a field the chart changes. `deploy` names the fields and prints the same command
+with `--force-conflicts`, which has Helm take them over.
+
 ## Existing minithor deployments
 
 A deployment made by a minithor from before the Helm charts must be converted with
