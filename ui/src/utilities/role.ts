@@ -50,79 +50,76 @@ export function getGroupRole(group: Group, user: string): GroupRoleKey | '' {
   }
 }
 
-/// Display metadata for a role badge
+/** Display metadata for a role badge. */
 export interface RoleBadgeMeta {
-  /// The text shown on the badge
+  /** The text shown on the badge */
   label: string;
-  /// The theme color class for the badge background
-  className: string;
-}
-
-/// Display metadata for a Thorium role badge
-export interface ThoriumRoleBadgeMeta extends RoleBadgeMeta {
-  /// The CSS colour of the badge, the same colour its class paints
+  /** The CSS colour of the badge */
   color: string;
 }
 
-// Thorium-wide role badge styling, keyed by role
-const THORIUM_ROLE_BADGES: Record<RoleKey, ThoriumRoleBadgeMeta> = {
-  [RoleKey.Admin]: { label: 'Admin', className: 'bg-maroon', color: '#6f1f2b' },
-  [RoleKey.Analyst]: { label: 'Analyst', className: 'bg-goldenrod', color: 'goldenrod' },
-  [RoleKey.Developer]: { label: 'Developer', className: 'bg-corn-flower', color: 'cornflowerblue' },
-  [RoleKey.User]: { label: 'User', className: 'bg-cadet', color: 'cadetblue' },
-  [RoleKey.Disabled]: { label: 'Disabled', className: 'bg-grey', color: '#999999' },
+/** The colour of the Admin badge, both Thorium-wide and in a group. */
+const ADMIN_COLOR = '#6f1f2b';
+
+/** Thorium-wide role badges, keyed by role. */
+const THORIUM_ROLE_BADGES: Record<RoleKey, RoleBadgeMeta> = {
+  [RoleKey.Admin]: { label: 'Admin', color: ADMIN_COLOR },
+  [RoleKey.Analyst]: { label: 'Analyst', color: 'goldenrod' },
+  [RoleKey.Developer]: { label: 'Developer', color: 'cornflowerblue' },
+  [RoleKey.User]: { label: 'User', color: 'cadetblue' },
+  [RoleKey.Disabled]: { label: 'Disabled', color: '#999999' },
 };
 
 /**
- * Get the badge display metadata (label, color class, and colour) for a user's Thorium role.
+ * Get the badge display metadata (label and colour) for a user's Thorium role.
  *
  * @param role - The serialized {@link ThoriumRole} to render a badge for.
- * @returns The {@link ThoriumRoleBadgeMeta} for that role.
+ * @returns The {@link RoleBadgeMeta} for that role.
  */
-export function getThoriumRoleBadge(role: ThoriumRole): ThoriumRoleBadgeMeta {
+export function getThoriumRoleBadge(role: ThoriumRole): RoleBadgeMeta {
   return THORIUM_ROLE_BADGES[getThoriumRole(role)];
 }
 
-/// Display metadata for a group role badge, including its tooltip
+/** Display metadata for a group role badge, including its tooltip. */
 export interface GroupRoleBadgeMeta extends RoleBadgeMeta {
-  /// The tooltip describing the role's abilities
+  /** The tooltip describing the role's abilities */
   tooltip: string;
 }
 
-// Group role badge styling and tooltips, keyed by group role
+/** Group role badges and their tooltips, keyed by group role. */
 const GROUP_ROLE_BADGES: Record<GroupRoleKey, GroupRoleBadgeMeta> = {
   [GroupRoleKey.Owner]: {
     label: 'Owner',
-    className: 'bg-dark-slate',
+    color: 'darkslateblue',
     tooltip:
       'You are an Owner of this group. Owners can add/remove any member within the group. An owner can also access and edit all group resources.',
   },
   [GroupRoleKey.Manager]: {
     label: 'Manager',
-    className: 'bg-corn-flower',
+    color: 'cornflowerblue',
     tooltip: 'You are a Manager of this group. Managers can edit non-Owner membership within the group as well as all group resources.',
   },
   [GroupRoleKey.Analyst]: {
     label: 'Analyst',
-    className: 'bg-goldenrod',
+    color: 'goldenrod',
     tooltip: 'You are an Analyst. Analysts have global access to all samples in Thorium and can analyze resources across every group.',
   },
   [GroupRoleKey.User]: {
     label: 'User',
-    className: 'bg-cadet',
+    color: 'cadetblue',
     tooltip:
       'You are a User in this group. A user can view group membership and resources. Users can also upload samples/repos and conduct analysis on them.',
   },
   [GroupRoleKey.Monitor]: {
     label: 'Monitor',
-    className: 'bg-grey',
+    color: '#999999',
     tooltip:
       'You are a Monitor of this group. Monitors can view group membership, track running jobs and analyze tool results. Monitors cannot run jobs or modify any group resources.',
   },
 };
 
 /**
- * Get the badge display metadata (label, color class, tooltip) for a user's role in a group.
+ * Get the badge display metadata (label, colour, tooltip) for a user's role in a group.
  *
  * Falls back to a Thorium Admin badge for admins who hold no explicit group role, since admins
  * always have full access.
@@ -140,7 +137,7 @@ export function getGroupRoleBadge(group: Group, userInfo: UserInfo): GroupRoleBa
   if (getThoriumRole(userInfo.role) == RoleKey.Admin) {
     return {
       label: 'Admin',
-      className: 'bg-maroon',
+      color: ADMIN_COLOR,
       tooltip: 'You are a Thorium admin. You have all the permissions.',
     };
   }

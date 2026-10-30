@@ -68,10 +68,10 @@ describe('getThoriumRole', () => {
 
 describe('getThoriumRoleBadge', () => {
   it('returns a label and color for every role (Analyst included)', () => {
-    expect(getThoriumRoleBadge(ADMIN)).toEqual({ label: 'Admin', className: 'bg-maroon', color: '#6f1f2b' });
-    expect(getThoriumRoleBadge(ANALYST)).toEqual({ label: 'Analyst', className: 'bg-goldenrod', color: 'goldenrod' });
-    expect(getThoriumRoleBadge(DEVELOPER)).toEqual({ label: 'Developer', className: 'bg-corn-flower', color: 'cornflowerblue' });
-    expect(getThoriumRoleBadge(USER)).toEqual({ label: 'User', className: 'bg-cadet', color: 'cadetblue' });
+    expect(getThoriumRoleBadge(ADMIN)).toEqual({ label: 'Admin', color: '#6f1f2b' });
+    expect(getThoriumRoleBadge(ANALYST)).toEqual({ label: 'Analyst', color: 'goldenrod' });
+    expect(getThoriumRoleBadge(DEVELOPER)).toEqual({ label: 'Developer', color: 'cornflowerblue' });
+    expect(getThoriumRoleBadge(USER)).toEqual({ label: 'User', color: 'cadetblue' });
   });
 });
 
@@ -109,7 +109,7 @@ describe('getGroupRoleBadge', () => {
     const group = makeGroup({ analysts: ['carol'] });
     const badge = getGroupRoleBadge(group, makeUser('carol', ANALYST));
     expect(badge?.label).toBe('Analyst');
-    expect(badge?.className).toBe('bg-goldenrod');
+    expect(badge?.color).toBe('goldenrod');
     expect(badge?.tooltip).toContain('Analyst');
   });
 
@@ -123,7 +123,7 @@ describe('getGroupRoleBadge', () => {
   it('falls back to an Admin badge for Thorium admins with no group role', () => {
     const badge = getGroupRoleBadge(makeGroup(), makeUser('admin', ADMIN));
     expect(badge?.label).toBe('Admin');
-    expect(badge?.className).toBe('bg-maroon');
+    expect(badge?.color).toBe('#6f1f2b');
   });
 
   it('returns null for a user with no role who is not an admin', () => {

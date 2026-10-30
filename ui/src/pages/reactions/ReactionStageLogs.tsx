@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { ButtonToolbar, ButtonGroup, Button, Card } from 'react-bootstrap';
 import { FaAngleDown, FaAngleDoubleDown, FaAngleDoubleUp, FaAngleUp } from 'react-icons/fa';
+import styled from 'styled-components';
 
 // project imports
 import Page from '@components/pages/Page';
-import { Button as SharedButton, ButtonSize, ButtonVariant } from '@components/shared/buttons';
+import { Button, ButtonSize, ButtonVariant, IconButton } from '@components/shared/buttons';
 import { Actions, EntityLink, Muted, PageHead, PageTitle, Row } from '@components/agentic/shared';
 import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
 import { OverlayTipBottom } from '@components/shared/overlay/tips';
@@ -16,6 +16,40 @@ import { isRunFinished, isUnknownStage, noStageLogsMessage, plannedStageNames, r
 import { RunKind } from '@models/runs';
 import { ReactionStatus } from '@models/reactions';
 import { AnsiText } from './AnsiText';
+
+/** The empty-logs message and the links to the stages that have logs, kept apart from each other and the page below. */
+const EmptyLogs = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  margin-bottom: 1rem;
+`;
+
+/** The log viewer's panel: the paging bar above the scrolling log lines. */
+const LogBox = styled.section`
+  display: flex;
+  flex-direction: column;
+  max-height: 90vh;
+  background-color: var(--thorium-panel-bg);
+  color: var(--thorium-text);
+  border: 1px solid var(--thorium-panel-border);
+  border-radius: 6px;
+`;
+
+/** The paging buttons, centred above the log lines. */
+const LogNav = styled.div`
+  display: flex;
+  justify-content: center;
+  gap: 0.25rem;
+  padding: 0.5rem;
+  border-bottom: 1px solid var(--thorium-panel-border);
+`;
+
+/** The log lines, scrolling inside the panel. */
+const LogLines = styled.div`
+  overflow-y: scroll;
+  padding: 1rem;
+`;
 
 /** Shows the logs of one stage of a reaction, paging through them and following new lines. */
 const StageLogsView = () => {
@@ -199,24 +233,22 @@ const StageLogsView = () => {
         <div data-testid="stage-logs-error">
           <AlertBanner>{logError}</AlertBanner>
           <Actions style={{ marginTop: '0.75rem' }}>
-            <SharedButton
+            <Button
               variant={ButtonVariant.Secondary}
               size={ButtonSize.Small}
               data-testid="stage-logs-retry"
               onClick={() => void getLogPage()}
             >
               Retry
-            </SharedButton>
+            </Button>
           </Actions>
         </div>
       )}
       {!logError && logsRead && reactionStageLogs.length === 0 && (
-        <div data-testid="stage-logs-empty">
-          <AlertBanner severity={Severity.Info} className="mb-3">
-            {noStageLogsMessage(stage!, reactionStatus, reactionStages)}
-          </AlertBanner>
+        <EmptyLogs data-testid="stage-logs-empty">
+          <AlertBanner severity={Severity.Info}>{noStageLogsMessage(stage!, reactionStatus, reactionStages)}</AlertBanner>
           {unknownStage && (
-            <Row data-testid="stage-logs-stage-links" className="mb-3">
+            <Row data-testid="stage-logs-stage-links">
               <Muted>Open logs for:</Muted>
               {reactionStages!.map((name) => (
                 <EntityLink key={name} to={`/reaction/logs/${group}/${reactionID}/${encodeURIComponent(name)}`}>
@@ -225,38 +257,54 @@ const StageLogsView = () => {
               ))}
             </Row>
           )}
-        </div>
+        </EmptyLogs>
       )}
       {/* a read that failed or a stage the reaction lacks leaves nothing to page through, so the viewer stays hidden */}
       {!(logError && reactionStageLogs.length === 0) && !unknownStage && (
-        <Card className="log-box panel">
-          <Card.Header>
-            <ButtonToolbar className="d-flex justify-content-center">
-              <ButtonGroup>
-                <Button variant="" onClick={pageToTop} className="log-nav-button primary-btn">
-                  <OverlayTipBottom tip={'Scroll to start of logs'}>
-                    <FaAngleDoubleUp size={18} />
-                  </OverlayTipBottom>
-                </Button>
-                <Button variant="" onClick={pageUp} className="log-nav-button primary-btn">
-                  <OverlayTipBottom tip={'Scroll up in logs'}>
-                    <FaAngleUp size={18} />
-                  </OverlayTipBottom>
-                </Button>
-                <Button variant="" onClick={pageDown} className="log-nav-button primary-btn">
-                  <OverlayTipBottom tip={'Scroll down in logs'}>
-                    <FaAngleDown size={18} />
-                  </OverlayTipBottom>
-                </Button>
-                <Button variant="" onClick={pageToEndAndFollow} className="log-nav-button primary-btn">
-                  <OverlayTipBottom tip={'Scroll to end of logs and follow'}>
-                    <FaAngleDoubleDown size={18} />
-                  </OverlayTipBottom>
-                </Button>
-              </ButtonGroup>
-            </ButtonToolbar>
-          </Card.Header>
-          <Card.Body className="scrollable-card">
+        <LogBox data-testid="stage-logs-box">
+          <LogNav>
+            <OverlayTipBottom tip={'Scroll to start of logs'}>
+              <IconButton
+                data-testid="stage-logs-nav-button"
+                variant={ButtonVariant.Primary}
+                aria-label="Scroll to start of logs"
+                onClick={pageToTop}
+              >
+                <FaAngleDoubleUp size={18} />
+              </IconButton>
+            </OverlayTipBottom>
+            <OverlayTipBottom tip={'Scroll up in logs'}>
+              <IconButton
+                data-testid="stage-logs-nav-button"
+                variant={ButtonVariant.Primary}
+                aria-label="Scroll up in logs"
+                onClick={pageUp}
+              >
+                <FaAngleUp size={18} />
+              </IconButton>
+            </OverlayTipBottom>
+            <OverlayTipBottom tip={'Scroll down in logs'}>
+              <IconButton
+                data-testid="stage-logs-nav-button"
+                variant={ButtonVariant.Primary}
+                aria-label="Scroll down in logs"
+                onClick={pageDown}
+              >
+                <FaAngleDown size={18} />
+              </IconButton>
+            </OverlayTipBottom>
+            <OverlayTipBottom tip={'Scroll to end of logs and follow'}>
+              <IconButton
+                data-testid="stage-logs-nav-button"
+                variant={ButtonVariant.Primary}
+                aria-label="Scroll to end of logs and follow"
+                onClick={pageToEndAndFollow}
+              >
+                <FaAngleDoubleDown size={18} />
+              </IconButton>
+            </OverlayTipBottom>
+          </LogNav>
+          <LogLines>
             {reactionStageLogs &&
               reactionStageLogs.map((line, idx) => (
                 <div key={startLogLine + idx} className="raw-log-line" ref={endLogsRef}>
@@ -264,8 +312,8 @@ const StageLogsView = () => {
                   <AnsiText text={line}></AnsiText>
                 </div>
               ))}
-          </Card.Body>
-        </Card>
+          </LogLines>
+        </LogBox>
       )}
     </Page>
   );

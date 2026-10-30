@@ -579,8 +579,8 @@ test.describe('Reaction pages', () => {
     await page.goto(`/reaction/logs/${MOCK_GROUP}/${REACTION}/build`);
     await expect(page.getByTestId('stage-logs-error')).toContainText('Permission Denied');
     // no empty log viewer or paging buttons sit under the error
-    await expect(page.locator('.log-box')).toHaveCount(0);
-    await expect(page.locator('.log-nav-button')).toHaveCount(0);
+    await expect(page.getByTestId('stage-logs-box')).toHaveCount(0);
+    await expect(page.getByTestId('stage-logs-nav-button')).toHaveCount(0);
     // the tail does not keep reading while the error is shown
     const settled = reads;
     await page.clock.runFor(60_000);
@@ -598,7 +598,7 @@ test.describe('Reaction pages', () => {
     await expect(page.getByTestId('stage-logs-error')).toHaveCount(0);
     // the banner leaves a gap above the log viewer card instead of touching it
     const banner = await page.getByTestId('stage-logs-empty').boundingBox();
-    const card = await page.locator('.log-box').boundingBox();
+    const card = await page.getByTestId('stage-logs-box').boundingBox();
     expect(banner && card && card.y - (banner.y + banner.height)).toBeGreaterThanOrEqual(8);
   });
 
@@ -613,8 +613,8 @@ test.describe('Reaction pages', () => {
     await page.goto(`/reaction/logs/${MOCK_GROUP}/${REACTION}/nope`);
     await expect(page.getByTestId('stage-logs-empty')).toContainText('This reaction has no stage named nope. Its stages are: build.');
     // a stage that can never log has no empty viewer or paging buttons, and the reaction's stages link to their logs
-    await expect(page.locator('.log-box')).toHaveCount(0);
-    await expect(page.locator('.log-nav-button')).toHaveCount(0);
+    await expect(page.getByTestId('stage-logs-box')).toHaveCount(0);
+    await expect(page.getByTestId('stage-logs-nav-button')).toHaveCount(0);
     await expect(page.getByTestId('stage-logs-stage-links').getByRole('link', { name: 'build' })).toHaveAttribute(
       'href',
       `/reaction/logs/${MOCK_GROUP}/${REACTION}/build`,
@@ -624,7 +624,7 @@ test.describe('Reaction pages', () => {
     await page.getByTestId('stage-logs-stage-links').getByRole('link', { name: 'build' }).click();
     await expect(page.getByRole('heading', { name: 'Stage logs: build' })).toBeVisible();
     await expect(page.getByTestId('stage-logs-empty')).toContainText('No logs were recorded for the build stage of this reaction');
-    await expect(page.locator('.log-box')).toHaveCount(1);
+    await expect(page.getByTestId('stage-logs-box')).toHaveCount(1);
   });
 
   test('a long unknown stage name wraps inside its banner at 1024 px', async ({ page }) => {
