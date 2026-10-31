@@ -709,6 +709,29 @@ mod tests {
         assert_eq!(header.timestamp, None);
     }
 
+    /// The security data directory (entry 4) is parsed as a file-offset range,
+    /// which is what lets the packing detection exclude a declared Authenticode
+    /// certificate table from its overlay measurement.
+    #[test]
+    fn parse_pe_reads_the_security_directory() {
+        // the base fixture declares no data directories, so no cert table
+        let header = parse_header(&pe_fixture(), Some("Portable Executable (PE)")).expect("parses");
+        assert_eq!(header.security_dir, None);
+        assert_eq!(header.cert_dir_entry_offset, None);
+        // declare 16 directories and fill entry 4 with the cert table's range
+        let mut raw = pe_fixture();
+        let opt = 0x98;
+        raw[opt + 92..opt + 96].copy_from_slice(&16u32.to_le_bytes());
+        let dirs = opt + 96;
+        raw[dirs + 32..dirs + 36].copy_from_slice(&0x580u32.to_le_bytes());
+        raw[dirs + 36..dirs + 40].copy_from_slice(&0x20u32.to_le_bytes());
+        let header = parse_header(&raw, Some("Portable Executable (PE)")).expect("parses");
+        // entry 4 is a FILE OFFSET + size, taken verbatim rather than resolved
+        assert_eq!(header.security_dir, Some((0x580, 0x20)));
+        // the directory entry's own offset is kept for Authenticode consumers
+        assert_eq!(header.cert_dir_entry_offset, Some((dirs + 32) as u64));
+    }
+
     /// A truncated or non-PE image yields no header rather than a guess.
     #[test]
     fn parse_pe_rejects_malformed_images() {

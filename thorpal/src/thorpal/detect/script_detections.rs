@@ -7,8 +7,9 @@
 //! runs sandboxed exactly like `run_script` -- every registered read-only Rhai
 //! binding, the shared operation cap, and a wall-clock deadline -- and its
 //! final expression is converted into [`DetectionHit`]s (tagged
-//! [`HitSource::Script`]) that flow through the same forum seeding and
-//! derived-question pipeline as the native hits.
+//! [`HitSource::Script`] and stamped with the script's name as their producing
+//! detection) that flow through the same forum seeding and derived-question
+//! pipeline as the native hits.
 //!
 //! The expected return contract (documented to the model by `promote_script`):
 //! either a bare array of hit maps, or a map `#{ hits: [...], questions:
@@ -196,7 +197,8 @@ pub async fn run_script_detectors(
 ///
 /// * `value` - The script's final expression, serialized to JSON
 /// * `resolve_function` - Resolves an address to its containing function entry
-/// * `script` - The script's name, stamped into hit reasoning and warnings
+/// * `script` - The script's name, stamped as the hits' detection name, into
+///   their reasoning, and into warnings
 fn outcome_from_value(
     value: &serde_json::Value,
     resolve_function: impl Fn(u64) -> Option<u64>,
@@ -234,7 +236,15 @@ fn outcome_from_value(
     let mut hits = Vec::new();
     for raw in raw_hits {
         match parse_hit(raw, &resolve_function, script) {
-            Ok(hit) => hits.push(hit),
+            Ok(mut hit) => {
+                // stamp the producing script as the hit's stable detection name
+                // (the seeder budgets and buckets per detection), never
+                // overwriting a name the hit already carries
+                if hit.detection.is_none() {
+                    hit.detection = Some(script.to_owned());
+                }
+                hits.push(hit);
+            }
             Err(error) => {
                 tracing::warn!(script, %error, "skipping a malformed detector script hit");
             }
@@ -473,6 +483,17 @@ mod tests {
         // the fallback technique and the provenance suffix are applied
         assert_eq!(hits[0].technique.id.as_ref(), "SCRIPT");
         assert!(hits[0].reasoning.contains("(library script `find-xor`)"));
+    }
+
+    /// Script hits are stamped with the producing script's detection name.
+    #[test]
+    fn script_hits_are_stamped_with_the_script_name() {
+        let value = serde_json::json!([
+            { "address": 0x1000, "content": "c", "reasoning": "r" },
+        ]);
+        let (hits, _) = outcome_from_value(&value, resolver, "find-xor").expect("parse");
+        // the seeder budgets and buckets per detection, so the name must land
+        assert_eq!(hits[0].detection.as_deref(), Some("find-xor"));
     }
 
     /// The map shape parses hits and questions together.

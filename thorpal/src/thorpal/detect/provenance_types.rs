@@ -14,6 +14,8 @@ pub enum CallContext {
     /// The finding sits in C-runtime / compiler-support code, reached by the
     /// recorded caller chain (e.g. `__scrt_fastfail <- __scrt_dllmain_crt_dispatch`).
     Runtime(String),
+    /// The evidence's result is tested and steers a conditional branch.
+    GatesBranch,
 }
 
 impl CallContext {
@@ -25,6 +27,9 @@ impl CallContext {
                 "Context: this is compiler-generated runtime code ({chain}), not the sample's \
                  own logic — the C runtime performs this check in every binary built with it."
             ),
+            CallContext::GatesBranch => "Context: the result is tested and steers a conditional \
+                 branch in the sample's own code, so it is used as a check."
+                .to_string(),
         }
     }
 }

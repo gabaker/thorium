@@ -443,7 +443,8 @@ pub struct FindingProvenance {
     /// finding carried one -- never the artifact's value
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_class: Option<String>,
-    /// Whether the finding was suppressed into the runtime-noise rollup
+    /// Whether the finding was demoted into a rollup-shape post (the
+    /// runtime-noise rollup or a per-detection census post)
     #[serde(default)]
     pub suppressed: bool,
 }

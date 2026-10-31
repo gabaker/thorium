@@ -9,9 +9,13 @@
 //! `DigestInfo`-shaped value inside the PKCS#7 blob — in a well-formed blob
 //! that is `SpcIndirectDataContent`'s `messageDigest`, the only digest the
 //! file digest is ever equal to; a signed file whose bytes were later
-//! modified does not match it. Signer names are recovered with a bounded
-//! byte scan (no ASN.1 dependency): heuristic, and labeled as such by the
-//! caller.
+//! modified does not match it. When that full-scope digest fails and bytes
+//! trail the declared certificate table, the digest is recomputed with the
+//! trailing span also excluded, separating a post-signing appendix (genuine
+//! signature over the signed scope, data appended after it) from a graft or
+//! a host tampered inside the signed region (fails both scopes). Signer
+//! names are recovered with a bounded byte scan (no ASN.1 dependency):
+//! heuristic, and labeled as such by the caller.
 
 use sha1::{Digest, Sha1};
 use sha2::{Sha256, Sha384, Sha512};
@@ -34,6 +38,20 @@ pub struct AuthenticodeInfo {
     /// Whether any `DigestInfo` inside the blob matches the file's computed
     /// Authenticode digest; `None` when no candidate digest was found at all.
     pub digest_matches: Option<bool>,
+    /// Whether the signed digest matches once the span trailing the declared
+    /// certificate table (`[table end, EOF)`) is also excluded from the hash.
+    ///
+    /// Separates a post-signing appendix (the full scope fails, this matches:
+    /// the signature is genuine over the signed scope and the trailing bytes
+    /// were not present at signing time) from a grafted table or a host
+    /// tampered inside the signed region (both fail). Equals
+    /// [`digest_matches`](Self::digest_matches) when nothing trails the table
+    /// (the scopes coincide) or the full scope already verifies — excluding
+    /// the trailing span can only rescue a mismatch, never improve a match.
+    pub signed_scope_matches: Option<bool>,
+    /// How many bytes trail the declared certificate table (`[table end,
+    /// EOF)`); zero when the table runs exactly to the end of the file.
+    pub trailing_bytes: u64,
     /// Certificate common names scanned out of the blob (heuristic, deduped).
     pub cert_names: Vec<String>,
     /// The VersionInfo CompanyName recovered from the raw bytes, when present.
@@ -66,11 +84,31 @@ pub fn inspect(raw: &[u8], header: &FormatHeader) -> Option<AuthenticodeInfo> {
     let computed = authenticode_digest(raw, header, start, end);
     let candidates = digest_candidates(blob);
     let digest_matches = digest_verdict(&candidates, &computed);
+    // measure the span trailing the declared table; a well-formed signed file
+    // has none (its certificate table is the last thing in the file)
+    let trailing_bytes = (raw.len() - end) as u64;
+    // when the full scope fails and bytes trail the table, re-verify with the
+    // trailing span [table end, EOF) also excluded — extending the table skip
+    // to EOF covers it, the two spans being adjacent. A match here means the
+    // signature is genuine over the signed scope and the real anomaly is a
+    // post-signing appendix, not a graft or a tampered host
+    let signed_scope_matches = if digest_matches == Some(false) && end < raw.len() {
+        digest_verdict(
+            &candidates,
+            &authenticode_digest(raw, header, start, raw.len()),
+        )
+    } else {
+        // the scopes coincide (nothing trails the table) or the full scope
+        // already verifies: the trailing exclusion cannot change the verdict
+        digest_matches
+    };
     Some(AuthenticodeInfo {
         table_offset: offset,
         table_size: size,
         table_is_tail: end == raw.len(),
         digest_matches,
+        signed_scope_matches,
+        trailing_bytes,
         cert_names: cert_names(blob),
         company_name: company_name(raw, header),
     })
@@ -496,6 +534,108 @@ mod tests {
         reference.update(&raw[24..32]);
         reference.update(&raw[40..]);
         assert_eq!(computed.sha1, <[u8; 20]>::from(reference.finalize()));
+    }
+
+    /// Builds a file image with a declared certificate table and the header
+    /// naming it: the signed body, then a `WIN_CERTIFICATE` wrapping one sha1
+    /// `DigestInfo` carrying `digest`, then the trailing appendix bytes.
+    ///
+    /// # Arguments
+    ///
+    /// * `body` - The signed body bytes (the table starts right after them)
+    /// * `table_size` - The declared certificate table's total size
+    /// * `digest` - The sha1 digest value planted in the blob
+    /// * `trailing` - The appendix bytes appended after the declared table
+    fn signed_fixture(
+        body: &[u8],
+        table_size: usize,
+        digest: [u8; 20],
+        trailing: &[u8],
+    ) -> (Vec<u8>, FormatHeader) {
+        // the signed body the planted digest is expected to cover
+        let mut raw = body.to_vec();
+        // the WIN_CERTIFICATE header: dwLength, wRevision, wCertificateType
+        raw.extend_from_slice(&u32::try_from(table_size).unwrap().to_le_bytes());
+        raw.extend_from_slice(&[0x00, 0x02, 0x02, 0x00]);
+        // one sha1 DigestInfo shape carrying the planted digest
+        raw.extend_from_slice(&[
+            0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00, 0x04, 0x14,
+        ]);
+        raw.extend_from_slice(&digest);
+        // pad the blob out to the declared table size
+        raw.resize(body.len() + table_size, 0);
+        // the appendix rides after the declared table
+        raw.extend_from_slice(trailing);
+        // the header declares only the security directory
+        let header = FormatHeader {
+            security_dir: Some((body.len() as u64, table_size as u64)),
+            ..Default::default()
+        };
+        (raw, header)
+    }
+
+    /// A digest verifying only with the trailing appendix excluded reports a
+    /// signed-scope match with the appendix measured (an observed layout:
+    /// table @ 0x9c00, 6440 bytes, a 1044-byte second PKCS#7 fragment after).
+    #[test]
+    fn inspect_separates_a_post_signing_appendix_from_a_graft() {
+        // the signed body runs up to the table at 0x9c00
+        let body: Vec<u8> = (0..0x9c00)
+            .map(|at| u8::try_from(at % 251).unwrap())
+            .collect();
+        // the planted digest covers exactly the signed scope (checksum and
+        // cert-entry offsets are undeclared, so the scope is just the body)
+        let scoped: [u8; 20] = Sha1::digest(&body).into();
+        let (raw, header) = signed_fixture(&body, 6440, scoped, &[0xEE; 1044]);
+        // the fixture reproduces the disputed file's extent: EOF at 0xB93C
+        assert_eq!(raw.len(), 0xB93C);
+        let info = inspect(&raw, &header).unwrap();
+        // the full-scope digest covers the appendix and must keep failing...
+        assert_eq!(info.digest_matches, Some(false));
+        // ...while the signed scope verifies and the appendix is measured
+        assert_eq!(info.signed_scope_matches, Some(true));
+        assert_eq!(info.trailing_bytes, 1044);
+        assert!(!info.table_is_tail);
+    }
+
+    /// A mismatching digest with the table at EOF (the confirmed tail-graft
+    /// shape) fails both scopes: there is no trailing span to exclude.
+    #[test]
+    fn inspect_keeps_a_tail_graft_failing_both_scopes() {
+        let body: Vec<u8> = (0u8..64).collect();
+        // the planted digest matches nothing the host hashes to
+        let (raw, header) = signed_fixture(&body, 48, [0xAB; 20], &[]);
+        let info = inspect(&raw, &header).unwrap();
+        assert_eq!(info.digest_matches, Some(false));
+        assert_eq!(info.signed_scope_matches, Some(false));
+        assert_eq!(info.trailing_bytes, 0);
+        assert!(info.table_is_tail);
+    }
+
+    /// A digest matching neither scope keeps both verdicts false even when an
+    /// appendix exists: the signed region itself was modified.
+    #[test]
+    fn inspect_keeps_a_tampered_host_failing_despite_an_appendix() {
+        let body: Vec<u8> = (0u8..64).collect();
+        let (raw, header) = signed_fixture(&body, 48, [0xAB; 20], &[0xEE; 100]);
+        let info = inspect(&raw, &header).unwrap();
+        assert_eq!(info.digest_matches, Some(false));
+        assert_eq!(info.signed_scope_matches, Some(false));
+        assert_eq!(info.trailing_bytes, 100);
+        assert!(!info.table_is_tail);
+    }
+
+    /// A digest verifying over the full scope reports both scopes matching.
+    #[test]
+    fn inspect_reports_a_verifying_signature_on_both_scopes() {
+        let body: Vec<u8> = (0u8..64).collect();
+        // with the table at EOF the full scope is exactly the body
+        let full: [u8; 20] = Sha1::digest(&body).into();
+        let (raw, header) = signed_fixture(&body, 48, full, &[]);
+        let info = inspect(&raw, &header).unwrap();
+        assert_eq!(info.digest_matches, Some(true));
+        assert_eq!(info.signed_scope_matches, Some(true));
+        assert_eq!(info.trailing_bytes, 0);
     }
 
     /// CompanyName is read as UTF-16LE inside the version-resource window.

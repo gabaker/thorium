@@ -32,23 +32,54 @@ pub fn is_printable(b: u8) -> bool {
     (0x20..=0x7e).contains(&b) || b == b'\t'
 }
 
+/// The digits leetspeak prose substitutes for letters.
+///
+/// The confirmed `GandCrab` ransom note spells `ATTENTION` as `A44EN4ION` and
+/// `PREVENT` as `02E6EN4`, so a majority-of-letters bar starves on text an analyst
+/// absolutely wants. These are the digits with a conventional letter reading
+/// (0→o, 1→i, 2→r, 3→e, 4→t, 5→s, 7→w, 9→y); `6` and `8` are deliberately absent —
+/// no leet word relies on them, and leaving them out keeps digit-bearing junk (the
+/// AES T-table's `=&&jL66Zl??A~`) from gaining anything.
+const LEET_DIGITS: &[u8] = b"01234579";
+
 /// Whether a decoded run looks like real text: majority ASCII letters and enough
 /// character diversity to reject runs like `"AAAA…"` (e.g. a zero region XORed with
 /// a printable key).
+///
+/// Digit-substituted (leetspeak) prose gets a second chance at the letter-majority
+/// bar: when the plain count falls short, the digits in [`LEET_DIGITS`] count as the
+/// letters they stand for and the bar is retried. The second chance is held to the
+/// shape leetspeak actually takes — prose: a run of at least [`MIN_DECODED_LEN`]
+/// carrying a space (words), with real letters still a third of it — so the
+/// single-token shapes that also mix letters and digits (a base64/hex run, emulated
+/// counter output like `3g1>2O7`, a digits-only table) can never talk their way in.
+/// The second chance only ever admits runs, so everything wordy today stays wordy.
 ///
 /// # Arguments
 ///
 /// * `run` - The candidate decoded bytes
 #[must_use]
 pub fn is_wordy(run: &[u8]) -> bool {
-    // require a majority of ASCII letters
-    let alpha = run.iter().filter(|b| b.is_ascii_alphabetic()).count();
-    if alpha * 2 < run.len() {
-        return false;
-    }
     // require character diversity (a constant/near-constant run carries no signal)
     let distinct: HashSet<u8> = run.iter().copied().collect();
-    distinct.len() >= 5
+    if distinct.len() < 5 {
+        return false;
+    }
+    // a majority of ASCII letters passes outright
+    let alpha = run.iter().filter(|b| b.is_ascii_alphabetic()).count();
+    if alpha * 2 >= run.len() {
+        return true;
+    }
+    // the second chance is for prose: long enough to mean something, and spaced
+    // into words — the one shape a letter-and-digit token (base64, counter
+    // output) never has
+    if run.len() < MIN_DECODED_LEN || !run.contains(&b' ') {
+        return false;
+    }
+    // leetspeak prose: the digits that stand for letters make up the majority,
+    // provided real letters still carry a third of the run
+    let leet = run.iter().filter(|b| LEET_DIGITS.contains(b)).count();
+    alpha * 3 >= run.len() && (alpha + leet) * 2 >= run.len()
 }
 
 /// The bracket pairs whose closing half only ever follows its own opener in real text.
@@ -523,19 +554,156 @@ pub fn is_dominated_by_one_byte(region: &[u8]) -> bool {
         .is_some_and(|top| top * 100 >= region.len() * DOMINANT_SHARE)
 }
 
+/// The fewest same-phase steps a paired-delta table needs before the constant
+/// step is a layout rather than a coincidence.
+///
+/// A fixed step recurring on alternate positions is drawn from 256 values each
+/// time it recurs, so eight in a row is a one-in-256⁷ accident against text or
+/// ciphertext — while a table built in adjacent pairs produces it from one end
+/// to the other.
+const MIN_PAIRED_STEPS: usize = 8;
+
+/// Whether a run's bytes step by one constant on alternate positions, and so are
+/// a table built in adjacent pairs rather than text.
+///
+/// This is the period-2 shape the stride tests cannot see. The popcount-family
+/// table (`b[i] = 16 − 2·popcount(i)`, an MSVC STL staple) pairs every even
+/// element with that element minus two, so its *values* never repeat on any
+/// stride ([`is_periodic_run`] needs equality), climb on only half their pairs
+/// ([`is_ordered_run`] needs 85%), and freeze no column — but its delta sequence
+/// is constant on one phase. The byte-key schemes shift every byte alike and so
+/// leave neighbour deltas unchanged, which lets this read source and output
+/// equally well; both phases are tried because a run may be carved from either
+/// half of a pair.
+///
+/// Text never does this: a constant alternate-position step means every other
+/// character is derived from its neighbour at one fixed distance, and the
+/// interleaved shapes that come close (`%s%s%s…`) freeze *both* phases and are
+/// already claimed by [`is_periodic_run`].
+///
+/// # Arguments
+///
+/// * `bytes` - The candidate run, or the source bytes underlying one
+#[must_use]
+pub fn is_paired_delta_table(bytes: &[u8]) -> bool {
+    // the wrapping neighbour deltas, which the byte-key decodes leave unchanged
+    let deltas: Vec<u8> = bytes
+        .windows(2)
+        .map(|pair| pair[1].wrapping_sub(pair[0]))
+        .collect();
+    // try both phases: a run may start on either half of a pair
+    (0..2).any(|phase| {
+        // the phase needs a first step and enough exact repeats to be a layout
+        let mut steps = deltas.iter().skip(phase).step_by(2);
+        let Some(first) = steps.next() else {
+            return false;
+        };
+        let mut count = 1;
+        for step in steps {
+            if step != first {
+                return false;
+            }
+            count += 1;
+        }
+        count >= MIN_PAIRED_STEPS
+    })
+}
+
+/// Whether a region's bytes all share one parity, and so are a table of even (or
+/// odd) machine values rather than hidden data.
+///
+/// Every neighbour delta of such a region is even — the popcount family again
+/// (`16 − 2·popcount(i)` only ever produces even values), and more broadly any
+/// table of doubled counts, halved sizes or aligned offsets. Chance hands a
+/// region one parity across [`MIN_MONOTONE_PAIRS`] pairs about once in 65,000,
+/// and text and ciphertext mix parities: letters, digits and punctuation start
+/// mixed, and a single-byte XOR, ADD or SUB shifts every byte's parity the same
+/// way, so mixed stays mixed.
+///
+/// # Arguments
+///
+/// * `region` - The source bytes underlying a recovered run
+#[must_use]
+pub fn is_even_delta_table(region: &[u8]) -> bool {
+    // too few pairs for a shared parity to be anything but chance
+    let pairs = region.len().saturating_sub(1);
+    if pairs < MIN_MONOTONE_PAIRS {
+        return false;
+    }
+    // one parity throughout — equivalently, every neighbour delta is even
+    region.windows(2).all(|pair| (pair[0] ^ pair[1]) & 1 == 0)
+}
+
+/// The highest value a byte may hold for a region to be a small-alphabet table.
+///
+/// Printable text starts at `0x20`, and the values compiler-emitted index,
+/// count and popcount tables are made of end below it: a region that never
+/// leaves the control range holds small machine numbers, where the ciphertext
+/// of a string under a byte key spreads across the byte range.
+const SMALL_ALPHABET_CEILING: u8 = 0x1f;
+
+/// The most distinct values a small-alphabet region may hold, in absolute terms
+/// (a longer region is instead allowed one distinct value per
+/// [`SMALL_ALPHABET_SPREAD`] bytes, whichever is larger).
+const SMALL_ALPHABET_DISTINCT: usize = 12;
+
+/// The bytes of region length that buy a small-alphabet table one more distinct
+/// value.
+const SMALL_ALPHABET_SPREAD: usize = 8;
+
+/// The fewest bytes a region needs before its alphabet means anything.
+const MIN_SMALL_ALPHABET_BYTES: usize = 8;
+
+/// Whether a region is a table of small integers rather than hidden data.
+///
+/// This is the alphabet read behind the layout reads, and it is what catches the
+/// mixed small-int table — values scattered over `0x00..=0x1f` from a dozen-odd
+/// distinct entries, in no order, with no dominant byte, no empty stride column
+/// and nothing stepping by one — which walks past every other source test and
+/// decodes to wordy junk under a whole band of additive keys. Encoded *text*
+/// cannot look like this: a byte key maps a string's spread of letters, digits
+/// and punctuation onto an equally spread set of ciphertext values, so a region
+/// confined to the control range and spelled from a handful of values was never
+/// holding a string.
+///
+/// Deliberately **not** part of [`is_structured_source`]: the crypto pass shares
+/// that test and must keep accepting narrow-range sources (lowercase plaintext
+/// under a lowercase repeating key lands every byte under `0x20`), so this read
+/// belongs only to the single-byte-key paths — [`hidden_claim_runs`] applies it.
+///
+/// # Arguments
+///
+/// * `region` - The source bytes underlying a recovered run
+#[must_use]
+pub fn is_small_alphabet_table(region: &[u8]) -> bool {
+    // too short for an alphabet to mean anything
+    if region.len() < MIN_SMALL_ALPHABET_BYTES {
+        return false;
+    }
+    // every byte must be a small machine number
+    if region.iter().any(|byte| *byte > SMALL_ALPHABET_CEILING) {
+        return false;
+    }
+    // ...drawn from a small set of distinct values (scaled for long regions)
+    let distinct: HashSet<u8> = region.iter().copied().collect();
+    distinct.len() <= SMALL_ALPHABET_DISTINCT.max(region.len() / SMALL_ALPHABET_SPREAD)
+}
+
 /// Whether a region's bytes carry a structure of their own rather than hidden data.
 ///
 /// A decode is only evidence when its input could plausibly have been holding
-/// something. Four shapes cannot: bytes that step through consecutive values
+/// something. Six shapes cannot: bytes that step through consecutive values
 /// ([`counts_up_or_down`]), bytes laid out as fixed-width integers
 /// ([`is_wide_int_table`]), bytes that are mostly one repeated value
-/// ([`is_dominated_by_one_byte`]), and bytes that are sorted ([`is_monotone_table`]).
-/// All four are ordinary compiler output, all four are far from random, and all four
-/// fabricate readable text under a key that never encoded them — the first because a run
-/// of small consecutive numbers shifts into a run of consecutive letters, the second
-/// because its empty high bytes hand back the key, the third because a repeated byte
-/// hands back the same character over and over, and the fourth because a climbing run of
-/// small values lands in the printable range all together.
+/// ([`is_dominated_by_one_byte`]), bytes that are sorted ([`is_monotone_table`]),
+/// bytes built in adjacent pairs ([`is_paired_delta_table`]), and bytes of one
+/// parity ([`is_even_delta_table`]). All six are ordinary compiler output, all six
+/// are far from random, and all six fabricate readable text under a key that never
+/// encoded them — the first because a run of small consecutive numbers shifts into
+/// a run of consecutive letters, the second because its empty high bytes hand back
+/// the key, the third because a repeated byte hands back the same character over
+/// and over, and the last three because any additive key walks a region of small,
+/// regularly-built values into the printable range all together.
 ///
 /// They are complementary rather than redundant, and each covers a table the others
 /// miss. A sparse table is only caught by the third: it has no column empty in every
@@ -543,7 +711,11 @@ pub fn is_dominated_by_one_byte(region: &[u8]) -> bool {
 /// count — but the zero filling its unused slots is most of its bytes. A table of code
 /// lengths or ranges is only caught by the fourth: it steps by two and three as often as
 /// by one, it is stored a byte per element so it has no empty column, and its values are
-/// spread widely enough that none of them dominates — but it was built in order.
+/// spread widely enough that none of them dominates — but it was built in order. The
+/// popcount-family table (`b[i] = 16 − 2·popcount(i)`) is only caught by the last two:
+/// its even-only deltas never step by one, its modal byte holds 27% of it, it rises as
+/// often as it falls and it has no empty column — but every even element is paired with
+/// itself minus two, and no byte of it is ever odd.
 ///
 /// # Arguments
 ///
@@ -554,6 +726,8 @@ pub fn is_structured_source(region: &[u8]) -> bool {
         || is_wide_int_table(region)
         || is_dominated_by_one_byte(region)
         || is_monotone_table(region)
+        || is_paired_delta_table(region)
+        || is_even_delta_table(region)
 }
 
 /// The fraction of `src` bytes that are non-printable (i.e. looked encoded).
@@ -577,17 +751,22 @@ pub fn src_nonprintable_ratio(src: &[u8]) -> f32 {
 /// another — see [`hidden_claim_runs`].
 pub type RunsAndClaims = (Vec<(usize, String)>, Vec<(usize, String)>);
 
-/// Whether a recovered run is a decoded table rather than text, by any of the three
+/// Whether a recovered run is a decoded table rather than text, by any of the four
 /// shapes a table takes: one that climbs ([`is_ordered_run`]), one that cycles
-/// ([`is_periodic_run`]) and one whose records hold whole byte columns still
-/// ([`is_columnar_run`]).
+/// ([`is_periodic_run`]), one whose records hold whole byte columns still
+/// ([`is_columnar_run`]), and one built in adjacent pairs
+/// ([`is_paired_delta_table`] — the popcount-family fractal, whose values neither
+/// repeat on a stride nor agree on a direction, so the first three never see it).
 ///
 /// # Arguments
 ///
 /// * `run` - The candidate recovered bytes
 #[must_use]
 pub fn is_table_run(run: &[u8]) -> bool {
-    is_ordered_run(run) || is_periodic_run(run) || is_columnar_run(run)
+    is_ordered_run(run)
+        || is_periodic_run(run)
+        || is_columnar_run(run)
+        || is_paired_delta_table(run)
 }
 
 /// Every printable, wordy run in `decoded` that reads as text, **including the decoded
@@ -682,12 +861,15 @@ pub fn hidden_claim_runs(decoded: &[u8], src: &[u8]) -> Vec<(usize, String)> {
         let run = &decoded[start..i];
         let src_run = &src[start..i.min(src.len())];
         // require length, wordiness, that it reads as text, that the source actually
-        // looked encoded, and that the source carried no layout of its own
+        // looked encoded, and that the source carried neither a layout nor a
+        // small-integer alphabet of its own (the latter is a byte-key-only read —
+        // see is_small_alphabet_table — so it sits beside the shared layout test)
         if run.len() >= MIN_DECODED_LEN
             && is_wordy(run)
             && reads_as_text(run)
             && src_nonprintable_ratio(src_run) >= 0.5
             && !is_structured_source(src_run)
+            && !is_small_alphabet_table(src_run)
         {
             out.push((start, String::from_utf8_lossy(run).into_owned()));
         }
@@ -697,9 +879,10 @@ pub fn hidden_claim_runs(decoded: &[u8], src: &[u8]) -> Vec<(usize, String)> {
 
 /// Extract printable, wordy runs from `decoded` (index-aligned to `src`), keeping
 /// only runs that are not themselves a table ([`is_table_run`]) and whose original bytes
-/// were mostly non-printable and carried no structure of their own
-/// ([`is_structured_source`]) — so we recover genuinely hidden strings, not merely
-/// re-cased plaintext or a decoded table of numbers.
+/// were mostly non-printable and carried neither a structure
+/// ([`is_structured_source`]) nor a small-integer alphabet
+/// ([`is_small_alphabet_table`]) of their own — so we recover genuinely hidden
+/// strings, not merely re-cased plaintext or a decoded table of numbers.
 ///
 /// Used for the byte-key schemes (XOR/SUB/ADD). Returns `(index, string)` pairs.
 ///
@@ -713,6 +896,64 @@ pub fn hidden_runs(decoded: &[u8], src: &[u8]) -> Vec<(usize, String)> {
     hidden_claim_runs(decoded, src)
         .into_iter()
         .filter(|(_, text)| !is_table_run(text.as_bytes()))
+        .collect()
+}
+
+/// Readable runs from a decode whose key was *observed* in the program's own decoder
+/// loop, rather than guessed.
+///
+/// The brute-force sweeps try keys, so [`hidden_runs`] holds their output to the full
+/// gauntlet — including the output-shape table reads ([`is_table_run`]) whose job is
+/// to kill what a wrong key fabricates. A key read out of the loop that references
+/// the buffer is not a guess: the code performing the decode corroborates it, so its
+/// runs skip the output-shape vetoes and are judged on the source instead. The source
+/// must still have looked encoded and carried no layout of its own
+/// ([`is_structured_source`], [`is_small_alphabet_table`]), which keeps an
+/// observed-key decode of a compiler table — the popcount family, a suballocator
+/// ramp — exactly as dead as the sweeps leave it.
+///
+/// Returns `(index, string)` pairs.
+///
+/// # Arguments
+///
+/// * `decoded` - The decoded bytes
+/// * `src` - The original bytes, aligned index-for-index with `decoded`
+#[must_use]
+pub fn observed_key_runs(decoded: &[u8], src: &[u8]) -> Vec<(usize, String)> {
+    // the claims extractor applies exactly the source-side gauntlet and no
+    // output-shape veto, which is the contract an observed key earns
+    hidden_claim_runs(decoded, src)
+}
+
+/// Readable runs from a decode corroborated *structurally* — the buffer itself
+/// carries the observed key, as interleaved `(value, key)` pair storage.
+///
+/// Used by the keyed-pair recovery (`GandCrab`-style stack strings, where each
+/// character is stored as the shifted byte followed by the key byte). The decode is
+/// already corroborated twice over — the loop's immediate was observed, and the
+/// buffer's own key column repeats it — so the source-looked-encoded ratio does not
+/// apply: a small key leaves much of the shifted text printable (`A` + `0x3a` is
+/// `{`), and demanding non-printability would starve exactly the uppercase leetspeak
+/// prose this path exists to recover. The structural reads still veto a decoded
+/// table: the value column must carry no layout or small-integer alphabet of its own.
+///
+/// Returns `(index, string)` pairs, indexed in value-column positions.
+///
+/// # Arguments
+///
+/// * `decoded` - The decoded value-column bytes
+/// * `src` - The stored value-column bytes, aligned index-for-index with `decoded`
+#[must_use]
+pub fn keyed_pair_runs(decoded: &[u8], src: &[u8]) -> Vec<(usize, String)> {
+    // the output-quality reads (length, wordiness, text shape) on the decoded bytes
+    printable_claim_runs(decoded)
+        .into_iter()
+        // the source reads still veto decoded tables: the key column corroborates
+        // the decode itself, not the idea that these bytes were hiding a string
+        .filter(|(start, text)| {
+            let src_run = &src[*start..(start + text.len()).min(src.len())];
+            !is_structured_source(src_run) && !is_small_alphabet_table(src_run)
+        })
         .collect()
 }
 
@@ -1202,6 +1443,223 @@ mod tests {
                 "{}",
                 String::from_utf8_lossy(table)
             );
+            assert!(
+                !is_paired_delta_table(table),
+                "{}",
+                String::from_utf8_lossy(table)
+            );
+        }
+    }
+
+    /// The MSVC STL popcount table never becomes a recovered string.
+    ///
+    /// `b[i] = 16 − 2·popcount(i)` walks past the four layout reads: its deltas
+    /// are even so nothing steps by one, its modal byte holds 27% of it, it rises
+    /// as often as it falls, and it has no empty stride column. Under ADD keys
+    /// around 0x70 it decodes to a long, wordy, bracket-clean run — the demo
+    /// corpus's `~~|~||z~||z|zzx…` fabrication — so the pair, parity and alphabet
+    /// reads are what have to condemn it.
+    #[test]
+    fn hidden_runs_reject_the_popcount_table() {
+        // the table exactly as the compiler emits it, carved from +0x01 the way
+        // the sweep's printable window broke it
+        let table: Vec<u8> = (0u32..256)
+            .map(|i| 16 - 2 * u8::try_from(i.count_ones()).expect("popcount of a byte"))
+            .collect();
+        let region = &table[1..];
+        // all three new source reads see the layout...
+        assert!(is_small_alphabet_table(region));
+        assert!(is_paired_delta_table(region));
+        assert!(is_even_delta_table(region));
+        // ...which none of the original four does
+        assert!(!counts_up_or_down(region));
+        assert!(!is_wide_int_table(region));
+        assert!(!is_dominated_by_one_byte(region));
+        assert!(!is_monotone_table(region));
+        // the ADD 0x70 fabrication really is wordy, text-reading junk — the hazard
+        let decoded: Vec<u8> = region.iter().map(|byte| byte.wrapping_add(0x70)).collect();
+        assert!(decoded.starts_with(b"~~|~||z~||z|zzx"));
+        assert!(is_wordy(&decoded));
+        assert!(reads_as_text(&decoded));
+        // the output-side pair read condemns it even where no source is in hand
+        assert!(is_table_run(&decoded));
+        // and the byte-key sweep path drops it end to end
+        assert!(src_nonprintable_ratio(region) >= 0.5);
+        assert!(hidden_runs(&decoded, region).is_empty());
+    }
+
+    /// An observed key skips the output-shape vetoes but never the source reads.
+    ///
+    /// The popcount table under its matching ADD 0x70 key decodes to wordy,
+    /// text-reading junk — the exact fabrication the overhaul killed — so the
+    /// observed-key path must still kill it on the source layout, while a keyed
+    /// leetspeak ransom line (digit-substituted words and all) comes through.
+    #[test]
+    fn observed_key_runs_keep_the_source_vetoes() {
+        // the popcount table, carved as the sweep's printable window broke it
+        let table: Vec<u8> = (0u32..256)
+            .map(|i| 16 - 2 * u8::try_from(i.count_ones()).expect("popcount of a byte"))
+            .collect();
+        let region = &table[1..];
+        let decoded: Vec<u8> = region.iter().map(|byte| byte.wrapping_add(0x70)).collect();
+        // the junk really is wordy and bracket-clean, so only the source condemns it
+        assert!(decoded.starts_with(b"~~|~||z~||z|zzx"));
+        assert!(observed_key_runs(&decoded, region).is_empty());
+        // ...and the structural keyed-pair read kills it the same way
+        assert!(keyed_pair_runs(&decoded, region).is_empty());
+        // a PPMd-style suballocator ramp is monotone at the source, so it dies too
+        let ramp: Vec<u8> = (0u8..64).map(|i| i * 4).collect();
+        let ramp_decoded: Vec<u8> = ramp.iter().map(|byte| byte.wrapping_add(0x24)).collect();
+        assert!(ramp_decoded.starts_with(b"$(,048<@"));
+        assert!(observed_key_runs(&ramp_decoded, &ramp).is_empty());
+        assert!(keyed_pair_runs(&ramp_decoded, &ramp).is_empty());
+        // the confirmed leetspeak note line under a high-bit key still comes through
+        let line = b"* DO NO4 MODIF9 ENC2904ED FILE3";
+        let src: Vec<u8> = line.iter().map(|byte| byte ^ 0x9c).collect();
+        assert_eq!(
+            observed_key_runs(line, &src)
+                .first()
+                .map(|(_, run)| run.as_str()),
+            Some("* DO NO4 MODIF9 ENC2904ED FILE3")
+        );
+    }
+
+    /// The source reads never fire on the note's ciphertext shapes.
+    ///
+    /// The confirmed `GandCrab` lines reach the source tests two ways — the whole
+    /// line under a byte key, and the value column of the `(value, key)` pair
+    /// storage — and the alphabet, pair and parity reads (and the rest of the
+    /// structured-source battery) must claim neither, or the recovery dies at the
+    /// source for looking like the tables it is nothing like.
+    #[test]
+    fn note_ciphertext_trips_no_source_reads() {
+        for line in [
+            &b" GANDC2AB 6"[..],
+            b"A44EN4ION!",
+            b"IN O2DE2 4O 02E6EN4 DA4A DAMAGE",
+            b"* DO NO4 MODIF9 ENC2904ED FILE3",
+            b"* DO NO4 CHANGE DA4A BELO7",
+            b"//WWW.ToRPRojecT.oRg/ ",
+        ] {
+            // the keyed contiguous shape: the line under a high-bit XOR key
+            let keyed: Vec<u8> = line.iter().map(|byte| byte ^ 0x9c).collect();
+            // the keyed-pair value column: the line shifted by the observed 0x3a
+            let column: Vec<u8> = line.iter().map(|byte| byte.wrapping_add(0x3a)).collect();
+            for src in [&keyed, &column] {
+                let text = String::from_utf8_lossy(line);
+                assert!(!is_small_alphabet_table(src), "{text}");
+                assert!(!is_paired_delta_table(src), "{text}");
+                assert!(!is_even_delta_table(src), "{text}");
+                assert!(!is_structured_source(src), "{text}");
+            }
+        }
+    }
+
+    /// A mixed small-integer table is condemned by its alphabet alone.
+    ///
+    /// Values scattered over the control range from ten distinct entries dodge
+    /// every layout read — mixed parity, varied deltas, no dominance, no order,
+    /// no empty column — and under additive keys in the 0x40s they decode to
+    /// wordy junk (the pack's ignored `?AFS@w@????T?LEAC` twin). The alphabet is
+    /// the tell: encoded text spreads across the byte range, machine numbers stay
+    /// under 0x20.
+    #[test]
+    fn small_alphabet_catches_the_mixed_small_int_table() {
+        #[rustfmt::skip]
+        let table: &[u8] = &[
+            0x03, 0x15, 0x08, 0x1b, 0x05, 0x0e, 0x18, 0x01, 0x12, 0x0b, 0x1b, 0x05,
+            0x15, 0x03, 0x0e, 0x08, 0x1b, 0x01, 0x12, 0x18, 0x0b, 0x05, 0x15, 0x0e,
+        ];
+        // none of the layout reads claims it...
+        assert!(!counts_up_or_down(table));
+        assert!(!is_wide_int_table(table));
+        assert!(!is_dominated_by_one_byte(table));
+        assert!(!is_monotone_table(table));
+        assert!(!is_paired_delta_table(table));
+        assert!(!is_even_delta_table(table));
+        // ...the alphabet does
+        assert!(is_small_alphabet_table(table));
+        // and the byte-key sweep path drops what it would otherwise fabricate
+        let decoded: Vec<u8> = table.iter().map(|byte| byte.wrapping_add(0x44)).collect();
+        assert!(is_wordy(&decoded));
+        assert!(reads_as_text(&decoded));
+        assert!(src_nonprintable_ratio(table) >= 0.5);
+        assert!(hidden_runs(&decoded, table).is_empty());
+    }
+
+    /// A table built in adjacent pairs is condemned by its frozen alternate step.
+    #[test]
+    fn paired_delta_catches_a_pair_table() {
+        // nine (value, value + 0x33) pairs: distinct values, mixed parity, mixed
+        // direction, nothing dominant — only the alternate-phase step is frozen
+        #[rustfmt::skip]
+        let table: &[u8] = &[
+            0xb0, 0xe3, 0x40, 0x73, 0x90, 0xc3, 0x20, 0x53, 0x70, 0xa3,
+            0x08, 0x3b, 0x60, 0x93, 0x18, 0x4b, 0x88, 0xbb,
+        ];
+        // the pair structure is invisible to every other read...
+        assert!(!counts_up_or_down(table));
+        assert!(!is_wide_int_table(table));
+        assert!(!is_dominated_by_one_byte(table));
+        assert!(!is_monotone_table(table));
+        assert!(!is_even_delta_table(table));
+        assert!(!is_small_alphabet_table(table));
+        // ...and the frozen alternate step gives it away
+        assert!(is_paired_delta_table(table));
+        assert!(is_structured_source(table));
+    }
+
+    /// A table of one parity is a table even when its values leave the control range.
+    #[test]
+    fn even_delta_catches_a_same_parity_table() {
+        // all-even values in no order, spread too wide for the alphabet read and
+        // too irregular for the pair read
+        #[rustfmt::skip]
+        let table: &[u8] = &[
+            0x22, 0x08, 0x30, 0x14, 0x3a, 0x02, 0x26, 0x0c, 0x38, 0x1e,
+            0x04, 0x2c, 0x12, 0x36, 0x0a, 0x20, 0x16, 0x3c,
+        ];
+        // every other read passes it...
+        assert!(!counts_up_or_down(table));
+        assert!(!is_wide_int_table(table));
+        assert!(!is_dominated_by_one_byte(table));
+        assert!(!is_monotone_table(table));
+        assert!(!is_paired_delta_table(table));
+        assert!(!is_small_alphabet_table(table));
+        // ...and the shared parity condemns it
+        assert!(is_even_delta_table(table));
+        assert!(is_structured_source(table));
+    }
+
+    /// The new table reads leave the confirmed recoveries' sources alone.
+    ///
+    /// The pack's real wins — the dead-drop URL, the proton.me contact, ransom
+    /// prose, a PEM body — decode from high-distinct, mostly-printable-plaintext
+    /// ciphertext, so none of the alphabet, pair or parity reads may claim a keyed
+    /// real plaintext's source, and none of their decoded texts reads as a table.
+    #[test]
+    fn new_source_reads_spare_real_recoveries() {
+        for (plain, key) in [
+            (&b"http://blog.yahoo.com/dead-drop/post"[..], 0x9du8),
+            (b"    >> 01Flip@proton.me", 0xa5),
+            (b"Your files have been encrypted. Do not attempt", 0xd7),
+            (b"MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA", 0xeb),
+        ] {
+            let src: Vec<u8> = plain.iter().map(|byte| byte ^ key).collect();
+            let text = String::from_utf8_lossy(plain);
+            assert!(!is_small_alphabet_table(&src), "{text}");
+            assert!(!is_paired_delta_table(&src), "{text}");
+            assert!(!is_even_delta_table(&src), "{text}");
+            assert!(!is_structured_source(&src), "{text}");
+            assert!(!is_table_run(plain), "{text}");
+            // the decode still comes through the full byte-key path
+            assert_eq!(
+                hidden_runs(plain, &src)
+                    .first()
+                    .map(|(_, run)| run.as_str()),
+                Some(text.as_ref()),
+                "{text}"
+            );
         }
     }
 
@@ -1321,6 +1779,44 @@ mod tests {
     fn is_wordy_requires_diversity() {
         assert!(!is_wordy(b"AAAAAAAAAA"));
         assert!(is_wordy(b"kernel32.dll"));
+    }
+
+    /// Digit-substituted (leetspeak) prose gets a second chance at wordiness.
+    ///
+    /// The confirmed `GandCrab` ransom note spells its words with digits —
+    /// `A44EN4ION`, `02E6EN4` (prevent), `ENC2904ED` (encrypted) — so a run carved
+    /// mid-word can fall under the letter-majority bar even though every digit stands
+    /// for a letter. The second chance maps the leet digits to the letters they stand
+    /// for and retries the majority test; it is a second chance only, so everything
+    /// that passes today still passes, and junk gains nothing: the popcount
+    /// fabrication has no digits at all, the AES T-table junk's `6` is deliberately
+    /// unmapped (no leet word uses it), and a digits-only ramp has too few real
+    /// letters to qualify.
+    #[test]
+    fn is_wordy_gives_digit_substituted_prose_a_second_chance() {
+        // a truncated carve of the confirmed note line fails the plain letter
+        // majority (9 letters over 19 bytes) and must survive on the leet map
+        assert!(is_wordy(b"IN O2DE2 4O 02E6EN4"));
+        // the confirmed note lines themselves stay wordy
+        for line in [
+            &b"A44EN4ION!"[..],
+            b"IN O2DE2 4O 02E6EN4 DA4A DAMAGE",
+            b"* DO NO4 MODIF9 ENC2904ED FILE3",
+            b"* DO NO4 CHANGE DA4A BELO7",
+            b"//WWW.ToRPRojecT.oRg/ ",
+        ] {
+            assert!(is_wordy(line), "{}", String::from_utf8_lossy(line));
+        }
+        // the overhaul's fabrication kills stay non-wordy: no digits to map
+        assert!(!is_wordy(b"~~|~||z~||z|zzx"));
+        // ...and `6` maps to nothing, so the T-table junk stays under the bar
+        assert!(!is_wordy(b"=&&jL66Zl??A~"));
+        // emulated table fragments are short, spaceless tokens: no second chance
+        assert!(!is_wordy(b"3g1>2O7"));
+        // a digits-only ramp has no letters: the second chance demands real ones
+        assert!(!is_wordy(b"0123 4567 8901 2345"));
+        // a letter-and-digit transport token (base64) is one word, not prose
+        assert!(!is_wordy(b"3q1R5k9W2z4V7p0X8"));
     }
 
     /// `reads_as_text` drops a run whose punctuation answers to nothing, and keeps

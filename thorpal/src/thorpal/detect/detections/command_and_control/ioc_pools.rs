@@ -15,6 +15,18 @@
 //! report shows — a six-member pool reported as a three-member one is worse than no
 //! pool at all.
 //!
+//! # Member and pool quality gates
+//!
+//! Grouping junk only manufactures structure: three carve offsets inside one
+//! ransom-note literal are not a table, and a statically linked stack's header
+//! strings pooled under an unnamed library function imply a selection that is not
+//! there. So membership excludes fragment-bearing URLs (reader-facing documentation
+//! links) and literals owned by recognized runtime/library code, and a candidate pool
+//! is only reported when it keeps at least one substantial member (a code xref or a
+//! medium-grade class), a contiguous pool is backed by a code xref or a non-runtime
+//! owner, an exclusively request-fabric pool is referenced from a function that also
+//! does networking, and the members do not all sit inside one defined string.
+//!
 //! # Phrasing rule
 //!
 //! Everything here is reported as an **observed fact about structure**. A pool is never
@@ -25,19 +37,19 @@
 //! C2 gets it blocked. So the finding says what is stored where, what references it,
 //! and what the referencing code does — and stops there.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::thorpal::detect::confidence::Confidence;
 use anyhow::Result;
-use ghidra_cli::models::Instruction;
+use ghidra_cli::models::{Instruction, StringData};
 
 use crate::thorpal::detect::context::{AnalysisContext, fmt_addr, parse_addr};
 use crate::thorpal::detect::detections::{
-    AttackTechnique, DetectionHit, EvidenceKind, low, medium,
+    AttackTechnique, DetectionHit, EvidenceKind, confidence_rank, low, medium,
 };
 
 use super::T1071;
-use super::network_comms::IocRecord;
+use super::network_comms::{IocRecord, NetIoc, is_runtime_function};
 
 /// The max gap (bytes) between two indicator strings that still counts as adjacency.
 ///
@@ -287,6 +299,132 @@ fn idioms(insns: &[Instruction]) -> BTreeSet<Idiom> {
     found
 }
 
+/// Whether a record is eligible to be a pool member at all.
+///
+/// Two kinds of record can never justify grouping: a fragment-bearing URL (a
+/// reader-facing documentation link that is never transmitted) and a literal owned by
+/// recognized runtime/library code (a statically linked stack's own string table is a
+/// table, but not an attacker's).
+///
+/// # Arguments
+///
+/// * `record` - The candidate member
+/// * `name` - The attributed function's name, when it has one
+fn poolable_member(record: &IocRecord, name: Option<&str>) -> bool {
+    // a URL nobody transmits groups nothing
+    if matches!(&record.ioc, NetIoc::Url(url) if url.has_fragment()) {
+        return false;
+    }
+    // a runtime-owned literal ships with the linked stack, not with the sample
+    !is_runtime_function(name)
+}
+
+/// Whether a member carries enough weight to substantiate a pool.
+///
+/// A code xref is direct evidence something reaches the member; failing that, a
+/// medium-or-better class (a URL, an endpoint, a User-Agent, a template) carries its
+/// own weight, while the weak classes (bare IPs, URI paths, header names) do not.
+///
+/// # Arguments
+///
+/// * `record` - The member to weigh
+fn member_substance(record: &IocRecord) -> bool {
+    // a referenced member is substantial however weak its class is
+    !record.sites.is_empty()
+        || confidence_rank(record.ioc.severity().0) >= confidence_rank(medium().0)
+}
+
+/// The `[start, end)` byte ranges of the defined strings, for the one-string test.
+///
+/// The span is the decoded value's byte length — exact for the ASCII blobs the carve
+/// sweep reads, and an under-estimate (never an over-estimate) for wide strings, so
+/// the test can only miss, not misfire.
+///
+/// # Arguments
+///
+/// * `strings` - The defined strings
+fn defined_string_ranges(strings: &[StringData]) -> Vec<(u64, u64)> {
+    strings
+        .iter()
+        .filter_map(|string| {
+            // locate the string and span it by its decoded byte length
+            let start = parse_addr(&string.address)?;
+            let len = string.value.len() as u64;
+            // a span of one byte can never hold two members, so empties are useless
+            (len > 1).then_some((start, start + len))
+        })
+        .collect()
+}
+
+/// Whether every member's storage address sits inside one defined string.
+///
+/// Three "members" at offsets inside a single literal (a ransom note carrying several
+/// URLs in its prose) are one string the carve sweep read three times, not a table.
+///
+/// # Arguments
+///
+/// * `members` - The pool's members
+/// * `ranges` - The defined strings' `[start, end)` ranges
+fn within_one_string(members: &[IocRecord], ranges: &[(u64, u64)]) -> bool {
+    // the pool's storage footprint; an empty pool sits inside nothing
+    let Some(min) = members.iter().map(|member| member.string_addr).min() else {
+        return false;
+    };
+    let max = members
+        .iter()
+        .map(|member| member.string_addr)
+        .max()
+        .unwrap_or(min);
+    // one range holding the whole footprint means one literal holds every member
+    ranges
+        .iter()
+        .any(|(start, end)| *start <= min && max < *end && min != max)
+}
+
+/// Whether a candidate pool clears the member-substance and junk gates.
+///
+/// # Arguments
+///
+/// * `pool` - The candidate pool
+/// * `network_funcs` - Entries of functions carrying a networking API/symbol hit
+/// * `ranges` - The defined strings' `[start, end)` ranges
+/// * `function_is_runtime` - Whether the pool's attributed function is runtime code
+fn pool_substantiated(
+    pool: &Pool,
+    network_funcs: &HashSet<u64>,
+    ranges: &[(u64, u64)],
+    function_is_runtime: bool,
+) -> bool {
+    // a pool with no substantial member is junk grouped by shape
+    if !pool.members.iter().any(member_substance) {
+        return false;
+    }
+    // a contiguous table additionally needs a code xref or a non-runtime owner, or
+    // nothing was ever seen to reach it
+    if pool.basis == PoolBasis::Contiguous {
+        let referenced = pool.members.iter().any(|member| !member.sites.is_empty());
+        let owned = pool.function.is_some() && !function_is_runtime;
+        if !referenced && !owned {
+            return false;
+        }
+    }
+    // a pool made entirely of request fabric is a string table unless the function
+    // selecting from it also does networking
+    let all_fabric = pool
+        .members
+        .iter()
+        .all(|member| matches!(member.ioc, NetIoc::Http { .. }));
+    if all_fabric
+        && !pool
+            .function
+            .is_some_and(|entry| network_funcs.contains(&entry))
+    {
+        return false;
+    }
+    // members that all sit inside one defined string are carve offsets, not a table
+    !within_one_string(&pool.members, ranges)
+}
+
 /// Group indicators that are stored next to each other in one data region.
 ///
 /// Members are grouped by class as well as by adjacency: a URL sitting between two
@@ -465,14 +603,17 @@ fn pool_reasoning(pool: &Pool) -> String {
 /// Group the recovered indicators into pools and report each one.
 ///
 /// Runs over the complete, uncapped record set from
-/// [`super::network_comms::ioc_records`]. Pools found by both bases are reported once,
+/// [`super::network_comms::ioc_records`], minus the members that can never justify
+/// grouping (see [`poolable_member`]). Pools found by both bases are reported once,
 /// preferring the contiguous reading because a data-layout fact is stronger evidence of
-/// a deliberate table than a shared reference is.
+/// a deliberate table than a shared reference is, and each candidate pool must clear
+/// [`pool_substantiated`] before it is reported.
 ///
 /// # Arguments
 ///
 /// * `ctx` - The analysis context
 /// * `records` - Every recovered indicator
+/// * `network_funcs` - Entries of functions carrying a networking API/symbol hit
 ///
 /// # Errors
 ///
@@ -481,12 +622,26 @@ fn pool_reasoning(pool: &Pool) -> String {
 pub(super) async fn pool_hits(
     ctx: &AnalysisContext,
     records: &[IocRecord],
+    network_funcs: &HashSet<u64>,
 ) -> Result<Vec<DetectionHit>> {
+    // exclude the records that can never justify grouping (fragment URLs and
+    // runtime-owned literals) before any structure is read out of the set
+    let records: Vec<IocRecord> = records
+        .iter()
+        .filter(|record| {
+            // resolve the attributed function's name for the runtime-ownership test
+            let name = record.function.and_then(|entry| ctx.function_name(entry));
+            poolable_member(record, name)
+        })
+        .cloned()
+        .collect();
+    // the defined strings' spans, for the carve-offsets-in-one-literal test
+    let ranges = defined_string_ranges(&ctx.strings);
     let mut pools: Vec<Pool> = Vec::new();
     // the membership sets already reported, so the two bases do not double-report
     let mut seen: BTreeSet<String> = BTreeSet::new();
     // 1) groups laid out as a table in one data region
-    for members in contiguous_pools(records) {
+    for members in contiguous_pools(&records) {
         if !seen.insert(membership_key(&members)) {
             continue;
         }
@@ -502,7 +657,7 @@ pub(super) async fn pool_hits(
         });
     }
     // 2) groups reached from one function, wherever they are stored
-    for (entry, members) in shared_function_pools(records) {
+    for (entry, members) in shared_function_pools(&records) {
         if !seen.insert(membership_key(&members)) {
             continue;
         }
@@ -513,6 +668,12 @@ pub(super) async fn pool_hits(
             idioms: BTreeSet::new(),
         });
     }
+    // drop the candidates whose membership cannot substantiate a selection structure
+    pools.retain(|pool| {
+        // resolve the pool's attributed function name for the runtime test
+        let name = pool.function.and_then(|entry| ctx.function_name(entry));
+        pool_substantiated(pool, network_funcs, &ranges, is_runtime_function(name))
+    });
     // the largest pools first, so the cap keeps the most informative ones
     pools.sort_by_key(|pool| std::cmp::Reverse(pool.members.len()));
     // never truncate silently
@@ -705,5 +866,244 @@ mod tests {
         let reasoning = pool_reasoning(&pool);
         assert!(reasoning.contains("none is called a decoy"));
         assert!(!reasoning.to_ascii_lowercase().contains("likely the real"));
+    }
+
+    /// Build a URL-record pool member for the gate tests.
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - The URL as it appears in the binary
+    /// * `string_addr` - Where the literal is stored
+    /// * `sites` - The code sites referencing it
+    fn url_record(raw: &str, string_addr: u64, sites: Vec<u64>) -> IocRecord {
+        // parse the raw text so has_fragment reflects the real URL shape
+        let url = crate::thorpal::detect::indicators::parse_url(raw).expect("URL parses");
+        IocRecord {
+            ioc: NetIoc::Url(url),
+            string_addr,
+            sites,
+            function: None,
+        }
+    }
+
+    /// Build a request-fabric pool member for the gate tests.
+    ///
+    /// # Arguments
+    ///
+    /// * `artifact` - Which piece of the fabric the literal is
+    /// * `raw` - The literal as it appears in the binary
+    /// * `string_addr` - Where the literal is stored
+    /// * `sites` - The code sites referencing it
+    /// * `function` - The function it is attributed to
+    fn fabric_record(
+        artifact: crate::thorpal::detect::indicators::HttpArtifact,
+        raw: &str,
+        string_addr: u64,
+        sites: Vec<u64>,
+        function: Option<u64>,
+    ) -> IocRecord {
+        IocRecord {
+            ioc: NetIoc::Http {
+                artifact,
+                raw: raw.to_string(),
+            },
+            string_addr,
+            sites,
+            function,
+        }
+    }
+
+    /// Build a pool over the given members for the gate tests.
+    ///
+    /// # Arguments
+    ///
+    /// * `basis` - Why the members are grouped
+    /// * `members` - The pool's members
+    /// * `function` - The function referencing the pool, when one was resolved
+    fn pool(basis: PoolBasis, members: Vec<IocRecord>, function: Option<u64>) -> Pool {
+        Pool {
+            basis,
+            members,
+            function,
+            idioms: BTreeSet::new(),
+        }
+    }
+
+    /// Fragment URLs and runtime-owned literals are never pool members.
+    #[test]
+    fn poolable_member_excludes_fragments_and_runtime_literals() {
+        // the getrandom documentation link groups nothing
+        let doc = url_record(
+            "https://docs.rs/getrandom#nodejs-es-module-support",
+            0x1000,
+            Vec::new(),
+        );
+        assert!(!poolable_member(&doc, None));
+        // a literal owned by a recognized runtime function ships with the stack
+        let owned = record("10.0.0.1", 0x2000, Some(0x40_1000));
+        assert!(!poolable_member(&owned, Some("net/http.(*Client).Do")));
+        // an ordinary program-owned member stays eligible
+        assert!(poolable_member(&owned, Some("FUN_00401000")));
+    }
+
+    /// Substance needs a code xref or a medium-grade class.
+    #[test]
+    fn member_substance_needs_an_xref_or_a_weighty_class() {
+        // a bare, unreferenced IP is exactly the version-number shape
+        assert!(!member_substance(&record("10.0.0.1", 0x1000, None)));
+        // a code xref makes any class substantial
+        let mut referenced = record("10.0.0.1", 0x1000, None);
+        referenced.sites.push(0x40_1000);
+        assert!(member_substance(&referenced));
+        // a URL-class member carries its own weight even unreferenced
+        assert!(member_substance(&url_record(
+            "https://c2.example.com/panel",
+            0x1000,
+            Vec::new()
+        )));
+    }
+
+    /// Defined strings span their decoded byte length; malformed addresses drop out.
+    #[test]
+    fn defined_string_ranges_span_decoded_bytes() {
+        let strings = vec![
+            StringData {
+                address: "4f62b0".to_string(),
+                value: "x".repeat(0x200),
+                length: 0x200,
+                encoding: None,
+                references: Vec::new(),
+            },
+            StringData {
+                address: "not-an-address".to_string(),
+                value: "bad".to_string(),
+                length: 3,
+                encoding: None,
+                references: Vec::new(),
+            },
+        ];
+        assert_eq!(
+            defined_string_ranges(&strings),
+            vec![(0x4f_62b0, 0x4f_64b0)]
+        );
+    }
+
+    /// Carve offsets inside one ransom-note literal never report as a pool.
+    #[test]
+    fn pools_inside_one_defined_string_are_skipped() {
+        // three "members" carved at offsets inside the one literal at 0x4f62b0
+        let note = pool(
+            PoolBasis::SharedFunction,
+            vec![
+                url_record(
+                    "https://restore-a.example.com/help",
+                    0x4f_62b0,
+                    vec![0x40_1000],
+                ),
+                url_record("https://restore-b.example.com/help", 0x4f_62f0, Vec::new()),
+                url_record("https://restore-c.example.com/help", 0x4f_6330, Vec::new()),
+            ],
+            Some(0x40_0f00),
+        );
+        // the whole ransom note is one defined string spanning every member
+        let ranges = vec![(0x4f_62b0, 0x4f_62b0 + 0x200)];
+        assert!(!pool_substantiated(&note, &HashSet::new(), &ranges, false));
+        // the same members strung across separate literals keep their pool
+        assert!(pool_substantiated(&note, &HashSet::new(), &[], false));
+    }
+
+    /// A contiguous table nothing references and nothing owns is not reported.
+    #[test]
+    fn contiguous_pools_need_a_reference_or_an_owner() {
+        // three URL members with no xrefs: substantial by class, but nothing was
+        // ever seen to reach the table
+        let members = vec![
+            url_record("https://a.example.com/gate", 0x1000, Vec::new()),
+            url_record("https://b.example.com/gate", 0x1040, Vec::new()),
+            url_record("https://c.example.com/gate", 0x1080, Vec::new()),
+        ];
+        let unreferenced = pool(PoolBasis::Contiguous, members.clone(), None);
+        assert!(!pool_substantiated(
+            &unreferenced,
+            &HashSet::new(),
+            &[],
+            false
+        ));
+        // the same table attributed to a program-owned function is reported
+        let owned = pool(PoolBasis::Contiguous, members.clone(), Some(0x40_1000));
+        assert!(pool_substantiated(&owned, &HashSet::new(), &[], false));
+        // ...while a runtime owner is not an owner for this purpose
+        let runtime = pool(PoolBasis::Contiguous, members, Some(0x40_1000));
+        assert!(!pool_substantiated(&runtime, &HashSet::new(), &[], true));
+    }
+
+    /// Junk fabric pools are suppressed; the ironstorm-shaped confirmed pool passes.
+    #[test]
+    fn fabric_pools_need_a_networking_function() {
+        use crate::thorpal::detect::indicators::HttpArtifact;
+        // the macOS framework paths pooled as 'URI Path @ contiguous data region':
+        // weak class, no xrefs, no owner — no substance at all
+        let dylib = pool(
+            PoolBasis::Contiguous,
+            vec![
+                fabric_record(
+                    HttpArtifact::UriPath,
+                    "/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit",
+                    0x1000,
+                    Vec::new(),
+                    None,
+                ),
+                fabric_record(
+                    HttpArtifact::UriPath,
+                    "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+                    0x1080,
+                    Vec::new(),
+                    None,
+                ),
+                fabric_record(
+                    HttpArtifact::UriPath,
+                    "/System/Library/Frameworks/Security.framework/Security",
+                    0x1100,
+                    Vec::new(),
+                    None,
+                ),
+            ],
+            None,
+        );
+        assert!(!pool_substantiated(&dylib, &HashSet::new(), &[], false));
+        // OpenSSL's asn_mime literals under an unnamed library function: referenced,
+        // but exclusively request fabric with no networking in the function
+        let asn_mime = pool(
+            PoolBasis::SharedFunction,
+            vec![
+                fabric_record(
+                    HttpArtifact::HeaderTemplate,
+                    "Content-Type: %smime;",
+                    0x2000,
+                    vec![0x50_1000],
+                    Some(0x50_0f00),
+                ),
+                fabric_record(
+                    HttpArtifact::ContentType,
+                    "multipart/signed",
+                    0x2040,
+                    vec![0x50_1010],
+                    Some(0x50_0f00),
+                ),
+                fabric_record(
+                    HttpArtifact::ContentType,
+                    "application/pkcs7-mime",
+                    0x2080,
+                    vec![0x50_1020],
+                    Some(0x50_0f00),
+                ),
+            ],
+            Some(0x50_0f00),
+        );
+        assert!(!pool_substantiated(&asn_mime, &HashSet::new(), &[], false));
+        // the ironstorm shape: the same three-member fabric table (one low-grade
+        // Content-Type member kept) selected by the function carrying WinINet hits
+        let wininet: HashSet<u64> = [0x50_0f00].into_iter().collect();
+        assert!(pool_substantiated(&asn_mime, &wininet, &[], false));
     }
 }

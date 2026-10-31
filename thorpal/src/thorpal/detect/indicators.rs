@@ -363,6 +363,10 @@ const HTTP_METHODS: &[&str] = &[
     "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "CONNECT", "TRACE",
 ];
 
+/// The HTTP version tokens a request line or hand-rolled template carries,
+/// lower-cased for matching.
+const HTTP_VERSION_TOKENS: &[&str] = &["http/1.0", "http/1.1", "http/2"];
+
 /// The standard HTTP header names, lower-cased (RFC 9110 and its companions).
 ///
 /// Used to tell a hand-built request header from a colon that happens to appear in
@@ -398,6 +402,7 @@ const STANDARD_HEADERS: &[&str] = &[
     "upgrade",
     "user-agent",
     "via",
+    "x-requested-with",
 ];
 
 /// The IANA top-level media types, for recognizing a `type/subtype` content type.
@@ -414,10 +419,31 @@ const MEDIA_TYPES: &[&str] = &[
 ];
 
 /// Filesystem path prefixes that a leading-slash literal is far more likely to be
-/// than a URI path — a platform fact about Unix layout, not an indicator.
+/// than a URI path — a platform fact about Unix and macOS layout, not an indicator.
 const FILESYSTEM_PREFIXES: &[&str] = &[
-    "/bin/", "/boot/", "/dev/", "/etc/", "/home/", "/lib/", "/lib64/", "/media/", "/mnt/", "/opt/",
-    "/proc/", "/root/", "/run/", "/sbin/", "/srv/", "/sys/", "/tmp/", "/usr/", "/var/",
+    "/applications/",
+    "/bin/",
+    "/boot/",
+    "/dev/",
+    "/etc/",
+    "/home/",
+    "/lib/",
+    "/lib64/",
+    "/library/",
+    "/media/",
+    "/mnt/",
+    "/opt/",
+    "/proc/",
+    "/root/",
+    "/run/",
+    "/sbin/",
+    "/srv/",
+    "/sys/",
+    "/system/",
+    "/tmp/",
+    "/usr/",
+    "/var/",
+    "/volumes/",
 ];
 
 /// File extensions that name a compilation input rather than a request target.
@@ -474,8 +500,6 @@ pub enum HttpArtifact {
     UriPath,
     /// A URI path carrying a format specifier or placeholder.
     UriTemplate,
-    /// A bare HTTP request method token.
-    Method,
     /// A media type the program sends or accepts.
     ContentType,
     /// A whole request line or hand-rolled request/response template.
@@ -493,7 +517,6 @@ impl HttpArtifact {
             Self::CookieName => "Cookie",
             Self::UriPath => "URI Path",
             Self::UriTemplate => "URI Template",
-            Self::Method => "HTTP Method",
             Self::ContentType => "Content Type",
             Self::RequestTemplate => "HTTP Request Template",
         }
@@ -595,23 +618,6 @@ fn has_angle_placeholder(value: &str) -> bool {
     false
 }
 
-/// Whether `value` is a bare token — the shape a header, cookie, or parameter name
-/// takes.
-///
-/// # Arguments
-///
-/// * `value` - The candidate name
-fn is_name_token(value: &str) -> bool {
-    // the longest name worth entertaining; RFC 6265 sets no limit, but servers do
-    const MAX_NAME: usize = 64;
-    !value.is_empty()
-        && value.len() <= MAX_NAME
-        && value.chars().any(|c| c.is_ascii_alphanumeric())
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
-}
-
 /// Whether a path ends in the name of a compilation input.
 ///
 /// Only the end of the path is tested, never a middle segment: a build path records the
@@ -653,9 +659,10 @@ fn carries_source_extension(value: &str) -> bool {
 
 /// Whether a leading-slash literal is a URI path rather than a filesystem path.
 ///
-/// The two are genuinely ambiguous in isolation; this rules out the Unix layout
-/// prefixes and the build paths a compiler embeds, and the caller is expected to report
-/// the remaining ambiguity rather than assert a URI.
+/// The two are genuinely ambiguous in isolation; this rules out the Unix/macOS
+/// layout prefixes, the build paths a compiler embeds, dot-directory segments, and
+/// lone base64-shaped blobs, and the caller is expected to report the remaining
+/// ambiguity rather than assert a URI.
 ///
 /// # Arguments
 ///
@@ -704,7 +711,28 @@ pub fn is_uri_path(value: &str) -> bool {
     if !value.chars().any(|c| c.is_ascii_alphabetic()) {
         return false;
     }
-    // the Unix layout prefixes are filesystem paths far more often than URI paths
+    // a dot-directory segment is dotfile/config layout, not a request target
+    if value.contains("/.") {
+        return false;
+    }
+    // a lone segment with no query that ends in '=' or is base64-shaped is an
+    // encoded blob (a key, a token) that merely starts with a slash
+    let segment = &value[1..];
+    if !segment.contains('/') && !segment.contains('?') {
+        // base64 padding glued to a single segment gives the encoding away
+        if segment.ends_with('=') {
+            return false;
+        }
+        // a mixed-case alphanumeric run long enough to be an encoded value
+        let base64_shaped = segment.len() >= 12
+            && segment.chars().all(|c| c.is_ascii_alphanumeric())
+            && segment.chars().any(|c| c.is_ascii_uppercase())
+            && segment.chars().any(|c| c.is_ascii_lowercase());
+        if base64_shaped {
+            return false;
+        }
+    }
+    // the Unix/macOS layout prefixes are filesystem paths far more often than URI paths
     let lower = value.to_ascii_lowercase();
     if FILESYSTEM_PREFIXES
         .iter()
@@ -754,6 +782,42 @@ fn is_product_token(value: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+' | '_'))
 }
 
+/// Whether `needle` occurs in `haystack` as a word of its own (no identifier
+/// character on either side).
+///
+/// # Arguments
+///
+/// * `haystack` - The lower-cased text to search
+/// * `needle` - The ASCII token to find
+fn contains_word_bounded(haystack: &str, needle: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    // walk every occurrence until one has non-identifier neighbours
+    let mut from = 0;
+    while let Some(at) = haystack[from..].find(needle) {
+        let start = from + at;
+        let end = start + needle.len();
+        // an identifier character on either side extends the token past the needle
+        let before_ok = start == 0 || !is_word_byte(bytes[start - 1]);
+        let after_ok = bytes.get(end).is_none_or(|byte| !is_word_byte(*byte));
+        if before_ok && after_ok {
+            return true;
+        }
+        // resume just past this occurrence's start (the needle is ASCII, so the
+        // next byte is a character boundary)
+        from = start + 1;
+    }
+    false
+}
+
+/// Whether a byte extends an identifier/word token.
+///
+/// # Arguments
+///
+/// * `byte` - The byte to test
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
 /// Split a `Name: value` header line into its name and value.
 ///
 /// # Arguments
@@ -772,6 +836,35 @@ fn split_header(value: &str) -> Option<(String, &str)> {
         return None;
     }
     Some((name.to_ascii_lowercase(), rest))
+}
+
+/// The longest rest a glued known-header line still reads as a value, in bytes.
+///
+/// Real header values the fabric carries (media types, encodings, hand-built token
+/// strings) sit well under this; prose that happens to open with a header word runs
+/// long past it.
+const MAX_GLUED_VALUE_LEN: usize = 128;
+
+/// Whether the text after a known header's colon looks like a header value.
+///
+/// Accepts a short, printable, single-line rest with no `::` (a scoped code path's
+/// tell, wherever it appears in the rest). Used only for *known* header names: a
+/// glued real-header template (`Content-Type:application/x-www-form-urlencoded`) is
+/// exactly what malware builds when it assembles requests by concatenation, while
+/// the gluing FPs this grammar rejects — Rust paths, ODBC/`k=v` strings — never
+/// hang off a known header name with a value-shaped rest.
+///
+/// # Arguments
+///
+/// * `rest` - The text after the header name's colon
+fn looks_like_header_value(rest: &str) -> bool {
+    // a value is non-empty, bounded, and free of the scoped-path tell
+    if rest.is_empty() || rest.len() > MAX_GLUED_VALUE_LEN || rest.contains("::") {
+        return false;
+    }
+    // one line of printable text (tabs allowed; header values are single-line)
+    rest.chars()
+        .all(|c| c == '\t' || (!c.is_control() && c.is_ascii()))
 }
 
 /// Fixed byte sequences the HTTP specifications require a conforming implementation to
@@ -836,7 +929,8 @@ fn is_protocol_constant(value: &str) -> bool {
 /// Tried most-specific first, so a `User-Agent:` header is a User-Agent rather than a
 /// generic header, and a header carrying a placeholder is a template rather than a
 /// fixed line. Returns `None` for anything that does not match a grammar — prose with
-/// a colon in it, a bare word, a filesystem path, or a constant the protocol required
+/// a colon in it, a bare word (including a bare method token like `GET`, which every
+/// HTTP client alive carries), a filesystem path, or a constant the protocol required
 /// the program to carry.
 ///
 /// # Arguments
@@ -857,20 +951,44 @@ pub fn classify_http(value: &str) -> Option<HttpArtifact> {
 
     // 1) a whole request line or a hand-rolled request/response template
     let first_word = trimmed.split([' ', '\t']).next().unwrap_or_default();
-    if HTTP_METHODS.contains(&first_word) && trimmed.contains(' ') {
+    let starts_with_method = HTTP_METHODS.contains(&first_word);
+    if starts_with_method && trimmed.contains(' ') {
         return Some(HttpArtifact::RequestTemplate);
     }
-    if lower.contains("http/1.0") || lower.contains("http/1.1") || lower.contains("http/2") {
-        return Some(HttpArtifact::RequestTemplate);
+    // a version token claims request fabric only when it stands as a word of its
+    // own AND the literal is shaped like protocol text — a request line, a trailing
+    // `HTTP/x` tail, or raw CRLF framing. Prose, symbol names, and library banners
+    // mention the version without being any of those
+    if HTTP_VERSION_TOKENS
+        .iter()
+        .any(|token| contains_word_bounded(&lower, token))
+    {
+        let ends_with_version = HTTP_VERSION_TOKENS
+            .iter()
+            .any(|token| lower.ends_with(token));
+        if starts_with_method || ends_with_version || trimmed.contains("\r\n") {
+            return Some(HttpArtifact::RequestTemplate);
+        }
     }
 
     // 2) a header line, typed by which header it is
     if let Some((name, rest)) = split_header(trimmed) {
+        // a double colon is a scoped code path (`Connection::poll`), never a header
+        let scoped = rest.starts_with(':');
         let known = STANDARD_HEADERS.contains(&name.as_str());
+        // a real header's value is empty, set off from the name by whitespace, or
+        // filled in at request time; a *known* header also accepts a value glued to
+        // the colon (`Content-Type:application/x-www-form-urlencoded` — the shape a
+        // hand-concatenated request template takes), provided the rest reads as a
+        // header value. Anything else glued to the colon is prose/code
+        let header_shaped = rest.is_empty()
+            || rest.starts_with(|c: char| c.is_whitespace())
+            || has_placeholder(rest)
+            || (known && looks_like_header_value(rest));
         // a program's own header follows the `x-` convention; anything else with a
         // colon is prose until proven otherwise
         let custom = name.starts_with("x-") && name.len() > 2;
-        if known || custom {
+        if !scoped && header_shaped && (known || custom) {
             return Some(match name.as_str() {
                 "user-agent" => HttpArtifact::UserAgent,
                 "cookie" | "set-cookie" => HttpArtifact::CookieName,
@@ -901,22 +1019,9 @@ pub fn classify_http(value: &str) -> Option<HttpArtifact> {
     if is_product_token(trimmed) && trimmed.contains('(') && trimmed.contains(')') {
         return Some(HttpArtifact::UserAgent);
     }
-
-    // 6) a bare method token, on its own
-    if HTTP_METHODS.contains(&trimmed) {
-        return Some(HttpArtifact::Method);
-    }
-
-    // 7) a `k=v;` cookie template. The name before the `=` has to look like a name:
-    // punctuation-heavy data ramps through `=` and `;` like it ramps through every
-    // other byte, and would otherwise be read as a cookie on the strength of that.
-    if templated && trimmed.contains(';') && !trimmed.contains(' ') {
-        if let Some((name, _)) = trimmed.split_once('=') {
-            if is_name_token(name.trim_start_matches(';')) {
-                return Some(HttpArtifact::CookieName);
-            }
-        }
-    }
+    // a bare method token ("GET", "POST") is shared by every HTTP client alive, and
+    // a `k=v;` template matches ODBC connection strings as readily as cookies, so
+    // neither is a classification of its own
     None
 }
 
@@ -1275,8 +1380,8 @@ fn is_degenerate_mac_text(value: &str) -> bool {
 
 /// Whether six octets are a degenerate run rather than an adapter's own address.
 ///
-/// The tests that hold however the value was found — spelled out with separators in a
-/// literal, or read as six raw bytes out of a structure. Each rejects a shape that
+/// The tests that hold however the rendering was found — a terminated literal in the
+/// string table, or an unterminated one in a literal pool. Each rejects a shape that
 /// occurs for a reason other than identifying an adapter.
 ///
 /// # Arguments
@@ -1408,6 +1513,59 @@ fn is_placeholder(value: &str) -> bool {
         .collect();
     // every networking stack ships both of these as "unset" and "broadcast"
     digits.iter().all(|b| *b == b'0') || digits.iter().all(|b| *b == b'f')
+}
+
+/// Whether a GUID literal is one of the ubiquitous platform identifiers.
+///
+/// COM/OLE interface ids, shell and media class ids, and the `DirectShow`
+/// baseclasses sample pair recur across a large share of all Windows binaries: a
+/// program carries them because it links a platform API, not because anything is
+/// keyed to a machine, so reporting each one floods a session with values no
+/// analyst can pivot on. Three cheap family markers cover nearly all of them —
+/// the OLE automation `data4` `C000-000000000046` shared by the base COM
+/// interface ids (`IUnknown`, `IDispatch`, ...), and the `E260-11CF`
+/// `data2`/`data3` pair and `00AA004A34D5` node, each shared by one of the big
+/// mid-nineties platform interface-id blocks — plus an exact list for the pair
+/// of `DirectShow` baseclasses GUIDs every binary built on that SDK embeds.
+///
+/// Deliberately *not* a validity test: a unique, author-chosen GUID (the kind a
+/// campaign is actually keyed or tracked by) matches none of these families and
+/// is unaffected.
+///
+/// # Arguments
+///
+/// * `value` - The GUID rendering, with or without braces, any case
+pub fn is_ubiquitous_guid(value: &str) -> bool {
+    /// The exact ubiquitous GUIDs the family rules do not cover.
+    const DENYLIST: &[&str] = &[
+        // the DirectShow baseclasses pair, compiled into every binary built on
+        // that SDK's sample code
+        "42e65c96-15e8-40c0-b04a-90d5ccf6e2eb",
+        "3cfffc43-d199-46fb-bfee-8342b653a491",
+    ];
+    // normalize: strip braces and compare in lower case
+    let trimmed = value.trim().trim_start_matches('{').trim_end_matches('}');
+    let lower = trimmed.to_ascii_lowercase();
+    // split the five groups of the canonical rendering; anything else is not a
+    // GUID rendering and is judged by its own matcher, not here
+    let groups: Vec<&str> = lower.split('-').collect();
+    if groups.len() != 5 {
+        return false;
+    }
+    // the OLE automation node every base COM interface id ends with
+    if groups[3] == "c000" && groups[4] == "000000000046" {
+        return true;
+    }
+    // the shared node of one mid-nineties platform interface-id block
+    if groups[4] == "00aa004a34d5" {
+        return true;
+    }
+    // ...and the shared timestamp fields of another
+    if groups[1] == "e260" && groups[2] == "11cf" {
+        return true;
+    }
+    // the handful of exact values the families do not cover
+    DENYLIST.contains(&lower.as_str())
 }
 
 /// Whether a literal could be a computer, domain, or account name.
@@ -1601,7 +1759,77 @@ mod tests {
             classify_http("/upload?id=%d"),
             Some(HttpArtifact::UriTemplate)
         );
-        assert_eq!(classify_http("GET"), Some(HttpArtifact::Method));
+    }
+
+    /// Bare method tokens are every client's fabric, never a seeded finding.
+    #[test]
+    fn classify_http_demotes_bare_method_tokens() {
+        // a lone verb carries no information about the sample's own requests
+        assert_eq!(classify_http("POST"), None);
+        assert_eq!(classify_http("GET"), None);
+        // a verb opening a request line is still request fabric
+        assert_eq!(
+            classify_http("POST /submit.php"),
+            Some(HttpArtifact::RequestTemplate)
+        );
+    }
+
+    /// A version token classifies only inside protocol-shaped text.
+    #[test]
+    fn classify_http_gates_version_tokens_on_protocol_shape() {
+        // a request line ending in the version token classifies
+        assert_eq!(
+            classify_http("GET /gate.php HTTP/1.1"),
+            Some(HttpArtifact::RequestTemplate)
+        );
+        // so does a template ending in the version token with no method
+        assert_eq!(
+            classify_http("%s %s HTTP/1.1"),
+            Some(HttpArtifact::RequestTemplate)
+        );
+        // and raw CRLF framing mid-string marks a hand-rolled response/request
+        assert_eq!(
+            classify_http("HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n"),
+            Some(HttpArtifact::RequestTemplate)
+        );
+        // prose mentioning a version is not request fabric
+        assert_eq!(classify_http("supports http/1.1 and spdy"), None);
+        // a version glued into a longer identifier is not word-bounded
+        assert_eq!(classify_http("winhttp/1.1transport"), None);
+    }
+
+    /// A scoped code path never reads as a header, but a known header glued to a
+    /// plausible value does.
+    ///
+    /// The glued-rest rule exists for Rust paths (`Connection::poll`) and ODBC/`k=v`
+    /// connection strings, not for real headers: a glued real-header template
+    /// (`Content-Type:application/x-www-form-urlencoded` — a confirmed C2 lead) is
+    /// exactly what malware builds when it assembles requests by concatenation, so a
+    /// known header name followed by a value-shaped rest classifies. `Accept:gzip`
+    /// rides the same rule — Accept is a known header and gzip a plausible value.
+    #[test]
+    fn classify_http_rejects_scoped_paths_but_keeps_glued_known_headers() {
+        // the Rust path shape (`Type::method`) a panicking binary embeds by the dozen
+        assert_eq!(classify_http("Connection::poll"), None);
+        // the confirmed glued hand-built header template classifies by its known name
+        assert_eq!(
+            classify_http("Content-Type:application/x-www-form-urlencoded"),
+            Some(HttpArtifact::ContentType)
+        );
+        // a known header glued to a short plausible value is the same template shape
+        assert_eq!(classify_http("Accept:gzip"), Some(HttpArtifact::HeaderName));
+        // a glued placeholder is request-time fill-in, so it stays a template
+        assert_eq!(
+            classify_http("X-Key:%s"),
+            Some(HttpArtifact::HeaderTemplate)
+        );
+        // an unknown name glued to a value is still prose/code, not a header
+        assert_eq!(classify_http("note:this is not a header"), None);
+        // a known name glued to a scoped path is code, not a value
+        assert_eq!(classify_http("Host:std::net::TcpStream"), None);
+        // a known name glued to an over-long rest is prose, not a header value
+        let long = format!("Accept:{}", "a".repeat(200));
+        assert_eq!(classify_http(&long), None);
     }
 
     /// `classify_http` does not report the constants the protocol mandates.
@@ -1662,21 +1890,21 @@ mod tests {
         ));
     }
 
-    /// A cookie template needs a name that could be a cookie name.
+    /// `k=v;` cookie-template shapes do not classify: ODBC strings share the shape.
     #[test]
-    fn classify_http_needs_a_real_cookie_name() {
-        assert_eq!(
-            classify_http("session_id=%s; path=/"),
-            None,
-            "spaces are not a template"
-        );
-        assert_eq!(
-            classify_http("sid=%s;path=/"),
-            Some(HttpArtifact::CookieName)
-        );
+    fn classify_http_rejects_cookie_template_shapes() {
+        // the ODBC connection-string shape (a measured-corpus junk value)
+        assert_eq!(classify_http("DRIVER={SQL Server};UID=sa;PWD=%s"), None);
+        // a bare k=v; template reads the same way the ODBC string does
+        assert_eq!(classify_http("sid=%s;path=/"), None);
+        assert_eq!(classify_http("session_id=%s; path=/"), None);
         // a punctuation ramp carries `=` and `;` without carrying a cookie
         assert_eq!(classify_http("!\"#$%&'()*+,-./0123456789:;<=>?@"), None);
-        assert!(is_name_token("__Secure-sid") && !is_name_token("!\"#$%&'()"));
+        // a real Cookie header classifies through the header grammar instead
+        assert_eq!(
+            classify_http("Cookie: sid=%s"),
+            Some(HttpArtifact::CookieName)
+        );
     }
 
     /// `is_uri_path` rules out the Windows and Unix filesystem forms.
@@ -1710,6 +1938,25 @@ mod tests {
         // nor does a segment that only happens to contain the letters
         assert!(is_uri_path("/api/v2/orders.chart"));
         assert!(is_uri_path("/download/report.pdf"));
+    }
+
+    /// macOS layout prefixes and dotfile/encoded-blob shapes are not URI paths.
+    #[test]
+    fn is_uri_path_rejects_macos_and_blob_shapes() {
+        // the macOS layout prefixes are filesystem facts, like the Unix ones
+        assert!(!is_uri_path("/System/Library/Frameworks"));
+        assert!(!is_uri_path("/Library/Preferences/com.apple.x"));
+        assert!(!is_uri_path("/Applications/Safari.app"));
+        assert!(!is_uri_path("/Volumes/Install"));
+        // a dot-directory segment is dotfile/config layout, not a request target
+        assert!(!is_uri_path("/.config"));
+        assert!(!is_uri_path("/data/.hidden/x"));
+        // a lone base64-shaped segment is an encoded blob, not a path
+        assert!(!is_uri_path("/dGVzdHN0cmluZw=="));
+        assert!(!is_uri_path("/aGVsbG93b3JsZHh5"));
+        // real request targets keep classifying
+        assert!(is_uri_path("/panel/gate.php?id="));
+        assert!(is_uri_path("/gate.php"));
     }
 
     /// `is_standard_port` separates well-known service ports from bespoke ones.
@@ -1840,6 +2087,27 @@ mod tests {
         assert!(!plausible_host_name("1.2.3"));
         // a filename that satisfies the character set is still a filename
         assert!(!plausible_host_name("kernel32.dll"));
+    }
+
+    /// Ubiquitous platform GUID families are recognized; unique values are not.
+    #[test]
+    fn is_ubiquitous_guid_matches_platform_families_only() {
+        // the OLE automation node family: IDispatch, braces and case ignored
+        assert!(is_ubiquitous_guid("00020400-0000-0000-c000-000000000046"));
+        assert!(is_ubiquitous_guid("{0000031A-0000-0000-C000-000000000046}"));
+        // the two mid-nineties interface-id blocks, matched by their shared fields
+        assert!(is_ubiquitous_guid("deadbeef-e260-11cf-9ae1-00805f14d305"));
+        assert!(is_ubiquitous_guid("f0b7a1a3-9847-11cf-8f20-00aa004a34d5"));
+        // the DirectShow baseclasses pair, exactly as binaries carry them
+        assert!(is_ubiquitous_guid("42E65C96-15E8-40c0-B04A-90D5CCF6E2EB"));
+        assert!(is_ubiquitous_guid("3CFFFC43-D199-46fb-BFEE-8342B653A491"));
+        // the confirmed campaign GUIDs stay reportable: unique non-COM values
+        // (full tails are representative; the fleet pack records the prefixes)
+        assert!(!is_ubiquitous_guid("ac634028-9bf2-4876-8a52-6b43e4b1f2d7"));
+        assert!(!is_ubiquitous_guid("67bde5d7-c2fc-4d2e-9a51-0c3e8f7b1a94"));
+        assert!(!is_ubiquitous_guid("916d809c-5949-4ca3-b1d4-7e2f0a68c315"));
+        // a non-GUID rendering is not judged here at all
+        assert!(!is_ubiquitous_guid("not-a-guid"));
     }
 
     /// The shared marker matcher is a lower-case substring test in table order.

@@ -24,7 +24,7 @@ use std::collections::HashSet;
 use ghidra_cli::models::{EmulateRequest, EmulateResult, EmulateStop, Instruction};
 
 use crate::thorpal::detect::context::AnalysisContext;
-use crate::thorpal::detect::decode;
+use crate::thorpal::detect::decode::{self, recover};
 use crate::thorpal::detect::detections::defense_evasion::T1027;
 use crate::thorpal::detect::detections::{
     DetectionHit, EvidenceKind, HitArtifact, HitSource, high, medium,
@@ -335,7 +335,11 @@ fn harvest_call_site_args(insns: &[Instruction], site: u64, is64: bool, windows:
 /// Sanitize one emulator-recovered string for seeding.
 ///
 /// Strips control characters (defense in depth over the bridge-side filter),
-/// trims, and enforces the recovery length window; `None` means "drop it".
+/// trims, enforces the recovery length window, and then holds the result to the
+/// static recovery path's text gates — a candidate loop that generates lookup
+/// tables (AES T-tables, PPMd suballocator ramps) writes those tables through the
+/// emulator byte by byte, and without the gates their printable stretches seed as
+/// "recovered strings"; `None` means "drop it".
 ///
 /// # Arguments
 ///
@@ -363,6 +367,19 @@ fn sanitize_recovered(text: &str) -> Option<String> {
     // counter/table loops emit letterless runs of consecutive punctuation or
     // digits (`;<=>?`); every real protocol verb, URL, key, or path has letters
     if !cleaned.chars().any(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    // a run that climbs, cycles or pairs is a table the emulator watched being
+    // built (the PPMd `$(,048<@…` ramp), whatever its characters look like
+    if recover::is_table_run(cleaned.as_bytes()) {
+        return None;
+    }
+    // untyped strings must look like words and read like text, exactly as the
+    // static path requires; typed kinds — URL/email/PEM — are exempt so numeric
+    // hosts and base64 bodies are never lost
+    if decode::classify(&cleaned) == decode::RecoveredKind::String
+        && (!recover::is_wordy(cleaned.as_bytes()) || !recover::reads_as_text(cleaned.as_bytes()))
+    {
         return None;
     }
     Some(cleaned)
@@ -822,6 +839,42 @@ mod tests {
         // letterless counter-loop output is dropped; real values have letters
         assert_eq!(sanitize_recovered(";<=>?"), None);
         assert_eq!(sanitize_recovered("12345678"), None);
+    }
+
+    /// Emulated table bytes never seed: the static text gates drop them.
+    #[test]
+    fn sanitize_drops_emulated_table_bytes() {
+        // AES T-table junk — 5 letters of 13 fails the wordiness bar
+        assert_eq!(sanitize_recovered("=&&jL66Zl??A~"), None);
+        assert_eq!(sanitize_recovered("3g1>2O7"), None);
+        // the PPMd suballocator units-to-index table (0x24,0x28,…,0x7c, step +4)
+        // is an ascending ramp the ordered-run read rejects
+        assert_eq!(sanitize_recovered("$(,048<@DHLPTX\\`dhlptx|"), None);
+        // junk whose punctuation answers to nothing fails the text read
+        assert_eq!(sanitize_recovered(r#""Ka}cd@kiny+Oeklgd`h&Wzfin"#), None);
+    }
+
+    /// Wordy and typed emulated recoveries still seed.
+    #[test]
+    fn sanitize_keeps_wordy_and_typed_recoveries() {
+        // the pack's confirmed emulated vocabulary and contacts
+        assert_eq!(
+            sanitize_recovered("ResumeThread").as_deref(),
+            Some("ResumeThread")
+        );
+        assert_eq!(
+            sanitize_recovered("eliasmarco@tutanota.com").as_deref(),
+            Some("eliasmarco@tutanota.com")
+        );
+        assert_eq!(
+            sanitize_recovered("-----BEGIN PUBLIC KEY-----").as_deref(),
+            Some("-----BEGIN PUBLIC KEY-----")
+        );
+        // typed kinds are exempt from the wordiness bar: a numeric host is no table
+        assert_eq!(
+            sanitize_recovered("http://45.67.89.10:8080/gate").as_deref(),
+            Some("http://45.67.89.10:8080/gate")
+        );
     }
 
     /// Bridge addresses parse bare or 0x-prefixed; operands stay strict.
