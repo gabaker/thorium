@@ -528,7 +528,10 @@ pub async fn submit(
     // send our results for samples
     for sha256 in &job.samples {
         // build an output request for this samples
-        let req = raw.to_sample_req(sha256, tool, logs)?;
+        // stamp this jobs trigger depth so downstream sigma events carry a real depth
+        let req = raw
+            .to_sample_req(sha256, tool, logs)?
+            .trigger_depth(job.trigger_depth.unwrap_or(0));
         // send this request to the API
         let id = thorium.files.create_result(req).await?;
         // add this new result id to our list
@@ -537,7 +540,10 @@ pub async fn submit(
     // send our results for repos
     for repo in &job.repos {
         // build an output request for this repos
-        let req = raw.to_repo_req(&repo.url, tool, logs)?;
+        // stamp this jobs trigger depth so downstream sigma events carry a real depth
+        let req = raw
+            .to_repo_req(&repo.url, tool, logs)?
+            .trigger_depth(job.trigger_depth.unwrap_or(0));
         // send this request to the API
         let id = thorium.repos.create_result(req).await?;
         // add this new result id to our list

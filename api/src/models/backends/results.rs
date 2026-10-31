@@ -137,6 +137,7 @@ impl<O: OutputSupport> OutputFormBuilder<O> {
                 }
                 "cmd" => self.cmd = Some(field.text().await?),
                 "result" => self.result = Some(field.text().await?),
+                "trigger_depth" => self.trigger_depth = field.text().await?.parse()?,
                 "display_type" => {
                     self.display_type =
                         Some(OutputDisplayType::from_str(&field.text().await?[..])?);
@@ -193,7 +194,11 @@ impl<O: OutputSupport> OutputFormBuilder<O> {
     /// but leaves files so that we can safely clean them up in case of errors.
     fn build(&mut self) -> Result<OutputForm<O>, ApiError> {
         // make sure that all of our required options are set
-        if self.tool.is_none() || self.display_type.is_none() || !O::validate_extra(&self.extra) {
+        if self.tool.is_none()
+            || self.display_type.is_none()
+            || self.result.is_none()
+            || !O::validate_extra(&self.extra)
+        {
             // reject this invalid request
             return Err(ApiError::new(
                 StatusCode::BAD_REQUEST,
@@ -216,6 +221,7 @@ impl<O: OutputSupport> OutputFormBuilder<O> {
             display_type: self.display_type.take().unwrap(),
             files: self.files.clone(),
             entities: self.entities.clone(),
+            trigger_depth: self.trigger_depth,
             extra: O::extract_extra(self.extra.take()),
         };
         Ok(valid)

@@ -15,13 +15,29 @@ export type SigmaAutoFlag = {
   reasoning: string;
 };
 
+/// Args for one image; positional/kwarg values are jq filters, switches are literals
+export type SigmaReactionArgs = {
+  positionals: string[];
+  kwargs: Record<string, string[]>;
+  switches: string[];
+};
+
+/// Spawn a reaction against the originating data when this rule hits
+export type SigmaSpawnReaction = {
+  group: string;
+  pipeline: string;
+  args: Record<string, SigmaReactionArgs>;
+};
+
 export enum SigmaRuleActions {
   Flag = 'Flag',
+  SpawnReaction = 'SpawnReaction',
 }
 
 /// Map each action to its payload type
 export type SigmaActionActionType = {
   [SigmaRuleActions.Flag]: SigmaAutoFlag;
+  [SigmaRuleActions.SpawnReaction]: SigmaSpawnReaction;
 };
 
 /// A single action variant

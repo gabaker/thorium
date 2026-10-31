@@ -19,8 +19,11 @@ api = [
   "axum", "http", "tower", "axum-macros", "tower-http", "tokio-stream", "generic-array", "futures-util", "tokio-util", "serde_qs",
   "aws-sdk-s3", "aws-types", "aws-smithy-http", "aws-credential-types", "scylla-utils", "http-body", "axum-extra", "once_cell", "utoipa",
   "utoipa-swagger-ui", "lettre", "headers", "percent-encoding", "dashmap", "scc", "mime", "rmcp", "openidconnect", "humantime",
-  "grep", "constant_time_eq", "serde_json_canonicalizer", "jsonschema", "client", "trace", "yara-x"
+  "grep", "constant_time_eq", "serde_json_canonicalizer", "jsonschema", "client", "trace", "yara-x", "jq"
   ]
+
+# include jq filter support for extracting values from json
+jq = ["dep:jaq-core", "dep:jaq-std", "dep:jaq-json"]
 
 # include scylla utility functions
 scylla-utils = ["scylla", "thorium-derive", "thorium-derive/schema", "utoipa", "sha2", "tokio", "argon2", "serde-value", "client"]
@@ -111,6 +114,11 @@ cidr = { version = "0.3", features = ["serde"] }
 gxhash = { version = "3.5", features = ["deterministic"] }
 isocountry = "0.3"
 linearize = { version = "0.1", features = ["derive"] }
+
+# jq dependencies
+jaq-core = { workspace = true, optional = true }
+jaq-std = { workspace = true, optional = true }
+jaq-json = { workspace = true, optional = true }
 
 # api dependencies
 bb8-redis = { version = "0.24", optional = true }

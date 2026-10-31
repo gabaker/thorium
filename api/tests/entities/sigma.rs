@@ -34,3 +34,21 @@ async fn delete() -> Result<(), thorium::Error> {
     let req = generators::gen_entity(&group, generators::gen_sigma_meta());
     common::check_delete(&client, req).await
 }
+
+/// Verify creating a sigma entity with an invalid jq filter action is rejected
+#[tokio::test]
+async fn create_rejects_bad_jq() -> Result<(), thorium::Error> {
+    // set up an admin client and a group
+    let (client, group) = common::setup().await?;
+    // build a sigma rule entity request with an action whose jq filter is invalid
+    let req = generators::gen_entity(&group, generators::gen_sigma_meta_bad_jq());
+    // try to create this entity and make sure it is rejected
+    let error = client
+        .entities
+        .create(req)
+        .await
+        .expect_err("sigma rule with a bad jq filter action was accepted");
+    // the api should reject it as a bad request
+    assert_eq!(error.status().map(|code| code.as_u16()), Some(400));
+    Ok(())
+}

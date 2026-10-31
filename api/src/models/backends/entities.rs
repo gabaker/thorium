@@ -19,7 +19,7 @@ use crate::models::backends::{GraphicSupport, TagSupport};
 use crate::models::entities::EntityMetadataForm;
 use crate::models::entities::incident::Incident;
 use crate::models::entities::network_activity::{NetConState, NetworkConnection};
-use crate::models::entities::rules::YaraActionToTake;
+use crate::models::entities::rules::{MAX_SIGMA_ACTIONS, YaraActionToTake};
 use crate::models::schema::queries::EntitiesListCursor;
 use crate::models::schema::{Bucket, CursorLimit, DEFAULT_LIMIT_CAP};
 use crate::models::{
@@ -1917,8 +1917,9 @@ impl Entity {
                 // remove any entities that this sigma rule no longer applies too
                 rule.applies_to
                     .retain(|thing| !form.remove_sigma_applies_to.contains(thing));
-                // add a new action to perform when this sigma rule hits
-                rule.actions.append(&mut form.add_sigma_actions);
+                // remove the requested indices before adding new actions since they index
+                // into the stored action list; an out of range index must be ignored
+                // rather than delete an action added by this same request
                 // remove the requested indices in reverse order to ensure the indices remain valid
                 // we could use swap_remove here and not have to do this but that would change the
                 // order of things on update which could be annoying. Its also going to be rare that
@@ -1929,6 +1930,19 @@ impl Entity {
                         // remove this index if it exists
                         rule.actions.remove(*index);
                     }
+                }
+                // make sure all new actions are valid before adding them
+                for action in &form.add_sigma_actions {
+                    // validate this actions config
+                    action.validate()?;
+                }
+                // add a new action to perform when this sigma rule hits
+                rule.actions.append(&mut form.add_sigma_actions);
+                // bound how many actions a rule may accumulate across updates
+                if rule.actions.len() > MAX_SIGMA_ACTIONS {
+                    return bad!(format!(
+                        "Sigma rules may have at most {MAX_SIGMA_ACTIONS} actions"
+                    ));
                 }
             }
             EntityMetadata::YaraRule(rule) => {
@@ -1948,8 +1962,9 @@ impl Entity {
                 // remove any entities that this yara rule no longer applies too
                 rule.applies_to
                     .retain(|thing| !form.remove_yara_applies_to.contains(thing));
-                // add a new action to perform when this yara rule hits
-                rule.actions.append(&mut form.add_yara_actions);
+                // remove the requested indices before adding new actions since they index
+                // into the stored action list; an out of range index must be ignored
+                // rather than delete an action added by this same request
                 // remove the requested indices in reverse order to ensure the indices remain valid
                 // we could use swap_remove here and not have to do this but that would change the
                 // order of things on update which could be annoying. Its also going to be rare that
@@ -1961,6 +1976,8 @@ impl Entity {
                         rule.actions.remove(*index);
                     }
                 }
+                // add a new action to perform when this yara rule hits
+                rule.actions.append(&mut form.add_yara_actions);
             }
             EntityMetadata::Flag(flag) => {
                 // update the required values in this flag if needed

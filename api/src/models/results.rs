@@ -88,6 +88,9 @@ pub struct OutputRequest<O: OutputSupport> {
     pub buffers: Vec<Buffer>,
     /// The display type of this result
     pub display_type: OutputDisplayType,
+    /// The trigger depth of the job that produced this result
+    #[serde(default)]
+    pub trigger_depth: u8,
 }
 
 impl<O: OutputSupport> OutputRequest<O> {
@@ -123,6 +126,7 @@ impl<O: OutputSupport> OutputRequest<O> {
             buffers: Vec::default(),
             entities: HashMap::default(),
             display_type,
+            trigger_depth: 0,
         }
     }
 
@@ -339,6 +343,18 @@ impl<O: OutputSupport> OutputRequest<O> {
         self
     }
 
+    /// Set the trigger depth of the job that produced this result
+    ///
+    /// # Arguments
+    ///
+    /// * `trigger_depth` - The trigger depth to set
+    #[must_use]
+    pub fn trigger_depth(mut self, trigger_depth: u8) -> Self {
+        // set the trigger depth for this result
+        self.trigger_depth = trigger_depth;
+        self
+    }
+
     /// Create a multipart form from this sample request
     #[cfg(feature = "client")]
     pub async fn to_form(mut self) -> Result<reqwest::multipart::Form, Error> {
@@ -352,6 +368,13 @@ impl<O: OutputSupport> OutputRequest<O> {
             .text("result", self.result)
             // the display type to use when rendering these results
             .text("display_type", self.display_type);
+        // add the trigger depth of the job that produced this result
+        // omit the default depth so uploads for untriggered jobs still work
+        // against older apis that reject unknown form fields
+        let form = match self.trigger_depth {
+            0 => form,
+            depth => form.text("trigger_depth", depth.to_string()),
+        };
         // add the groups to share this result with
         let form = multipart_list!(form, "groups", self.groups);
         // add the version label of the tool that created this result if it was set, which the
@@ -1642,5 +1665,26 @@ impl OutputKey {
             Self::Entity(_) => unimplemented!("Entities do not yet support results"),
         };
         Ok(entities)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::Sample;
+
+    /// Output requests default to a trigger depth of 0 and the builder sets it
+    #[test]
+    fn output_request_trigger_depth() {
+        // build a sha256 to upload results for
+        let sha256 = "63b0490d4736e740f26ea9483d55c254abe032845b70ba84ea463ca6582d106f".to_owned();
+        // build an output request without setting a trigger depth
+        let req = OutputRequest::<Sample>::new(sha256, "tool", "result", OutputDisplayType::String);
+        // results that don't set a depth should default to 0
+        assert_eq!(req.trigger_depth, 0);
+        // set a trigger depth with the builder
+        let req = req.trigger_depth(3);
+        // the set trigger depth should be used
+        assert_eq!(req.trigger_depth, 3);
     }
 }

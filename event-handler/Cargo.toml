@@ -7,7 +7,7 @@ edition = { workspace = true }
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-thorium-api = { workspace = true, features = ["client", "trace", "kanal-err"] }
+thorium-api = { workspace = true, features = ["client", "trace", "kanal-err", "jq"] }
 reqwest = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }

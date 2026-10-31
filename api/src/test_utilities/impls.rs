@@ -814,8 +814,12 @@ impl PartialEq<EntityUpdate> for Entity {
                     {
                         return false;
                     }
-                    // actions have no PartialEq; they were created empty so must json-match the adds
-                    if !add_actions.is_empty() && !json_eq(&rule.actions, add_actions) {
+                    // actions have no PartialEq so json-match that each added action is present
+                    // entities may be created with actions so only check membership
+                    if !add_actions
+                        .iter()
+                        .all(|added| rule.actions.iter().any(|existing| json_eq(existing, added)))
+                    {
                         return false;
                     }
                 }

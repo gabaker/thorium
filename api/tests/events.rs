@@ -1,16 +1,19 @@
 //! Tests the admin event queue peek route, the event queue inspection helper, how workflow
 //! graph events are queued and wait to mature, how model refresh events are queued, yara
-//! scan events, and the per component cache flags
+//! scan events, sigma scannable results events, and the per component cache flags
 
 use chrono::{DateTime, TimeZone, Utc};
 use rand::RngCore;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
+use thorium::client::ResultsClient;
 use thorium::models::{
-    Buffer, Event, EventData, EventIds, EventPeekOpts, EventPopOpts, EventType, FileDeleteOpts,
-    ModelEndpointEntityRequest, ModelProvider, Sample, SampleRequest, ScanStatsSnapshot,
-    SubmissionUpdate, TagRequest, UserRole, WorkerStatsReport, WorkflowCatalogEntityRequest,
-    WorkflowGraphChange, YaraScanTrigger,
+    Buffer, EntityKinds, EntityMetadataRequest, EntityRequest, Event, EventCacheStatusOpts,
+    EventData, EventIds, EventPeekOpts, EventPopOpts, EventType, FileDeleteOpts,
+    ModelEndpointEntityRequest, ModelProvider, OutputDisplayType, OutputKey, OutputRequest, Sample,
+    SampleRequest, ScanStatsSnapshot, SigmaRuleAppliesTo, SubmissionUpdate, TagRequest, UserRole,
+    WindowsProcessEntity, WorkerStatsReport, WorkflowCatalogEntityRequest, WorkflowGraphChange,
+    YaraScanTrigger,
 };
 use thorium::test_utilities::generators::{GroupRoles, god_group};
 use thorium::test_utilities::{self, events, generators};
@@ -350,16 +353,16 @@ async fn peek_empty_queue() -> Result<(), Error> {
     // get an admin client
     let client = test_utilities::admin_client().await?;
     // capture the empty queue's state before peeking
-    let before = events::queue_state(EventType::SigmaScannableResults).await?;
+    let before = events::queue_state(EventType::YaraHuntChunk).await?;
     // peek at a queue nothing in this test binary writes to
     let peeked = client
         .events
-        .peek(EventType::SigmaScannableResults, &EventPeekOpts::default())
+        .peek(EventType::YaraHuntChunk, &EventPeekOpts::default())
         .await?;
     // the queue is empty
     is!(peeked.len(), 0, "empty queue peeks empty");
     // the queue state is unchanged
-    let after = events::queue_state(EventType::SigmaScannableResults).await?;
+    let after = events::queue_state(EventType::YaraHuntChunk).await?;
     is!(&before, &after, "empty queue state unchanged");
     Ok(())
 }
@@ -2075,5 +2078,172 @@ async fn events_stats_routes_401_matrix() -> Result<(), thorium::Error> {
         snapshot.is_some(),
         "rejected triggers must never take a window gate"
     );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Sigma scannable results event tests
+//
+// These cover the sigma events emitted when results with entities are
+// uploaded: the uploads trigger depth rides the event, applies_to names the
+// rule kinds that can match its entities, and sigma rule writes flag the
+// event handlers sigma rule cache stale. The queue touching tests join the
+// unnamed serial group since they steal events from the shared queues the
+// other serial tests hold.
+// ---------------------------------------------------------------------------
+
+/// Upload results with a windows process entity at a specific trigger depth
+///
+/// # Arguments
+///
+/// * `client` - The client to upload results with
+/// * `group` - The group to upload results to
+/// * `sha256` - The sample to upload results for
+/// * `tool` - The tool these results are from
+/// * `depth` - The trigger depth to stamp on these results
+async fn upload_scannable_results(
+    client: &Thorium,
+    group: &str,
+    sha256: &str,
+    tool: &str,
+    depth: u8,
+) -> Result<(), Error> {
+    // build a windows process entity for these results
+    let proc = WindowsProcessEntity::new(1234);
+    // wrap this entity in a single entity request for our group
+    let reqs = vec![EntityRequest::new(
+        generators::gen_string(16),
+        EntityMetadataRequest::WindowsProcess(proc),
+        vec![group.to_owned()],
+    )];
+    // serialize our entities into a buffer
+    let buffer = Buffer::new(serde_json::to_string(&reqs)?);
+    // build the result request with our entities at the right depth
+    let req = OutputRequest::<Sample>::new(sha256.to_owned(), tool, "{}", OutputDisplayType::Json)
+        .group(group)
+        .trigger_depth(depth)
+        .entities(EntityKinds::WindowsProcess, 1, buffer);
+    // upload our results
+    client.files.create_result(req).await?;
+    Ok(())
+}
+
+/// Pop sigma scannable results events until we find the one for a tool
+///
+/// # Arguments
+///
+/// * `client` - The client to pop events with
+/// * `sha256` - The sample our event should be keyed to
+/// * `tool` - The tool our event should be from
+async fn pop_scannable_event(client: &Thorium, sha256: &str, tool: &str) -> Result<Event, Error> {
+    // event creation is async so retry popping for a bit
+    for _ in 0..30 {
+        // build the opts to pop a large page of events
+        let opts = EventPopOpts::default().limit(1000);
+        // pop any pending sigma scannable results events
+        let events = client
+            .events
+            .pop(EventType::SigmaScannableResults, &opts)
+            .await?;
+        // look for the event for our tool and sample
+        let found = events.into_iter().find(|event| {
+            // only sigma scannable results events have the info we need
+            if let EventData::SigmaScannableResults(inner) = &event.data {
+                // output keys have no PartialEq so match the sample arm directly
+                inner.tool == tool && matches!(&inner.key, OutputKey::Sample(key) if key == sha256)
+            } else {
+                false
+            }
+        });
+        // return our event if we found it
+        if let Some(event) = found {
+            return Ok(event);
+        }
+        // this event hasn't landed yet so wait a bit
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    // we never found our event so fail loudly
+    Err(Error::new(format!("No scannable event found for {tool}")))
+}
+
+/// Verify result uploads with entities create sigma events at their trigger depth
+///
+/// This joins the unnamed serial group since popping steals events from the
+/// shared queues the other serial tests hold.
+#[tokio::test]
+#[serial_test::serial]
+async fn scannable_results_events_carry_trigger_depth() -> Result<(), thorium::Error> {
+    // get an admin client and create a group to work in
+    let client = test_utilities::admin_client().await?;
+    let group = generators::groups(1, &client).await?.remove(0).name;
+    // upload a sample for our results to hang off of
+    let sample =
+        SampleRequest::new_buffer(Buffer::new(generators::gen_string(32)), vec![group.clone()]);
+    let sha256 = client.files.create(sample).await?.sha256;
+    // upload results with entities at trigger depth 3
+    upload_scannable_results(&client, &group, &sha256, "depth-tool", 3).await?;
+    // the sigma event for these results should carry the uploads depth
+    let event = pop_scannable_event(&client, &sha256, "depth-tool").await?;
+    assert_eq!(
+        event.depth, 3,
+        "event did not carry the uploads trigger depth"
+    );
+    // the event should know what rules apply to its entities
+    if let EventData::SigmaScannableResults(inner) = &event.data {
+        assert!(
+            inner
+                .applies_to
+                .contains(&SigmaRuleAppliesTo::WindowsProcesses),
+            "event applies_to missing windows processes: {:?}",
+            inner.applies_to
+        );
+    }
+    Ok(())
+}
+
+/// Verify creating a sigma rule flags the event handlers sigma cache as stale
+///
+/// This joins the unnamed serial group since the cache flags are global and
+/// its reset would consume the flags the other serial tests assert on.
+#[tokio::test]
+#[serial_test::serial]
+async fn sigma_rule_create_flags_cache_stale() -> Result<(), thorium::Error> {
+    // get an admin client and create a group to work in
+    let client = test_utilities::admin_client().await?;
+    let group = generators::groups(1, &client).await?.remove(0).name;
+    // consume any staleness from other tests
+    let opts = EventCacheStatusOpts::default().reset();
+    client.events.get_cache_status(&opts).await?;
+    // create a sigma rule entity
+    let req = generators::gen_entity(&group, generators::gen_sigma_meta());
+    client.entities.create(req).await?;
+    // the sigma rule cache should now be flagged as stale
+    let status = client.events.get_cache_status(&opts).await?;
+    assert!(
+        status.sigma_rules,
+        "sigma rule create did not flag cache stale"
+    );
+    Ok(())
+}
+
+/// Verify result uploads without a trigger depth create depth 0 sigma events
+///
+/// This joins the unnamed serial group since popping steals events from the
+/// shared queues the other serial tests hold.
+#[tokio::test]
+#[serial_test::serial]
+async fn scannable_results_events_default_depth() -> Result<(), thorium::Error> {
+    // get an admin client and create a group to work in
+    let client = test_utilities::admin_client().await?;
+    let group = generators::groups(1, &client).await?.remove(0).name;
+    // upload a sample for our results to hang off of
+    let sample =
+        SampleRequest::new_buffer(Buffer::new(generators::gen_string(32)), vec![group.clone()]);
+    let sha256 = client.files.create(sample).await?.sha256;
+    // upload results with entities without setting a trigger depth
+    upload_scannable_results(&client, &group, &sha256, "default-depth-tool", 0).await?;
+    // the sigma event for these results should default to depth 0
+    let event = pop_scannable_event(&client, &sha256, "default-depth-tool").await?;
+    assert_eq!(event.depth, 0, "event depth did not default to 0");
     Ok(())
 }

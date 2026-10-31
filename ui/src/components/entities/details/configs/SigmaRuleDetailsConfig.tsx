@@ -49,21 +49,54 @@ const ActionViewLabel = styled.span`
   letter-spacing: 0.03em;
 `;
 
+const ImageArgsView = styled.div`
+  margin-left: 1rem;
+`;
+
 const ActionsView: React.FC<{ actions: SigmaActionToTake[] }> = ({ actions }) => {
   if (actions.length === 0) return <span style={{ color: 'var(--thorium-secondary-text)' }}>None</span>;
   return (
     <>
       {actions.map((action, i) => (
         <ActionViewCard key={i}>
-          <ActionViewLabel>Flag #{i + 1}</ActionViewLabel>
-          {action.Flag.content && (
-            <div>
-              <strong>Content:</strong> {action.Flag.content}
-            </div>
+          {'Flag' in action && (
+            <>
+              <ActionViewLabel>Flag #{i + 1}</ActionViewLabel>
+              {action.Flag.content && (
+                <div>
+                  <strong>Content:</strong> {action.Flag.content}
+                </div>
+              )}
+              <div>
+                <strong>Reasoning:</strong> {action.Flag.reasoning}
+              </div>
+            </>
           )}
-          <div>
-            <strong>Reasoning:</strong> {action.Flag.reasoning}
-          </div>
+          {'SpawnReaction' in action && (
+            <>
+              <ActionViewLabel>Spawn Reaction #{i + 1}</ActionViewLabel>
+              <div>
+                <strong>Group:</strong> {action.SpawnReaction.group}
+              </div>
+              <div>
+                <strong>Pipeline:</strong> {action.SpawnReaction.pipeline}
+              </div>
+              {Object.entries(action.SpawnReaction.args).map(([image, args]) => (
+                <div key={image}>
+                  <strong>{image}:</strong>
+                  <ImageArgsView>
+                    {args.positionals.length > 0 && <div>Positionals: {args.positionals.join(' ')}</div>}
+                    {Object.entries(args.kwargs).map(([kwarg, values]) => (
+                      <div key={kwarg}>
+                        {kwarg}: {values.join(' ')}
+                      </div>
+                    ))}
+                    {args.switches.length > 0 && <div>Switches: {args.switches.join(' ')}</div>}
+                  </ImageArgsView>
+                </div>
+              ))}
+            </>
+          )}
         </ActionViewCard>
       ))}
     </>

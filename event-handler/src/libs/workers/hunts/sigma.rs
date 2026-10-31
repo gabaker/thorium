@@ -7,15 +7,19 @@ use linearize::StaticMap;
 use papaya::HashMap as PapayaMap;
 use sigma_rust::Rule;
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::sync::Arc;
-use thorium::models::entities::rules::{SigmaActionToTake, SigmaAutoFlag};
+use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use thorium::models::entities::rules::jq::CompiledJq;
+use thorium::models::entities::rules::{SigmaActionToTake, SigmaAutoFlag, SigmaSpawnReaction};
 use thorium::models::{
     AssociationKind, AssociationRequest, AssociationTarget, Entity, EntityKinds, EntityListOpts,
-    EntityMetadata, EntityMetadataRequest, EntityRequest, Event, EventData, EventType, OutputKey,
-    ScrubbedUser, SigmaRule, SigmaScannableResultsEvent, TreeNode, TreeOpts, TreeQuery, UserRole,
+    EntityMetadata, EntityMetadataRequest, EntityRequest, Event, EventData, EventType,
+    GenericJobArgs, OutputKey, ReactionRequest, RepoDependencyRequest, ScrubbedUser, SigmaRule,
+    SigmaScannableResultsEvent, TreeNode, TreeOpts, TreeQuery, UserRole,
 };
 use thorium::{Error, Thorium};
 use tracing::{Level, event, instrument};
@@ -26,6 +30,107 @@ use crate::libs::workers::{
     EventWorkerSupport, EventWorkerSupportCore, WorkerCacheUpdateKinds, WorkerCacheUpdates,
 };
 
+/// How long a spawn actions jq filters may run against a single entity
+///
+/// Rendering runs on a blocking thread that cannot be cancelled, so a timed
+/// out render leaks a thread that spins until the process restarts. Leaks are
+/// tracked so a timed out action is never rerendered and rendering shuts off
+/// entirely at [`MAX_LEAKED_JQ_THREADS`], keeping leaks from piling up and
+/// starving the shared blocking pool the rest of this daemon runs on.
+const JQ_RENDER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The max number of blocking threads that timed out jq renders may leak
+///
+/// Each leaked thread spins at full cpu until the process restarts, so once
+/// this many have been leaked all spawn arg rendering is refused instead of
+/// letting leaks exhaust tokios blocking pool (which yara scans and dns
+/// lookups also run on).
+const MAX_LEAKED_JQ_THREADS: usize = 32;
+
+/// How many blocking threads timed out jq renders have leaked
+static LEAKED_JQ_THREADS: AtomicUsize = AtomicUsize::new(0);
+
+/// The hashes of spawn actions whose jq renders have timed out
+///
+/// Timed out actions are refused instead of rerendered on later events since
+/// every rerender of a non terminating filter would leak another thread. This
+/// is process wide because the blocking pool the leaks land on is too.
+static TIMED_OUT_SPAWNS: StdMutex<BTreeSet<u64>> = StdMutex::new(BTreeSet::new());
+
+/// Hash a spawn action so timed out renders can be tracked across events
+///
+/// # Arguments
+///
+/// * `spawn` - The spawn reaction action to hash
+fn hash_spawn_action(spawn: &SigmaSpawnReaction) -> u64 {
+    // get the hasher to hash this spawn action with
+    let mut hasher = GxHasher::default();
+    // hash this spawn action
+    spawn.hash(&mut hasher);
+    // get this spawn actions hash
+    hasher.finish()
+}
+
+/// Check whether a spawn actions jq filters may be rendered
+///
+/// Rendering is refused for actions whose filters already timed out and for
+/// all actions once too many blocking threads have been leaked, since leaked
+/// threads spin until the process restarts and would otherwise pile up until
+/// they peg this pods cpu and starve tokios shared blocking pool.
+///
+/// # Arguments
+///
+/// * `timed_out` - The hashes of spawn actions whose renders have timed out
+/// * `leaked` - How many blocking threads timed out renders have leaked
+/// * `action_hash` - The hash of the spawn action to check
+fn check_render_budget(
+    timed_out: &StdMutex<BTreeSet<u64>>,
+    leaked: &AtomicUsize,
+    action_hash: u64,
+) -> Result<(), Error> {
+    // get the set of timed out spawn actions even if a prior lock holder panicked
+    let timed_out = timed_out
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // refuse to rerender actions whose filters already timed out
+    if timed_out.contains(&action_hash) {
+        return Err(Error::new(
+            "Refusing to render a spawn action whose jq filters previously timed out; \
+            fix the rule and restart the event handler",
+        ));
+    }
+    // refuse all renders once too many blocking threads have been leaked
+    if leaked.load(Ordering::Relaxed) >= MAX_LEAKED_JQ_THREADS {
+        return Err(Error::new(format!(
+            "Refusing to render spawn args since timed out jq renders have leaked \
+            {MAX_LEAKED_JQ_THREADS} blocking threads; restart the event handler"
+        )));
+    }
+    Ok(())
+}
+
+/// Record that a spawn actions jq render timed out and leaked its thread
+///
+/// # Arguments
+///
+/// * `timed_out` - The hashes of spawn actions whose renders have timed out
+/// * `leaked` - How many blocking threads timed out renders have leaked
+/// * `action_hash` - The hash of the spawn action that timed out
+fn record_render_timeout(
+    timed_out: &StdMutex<BTreeSet<u64>>,
+    leaked: &AtomicUsize,
+    action_hash: u64,
+) {
+    // count the blocking thread this timed out render leaked
+    leaked.fetch_add(1, Ordering::Relaxed);
+    // get the set of timed out spawn actions even if a prior lock holder panicked
+    let mut timed_out = timed_out
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // track this action so it is not rerendered on later events
+    timed_out.insert(action_hash);
+}
+
 /// The stats for each entity
 #[derive(Default, Debug, Clone, Eq, PartialEq)]
 pub struct SigmaRuleSpecificStats {
@@ -35,6 +140,16 @@ pub struct SigmaRuleSpecificStats {
     pub created: usize,
     /// The total number of flags created
     pub flagged: usize,
+    /// The number of reactions spawned
+    ///
+    /// Per entity kind this counts the spawn requests that rule hits collected
+    /// while the total counts the reactions that were actually created.
+    pub spawned: usize,
+    /// The number of reaction spawns that failed or were refused
+    ///
+    /// Per entity kind this counts hits whose spawn was refused or failed to
+    /// render while the total counts reactions that failed to be created.
+    pub spawn_errors: usize,
 }
 
 impl std::ops::AddAssign for SigmaRuleSpecificStats {
@@ -42,6 +157,8 @@ impl std::ops::AddAssign for SigmaRuleSpecificStats {
         self.scanned = self.scanned.saturating_add(rhs.scanned);
         self.created = self.created.saturating_add(rhs.created);
         self.flagged = self.flagged.saturating_add(rhs.flagged);
+        self.spawned = self.spawned.saturating_add(rhs.spawned);
+        self.spawn_errors = self.spawn_errors.saturating_add(rhs.spawn_errors);
     }
 }
 
@@ -329,6 +446,10 @@ struct SigmaActionCache {
         reason = "the tuple follows the (source, target, groups) layout documented on the field"
     )]
     associations: Vec<(AssociationKind, (MaybeEntity, MaybeEntity, Vec<String>))>,
+    /// The hashes for reactions that we are spawning and their indexes
+    pending_reactions: HashMap<u64, usize>,
+    /// The reactions that we are spawning
+    reactions: Vec<ReactionRequest>,
 }
 
 impl SigmaActionCache {
@@ -343,6 +464,45 @@ impl SigmaActionCache {
             pending_entities: HashMap::default(),
             entities: Vec::default(),
             associations: Vec::default(),
+            pending_reactions: HashMap::default(),
+            reactions: Vec::default(),
+        }
+    }
+
+    /// Add a reaction to spawn or merge its tags into an identical request
+    ///
+    /// This returns true if this reaction was newly collected and false if an
+    /// identical request was already collected and only its tags were merged.
+    ///
+    /// # Arguments
+    ///
+    /// * `hash` - The dedupe hash for this reaction request
+    /// * `req` - The reaction request to add
+    pub fn add_reaction(&mut self, hash: u64, req: ReactionRequest) -> bool {
+        // check if we have already collected an identical request
+        match self.pending_reactions.entry(hash) {
+            // another rule already collected this request so just merge our tags
+            Entry::Occupied(entry) => {
+                // get the already collected request
+                if let Some(existing) = self.reactions.get_mut(*entry.get()) {
+                    // add any of our tags that are not already set
+                    for tag in req.tags {
+                        // only add new tags
+                        if !existing.tags.contains(&tag) {
+                            existing.tags.push(tag);
+                        }
+                    }
+                }
+                false
+            }
+            // this is a new request so add it
+            Entry::Vacant(entry) => {
+                // track the index this request will be added at
+                entry.insert(self.reactions.len());
+                // add this reaction request
+                self.reactions.push(req);
+                true
+            }
         }
     }
 
@@ -567,25 +727,27 @@ impl SigmaActionCache {
                 // get our root nodes if we have any
                 let entities = entity_map.get(root_kind);
                 // for now just assume the first one
-                let Some(root) = entities.first() else {
-                    // we are missing a root for an entity
-                    let msg = format!(
-                        "Missing root {root_kind} from {}:{}",
-                        entity.kind(),
-                        entity.name
-                    );
-                    // return an error for this missing root
-                    return Err(Error::new(msg));
-                };
-                // add our root entity and get its index
-                let root_index = self.add_entity(rule, root.clone(), stats);
-                // get the association kind between these entities
-                let kind = AssociationKind::from((root_kind, child_kind));
-                // add the association to create
-                self.add_association(rule, kind, root_index, child_index);
-                // link our root node back to our original data
-                self.link_to_original(thorium, rule, root_kind, root_index)
-                    .await?;
+                match entities.first() {
+                    // we have a root so link our chain through it
+                    Some(root) => {
+                        // add our root entity and get its index
+                        let root_index = self.add_entity(rule, root.clone(), stats);
+                        // get the association kind between these entities
+                        let kind = AssociationKind::from((root_kind, child_kind));
+                        // add the association to create
+                        self.add_association(rule, kind, root_index, child_index);
+                        // link our root node back to our original data
+                        self.link_to_original(thorium, rule, root_kind, root_index)
+                            .await?;
+                    }
+                    // results are not required to include root entities (e.g.
+                    // processes can be uploaded without a process tree) so link
+                    // this chain top back to our original data instead
+                    None => {
+                        self.link_to_original(thorium, rule, child_kind, child_index)
+                            .await?;
+                    }
+                }
             } else {
                 // just link the final child back to our original data
                 self.link_to_original(thorium, rule, child_kind, child_index)
@@ -733,6 +895,140 @@ impl SigmaActionCache {
     }
 }
 
+/// Spawn all of the reactions that any rule hits collected
+///
+/// This must only be called after all fallible scan steps so that a retried
+/// event cannot respawn reactions that were already created. Failures to create
+/// single reactions are logged and counted but never bubbled up for the same
+/// reason.
+///
+/// # Arguments
+///
+/// * `reqs` - The reactions to spawn
+/// * `thorium` - A Thorium client
+/// * `stats` - The stats to track spawned reactions in
+#[instrument(name = "spawn_reactions", skip_all, fields(reqs = reqs.len()))]
+async fn spawn_reactions(
+    reqs: Vec<ReactionRequest>,
+    thorium: &Thorium,
+    stats: &mut SigmaRuleStats,
+) {
+    // skip spawning if no reactions were collected
+    if reqs.is_empty() {
+        return;
+    }
+    // create all of our reactions 10 at a time
+    let results = futures::stream::iter(reqs)
+        .map(|req| async move {
+            // create this reaction and keep the request for error logs
+            let result = thorium.reactions.create(&req).await;
+            (req, result)
+        })
+        .buffer_unordered(10)
+        .collect::<Vec<_>>()
+        .await;
+    // log any failures and track our stats
+    for (req, result) in results {
+        // check if this reaction was created
+        match result {
+            // track that we spawned a reaction
+            Ok(_) => stats.total.spawned = stats.total.spawned.saturating_add(1),
+            Err(error) => {
+                // log that we failed to create a reaction
+                event!(
+                    Level::ERROR,
+                    creating = "Reaction",
+                    group = &req.group,
+                    pipeline = &req.pipeline,
+                    error = error.to_string()
+                );
+                // track that this spawn failed
+                stats.total.spawn_errors = stats.total.spawn_errors.saturating_add(1);
+            }
+        }
+    }
+}
+
+/// Render a spawn actions jq filter args against a matched entitys metadata json
+///
+/// # Arguments
+///
+/// * `spawn` - The spawn reaction action to render args for
+/// * `entity_json` - The matched entitys metadata json
+#[instrument(name = "render_spawn_args", skip_all, err(Debug))]
+fn render_spawn_args(
+    spawn: &SigmaSpawnReaction,
+    entity_json: &serde_json::Value,
+) -> Result<BTreeMap<String, GenericJobArgs>, Error> {
+    // start with an empty map of rendered args
+    let mut rendered = BTreeMap::default();
+    // render the args for each image in this spawn action
+    for (image, args) in &spawn.args {
+        // start with room for one output per positional filter
+        let mut positionals = Vec::with_capacity(args.positionals.len());
+        // run each positional filter against our entity
+        for filter in &args.positionals {
+            // compile and run this filter against our entity
+            let outputs = CompiledJq::new(filter)
+                .and_then(|compiled| compiled.run(entity_json))
+                .map_err(|error| Error::new(error.to_string()))?;
+            // add this filters outputs as positionals in order
+            positionals.extend(outputs);
+        }
+        // start with an empty map of kwargs
+        let mut kwargs = BTreeMap::default();
+        // run the filters for each kwarg against our entity
+        for (key, filters) in &args.kwargs {
+            // start with room for one output per kwarg filter
+            let mut values = Vec::with_capacity(filters.len());
+            // run each of this kwargs filters against our entity
+            for filter in filters {
+                // compile and run this filter against our entity
+                let outputs = CompiledJq::new(filter)
+                    .and_then(|compiled| compiled.run(entity_json))
+                    .map_err(|error| Error::new(error.to_string()))?;
+                // add this filters outputs as values in order
+                values.extend(outputs);
+            }
+            // add this kwargs rendered values
+            kwargs.insert(key.clone(), values);
+        }
+        // build this images job args with our rendered values
+        let job_args = GenericJobArgs::default()
+            .positionals(positionals)
+            .set_kwargs(kwargs)
+            .switches(args.switches.clone());
+        // add this images rendered args
+        rendered.insert(image.clone(), job_args);
+    }
+    Ok(rendered)
+}
+
+/// Hash a spawn request so duplicate spawns can be deduped within a single event
+///
+/// # Arguments
+///
+/// * `group` - The group the pipeline to spawn is in
+/// * `pipeline` - The pipeline to spawn
+/// * `rendered` - The rendered args for this spawn request
+#[instrument(name = "hash_spawn_request", skip_all, err(Debug))]
+fn hash_spawn_request(
+    group: &str,
+    pipeline: &str,
+    rendered: &BTreeMap<String, GenericJobArgs>,
+) -> Result<u64, Error> {
+    // serialize our rendered args since job args are not directly hashable
+    let serialized = serde_json::to_string(rendered)?;
+    // get the hasher to hash this spawn request with
+    let mut hasher = GxHasher::default();
+    // hash the target pipeline and its rendered args
+    group.hash(&mut hasher);
+    pipeline.hash(&mut hasher);
+    serialized.hash(&mut hasher);
+    // get this spawn requests hash
+    Ok(hasher.finish())
+}
+
 /// A map of entities and events sorted by what kind of entity this is
 #[derive(Default)]
 struct EntityMap {
@@ -815,12 +1111,31 @@ impl EntityMap {
         for applies_to in &event.applies_to {
             // get the kind of entity this applies to maps too
             let entity_kind = EntityKinds::from(*applies_to);
+            // skip kinds this result has no entities for since downloading an
+            // absent kinds entities fails; the newest result for this tool is
+            // fetched so a kind the event applies to can be absent when a newer
+            // result shadowed the one that created this event
+            if !result.entities.contains_key(&entity_kind) {
+                // warn since this skips scanning entities the event was created for
+                event!(
+                    Level::WARN,
+                    msg = "Newest result is missing entities this event applies to; skipping that kinds scan",
+                    tool = &event.tool,
+                    kind = entity_kind.as_str(),
+                );
+                continue;
+            }
             // get the entities for this kind
             entity_map
                 .populate(event, result.id, entity_kind, thorium, local_stats)
                 .await?;
             // also get any root entities for this entity kind
             for root_kind in entity_kind.root_kinds() {
+                // results are not required to include root entities
+                // (e.g. processes can be uploaded without a process tree)
+                if !result.entities.contains_key(root_kind) {
+                    continue;
+                }
                 // get the entities for this kind
                 entity_map
                     .populate(event, result.id, *root_kind, thorium, local_stats)
@@ -864,6 +1179,8 @@ pub struct SigmaRuleWorker {
     pub clients: PapayaMap<String, Thorium>,
     /// The users that are currently disabled and whose events should be skipped
     pub disabled: HashSet<String>,
+    /// The max trigger depth at which sigma rule hits may still spawn reactions
+    max_depth: u8,
     /// The base (admin) client that builds user clients and creates sigma's entities and associations
     thorium: Arc<Thorium>,
 }
@@ -899,6 +1216,167 @@ impl SigmaRuleWorker {
             // add a client for this user
             pin.insert(username, user_client);
         }
+    }
+
+    /// Check if spawning a reaction must be refused because an event is at or past the max depth
+    ///
+    /// This mirrors the trigger cache max depth guard so sigma spawned reactions
+    /// cannot recurse past the configured max trigger depth.
+    ///
+    /// # Arguments
+    ///
+    /// * `depth` - The depth of the event being scanned
+    /// * `max_depth` - The max depth an event chain may reach
+    fn spawn_depth_capped(depth: u8, max_depth: u8) -> bool {
+        // refuse to spawn once an events depth reaches the max trigger depth
+        depth >= max_depth
+    }
+
+    /// Build and collect a reaction to spawn for a sigma rule hit
+    ///
+    /// Any failures are logged and counted instead of returned so that one bad
+    /// action cannot poison the rest of this events scan.
+    ///
+    /// # Arguments
+    ///
+    /// * `action_cache` - A cache of actions that this worker will eventually take
+    /// * `rule` - The rule that hit and wants to spawn a reaction
+    /// * `spawn` - The spawn reaction action to take
+    /// * `hit_on` - The entity that this rule hit on
+    /// * `event_depth` - The trigger depth of the event we are scanning
+    /// * `stats` - The local stats for this worker
+    #[instrument(name = "SigmaRuleWorker::collect_spawn", skip_all)]
+    async fn collect_spawn(
+        &self,
+        action_cache: &mut SigmaActionCache,
+        rule: &CompiledSigmaRule,
+        spawn: &SigmaSpawnReaction,
+        hit_on: &EntityRequest,
+        event_depth: u8,
+        stats: &mut SigmaRuleStats,
+    ) {
+        // try to collect a reaction to spawn for this rule hit
+        if let Err(error) = self
+            .try_collect_spawn(action_cache, rule, spawn, hit_on, event_depth, stats)
+            .await
+        {
+            // log that we skipped spawning a reaction for this hit
+            event!(
+                Level::WARN,
+                rule = &rule.original.name,
+                error = error.to_string(),
+                msg = "Skipping reaction spawn"
+            );
+            // get this entity kinds stats
+            let entity_stats = &mut stats.by_entity[hit_on.kind()];
+            // track that spawning for this entity kind failed or was refused
+            entity_stats.spawn_errors = entity_stats.spawn_errors.saturating_add(1);
+        }
+    }
+
+    /// Try to build and collect a reaction to spawn for a sigma rule hit
+    ///
+    /// Spawn requests are deduped within a single event; a duplicate request is
+    /// not an error and instead just adds this rules tag to the already
+    /// collected request.
+    ///
+    /// # Arguments
+    ///
+    /// * `action_cache` - A cache of actions that this worker will eventually take
+    /// * `rule` - The rule that hit and wants to spawn a reaction
+    /// * `spawn` - The spawn reaction action to take
+    /// * `hit_on` - The entity that this rule hit on
+    /// * `event_depth` - The trigger depth of the event we are scanning
+    /// * `stats` - The local stats for this worker
+    #[instrument(name = "SigmaRuleWorker::try_collect_spawn", skip_all, err(Debug))]
+    async fn try_collect_spawn(
+        &self,
+        action_cache: &mut SigmaActionCache,
+        rule: &CompiledSigmaRule,
+        spawn: &SigmaSpawnReaction,
+        hit_on: &EntityRequest,
+        event_depth: u8,
+        stats: &mut SigmaRuleStats,
+    ) -> Result<(), Error> {
+        // refuse to spawn reactions at or past the max trigger depth
+        if Self::spawn_depth_capped(event_depth, self.max_depth) {
+            return Err(Error::new(format!(
+                "Refusing to spawn a reaction at max trigger depth: {event_depth} >= {}",
+                self.max_depth
+            )));
+        }
+        // reactions can only be spawned on sample or repo backed results
+        if let OutputKey::Entity(_) = &action_cache.key {
+            return Err(Error::new(
+                "Spawning reactions is not supported for entity results",
+            ));
+        }
+        // hash this spawn action so timed out renders can be tracked across events
+        let action_hash = hash_spawn_action(spawn);
+        // make sure this actions filters may still be rendered
+        check_render_budget(&TIMED_OUT_SPAWNS, &LEAKED_JQ_THREADS, action_hash)?;
+        // get the metadata json for the entity this rule hit on
+        // a scanned entity should always be scannable but be defensive anyways
+        let scannable = hit_on
+            .metadata
+            .to_sigma_scannable()?
+            .ok_or_else(|| Error::new("Matched entity is not sigma scannable"))?;
+        // parse this entities metadata json so we can run jq filters against it
+        let entity_json = serde_json::from_str::<serde_json::Value>(&scannable)?;
+        // clone this spawn action so it can be rendered on a blocking thread
+        let to_render = spawn.clone();
+        // render this spawn actions jq filters against our entity on a blocking
+        // thread with a timeout so pathological filters that loop forever cannot
+        // wedge this worker
+        let render =
+            tokio::task::spawn_blocking(move || render_spawn_args(&to_render, &entity_json));
+        // wait for the render to finish or fail this spawn once it times out
+        let rendered = match tokio::time::timeout(JQ_RENDER_TIMEOUT, render).await {
+            // rendering completed so bubble up any jq failures
+            Ok(joined) => joined.map_err(|error| Error::new(error.to_string()))??,
+            // fail closed on filters that did not finish in time; the leaked
+            // thread spins until this process restarts so record it and never
+            // rerender this action
+            Err(_) => {
+                // record this timed out render and the thread it leaked
+                record_render_timeout(&TIMED_OUT_SPAWNS, &LEAKED_JQ_THREADS, action_hash);
+                return Err(Error::new(format!(
+                    "jq arg extraction timed out after {}s; this action is skipped \
+                    until the event handler restarts",
+                    JQ_RENDER_TIMEOUT.as_secs()
+                )));
+            }
+        };
+        // hash this spawn request so we can dedupe duplicate spawns
+        let hash = hash_spawn_request(&spawn.group, &spawn.pipeline, &rendered)?;
+        // build the base reaction request for this spawn action
+        // spawned reactions are one trigger deeper than the event that caused them
+        let req = ReactionRequest::new(spawn.group.clone(), spawn.pipeline.clone())
+            .trigger_depth(event_depth.saturating_add(1))
+            // tag this reaction with the rule that spawned it
+            .tag(format!("sigma-rule:{}", rule.original.name));
+        // target the data that the originating reaction ran on; repo results
+        // only record the repo url so repo spawns run against the repos
+        // default checkout rather than the originating commit
+        let mut req = match &action_cache.key {
+            OutputKey::Sample(sha256) => req.sample(sha256.clone()),
+            OutputKey::Repo(url) => req.repo(RepoDependencyRequest::new(url.clone())),
+            // entity keyed results were already rejected above
+            OutputKey::Entity(_) => return Ok(()),
+        };
+        // overlay the rendered args for each image
+        for (image, args) in rendered {
+            // add this images rendered args
+            req = req.args(image, args);
+        }
+        // add this reaction or merge its tags into an identical collected one
+        if action_cache.add_reaction(hash, req) {
+            // get this entity kinds stats
+            let entity_stats = &mut stats.by_entity[hit_on.kind()];
+            // track that we are spawning a reaction for this entity kind
+            entity_stats.spawned = entity_stats.spawned.saturating_add(1);
+        }
+        Ok(())
     }
 
     /// Create a flag for this rule hit
@@ -981,6 +1459,8 @@ impl SigmaRuleWorker {
         };
         // start with an empty stats block then we will lock and add everything all at once later
         let mut local_stats = SigmaRuleStats::default();
+        // keep this events trigger depth so spawned reactions can go one deeper
+        let depth = event.depth;
         // get our innner event
         // this should never hit the wrong event kind branch but its better to be defensive
         let EventData::SigmaScannableResults(event_data) = event.data else {
@@ -1040,14 +1520,32 @@ impl SigmaRuleWorker {
                                     )
                                     .await?;
                                 }
+                                // spawn a reaction on the data these results came from
+                                SigmaActionToTake::SpawnReaction(spawn) => {
+                                    self.collect_spawn(
+                                        &mut action_cache,
+                                        rule,
+                                        spawn,
+                                        entity_req,
+                                        depth,
+                                        &mut local_stats,
+                                    )
+                                    .await;
+                                }
                             }
                         }
                     }
                 }
             }
         }
+        // pull any reactions collected by rule hits out before the cache is consumed
+        let spawn_reqs = std::mem::take(&mut action_cache.reactions);
         // create any entities that any rules hit/flagged on with our base (admin) client
+        // this must happen before spawning reactions since its errors retry the
+        // event and a retried event would respawn already spawned reactions
         action_cache.create_all(thorium, &self.thorium).await?;
+        // spawn any reactions that any rule hits collected as this events user
+        spawn_reactions(spawn_reqs, thorium, &mut local_stats).await;
         Ok(local_stats)
     }
 }
@@ -1071,6 +1569,7 @@ impl EventWorkerSupportCore for SigmaRuleWorker {
             thorium: thorium.clone(),
             clients: PapayaMap::with_capacity(100),
             disabled: HashSet::default(),
+            max_depth: cache.conf.thorium.events.max_depth,
         };
         // populate our user clients
         worker.create_user_clients(cache.users.clone());
@@ -1126,6 +1625,8 @@ impl EventWorkerSupportCore for SigmaRuleWorker {
             scanned = stats.total.scanned,
             created = stats.total.created,
             flagged = stats.total.flagged,
+            spawned = stats.total.spawned,
+            spawn_errors = stats.total.spawn_errors,
         );
         // now report stats on a per entity basis
         for (entity, entity_stats) in &stats.by_entity {
@@ -1143,6 +1644,8 @@ impl EventWorkerSupportCore for SigmaRuleWorker {
                 scanned = entity_stats.scanned,
                 created = entity_stats.created,
                 flagged = entity_stats.flagged,
+                spawned = entity_stats.spawned,
+                spawn_errors = entity_stats.spawn_errors,
             );
         }
     }
@@ -1162,6 +1665,11 @@ impl EventWorkerSupportCore for SigmaRuleWorker {
             ("total.scanned".to_owned(), stats.total.scanned as u64),
             ("total.created".to_owned(), stats.total.created as u64),
             ("total.flagged".to_owned(), stats.total.flagged as u64),
+            ("total.spawned".to_owned(), stats.total.spawned as u64),
+            (
+                "total.spawn_errors".to_owned(),
+                stats.total.spawn_errors as u64,
+            ),
         ]);
         // flatten each entity kinds stats to dotted paths
         for (kind, entity_stats) in &stats.by_entity {
@@ -1177,6 +1685,14 @@ impl EventWorkerSupportCore for SigmaRuleWorker {
             map.insert(
                 format!("by_entity.{}.flagged", kind.as_str()),
                 entity_stats.flagged as u64,
+            );
+            map.insert(
+                format!("by_entity.{}.spawned", kind.as_str()),
+                entity_stats.spawned as u64,
+            );
+            map.insert(
+                format!("by_entity.{}.spawn_errors", kind.as_str()),
+                entity_stats.spawn_errors as u64,
             );
         }
         map
@@ -1479,8 +1995,10 @@ mod tests {
             scanned: 1,
             created: 2,
             flagged: 3,
+            spawned: 4,
+            spawn_errors: 5,
         };
-        stats.by_entity[EntityKinds::SigmaRule].scanned = 4;
+        stats.by_entity[EntityKinds::SigmaRule].scanned = 6;
         // flatten these stats into a counter map
         let map = SigmaRuleWorker::counter_map(&stats);
         // the totals must land under the total prefix
@@ -1499,10 +2017,20 @@ mod tests {
             Some(&3),
             "total.flagged must carry the total"
         );
+        assert_eq!(
+            map.get("total.spawned"),
+            Some(&4),
+            "total.spawned must carry the total"
+        );
+        assert_eq!(
+            map.get("total.spawn_errors"),
+            Some(&5),
+            "total.spawn_errors must carry the total"
+        );
         // an active kinds counters must land under its dotted path
         assert_eq!(
             map.get("by_entity.SigmaRule.scanned"),
-            Some(&4),
+            Some(&6),
             "an active kind must flatten to its dotted path"
         );
         // untouched kinds must still be emitted as zeros so the key set is stable
@@ -1511,11 +2039,155 @@ mod tests {
             Some(&0),
             "untouched kinds must be emitted as zeros"
         );
-        // the map must hold the totals plus three counters per entity kind
+        // the map must hold the totals plus five counters per entity kind
         assert_eq!(
             map.len(),
-            3 + 3 * (&stats.by_entity).into_iter().count(),
-            "the counter map must hold the totals plus three counters per entity kind"
+            5 + 5 * (&stats.by_entity).into_iter().count(),
+            "the counter map must hold the totals plus five counters per entity kind"
         );
+    }
+
+    /// Build a volatility like spawn reaction action for tests
+    fn volatility_spawn() -> SigmaSpawnReaction {
+        // extract the pid of the matched process and pass a literal mode
+        SigmaSpawnReaction::new("forensics", "volatility-dump")
+            .kwarg("volatility", "--pid", vec![".pid"])
+            .positional("volatility", "\"memdump\"")
+            .switch("volatility", "--verbose")
+    }
+
+    /// Build a windows process like metadata json blob for tests
+    fn process_json() -> serde_json::Value {
+        serde_json::json!({"pid": 4321, "parent_pid": null, "name": "evil.exe"})
+    }
+
+    /// Rendering a spawn action extracts values from the matched entity
+    #[test]
+    fn render_spawn_args_extracts_values() {
+        // render our volatility spawn action against a matched process
+        let rendered = render_spawn_args(&volatility_spawn(), &process_json()).unwrap();
+        // get the rendered args for the volatility image
+        let args = rendered.get("volatility").expect("missing volatility args");
+        // the pid should be extracted from the matched process
+        assert_eq!(args.kwargs["--pid"], vec!["4321".to_owned()]);
+        // the literal positional should be passed through without quotes
+        assert_eq!(args.positionals, vec!["memdump".to_owned()]);
+        // switches should be passed through unchanged
+        assert_eq!(args.switches, vec!["--verbose".to_owned()]);
+    }
+
+    /// Rendering fails closed when a filter yields null or hits a missing field
+    #[test]
+    fn render_spawn_args_fails_closed() {
+        // build a spawn action that extracts a null field
+        let null_spawn = SigmaSpawnReaction::new("forensics", "volatility-dump").kwarg(
+            "volatility",
+            "--ppid",
+            vec![".parent_pid"],
+        );
+        // rendering a null field must fail so this spawn is skipped
+        assert!(render_spawn_args(&null_spawn, &process_json()).is_err());
+        // build a spawn action that extracts a missing field
+        let missing_spawn = SigmaSpawnReaction::new("forensics", "volatility-dump").kwarg(
+            "volatility",
+            "--pid",
+            vec![".not_a_field"],
+        );
+        // rendering a missing field must also fail
+        assert!(render_spawn_args(&missing_spawn, &process_json()).is_err());
+    }
+
+    /// Filters with multiple outputs render multiple values in order
+    #[test]
+    fn render_spawn_args_multiple_outputs() {
+        // build a spawn action whose filter yields multiple outputs
+        let spawn = SigmaSpawnReaction::new("forensics", "volatility-dump").kwarg(
+            "volatility",
+            "--info",
+            vec![".pid, .name"],
+        );
+        // render this spawn action against a matched process
+        let rendered = render_spawn_args(&spawn, &process_json()).unwrap();
+        // both outputs should become values for this kwarg in order
+        assert_eq!(
+            rendered["volatility"].kwargs["--info"],
+            vec!["4321".to_owned(), "evil.exe".to_owned()]
+        );
+    }
+
+    /// Spawning is refused at or past the max trigger depth
+    #[test]
+    fn spawn_depth_capped_at_max_depth() {
+        // below the max depth spawning is allowed
+        assert!(!SigmaRuleWorker::spawn_depth_capped(4, 5));
+        // at the max depth spawning is refused
+        assert!(SigmaRuleWorker::spawn_depth_capped(5, 5));
+        // past the max depth spawning is refused
+        assert!(SigmaRuleWorker::spawn_depth_capped(6, 5));
+    }
+
+    /// Duplicate spawn requests merge their rule tags instead of duplicating
+    #[test]
+    fn add_reaction_merges_tags() {
+        // build an action cache for a sample backed event
+        let mut cache = SigmaActionCache::new(OutputKey::Sample("sha256".to_owned()));
+        // build two identical requests from two different rules
+        let first = ReactionRequest::new("forensics", "volatility-dump").tag("sigma-rule:ransom");
+        let second = ReactionRequest::new("forensics", "volatility-dump").tag("sigma-rule:shadow");
+        // the first request should be newly collected
+        assert!(cache.add_reaction(42, first));
+        // the second identical request should only merge its tag
+        assert!(!cache.add_reaction(42, second));
+        // only one reaction should be collected with both rules tags
+        assert_eq!(cache.reactions.len(), 1);
+        assert_eq!(
+            cache.reactions[0].tags,
+            vec![
+                "sigma-rule:ransom".to_owned(),
+                "sigma-rule:shadow".to_owned()
+            ]
+        );
+        // a request with a different hash should be newly collected
+        let other = ReactionRequest::new("forensics", "other-pipeline").tag("sigma-rule:ransom");
+        assert!(cache.add_reaction(43, other));
+        assert_eq!(cache.reactions.len(), 2);
+    }
+
+    /// Identical spawn requests hash identically and distinct ones do not
+    #[test]
+    fn hash_spawn_request_dedupes() {
+        // render the same spawn action twice
+        let first = render_spawn_args(&volatility_spawn(), &process_json()).unwrap();
+        let second = render_spawn_args(&volatility_spawn(), &process_json()).unwrap();
+        // identical requests must hash identically so they dedupe
+        assert_eq!(
+            hash_spawn_request("forensics", "volatility-dump", &first).unwrap(),
+            hash_spawn_request("forensics", "volatility-dump", &second).unwrap(),
+        );
+        // a different pipeline must hash differently
+        assert_ne!(
+            hash_spawn_request("forensics", "volatility-dump", &first).unwrap(),
+            hash_spawn_request("forensics", "other-pipeline", &second).unwrap(),
+        );
+    }
+
+    /// Timed out spawn renders are tracked and refused instead of rerendered
+    #[test]
+    fn render_budget_blocks_timed_out_actions() {
+        // build fresh budget state for this test instead of using the statics
+        let timed_out = StdMutex::new(BTreeSet::new());
+        let leaked = AtomicUsize::new(0);
+        // an action that never timed out may render
+        assert!(check_render_budget(&timed_out, &leaked, 42).is_ok());
+        // record a timed out render for this action
+        record_render_timeout(&timed_out, &leaked, 42);
+        // the timed out action must be refused instead of leaking another thread
+        assert!(check_render_budget(&timed_out, &leaked, 42).is_err());
+        // other actions may still render while the leak budget remains
+        assert!(check_render_budget(&timed_out, &leaked, 43).is_ok());
+        // exhaust the leak budget
+        leaked.store(MAX_LEAKED_JQ_THREADS, Ordering::Relaxed);
+        // all renders must be refused once the leak budget is exhausted
+        assert!(check_render_budget(&timed_out, &leaked, 43).is_err());
     }
 }
