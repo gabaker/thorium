@@ -13,7 +13,7 @@ use crate::models::entities::network_activity::{
     NetConState, NetworkConnection, TransportLayerProtocol,
 };
 use crate::models::entities::rules::{
-    SigmaActionToTake, SigmaAutoFlag, YaraActionToTake, YaraAutoFlag,
+    SigmaActionToTake, SigmaAutoFlag, SigmaSpawnReaction, YaraActionToTake, YaraAutoFlag,
 };
 use crate::models::{
     AgentConfig, AgentEntityRequest, AgenticTool, AgenticToolBacking, AllowedEndpoint,
@@ -1935,6 +1935,19 @@ pub fn gen_flag_meta() -> EntityMetadataRequest {
     })
 }
 
+/// Generate a spawn reaction action with jq filter extracted args
+#[allow(dead_code)]
+#[must_use]
+pub fn gen_sigma_spawn_action() -> SigmaActionToTake {
+    // build a volatility like spawn action that extracts the matched processes pid
+    let spawn = SigmaSpawnReaction::new("forensics", "volatility-dump")
+        .kwarg("volatility", "--pid", vec![".pid"])
+        .positional("volatility", "\"memdump\"")
+        .switch("volatility", "--verbose");
+    // wrap this spawn action in an action to take
+    SigmaActionToTake::SpawnReaction(spawn)
+}
+
 /// Generate metadata for a sigma rule entity
 ///
 /// # Panics
@@ -1945,7 +1958,31 @@ pub fn gen_flag_meta() -> EntityMetadataRequest {
 pub fn gen_sigma_meta() -> EntityMetadataRequest {
     // build a validated sigma rule from our test rule
     let rule = SigmaRule::new(TEST_SIGMA_RULE, SigmaRuleAppliesTo::WindowsProcesses)
-        .expect("failed to build test sigma rule");
+        .expect("failed to build test sigma rule")
+        // add a spawn reaction action to exercise create time action validation
+        .action(gen_sigma_spawn_action());
+    // build our sigma rule metadata request
+    EntityMetadataRequest::SigmaRule(rule)
+}
+
+/// Generate metadata for a sigma rule entity with an invalid jq filter action
+///
+/// # Panics
+///
+/// Panics if the built-in test sigma rule fails to validate
+#[allow(dead_code)]
+#[must_use]
+pub fn gen_sigma_meta_bad_jq() -> EntityMetadataRequest {
+    // build a spawn action whose jq filter does not compile
+    let spawn = SigmaSpawnReaction::new("forensics", "volatility-dump").kwarg(
+        "volatility",
+        "--pid",
+        vec!["]["],
+    );
+    // build a validated sigma rule with this invalid action
+    let rule = SigmaRule::new(TEST_SIGMA_RULE, SigmaRuleAppliesTo::WindowsProcesses)
+        .expect("failed to build test sigma rule")
+        .action(SigmaActionToTake::SpawnReaction(spawn));
     // build our sigma rule metadata request
     EntityMetadataRequest::SigmaRule(rule)
 }
@@ -2387,11 +2424,14 @@ pub fn gen_sigma_update(_existing: &Entity) -> EntityMetadataUpdate {
         score: Some(gen_int!(1, 100)),
         add_applies_to: vec![SigmaRuleAppliesTo::NetworkConnections],
         remove_applies_to: vec![SigmaRuleAppliesTo::WindowsProcesses],
-        add_actions: vec![SigmaActionToTake::Flag(SigmaAutoFlag {
-            confidence: Confidence::Likely,
-            content: Some(gen_string(gen_int!(4, 16))),
-            reasoning: gen_string(gen_int!(8, 32)),
-        })],
+        add_actions: vec![
+            SigmaActionToTake::Flag(SigmaAutoFlag {
+                confidence: Confidence::Likely,
+                content: Some(gen_string(gen_int!(4, 16))),
+                reasoning: gen_string(gen_int!(8, 32)),
+            }),
+            gen_sigma_spawn_action(),
+        ],
         remove_actions: std::collections::BTreeSet::new(),
     }
 }

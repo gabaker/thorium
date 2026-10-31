@@ -122,8 +122,14 @@ pub async fn create<O: OutputSupport>(
     if !applies_to.is_empty() {
         // only create scan events if we found some
         // create an event for these newly scannable sigma rules
-        let event =
-            Event::sigma_scannable_results(user, key, form.groups.clone(), applies_to, &form.tool);
+        let event = Event::sigma_scannable_results(
+            user,
+            key,
+            form.groups.clone(),
+            applies_to,
+            &form.tool,
+            form.trigger_depth,
+        );
         // save our event
         super::events::create(&event, shared).await?;
     }

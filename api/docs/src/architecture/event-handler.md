@@ -44,6 +44,50 @@ The event handler also runs an AI worker that keeps AI workflows and model catal
 
 Workflow graph and model refresh events never trigger reactions.
 
+The event handler also scans tool results with sigma rules. When a tool uploads
+results containing scannable entities (e.g. windows processes) an event is
+created and the event handler runs all matching sigma rules against those
+entities. When a rule hits it performs that rule's actions, which can either
+flag the matched entity or spawn a reaction.
+
+### Spawning reactions from sigma rule hits
+A sigma rule can have a `SpawnReaction` action that spawns a pipeline against
+the same data (sample or repo) that the originating reaction ran on. Repo
+results only record the repo url, so a reaction spawned from repo results runs
+against the repo's default checkout rather than the commit the originating
+reaction ran on. Parts of
+the matched entity can be passed to the pipeline as args using jq filters. For
+example this action dumps the memory of any process a rule hits on by passing
+the matched process's pid to volatility:
+
+```json
+{
+  "SpawnReaction": {
+    "group": "forensics",
+    "pipeline": "volatility-dump",
+    "args": {
+      "volatility": {
+        "positionals": ["\"memdump\""],
+        "kwargs": {"--pid": [".pid"]},
+        "switches": ["--verbose"]
+      }
+    }
+  }
+}
+```
+
+The args map is keyed by image name. Every positional and kwarg value is a jq
+filter run against the metadata json of the entity the rule hit on (the same
+json the sigma rule matched), while switches are passed through as literals.
+Literal positional/kwarg values can be set with jq string literals like
+`"\"memdump\""` and optional fields can be defaulted with jq's alternative
+operator (e.g. `.parent_pid // 0`). Extraction fails closed: if any filter
+errors, returns null, or yields no outputs then that spawn is skipped and
+logged. A filter that runs past the render timeout is also skipped, and that
+action is not rendered again until the event handler restarts. Spawned
+reactions run as the user whose results were scanned and are
+tagged with `sigma-rule:<rule name>`.
+
 ### Event Handler FAQ's
 ---
 
@@ -60,7 +104,18 @@ consistent.
 Triggers have a configurable depth limit (`thorium.events.max_depth`, default 5)
 meaning any events that reach that limit will be immediately dropped instead of
 processed. Tags written by YARA hits inherit the depth of the event that caused the
-scan plus one, so hit-triggered pipelines also terminate at the depth limit.
+scan plus one, so hit-triggered pipelines also terminate at the depth limit. Sigma
+rule scanning follows the same limit: result uploads carry the trigger depth of the
+job that produced them, and a sigma rule hit refuses to spawn a reaction once that
+depth reaches the configured max depth. Reactions spawned by a sigma rule hit run
+one trigger level deeper than the event that caused them. Note that like tags and
+children, the depth on results is stamped by the uploader (the Thorium agent), so
+results uploaded by clients that do not stamp a depth (e.g. manual uploads) start a
+fresh chain at depth 0. A fresh chain also restarts the loop guard: if a tool in a
+sigma-spawned pipeline uploads its own results directly without stamping a depth
+and those results match the same spawning rule, every pass re-enters at depth 0 and
+the max depth never ends the loop — such tools must stamp the depth they ran at (as
+the agent does) or the rule must not match its own pipeline's results.
 
 ### Can I replay events?
 Successfully processed events are dropped and cannot be replayed. However, in-flight

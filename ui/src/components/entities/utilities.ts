@@ -572,9 +572,7 @@ export function buildCreateEntityForm(entity: EntityCreateTypes, imageFile?: Fil
       }
       if (meta.actions && Array.isArray(meta.actions)) {
         meta.actions.forEach((action: SigmaActionToTake) => {
-          if (action.Flag) {
-            createForm.append(`metadata[sigma_actions][]`, JSON.stringify(action));
-          }
+          createForm.append(`metadata[sigma_actions][]`, JSON.stringify(action));
         });
       }
       if (meta.applies_to && Array.isArray(meta.applies_to)) {

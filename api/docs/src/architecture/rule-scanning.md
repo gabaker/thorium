@@ -155,9 +155,14 @@ stale `HuntStatus`/`HuntActive` tag rows.
 Sigma scanning predates the YARA path and kept the original design. It is result-driven: a `SigmaScannableResults`
 event fires when a tool result carrying scannable entities is created, and the `SigmaScanner` worker compiles every
 stored `SigmaRule` at context build, logging and skipping compile failures (no quarantine, no notifications). Scans
-run as the uploader through masqueraded per-user clients and a match creates a `Flag` entity in the *rule's* groups,
-so an uploader outside a rule's group fails authorization and the hit is silently dropped (log only). Sigma has no
-`thorium.yml` config section and no hunt engine — the fixes built for the YARA path have not yet been ported back.
+run as the uploader through masqueraded per-user clients and a match performs the rule's actions: flag actions
+create a `Flag` entity in the *rule's* groups, and `SpawnReaction` actions spawn a pipeline reaction with args
+rendered from the matched entity by jq filters (see the [event handler](./event-handler.md) page). Spawned
+reactions run as the uploader, so an uploader without access to a spawn action's target group or pipeline fails
+authorization and that spawn is dropped (log and stats only). Flag entities and their associations are instead
+created with the worker's base (admin) client, so a rule's flags land in the rule's groups regardless of the
+uploader's group membership. Sigma has no `thorium.yml` config section and no hunt engine — the
+fixes built for the YARA path have not yet been ported back.
 
 ## Scaling, Ownership, and the Reaper
 ---

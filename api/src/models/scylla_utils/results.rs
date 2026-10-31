@@ -30,6 +30,8 @@ pub struct OutputForm<O: OutputSupport> {
     pub files: Vec<String>,
     /// What entities were found in this result but not neccesarily created in Thorium
     pub entities: HashMap<EntityKinds, i64>,
+    /// The trigger depth of the job that produced this result
+    pub trigger_depth: u8,
     /// Any extra info thats needed in this result form
     pub extra: O::ExtraKey,
 }
@@ -55,6 +57,8 @@ pub struct OutputFormBuilder<O: OutputSupport> {
     pub files: Vec<String>,
     /// What entities were found in this result but not neccesarily created in Thorium
     pub entities: HashMap<EntityKinds, i64>,
+    /// The trigger depth of the job that produced this result
+    pub trigger_depth: u8,
     /// Any extra info thats needed in this result form
     pub extra: Option<O::ExtraKey>,
 }
@@ -72,6 +76,7 @@ impl<O: OutputSupport> Default for OutputFormBuilder<O> {
             display_type: None,
             files: Vec::default(),
             entities: HashMap::default(),
+            trigger_depth: 0,
             extra: None,
         }
     }

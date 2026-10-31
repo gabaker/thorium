@@ -298,7 +298,12 @@ impl Event {
     ///
     /// # Arguments
     ///
-    /// * `user` - The user that is creating
+    /// * `user` - The user that is creating this event
+    /// * `key` - The key to the output that can be scanned
+    /// * `groups` - The groups these results were added too
+    /// * `applies_to` - The kinds of rules that can be applied to these results
+    /// * `tool` - The tool that created these results
+    /// * `depth` - The trigger depth of the job that produced these results
     #[must_use]
     pub fn sigma_scannable_results(
         user: &User,
@@ -306,6 +311,7 @@ impl Event {
         groups: Vec<String>,
         applies_to: Vec<SigmaRuleAppliesTo>,
         tool: impl Into<String>,
+        depth: u8,
     ) -> Self {
         // generate a random event id
         let id = Uuid::new_v4();
@@ -327,8 +333,7 @@ impl Event {
             parent: None,
             user: user.username.clone(),
             data,
-            // depth has no meaning for sigma scannable results
-            depth: 0,
+            depth,
         }
     }
 
