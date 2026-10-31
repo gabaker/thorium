@@ -72,6 +72,50 @@ pub fn is_executable_addr(sections: &[Section], addr: u64) -> bool {
     section_at(sections, addr).is_none_or(Section::is_executable)
 }
 
+/// Whether an xref's reference type is a call-like class.
+///
+/// Matches the CALL classes (`UNCONDITIONAL_CALL`, `CONDITIONAL_CALL`,
+/// `COMPUTED_CALL`, ...), the JUMP classes (tail calls and jump stubs), and
+/// `THUNK` references; the data classes (`DATA`, `READ`, `WRITE`, `PARAM`,
+/// `EXTERNAL_REF`, ...) are not call-like — Ghidra's constant propagation
+/// records those at every instruction a target's address flows through, so on
+/// their own they prove nothing. Whether a non-call-like reference still counts
+/// as a call site is decided by [`is_call_site_evidence`], which weighs the
+/// containing function in. A missing/empty type is call-like (fail-open): a
+/// bridge version that omits the field must never silently lose a genuine
+/// call. The strings are Ghidra `RefType` display names, rendered by the
+/// bridge via `getReferenceType().toString()`.
+///
+/// # Arguments
+///
+/// * `ref_type` - The reference type string the bridge reported
+fn is_call_like_ref(ref_type: &str) -> bool {
+    // normalize once; Ghidra renders RefType display names in upper snake case
+    let t = ref_type.trim().to_ascii_uppercase();
+    // fail-open on a missing type, otherwise demand a call/jump/thunk class
+    t.is_empty() || t.contains("CALL") || t.contains("JUMP") || t.contains("THUNK")
+}
+
+/// Whether a resolved reference survives as call-site evidence.
+///
+/// A call/jump/thunk-typed (or missing-typed, fail-open) reference is a call site
+/// wherever it sits. A data-typed (`READ`/`DATA`/…) reference is kept only when a
+/// function contains it: the x64 indirect-call idiom (`mov rsi, [import]; … call rsi`)
+/// records a READ-typed reference at the `mov` — a genuine call-site evidence source
+/// (the `WinHttp*`/`InternetOpen*`/`HttpOpenRequest` call-site leads come from exactly
+/// this shape) — while the `VMProtect` import slots the type filter exists for are
+/// data references in an executable `.vmp` section that no function contains.
+///
+/// # Arguments
+///
+/// * `ref_type` - The reference type string the bridge reported
+/// * `function` - The entry of the function containing the referencing site, if any
+fn is_call_site_evidence(ref_type: &str, function: Option<u64>) -> bool {
+    // a call-like (or missing) type stands on its own; a data-typed reference is
+    // evidence only when a real function contains the referencing instruction
+    is_call_like_ref(ref_type) || function.is_some()
+}
+
 /// Decode a hex string (no `0x` prefix) into raw bytes.
 ///
 /// Non-hex characters are skipped and a dangling final nibble is dropped. Used to
@@ -765,6 +809,21 @@ impl AnalysisContext {
     /// (see `crate::provenance`). An import referenced only from data still
     /// surfaces through the "imported, but no direct call site" path.
     ///
+    /// References are also judged by type and attribution together (see
+    /// [`is_call_site_evidence`]): CALL-, JUMP- (tail calls), and THUNK-typed
+    /// references are call sites wherever they sit, and a `DATA`/`READ`-typed
+    /// reference is kept only when a function contains it. Ghidra's constant
+    /// propagation records data-typed references at every instruction an
+    /// import's address flows through, which cuts both ways: the x64 indirect
+    /// call idiom (`mov rsi, [import]; … call rsi`) records a READ at the `mov`
+    /// inside a real function — genuine call-site evidence — while `VMProtect`'s
+    /// `.vmp` import slots record them in executable memory that no function
+    /// contains, fabricating call sites no instruction executes. Each site is
+    /// therefore attributed to its containing function *first*, and a
+    /// data-typed reference without one is dropped. A reference with a
+    /// missing/empty type is kept (fail-open), so bridge versions that omit
+    /// the field never silently lose a genuine call.
+    ///
     /// # Arguments
     ///
     /// * `target_addr` - The address to resolve references to (e.g. an import)
@@ -788,8 +847,15 @@ impl AnalysisContext {
             if !is_executable_addr(&sections, from) {
                 continue;
             }
-            // find the function the reference lives in
+            // attribute the site to its containing function *before* judging the
+            // reference: the keep decision below needs the attribution
             let container = self.containing_function(from);
+            // keep call/jump/thunk-typed references anywhere, and data-typed ones
+            // only inside a function (the mov-load idiom); a function-less data
+            // reference is a VMProtect-style import slot, not a call site
+            if !is_call_site_evidence(&xref.ref_type, container) {
+                continue;
+            }
             // if that function is a thunk, hop to its real callers
             if let Some(thunk) = container {
                 if self.is_thunk(thunk).await? {
@@ -1032,6 +1098,51 @@ mod tests {
         assert!(!is_thunk_body(&[]));
         assert!(!is_thunk_body(&[insn("PUSH")]));
         assert!(!is_thunk_body(&[insn("JMP"), insn("RET")]));
+    }
+
+    /// Call/jump/thunk reference types are call-like, data types are not, empty is.
+    #[test]
+    fn call_like_ref_types_filter_data_references() {
+        // the call/jump/thunk classes Ghidra renders for genuine control flow
+        for kept in [
+            "UNCONDITIONAL_CALL",
+            "CONDITIONAL_CALL",
+            "COMPUTED_CALL",
+            "UNCONDITIONAL_JUMP",
+            "THUNK",
+        ] {
+            assert!(is_call_like_ref(kept), "{kept} must be call-like");
+        }
+        // the data classes constant propagation records at import slots
+        for data in ["DATA", "READ", "WRITE", "PARAM", "EXTERNAL_REF"] {
+            assert!(!is_call_like_ref(data), "{data} must not be call-like");
+        }
+        // a missing/empty type is call-like: never silently lose a genuine call
+        assert!(is_call_like_ref(""));
+        assert!(is_call_like_ref("  "));
+    }
+
+    /// A data-typed reference is call-site evidence only inside a function: the x64
+    /// `mov rsi, [import]; … call rsi` idiom records a READ at the `mov` (the shape
+    /// behind the confirmed `WinHttp*`/`InternetOpen*`/`HttpOpenRequest` and
+    /// `OutputDebugString` call-site leads), while a `VMProtect` import slot's READ
+    /// has no containing function and stays dropped.
+    #[test]
+    fn data_refs_are_call_site_evidence_only_inside_functions() {
+        // the mov-load shape: READ/DATA-typed, inside a real function → kept
+        assert!(is_call_site_evidence("READ", Some(0x1400_0100)));
+        assert!(is_call_site_evidence("DATA", Some(0x1400_0100)));
+        // the VMProtect import-slot shape: data-typed, no containing function → dropped
+        assert!(!is_call_site_evidence("READ", None));
+        assert!(!is_call_site_evidence("DATA", None));
+        assert!(!is_call_site_evidence("EXTERNAL_REF", None));
+        // call/jump/thunk references are call sites even without a containing function
+        assert!(is_call_site_evidence("UNCONDITIONAL_CALL", None));
+        assert!(is_call_site_evidence("CONDITIONAL_JUMP", None));
+        assert!(is_call_site_evidence("THUNK", None));
+        // the fail-open empty type still never silently loses a genuine call
+        assert!(is_call_site_evidence("", None));
+        assert!(is_call_site_evidence("  ", None));
     }
 
     /// Only code addresses count as executable, and an unmapped one is kept.

@@ -16,6 +16,7 @@ pub use thorpal::resume::{
 };
 pub use thorpal::scrub::{defang, refang};
 pub use thorpal::seed::SEED_AUTHOR as DETECTOR_AUTHOR;
+pub use thorpal::seed::{SeedReport, seed_forum_from_detectors};
 pub use thorpal::session::{RunOutcome, Session, SessionConfig};
 pub use thorpal::store::library::{LibraryEntry, ScriptLibrary, ScriptMeta};
 pub use thorpal::store::redact::{LibraryRedactor, parse_token_file};

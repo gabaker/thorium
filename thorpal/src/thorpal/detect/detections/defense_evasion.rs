@@ -19,6 +19,7 @@
 //! itself under Discovery (T1082) while its primary claim stays Defense Evasion.
 
 pub mod anti_instrumentation;
+pub mod api_hashing;
 pub mod debugger_evasion;
 pub mod embedded_content;
 pub mod encoded_strings;
@@ -83,6 +84,13 @@ pub const T1027_002: AttackTechnique = AttackTechnique {
     tactic: AttackTactic::DefenseEvasion,
 };
 
+/// ATT&CK T1027.007 — Obfuscated Files or Information: Dynamic API Resolution.
+pub const T1027_007: AttackTechnique = AttackTechnique {
+    id: Cow::Borrowed("T1027.007"),
+    name: Cow::Borrowed("Obfuscated Files or Information: Dynamic API Resolution"),
+    tactic: AttackTactic::DefenseEvasion,
+};
+
 /// ATT&CK T1480.001 — Execution Guardrails: Environmental Keying.
 pub const T1480_001: AttackTechnique = AttackTechnique {
     id: Cow::Borrowed("T1480.001"),
@@ -131,6 +139,7 @@ pub fn detections() -> Vec<Box<dyn Detection>> {
         Box::new(sandbox_time_evasion::SandboxTimeEvasion),
         Box::new(sandbox_user_activity::SandboxUserActivity),
         Box::new(anti_instrumentation::AntiInstrumentation),
+        Box::new(api_hashing::ApiHashing),
         Box::new(self_deletion::SelfDeletion),
         Box::new(encoded_strings::EncodedStrings),
         Box::new(packing::Packing),

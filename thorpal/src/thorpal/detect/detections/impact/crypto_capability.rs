@@ -42,6 +42,7 @@ pub struct CryptoCapability;
 const STRONG_SIGS: &[ByteSig] = &[
     ByteSig {
         name: "ChaCha/Salsa20 nonce",
+        always_noise: false,
         // the ASCII sigma constant "expand 32-byte k" used by ChaCha20/Salsa20
         bytes: b"expand 32-byte k",
         reasoning: "Contains the ChaCha20/Salsa20 constant \"expand 32-byte k\"; this stream cipher \
@@ -50,6 +51,7 @@ const STRONG_SIGS: &[ByteSig] = &[
     },
     ByteSig {
         name: "AES forward S-box",
+        always_noise: false,
         // first 32 bytes of the AES (Rijndael) forward S-box
         bytes: &[
             0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7,
@@ -61,6 +63,7 @@ const STRONG_SIGS: &[ByteSig] = &[
     },
     ByteSig {
         name: "AES inverse S-box",
+        always_noise: false,
         // first 32 bytes of the AES inverse S-box (decryption)
         bytes: &[
             0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38, 0xbf, 0x40, 0xa3, 0x9e, 0x81, 0xf3,
@@ -76,6 +79,7 @@ const STRONG_SIGS: &[ByteSig] = &[
 const WORD_SIGS: &[ByteSig] = &[
     ByteSig {
         name: "SHA-256 round constants (BE)",
+        always_noise: false,
         // first four 32-bit K constants, big-endian
         bytes: &[
             0x42, 0x8a, 0x2f, 0x98, 0x71, 0x37, 0x44, 0x91, 0xb5, 0xc0, 0xfb, 0xcf, 0xe9, 0xb5,
@@ -86,6 +90,7 @@ const WORD_SIGS: &[ByteSig] = &[
     },
     ByteSig {
         name: "SHA-256 round constants (LE)",
+        always_noise: false,
         // first four 32-bit K constants, little-endian (x86 word storage)
         bytes: &[
             0x98, 0x2f, 0x8a, 0x42, 0x91, 0x44, 0x37, 0x71, 0xcf, 0xfb, 0xc0, 0xb5, 0xa5, 0xdb,
@@ -96,6 +101,7 @@ const WORD_SIGS: &[ByteSig] = &[
     },
     ByteSig {
         name: "SHA-256 init hash (BE)",
+        always_noise: false,
         // first four 32-bit H init values, big-endian
         bytes: &[
             0x6a, 0x09, 0xe6, 0x67, 0xbb, 0x67, 0xae, 0x85, 0x3c, 0x6e, 0xf3, 0x72, 0xa5, 0x4f,
@@ -105,6 +111,7 @@ const WORD_SIGS: &[ByteSig] = &[
     },
     ByteSig {
         name: "SHA-256 init hash (LE)",
+        always_noise: false,
         // first four 32-bit H init values, little-endian
         bytes: &[
             0x67, 0xe6, 0x09, 0x6a, 0x85, 0xae, 0x67, 0xbb, 0x72, 0xf3, 0x6e, 0x3c, 0x3a, 0xf5,
@@ -115,6 +122,7 @@ const WORD_SIGS: &[ByteSig] = &[
     },
     ByteSig {
         name: "MD5 sine table (BE)",
+        always_noise: false,
         // first four 32-bit MD5 T[] sine constants, big-endian
         bytes: &[
             0xd7, 0x6a, 0xa4, 0x78, 0xe8, 0xc7, 0xb7, 0x56, 0x24, 0x20, 0x70, 0xdb, 0xc1, 0xbd,
@@ -124,6 +132,7 @@ const WORD_SIGS: &[ByteSig] = &[
     },
     ByteSig {
         name: "MD5 sine table (LE)",
+        always_noise: false,
         // first four 32-bit MD5 T[] sine constants, little-endian
         bytes: &[
             0x78, 0xa4, 0x6a, 0xd7, 0x56, 0xb7, 0xc7, 0xe8, 0xdb, 0x70, 0x20, 0x24, 0xee, 0xce,
@@ -133,6 +142,7 @@ const WORD_SIGS: &[ByteSig] = &[
     },
     ByteSig {
         name: "SHA-1 init hash (BE)",
+        always_noise: false,
         // the five 32-bit SHA-1 init constants (fifth word disambiguates from MD5)
         bytes: &[
             0x67, 0x45, 0x23, 0x01, 0xef, 0xcd, 0xab, 0x89, 0x98, 0xba, 0xdc, 0xfe, 0x10, 0x32,
@@ -142,6 +152,7 @@ const WORD_SIGS: &[ByteSig] = &[
     },
     ByteSig {
         name: "SHA-1 init hash (LE)",
+        always_noise: false,
         // the five 32-bit SHA-1 init constants, little-endian
         bytes: &[
             0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54,
@@ -151,6 +162,7 @@ const WORD_SIGS: &[ByteSig] = &[
     },
     ByteSig {
         name: "RC5/RC6 magic constant P (LE)",
+        always_noise: false,
         // the RC5/RC6 key-schedule constant P = 0xB7E15163, little-endian (x86 word storage)
         bytes: &[0x63, 0x51, 0xe1, 0xb7],
         reasoning: "Contains the RC5/RC6 key-schedule magic constant P (0xB7E15163, derived from \
@@ -159,6 +171,7 @@ const WORD_SIGS: &[ByteSig] = &[
     },
     ByteSig {
         name: "RC5/RC6 magic constant P (BE)",
+        always_noise: false,
         // the RC5/RC6 key-schedule constant P = 0xB7E15163, big-endian
         bytes: &[0xb7, 0xe1, 0x51, 0x63],
         reasoning: "Contains the RC5/RC6 key-schedule magic constant P (0xB7E15163, derived from \
@@ -171,6 +184,9 @@ const WORD_SIGS: &[ByteSig] = &[
 const WEAK_SIGS: &[ByteSig] = &[
     ByteSig {
         name: "base64 standard alphabet",
+        // every base64 encoder ever linked carries this table; the seeder may
+        // roll these hits up as noise regardless of toolchain
+        always_noise: true,
         bytes: b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
         reasoning: "Contains the standard base64 alphabet; base64 frequently wraps encrypted keys/\
                     payloads, including cipher data embedded in a dropped note. Ubiquitous, \
@@ -178,12 +194,16 @@ const WEAK_SIGS: &[ByteSig] = &[
     },
     ByteSig {
         name: "base64 URL-safe alphabet",
+        // every URL-safe base64 encoder carries this table; the seeder may roll
+        // these hits up as noise regardless of toolchain
+        always_noise: true,
         bytes: b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
         reasoning: "Contains the URL-safe base64 alphabet; used to wrap encrypted keys/payloads for \
                     transport. Ubiquitous, hence low confidence.",
     },
     ByteSig {
         name: "RC5/RC6/TEA magic constant Q (LE)",
+        always_noise: false,
         // the RC5/RC6 key-schedule constant Q = 0x9E3779B9, little-endian
         bytes: &[0xb9, 0x79, 0x37, 0x9e],
         reasoning: "Contains the golden-ratio constant Q (0x9E3779B9) used by the RC5/RC6 key \
@@ -193,6 +213,7 @@ const WEAK_SIGS: &[ByteSig] = &[
     },
     ByteSig {
         name: "RC5/RC6/TEA magic constant Q (BE)",
+        always_noise: false,
         // the RC5/RC6 key-schedule constant Q = 0x9E3779B9, big-endian
         bytes: &[0x9e, 0x37, 0x79, 0xb9],
         reasoning: "Contains the golden-ratio constant Q (0x9E3779B9) used by the RC5/RC6 key \
@@ -201,6 +222,51 @@ const WEAK_SIGS: &[ByteSig] = &[
                     confidence on its own.",
     },
 ];
+
+/// The signature-name prefix both P-constant [`WORD_SIGS`] entries share.
+///
+/// A scanned hit's content leads with its signature name (see
+/// `detections::build_signature_hit`), so this prefix identifies the P hits in the
+/// scan results without re-walking the sections.
+const P_SIG_PREFIX: &str = "RC5/RC6 magic constant P";
+
+/// The signature-name prefix both Q-constant [`WEAK_SIGS`] entries share.
+const Q_SIG_PREFIX: &str = "RC5/RC6/TEA magic constant Q";
+
+/// The reasoning note appended to a Q-constant hit when the P constant is absent
+/// image-wide (see [`annotate_p_less_q_hits`]).
+const Q_WITHOUT_P_NOTE: &str = "\n\nThe RC5/RC6 companion constant P (0xB7E15163) is absent from this image, so this \
+     match does not corroborate an RC5/RC6 key schedule. A lone 0x9E3779B9 is most often \
+     the golden-ratio hash mixer (e.g. the 64-bit Fibonacci-hashing multiplier \
+     0x9E3779B97F4A7C15 that Rust hash tables bake into code as an immediate operand), a \
+     PRNG seed, or a coincidental 4-byte match inside compressed data. The TEA/XTEA cipher \
+     family does use this delta with no P constant, so a cluster of these matches near \
+     loop code is still worth a look as a TEA payload/config decryptor before the match \
+     is written off.";
+
+/// Append the P-absence framing note to every Q-constant hit, in place.
+///
+/// The Q signature's own reasoning says it corroborates RC5/RC6 only alongside the P
+/// constant, yet the 4-byte pattern also matches hash mixers, PRNG seeds, and
+/// compressed streams. When P is absent image-wide the hit still seeds (TEA/XTEA
+/// genuinely use the Q delta and never P), but its reasoning states exactly what a
+/// P-less match does and does not support, and the hit is marked always-noise so
+/// the seeder treats it as rollup-eligible regardless of toolchain.
+///
+/// # Arguments
+///
+/// * `hits` - The scanned [`WEAK_SIGS`] hits to annotate
+fn annotate_p_less_q_hits(hits: &mut [DetectionHit]) {
+    for hit in hits {
+        // only the Q-constant hits carry the RC5/RC6 corroboration claim
+        if hit.content.starts_with(Q_SIG_PREFIX) {
+            hit.reasoning.push_str(Q_WITHOUT_P_NOTE);
+            // a P-less Q is overwhelmingly a hash mixer/PRNG seed, so the seeder
+            // may roll it up as noise regardless of toolchain
+            hit.always_noise = true;
+        }
+    }
+}
 
 /// PEM boundary substrings (lower-case) that reveal an embedded key or certificate in a
 /// defined string. Used by [`pem_hits`] to seed a full-block recovery from each boundary.
@@ -218,54 +284,84 @@ const PEM_MARKER_REASON: &str = "Contains a PEM boundary (-----BEGIN ... KEY/CER
      or certificate. Ransomware bakes in an attacker RSA public key to wrap the file \
      session key; it can also indicate pinned C2 crypto.";
 
-/// Cryptographic APIs (Win32 CryptoAPI / CNG).
+/// Cryptographic APIs (Win32 `CryptoAPI` / CNG).
+///
+/// The reasonings are deliberately capability-neutral: every one of these APIs is
+/// dual-use (C2 channel crypto, config decryption, hashing schemes, and exfil
+/// transport in the measured corpus, as often as file encryption), so each names
+/// the capability and the candidate roles rather than asserting a ransomware role
+/// the call site alone cannot support.
 const APIS: &[ApiSpec] = &[
     ApiSpec {
         key: "CryptEncrypt",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls CryptEncrypt (Win32 CryptoAPI) to encrypt data — a direct data-encryption \
-                    capability, the core of ransomware file encryption.",
+        reasoning: "Calls CryptEncrypt (Win32 CryptoAPI) to encrypt data — a dual-use capability \
+                    used for victim-file encryption, C2/exfil protection, or wrapping \
+                    configs/payloads. Attribute it to T1486 only when file-enumeration and \
+                    file-rewrite evidence corroborates a file cryptor.",
     },
     ApiSpec {
         key: "BCryptEncrypt",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls BCryptEncrypt (CNG) to encrypt data — a direct data-encryption capability.",
+        reasoning: "Calls BCryptEncrypt (CNG) to encrypt data — a dual-use capability used for \
+                    victim-file encryption, C2/exfil protection, or wrapping configs/payloads. \
+                    Attribute it to T1486 only when file-walk evidence corroborates a file \
+                    cryptor.",
     },
     ApiSpec {
         key: "CryptDecrypt",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls CryptDecrypt (Win32 CryptoAPI); paired with encryption in ransomware, or \
-                    used to decrypt an embedded payload/config.",
+        reasoning: "Calls CryptDecrypt (Win32 CryptoAPI) to decrypt data — commonly an embedded \
+                    payload/config decryption or the receive half of an encrypted C2 channel; \
+                    it can also be the decrypt half of a file cryptor.",
     },
     ApiSpec {
         key: "CryptImportKey",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls CryptImportKey to load a key blob (e.g. the attacker's embedded RSA public \
-                    key used to wrap the file session key) — a ransomware key-management step.",
+        reasoning: "Calls CryptImportKey to load a key blob. Key import is dual-use — C2 \
+                    session-key exchange, config decryption, and signature checks as well as \
+                    public-key wrapping of file-encryption keys — so which role applies depends \
+                    on where the blob comes from and what the keyed output feeds.",
     },
     ApiSpec {
         key: "CryptGenKey",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls CryptGenKey to generate a symmetric/session key — the per-victim file \
-                    encryption key in a ransomware crypto scheme.",
+        reasoning: "Calls CryptGenKey to generate a symmetric/session key — a transport key for \
+                    an encrypted C2 channel as often as a file-encryption key; generation alone \
+                    does not say which role the key plays.",
     },
     ApiSpec {
         key: "CryptAcquireContext",
+        // the setup call before ANY CryptoAPI use proves nothing by itself; the
+        // seeder may roll these hits up as noise regardless of toolchain
+        always_noise: true,
         severity: low(),
-        reasoning: "Calls CryptAcquireContext to open a CryptoAPI provider — the setup step before \
-                    key generation / encryption. Common, hence low confidence.",
+        reasoning: "Calls CryptAcquireContext to open a CryptoAPI provider — the setup step \
+                    before any CryptoAPI use (hashing, random bytes, signatures, or \
+                    encryption). Ubiquitous and capability-neutral, hence low confidence.",
     },
     ApiSpec {
         key: "BCryptGenerateSymmetricKey",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls BCryptGenerateSymmetricKey (CNG) to create a symmetric key — the file \
-                    encryption key in a ransomware crypto scheme.",
+        reasoning: "Calls BCryptGenerateSymmetricKey (CNG) to create a symmetric key — used for \
+                    file encryption, C2/exfil protection, or config decryption; the key's \
+                    consumer, not its creation, determines the role.",
     },
     ApiSpec {
         key: "CryptStringToBinary",
+        // routine certificate/config decoding in benign and malicious code alike;
+        // the seeder may roll these hits up as noise regardless of toolchain
+        always_noise: true,
         severity: low(),
-        reasoning: "Calls CryptStringToBinary, often to decode a base64/PEM-wrapped embedded key or \
-                    ciphertext into raw bytes for use with the crypto APIs.",
+        reasoning: "Calls CryptStringToBinary to decode base64/hex text into raw bytes — \
+                    routinely certificate/key parsing or config decoding ahead of the crypto \
+                    APIs, in benign and malicious code alike.",
     },
 ];
 
@@ -509,10 +605,22 @@ impl Detection for CryptoCapability {
         hits.extend(
             signature_hits(ctx, T1486, STRONG_SIGS, high(), EvidenceKind::ContextOnly).await?,
         );
-        hits.extend(
-            signature_hits(ctx, T1486, WORD_SIGS, medium(), EvidenceKind::ContextOnly).await?,
-        );
-        hits.extend(signature_hits(ctx, T1486, WEAK_SIGS, low(), EvidenceKind::ContextOnly).await?);
+        let word_hits =
+            signature_hits(ctx, T1486, WORD_SIGS, medium(), EvidenceKind::ContextOnly).await?;
+        // whether the RC5/RC6 P constant landed anywhere in the image: the Q constant
+        // corroborates an RC5/RC6 key schedule only alongside P
+        let p_present = word_hits
+            .iter()
+            .any(|hit| hit.content.starts_with(P_SIG_PREFIX));
+        hits.extend(word_hits);
+        let mut weak_hits =
+            signature_hits(ctx, T1486, WEAK_SIGS, low(), EvidenceKind::ContextOnly).await?;
+        // P-less Q matches keep seeding (TEA/XTEA use the Q delta with no P), but say
+        // exactly what they do and do not support
+        if !p_present {
+            annotate_p_less_q_hits(&mut weak_hits);
+        }
+        hits.extend(weak_hits);
 
         // 2) embedded PEM keys/certificates: recover the FULL block by locating both
         //    boundaries in the raw section bytes, seeded from both a raw-byte scan and any
@@ -669,12 +777,17 @@ const MAX_KEY_LEN: usize = 64;
 /// The min length of a candidate ciphertext buffer.
 const MIN_CT_BYTES: usize = 24;
 
-/// A candidate key: its raw bytes plus a display rendering.
+/// A candidate key: its raw bytes plus a display rendering and where it lives.
 struct KeyCandidate {
     /// The key bytes fed to the cipher.
     bytes: Vec<u8>,
     /// A human rendering for the flag (`"…"` if printable, else hex).
     display: String,
+    /// The address the key string is stored at (0 when unknown).
+    addr: u64,
+    /// The entry of the function that references the key's buffer, when known (what
+    /// the key↔ciphertext affinity check compares).
+    function: Option<u64>,
 }
 
 /// A candidate ciphertext buffer: where it came from and its bytes.
@@ -696,8 +809,14 @@ struct CtCandidate {
 /// buffers (mostly-non-printable data buffers the code references, plus base64-
 /// unwrapped blobs), then replays **RC4** and single-byte streams over each pair.
 /// Only decodes that yield genuinely-hidden readable text (guarded by
-/// [`recover::hidden_runs`]) are reported, so a wrong key — which yields random
-/// bytes — never fires. Everything is bounded so this stays cheap.
+/// [`recover::hidden_runs`], plus the stricter repeating-XOR gate in
+/// [`recovered_runs`]) are reported. The replay tries every key against every
+/// buffer, so a surviving pair whose key and ciphertext share no referencing
+/// function and sit nowhere near each other is demoted to the weak grade — the
+/// pairing exists only because the brute force tried it — and the key rides as a
+/// [`ArtifactClass::SymmetricKey`] artifact only on key-class recoveries
+/// ([`carries_key_artifact`]), so a plain recovered string never pivot-shields its
+/// hit. Everything is bounded so this stays cheap.
 ///
 /// # Arguments
 ///
@@ -708,8 +827,11 @@ struct CtCandidate {
 /// Returns an error if disassembling the program or reading its sections fails.
 #[tracing::instrument(name = "crypto_capability::crypto_decrypt_hits", skip_all, err(Debug))]
 async fn crypto_decrypt_hits(ctx: &AnalysisContext) -> Result<Vec<DetectionHit>> {
+    // the data-reference index names the function referencing each key string, which
+    // is one half of the key↔ciphertext affinity test below
+    let index = ctx.reference_index().await?;
     // collect candidate keys and ciphertext buffers (both bounded)
-    let keys = collect_keys(ctx);
+    let keys = collect_keys(ctx, &index);
     let cts = collect_ciphertexts(ctx).await?;
     if keys.is_empty() || cts.is_empty() {
         return Ok(Vec::new());
@@ -748,6 +870,10 @@ async fn crypto_decrypt_hits(ctx: &AnalysisContext) -> Result<Vec<DetectionHit>>
                 let Some(runs) = recovered_runs(&plain, &ct.bytes, guard) else {
                     continue;
                 };
+                // whether anything in the program ties this key to this buffer beyond
+                // the replay itself; a brute-forced pairing with no static affinity is
+                // where fabricated recoveries come from, so it reports quietly
+                let affine = key_ct_affinity(key, ct);
                 // one typed flag per recovered item (a PEM armor coalesced, trailing split)
                 for (off, text) in recover::extract_items(runs) {
                     if !seen.insert(text.clone()) {
@@ -764,43 +890,36 @@ async fn crypto_decrypt_hits(ctx: &AnalysisContext) -> Result<Vec<DetectionHit>>
                         scheme,
                         Some(&key.display),
                     );
-                    // a keyed decryption is reliable (Likely base); content sets
-                    // suspicion and can only raise confidence further
-                    let assessment = decode::assess(high().0, kind, &text);
-                    let reasoning = decode::append_assessment(
-                        decode::recovery_reasoning(CRYPTO_BASE_REASON, scheme, Some(&key.display)),
-                        &assessment.notes,
-                    );
-                    // the key is the artifact here, and the decryption is the strongest
-                    // attribution there is: this function's buffer decrypted with it
-                    let mut artifact =
-                        HitArtifact::new(ArtifactClass::SymmetricKey, key.display.clone()).detail(
-                            format!(
-                                "recovered by replaying {scheme} over the buffer at {}",
+                    // grade the recovery, demoting a no-affinity pairing to the weak
+                    // grade with a reasoning that names the missing tie
+                    let (severity, reasoning) =
+                        decrypt_severity(affine, kind, &text, scheme, &key.display);
+                    let mut hit =
+                        DetectionHit::new(T1486, addr, ct.function, severity, content, reasoning)
+                            .name(name)
+                            .kind(EvidenceKind::ContextOnly);
+                    // the key rides as a pivotable artifact only when the pair has
+                    // affinity AND the recovery is itself key material: artifact
+                    // classes are pivot-class (they veto runtime weakening and rollup
+                    // suppression), which a plain recovered string has no claim to
+                    if affine && carries_key_artifact(kind) {
+                        let mut artifact =
+                            HitArtifact::new(ArtifactClass::SymmetricKey, key.display.clone())
+                                .detail(format!(
+                                    "recovered by replaying {scheme} over the buffer at {}",
+                                    crate::thorpal::detect::context::fmt_addr(ct.addr)
+                                ));
+                        artifact = match ct.function {
+                            Some(_) => artifact.role(format!(
+                                "decrypts the buffer at {} with this key ({scheme})",
                                 crate::thorpal::detect::context::fmt_addr(ct.addr)
-                            ),
-                        );
-                    artifact = match ct.function {
-                        Some(_) => artifact.role(format!(
-                            "decrypts the buffer at {} with this key ({scheme})",
-                            crate::thorpal::detect::context::fmt_addr(ct.addr)
-                        )),
-                        // the buffer decrypted, but no function was seen referencing it
-                        None => artifact,
-                    };
-                    hits.push(
-                        DetectionHit::new(
-                            T1486,
-                            addr,
-                            ct.function,
-                            (assessment.confidence, assessment.suspicion),
-                            content,
-                            reasoning,
-                        )
-                        .name(name)
-                        .kind(EvidenceKind::ContextOnly)
-                        .artifact(artifact),
-                    );
+                            )),
+                            // the buffer decrypted, but no function was seen referencing it
+                            None => artifact,
+                        };
+                        hit = hit.artifact(artifact);
+                    }
+                    hits.push(hit);
                     if hits.len() >= MAX_DECRYPT_HITS {
                         break 'ct;
                     }
@@ -815,10 +934,15 @@ async fn crypto_decrypt_hits(ctx: &AnalysisContext) -> Result<Vec<DetectionHit>>
 
 /// Gather candidate embedded keys: printable defined strings of a plausible length.
 ///
+/// Each candidate records where its string is stored and which function references
+/// that buffer, so [`crypto_decrypt_hits`] can test whether a key and a ciphertext
+/// have any static affinity before believing a replay that paired them.
+///
 /// # Arguments
 ///
 /// * `ctx` - The analysis context
-fn collect_keys(ctx: &AnalysisContext) -> Vec<KeyCandidate> {
+/// * `index` - The sorted data-reference index (to attribute each key string)
+fn collect_keys(ctx: &AnalysisContext, index: &[(u64, u64)]) -> Vec<KeyCandidate> {
     let mut keys = Vec::new();
     let mut seen: HashSet<Vec<u8>> = HashSet::new();
     for string in &ctx.strings {
@@ -832,12 +956,18 @@ fn collect_keys(ctx: &AnalysisContext) -> Vec<KeyCandidate> {
         if !len_ok || !bytes.iter().all(|b| recover::is_printable(*b)) {
             continue;
         }
+        // where the key string sits and which function references it, for the
+        // key↔ciphertext affinity check
+        let addr = crate::thorpal::detect::context::parse_addr(&string.address).unwrap_or(0);
+        let function = decode::buffers::referencing_function(index, addr, KEY_REF_WINDOW);
         // 1) the raw string bytes as the key (an embedded plaintext password/key)
         push_key(
             &mut keys,
             &mut seen,
             bytes.to_vec(),
             format!("{:?}", string.value),
+            addr,
+            function,
         );
         // 2) a base64-wrapped key: unwrap it to its raw bytes and try those too, when the
         //    string is pure base64 that decodes to a standard symmetric key length
@@ -848,7 +978,7 @@ fn collect_keys(ctx: &AnalysisContext) -> Vec<KeyCandidate> {
                 short_value(&string.value),
                 decoded.len()
             );
-            push_key(&mut keys, &mut seen, decoded, display);
+            push_key(&mut keys, &mut seen, decoded, display, addr, function);
         }
     }
     keys
@@ -862,17 +992,108 @@ fn collect_keys(ctx: &AnalysisContext) -> Vec<KeyCandidate> {
 /// * `seen` - The set of already-collected key material (dedup)
 /// * `bytes` - The candidate key bytes
 /// * `display` - A human rendering of the key for the flag
+/// * `addr` - The address the key's string is stored at (0 when unknown)
+/// * `function` - The entry of the function that references the key's buffer, if any
 fn push_key(
     keys: &mut Vec<KeyCandidate>,
     seen: &mut HashSet<Vec<u8>>,
     bytes: Vec<u8>,
     display: String,
+    addr: u64,
+    function: Option<u64>,
 ) {
     // skip empty or duplicate key material
     if bytes.is_empty() || !seen.insert(bytes.clone()) {
         return;
     }
-    keys.push(KeyCandidate { bytes, display });
+    keys.push(KeyCandidate {
+        bytes,
+        display,
+        addr,
+        function,
+    });
+}
+
+/// Whether a candidate key and a ciphertext buffer have static affinity: one function
+/// references both, or they are stored within [`KEY_REF_WINDOW`] bytes of each other.
+///
+/// The decrypt replay tries every key against every buffer, so the pairing itself
+/// proves nothing. A key the program actually uses on a buffer is referenced by the
+/// decrypting function, or sits right beside its ciphertext in one config/string
+/// table; a pairing with neither tie is a brute-force coincidence and is demoted.
+///
+/// # Arguments
+///
+/// * `key` - The candidate key
+/// * `ct` - The candidate ciphertext buffer
+fn key_ct_affinity(key: &KeyCandidate, ct: &CtCandidate) -> bool {
+    // a shared referencing function ties the pair directly (both must be known)
+    if key.function.is_some() && key.function == ct.function {
+        return true;
+    }
+    // adjacency: a key stored beside its ciphertext (one config/string table)
+    key.addr != 0 && ct.addr != 0 && key.addr.abs_diff(ct.addr) <= KEY_REF_WINDOW
+}
+
+/// The severity and reasoning for one decrypt-replay recovery, demoting a pairing
+/// with no key↔ciphertext affinity to the weak grade.
+///
+/// # Arguments
+///
+/// * `affine` - Whether the key and ciphertext passed [`key_ct_affinity`]
+/// * `kind` - The classified kind of the recovered text
+/// * `text` - The recovered text
+/// * `scheme` - The replayed scheme's label
+/// * `key_display` - The candidate key's display rendering
+fn decrypt_severity(
+    affine: bool,
+    kind: RecoveredKind,
+    text: &str,
+    scheme: &str,
+    key_display: &str,
+) -> ((Confidence, i64), String) {
+    // a keyed decryption of an affine pair is reliable (Likely base); content sets
+    // suspicion and can only raise confidence further
+    if affine {
+        let assessment = decode::assess(high().0, kind, text);
+        let reasoning = decode::append_assessment(
+            decode::recovery_reasoning(CRYPTO_BASE_REASON, scheme, Some(key_display)),
+            &assessment.notes,
+        );
+        ((assessment.confidence, assessment.suspicion), reasoning)
+    } else {
+        // with no affinity the replay alone carries the claim: the weak grade, and a
+        // reasoning that names the missing tie so an agent knows what to check
+        let base = decode::recovery_reasoning(CRYPTO_BASE_REASON, scheme, Some(key_display));
+        let reasoning = format!(
+            "{base}\n\nDemoted: no function references both the candidate key and this \
+             buffer, and they sit more than {KEY_REF_WINDOW} bytes apart, so nothing in \
+             the program ties the two together — the pairing exists only because the \
+             replay tried every embedded string as a key against every buffer."
+        );
+        (low(), reasoning)
+    }
+}
+
+/// Whether a recovery of this kind justifies attaching the decrypting key as a
+/// [`ArtifactClass::SymmetricKey`] artifact.
+///
+/// Key-class recoveries validate the key that produced them; a plain recovered
+/// string does not. The artifact classes are pivot-class — they exempt a hit from
+/// runtime weakening and its thread from rollup suppression — so attaching the key
+/// to a string-grade recovery would guarantee every fabrication a loud thread.
+///
+/// # Arguments
+///
+/// * `kind` - The classified kind of the recovered text
+fn carries_key_artifact(kind: RecoveredKind) -> bool {
+    matches!(
+        kind,
+        RecoveredKind::PublicKey
+            | RecoveredKind::PrivateKey
+            | RecoveredKind::Certificate
+            | RecoveredKind::SymmetricKey
+    )
 }
 
 /// The raw bytes of a base64-wrapped symmetric key, if `value` is pure base64 that
@@ -996,6 +1217,61 @@ const CRYPTO_BASE_REASON: &str = "Statically recovered by replaying a keyed ciph
 /// is still attributed to the referencing function.
 const PEM_REF_WINDOW: u64 = 4096;
 
+/// The max PEM key/certificate recoveries reported per run (mirrors [`MAX_DER_HITS`]).
+///
+/// A statically linked trust store or test suite embeds dozens to hundreds of armored
+/// blocks, and itemizing them buries the sample's own key material.
+const MAX_PEM_HITS: usize = 24;
+
+/// The max certificates itemized per image before they collapse into one bundle lead.
+///
+/// A sample pinning its TLS peer or carrying operator material embeds a handful of
+/// certificates; a statically linked trust store embeds dozens to hundreds.
+const MAX_ITEMIZED_CERTS: usize = 3;
+
+/// The max member addresses listed in the collapsed certificate-bundle lead's content
+/// (mirrors the seeder's per-post site cap, so content and post agree on bounds).
+const BUNDLE_LISTED: usize = 8;
+
+/// The min stripped characters in one PEM body line for the block to count as holding
+/// real key material.
+///
+/// The shortest real body in the wild — an Ed25519 `SubjectPublicKeyInfo` — is a
+/// single 60-character line, so half that leaves margin while still rejecting a stray
+/// word sitting between two PEM-writer string constants.
+const MIN_PEM_BODY_LINE: usize = 32;
+
+/// Known library-test and public trust-store subject markers, matched (lowercased)
+/// against a PEM block's **decoded** body.
+///
+/// [`TEST_LABELS`] only sees armor labels, but a library's test material usually
+/// marks itself in the certificate subject instead (`O=PolarSSL, CN=PolarSSL Test EC
+/// CA`), and a bundled root CA names its operator there. Either way the block is the
+/// linked library's baggage rather than the sample's own key, so a match demotes the
+/// recovery with a caveat instead of letting it claim the top grade.
+const LIBRARY_MATERIAL_SUBJECTS: &[&str] = &[
+    // library test-suite material, marked in the subject/body rather than the armor
+    "polarssl",
+    "mbed tls",
+    "testing key",
+    // well-known public root-CA operators (trust-store bundle material)
+    "digicert",
+    "verisign",
+    "globalsign",
+    "baltimore cybertrust",
+    "usertrust",
+    "addtrust",
+    "comodo",
+    "sectigo",
+    "entrust",
+    "thawte",
+    "geotrust",
+    "go daddy",
+    "starfield tech",
+    "isrg root",
+    "quovadis",
+];
+
 /// The max base64 characters looked back from a padding marker when carving an embedded
 /// symmetric key (a ≤32-byte key encodes to ≤44 base64 characters). Bounds the scan.
 const MAX_KEY_B64_LEN: usize = 44;
@@ -1007,6 +1283,32 @@ const MIN_KEY_ENTROPY: f32 = 3.5;
 /// The max distance (bytes) from a referenced data address at which a carved key blob is
 /// still attributed to the referencing function.
 const KEY_REF_WINDOW: u64 = 4096;
+
+/// The max gap (bytes) between neighbouring carved key tokens that still groups them
+/// into one cluster.
+///
+/// Entries of one encoded string table sit back to back; 4KB is far past any table's
+/// internal padding while keeping unrelated keys apart.
+const KEY_CLUSTER_GAP: u64 = 4096;
+
+/// The min carved tokens in one cluster to reshape the cluster into a single
+/// string-table lead.
+///
+/// One or two key-length blobs are plausibly real embedded keys; three or more
+/// same-shape blobs in one run is the shape of an encoded string table, where every
+/// 16/24/32-char entry decodes to a "key-length high-entropy blob".
+const KEY_CLUSTER_MIN: usize = 3;
+
+/// The max carved tokens itemized image-wide before every cluster collapses.
+///
+/// A table whose entries sit far apart (or straddle sections) defeats the gap
+/// grouping; past this many key-length carvings the image is storing encoded data in
+/// bulk, and itemizing each blob as a separate candidate key is a flood, not keys.
+const MAX_LONE_KEYS: usize = 4;
+
+/// The max cluster member addresses listed in a collapsed lead's content (mirrors the
+/// seeder's per-post site cap, so the content and the seeded post agree on bounds).
+const KEY_CLUSTER_LISTED: usize = 8;
 
 /// Recover and flag embedded PEM keys/certificates, surfacing the **full** block.
 ///
@@ -1024,9 +1326,14 @@ const KEY_REF_WINDOW: u64 = 4096;
 ///   ordinary storage shape rather than anything family-specific.
 ///
 /// A boundary that cannot be completed into a real key/cert (e.g. a runtime
-/// `encoding/pem` template) still emits the boundary-present marker ([`pem_marker_hits`]),
-/// preserving the capability signal without duplicating a recovered block. Dedup is by
-/// recovered block **content**, shared across all three mechanisms.
+/// `encoding/pem` template), or completes only into an internally-inconsistent block
+/// (mismatched labels, no base64 body — a PEM-writer constant table), still emits the
+/// boundary-present marker ([`pem_marker_hits`]), preserving the capability signal
+/// without fabricating a recovery. Dedup is by recovered block **content**, shared
+/// across all three mechanisms. The itemized recoveries are capped at
+/// [`MAX_PEM_HITS`], and more than [`MAX_ITEMIZED_CERTS`] certificates collapse into
+/// one bundle lead ([`certificate_bundle_hit`]) — a trust store must not bury the
+/// sample's own key material.
 ///
 /// # Arguments
 ///
@@ -1041,7 +1348,10 @@ async fn pem_hits(ctx: &AnalysisContext, consumers: &KeyConsumers) -> Result<Vec
     // read (cached) the section bytes and the data-reference index once
     let sections = ctx.initialized_bytes().await?;
     let index = ctx.reference_index().await?;
+    // marker hits pass straight through; recovered blocks are gathered first so the
+    // certificate-bundle collapse and the per-run cap can see the whole yield
     let mut hits = Vec::new();
+    let mut recovered: Vec<(RecoveredKind, String, DetectionHit)> = Vec::new();
     // dedup key = recovered block text, shared across all three mechanisms
     let mut seen: HashSet<String> = HashSet::new();
 
@@ -1052,9 +1362,10 @@ async fn pem_hits(ctx: &AnalysisContext, consumers: &KeyConsumers) -> Result<Vec
         }
         for (off, block) in recover::find_pem_blocks(bytes) {
             let addr = base.saturating_add(off as u64);
-            if let Some(hit) = emit_pem(ctx, &index, consumers, &mut seen, addr, name, block, None)
+            if let Some((kind, hit)) =
+                emit_pem(ctx, &index, consumers, &mut seen, addr, name, &block, None)
             {
-                hits.push(hit);
+                recovered.push((kind, name.clone(), hit));
             }
         }
     }
@@ -1080,16 +1391,20 @@ async fn pem_hits(ctx: &AnalysisContext, consumers: &KeyConsumers) -> Result<Vec
             },
         );
         match block_here {
-            // a full block: emit typed content (dedup collapses it against mechanism A)
-            Some((section, block)) => {
-                if let Some(hit) = emit_pem(
-                    ctx, &index, consumers, &mut seen, addr, section, block, None,
+            // a full, internally-consistent block: emit typed content (dedup collapses
+            // it against mechanism A)
+            Some((section, block)) if is_valid_pem_block(&block) => {
+                if let Some((kind, hit)) = emit_pem(
+                    ctx, &index, consumers, &mut seen, addr, section, &block, None,
                 ) {
-                    hits.push(hit);
+                    recovered.push((kind, section.to_string(), hit));
                 }
             }
-            // a lone boundary / runtime template: fall back to the boundary-present marker
-            None => hits.extend(pem_marker_hits(ctx, &index, string).await?),
+            // a lone boundary, a mismatched BEGIN/END pair, or an armor pair with no
+            // base64 body (a PEM-writer constant table): fall back to the
+            // boundary-present marker, which claims the capability without fabricating
+            // a recovery
+            _ => hits.extend(pem_marker_hits(ctx, &index, string).await?),
         }
     }
 
@@ -1115,22 +1430,131 @@ async fn pem_hits(ctx: &AnalysisContext, consumers: &KeyConsumers) -> Result<Vec
             for (_, block) in recover::find_pem_blocks(text.as_bytes()) {
                 // the address is the *stored* (encoded) blob — that is where an analyst
                 // has to look, and where the decoding function's reference points
-                if let Some(hit) = emit_pem(
+                if let Some((kind, hit)) = emit_pem(
                     ctx,
                     &index,
                     consumers,
                     &mut seen,
                     addr,
                     name,
-                    block,
+                    &block,
                     Some("base64"),
                 ) {
-                    hits.push(hit);
+                    recovered.push((kind, name.clone(), hit));
                 }
             }
         }
     }
+
+    // bundle a certificate flood and cap the itemized recoveries, then append the
+    // shaped findings after the marker hits
+    hits.extend(shape_pem_recoveries(recovered));
     Ok(hits)
+}
+
+/// Shape the gathered PEM recoveries for the report: collapse a certificate flood
+/// into one bundle lead ([`certificate_bundle_hit`]) and cap the itemized remainder
+/// at [`MAX_PEM_HITS`].
+///
+/// # Arguments
+///
+/// * `recovered` - Each recovered block's kind, section, and hit, in recovery order
+fn shape_pem_recoveries(
+    recovered: Vec<(RecoveredKind, String, DetectionHit)>,
+) -> Vec<DetectionHit> {
+    let mut hits = Vec::new();
+    // collapse a certificate flood: more than MAX_ITEMIZED_CERTS distinct certificates
+    // in one image is a trust-store/test bundle, not operator material
+    let cert_count = recovered
+        .iter()
+        .filter(|(kind, _, _)| matches!(kind, RecoveredKind::Certificate))
+        .count();
+    let mut itemized: Vec<DetectionHit> = Vec::new();
+    if cert_count > MAX_ITEMIZED_CERTS {
+        // split the certificates into the bundle and keep everything else itemized
+        let mut bundle: Vec<(String, u64)> = Vec::new();
+        for (kind, section, hit) in recovered {
+            if matches!(kind, RecoveredKind::Certificate) {
+                bundle.push((section, hit.address));
+            } else {
+                itemized.push(hit);
+            }
+        }
+        hits.push(certificate_bundle_hit(&bundle));
+    } else {
+        itemized.extend(recovered.into_iter().map(|(_, _, hit)| hit));
+    }
+    // cap the itemized recoveries the way MAX_DER_HITS caps DER structures, and say so
+    let dropped = itemized.len().saturating_sub(MAX_PEM_HITS);
+    itemized.truncate(MAX_PEM_HITS);
+    if dropped > 0 {
+        tracing::warn!(
+            reported = itemized.len(),
+            dropped,
+            "PEM key/certificate recoveries truncated at the per-run cap"
+        );
+    }
+    hits.extend(itemized);
+    hits
+}
+
+/// Build the single collapsed lead for an image's embedded certificate bundle.
+///
+/// More than [`MAX_ITEMIZED_CERTS`] distinct certificates in one image is a trust
+/// store or test bundle shipped by a statically linked TLS library, not operator
+/// material, so the flood is reported as one context lead. No artifact is attached:
+/// certificates are pivot-class (they veto runtime weakening and rollup
+/// suppression), and a linked trust store has no claim to that shielding.
+///
+/// # Arguments
+///
+/// * `certs` - Each recovered certificate's `(section, address)`, in recovery order
+fn certificate_bundle_hit(certs: &[(String, u64)]) -> DetectionHit {
+    let n = certs.len();
+    // anchor at the first recovered certificate
+    let first = certs.first().map_or(0, |(_, addr)| *addr);
+    // the sections the bundle spans, deduped for the metadata line
+    let sections: BTreeSet<&str> = certs.iter().map(|(section, _)| section.as_str()).collect();
+    let sections = sections.into_iter().collect::<Vec<_>>().join(", ");
+    // list the first few member addresses; the full list rides on the hit's sites
+    let listed: Vec<String> = certs
+        .iter()
+        .take(BUNDLE_LISTED)
+        .map(|(_, addr)| crate::thorpal::detect::context::fmt_addr(*addr))
+        .collect();
+    let more = n.saturating_sub(BUNDLE_LISTED);
+    let addr_list = match more {
+        0 => listed.join(", "),
+        more => format!("{} (+{more} more)", listed.join(", ")),
+    };
+    // the collapsed content: a count and the places to look, not N copies of a cert
+    let content = format!(
+        "### Embedded certificate bundle ({n} certs)\n\n### Metadata\n\
+         - **Certificates:** {n}\n- **Sections:** {sections}\n- **Addresses:** {addr_list}\n"
+    );
+    let reasoning = format!(
+        "The image embeds {n} distinct certificates. A sample pinning its own TLS peer or \
+         carrying operator material embeds a handful; dozens is the shape of a CA trust \
+         store or a library test bundle statically linked into the binary, so the bundle is \
+         reported once rather than as {n} recovered-certificate findings. If one of these \
+         matters it is the odd one out: look for a subject that is not a public root CA or \
+         a library test CA."
+    );
+    DetectionHit::new(
+        T1486,
+        first,
+        // a bundle spans functions; it is a fact about the image, not about one routine
+        None,
+        // context about the linked libraries, not a recovery claim
+        medium(),
+        content,
+        reasoning,
+    )
+    .name(format!(
+        "Certificate Bundle - {n} certificates @ 0x{first:x}"
+    ))
+    .kind(EvidenceKind::ContextOnly)
+    .sites(certs.iter().map(|(_, addr)| *addr).collect())
 }
 
 /// The minimum characters in a base64 run for it to be worth decoding as possible
@@ -1211,20 +1635,23 @@ fn find_base64_blobs(bytes: &[u8]) -> (Vec<(usize, Vec<u8>)>, usize) {
     (out, skipped)
 }
 
-/// Build one full-content flag for a recovered PEM block, or `None` when it is not a real
-/// key/cert or is a duplicate.
+/// Build one full-content flag for a recovered PEM block, or `None` when it is not a
+/// real key/cert, is internally inconsistent, or is a duplicate. Returns the block's
+/// classified kind alongside the hit so the caller can bundle certificates.
 ///
 /// Classifies the block and only surfaces a public key, private key, or certificate (a
-/// bare boundary/template classifies as a generic string and is skipped), requires a
-/// non-trivial body between the boundaries, and dedups by content via `seen`. The flag
-/// carries the full block, a typed snippet-bearing name, and a `Fact` confidence — a
-/// verbatim plaintext block has no decode uncertainty.
+/// bare boundary/template classifies as a generic string and is skipped), requires an
+/// internally-consistent block ([`is_valid_pem_block`]: matching BEGIN/END labels and
+/// a decodable base64 body — PEM-writer constant tables fail both), and dedups by
+/// content via `seen`. The flag carries the full block, a typed snippet-bearing name,
+/// and a `Fact` confidence — a verbatim plaintext block has no decode uncertainty.
 ///
-/// A block whose armor label or referencing function marks it as library/test material
-/// is weakened and annotated rather than dropped: a standard library that statically
-/// links an HTTP or TLS stack ships its own test key material into every binary built
-/// against it, and silently discarding the class would also discard a real recovery
-/// whenever the sample's own key happens to sit in the same company.
+/// A block whose armor label, decoded body subject, or referencing function marks it
+/// as library/test/trust-store material is weakened and annotated rather than dropped:
+/// a standard library that statically links an HTTP or TLS stack ships its own test
+/// key material into every binary built against it, and silently discarding the class
+/// would also discard a real recovery whenever the sample's own key happens to sit in
+/// the same company.
 ///
 /// # Arguments
 ///
@@ -1244,23 +1671,25 @@ fn emit_pem(
     seen: &mut HashSet<String>,
     addr: u64,
     section: &str,
-    block: String,
+    block: &str,
     encoding: Option<&str>,
-) -> Option<DetectionHit> {
+) -> Option<(RecoveredKind, DetectionHit)> {
     // only a real key/cert armor is surfaced; a bare `-----BEGIN ` template is not
-    let kind = decode::classify(&block);
+    let kind = decode::classify(block);
     if !matches!(
         kind,
         RecoveredKind::PublicKey | RecoveredKind::PrivateKey | RecoveredKind::Certificate
     ) {
         return None;
     }
-    // require key material between the boundaries (guards an armor-only BEGIN/END pair)
-    if !has_pem_body(&block) {
+    // require an internally-consistent block: a matching END label and a real base64
+    // body (adjacent PEM-writer string constants weld into "blocks" with mismatched
+    // labels or NUL/garbage bodies; a stored key never has either defect)
+    if !is_valid_pem_block(block) {
         return None;
     }
     // dedup by content so no mechanism reports the same key/cert a second time
-    if !seen.insert(block.clone()) {
+    if !seen.insert(block.to_owned()) {
         return None;
     }
     // attribute the block to the function that references it, when known
@@ -1272,8 +1701,8 @@ fn emit_pem(
         None => "plaintext (embedded PEM)".to_string(),
     };
     // typed name + full-content markdown + independent confidence/suspicion assessment
-    let name = decode::recovered_name(kind, &block, section, addr);
-    let content = decode::recovered_content(kind, &block, section, addr, &stored, None);
+    let name = decode::recovered_name(kind, block, section, addr);
+    let content = decode::recovered_content(kind, block, section, addr, &stored, None);
     // a verbatim plaintext block has zero decode uncertainty → Fact; content sets
     // suspicion. A block recovered through a decode step is only as good as the decode,
     // so it starts at the keyed-recovery level instead
@@ -1281,7 +1710,7 @@ fn emit_pem(
         Some(_) => high().0,
         None => Confidence::Fact,
     };
-    let assessment = decode::assess(method, kind, &block);
+    let assessment = decode::assess(method, kind, block);
     // a dedicated reasoning (not `recovery_reasoning`, which would imply a decode step
     // for the verbatim case)
     let recovery = match encoding {
@@ -1304,7 +1733,7 @@ fn emit_pem(
          or certificate is itself sensitive key material.",
         kind.label().to_ascii_lowercase(),
     );
-    let mut reasoning = decode::append_assessment(base, &assessment.notes);
+    let reasoning = decode::append_assessment(base, &assessment.notes);
     let mut hit = DetectionHit::new(
         T1486,
         addr,
@@ -1315,37 +1744,20 @@ fn emit_pem(
     )
     .name(name)
     .kind(EvidenceKind::ContextOnly);
-
     // weaken (never drop) material the evidence marks as library or test key material
-    let mut caveats = Vec::new();
-    if let Some(label) = test_label(&block) {
-        caveats.push(format!(
-            "the PEM armor is labelled `{label}`, which standard libraries use to mark \
-             deliberately non-production key material"
-        ));
-    }
-    if let Some(fn_name) = function.and_then(|entry| ctx.function_name(entry)) {
-        if is_library_function(fn_name) {
-            caveats.push(format!(
-                "the referencing function `{fn_name}` is statically linked runtime code \
-                 rather than the program's own"
-            ));
-        }
-    }
+    let caveats = pem_caveats(ctx, block, function);
     if !caveats.is_empty() {
         hit.weaken();
-        reasoning.push_str(&format!(
-            "\n\nWeakened because {}. Reported rather than dropped: the block is genuinely \
-             present, and suppressing the class would also hide a real key that happens to \
-             sit alongside library material.",
+        hit.reasoning = format!(
+            "{reasoning}\n\nWeakened because {}. Reported rather than dropped: the block is \
+             genuinely present, and suppressing the class would also hide a real key that \
+             happens to sit alongside library material.",
             caveats.join(", and ")
-        ));
-        hit.reasoning = reasoning;
+        );
     }
-
     // tie the recovered key to the code that uses it (an unowned key is not triageable)
     let (role, detail) = key_attribution(consumers, function, "PEM block", PEM_REF_WINDOW);
-    let mut artifact = HitArtifact::new(artifact_class(kind), pem_artifact_value(&block));
+    let mut artifact = HitArtifact::new(artifact_class(kind), pem_artifact_value(block));
     if let Some(role) = role {
         artifact = artifact.role(role);
     }
@@ -1357,7 +1769,74 @@ fn emit_pem(
     if !details.is_empty() {
         artifact = artifact.detail(details.join("; "));
     }
-    Some(hit.artifact(artifact))
+    Some((kind, hit.artifact(artifact)))
+}
+
+/// The caveats that mark a recovered PEM block as library/test material: a test
+/// armor label, a known library/trust-store subject in the decoded body, or a
+/// statically linked referencing function.
+///
+/// # Arguments
+///
+/// * `ctx` - The analysis context (resolves the referencing function's name)
+/// * `block` - The recovered PEM block text
+/// * `function` - The entry of the referencing function, when one was found
+fn pem_caveats(ctx: &AnalysisContext, block: &str, function: Option<u64>) -> Vec<String> {
+    let mut caveats = Vec::new();
+    // a test-material armor label is the library marking the block itself
+    if let Some(label) = test_label(block) {
+        caveats.push(format!(
+            "the PEM armor is labelled `{label}`, which standard libraries use to mark \
+             deliberately non-production key material"
+        ));
+    }
+    // a known test/trust-store subject inside the decoded body says the same thing
+    if let Some(subject) = library_material_marker(block) {
+        caveats.push(format!(
+            "the decoded body carries the library/trust-store subject marker `{subject}` \
+             (test-suite CAs and public root bundles ship inside statically linked TLS \
+             libraries)"
+        ));
+    }
+    // material referenced only by linked runtime code is the library's, not the sample's
+    let runtime_name = function
+        .and_then(|entry| ctx.function_name(entry))
+        .filter(|name| is_library_function(name));
+    if let Some(fn_name) = runtime_name {
+        caveats.push(format!(
+            "the referencing function `{fn_name}` is statically linked runtime code \
+             rather than the program's own"
+        ));
+    }
+    caveats
+}
+
+/// The library-test or trust-store subject marker a PEM block's **decoded** body
+/// carries, if any.
+///
+/// Subjects live inside the DER, not in the armor, so the base64 body is decoded and
+/// searched (lowercased) for the [`LIBRARY_MATERIAL_SUBJECTS`] — DER stores subject
+/// names as printable ASCII, so a lossy conversion finds them byte-exactly.
+///
+/// # Arguments
+///
+/// * `block` - The recovered PEM block text
+fn library_material_marker(block: &str) -> Option<&'static str> {
+    // gather and strip the base64 body between the boundaries
+    let body: String = block
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("-----"))
+        .flat_map(str::chars)
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    // decode to the DER bytes the subject names actually live in
+    let decoded = decode::base64::decode(&body)?;
+    let hay = String::from_utf8_lossy(&decoded).to_ascii_lowercase();
+    LIBRARY_MATERIAL_SUBJECTS
+        .iter()
+        .copied()
+        .find(|subject| hay.contains(subject))
 }
 
 /// The artifact class a recovered-key kind maps to.
@@ -1647,18 +2126,92 @@ fn der_content(kind: der::DerKind, raw: &[u8], section: &str, addr: u64, armored
     out
 }
 
-/// Whether a PEM block has key material (a non-empty, non-boundary line) between its
-/// boundaries — rejecting an armor-only `-----BEGIN …----- -----END …-----` pair.
+/// Whether a recovered PEM block is internally consistent: its `-----END` label
+/// matches its `-----BEGIN` label and a real base64 body sits between them.
+///
+/// mbedTLS/OpenSSL PEM-writer constant tables store `-----BEGIN X-----` and
+/// `-----END Y-----` strings back to back, and a boundary-pair scan welds them into
+/// "blocks" with mismatched labels and NUL/garbage "bodies". A real stored key or
+/// certificate never has either defect, so both checks together cost nothing real.
+///
+/// # Arguments
+///
+/// * `block` - The recovered PEM block text
+fn is_valid_pem_block(block: &str) -> bool {
+    pem_labels_match(block) && has_pem_body(block)
+}
+
+/// Whether a PEM block's `-----END` label equals its `-----BEGIN` label.
+///
+/// A block whose armor cannot supply both labels (a truncated `-----END` with no
+/// closing dash run) fails too: every real armor closes both boundaries.
+///
+/// # Arguments
+///
+/// * `block` - The recovered PEM block text
+fn pem_labels_match(block: &str) -> bool {
+    // both labels must parse and agree for the pair to be one block's armor
+    match (pem_label(block, "-----begin"), pem_label(block, "-----end")) {
+        (Some(begin), Some(end)) => begin == end,
+        _ => false,
+    }
+}
+
+/// The lowercased armor label following `marker` in a PEM block, when its closing
+/// dash run is present (`-----BEGIN RSA PRIVATE KEY-----` → `rsa private key`).
+///
+/// # Arguments
+///
+/// * `block` - The recovered PEM block text
+/// * `marker` - The lowercase boundary marker (`"-----begin"` or `"-----end"`)
+fn pem_label(block: &str, marker: &str) -> Option<String> {
+    // search lowercased so armor case never matters (byte offsets are preserved)
+    let lower = block.to_ascii_lowercase();
+    let at = lower.find(marker)?;
+    let rest = &lower[at + marker.len()..];
+    // the label runs to the closing dash run; a truncated armor has no label
+    let close = rest.find("-----")?;
+    Some(rest[..close].trim().to_string())
+}
+
+/// Whether a PEM block carries a real base64 body between its boundaries: every body
+/// line is base64 alphabet/padding/whitespace only, and at least one line is long
+/// enough ([`MIN_PEM_BODY_LINE`]) to be key material and decodes.
+///
+/// This is what separates a stored key from a PEM-writer constant table: the NUL and
+/// garbage bytes between two adjacent writer string constants read as non-empty,
+/// non-boundary "body" lines (`str::trim` strips only whitespace), but never as
+/// decodable base64. An armor-only `BEGIN`/`END` pair has no body line at all and is
+/// rejected the same way.
 ///
 /// # Arguments
 ///
 /// * `block` - The recovered PEM block text
 fn has_pem_body(block: &str) -> bool {
-    // any line that is neither blank nor a `-----…-----` boundary is body content
-    block
-        .lines()
-        .map(str::trim)
-        .any(|line| !line.is_empty() && !line.starts_with("-----"))
+    // whether any body line was long enough to be key material and decoded
+    let mut decodes = false;
+    for line in block.lines().map(str::trim) {
+        // boundaries and blank lines are not body
+        if line.is_empty() || line.starts_with("-----") {
+            continue;
+        }
+        // a body line may hold only base64 alphabet, padding, and whitespace
+        if !line
+            .bytes()
+            .all(|b| is_base64_std(b) || b == b'=' || b.is_ascii_whitespace())
+        {
+            return false;
+        }
+        // count a full-length line that decodes as the real-key-material evidence
+        let stripped: String = line
+            .chars()
+            .filter(|c| !c.is_whitespace() && *c != '=')
+            .collect();
+        if stripped.len() >= MIN_PEM_BODY_LINE && decode::base64::decode(&stripped).is_some() {
+            decodes = true;
+        }
+    }
+    decodes
 }
 
 /// Emit the boundary-present marker hit(s) for a defined string whose PEM boundary could
@@ -1748,13 +2301,16 @@ fn short_value(s: &str) -> String {
 }
 
 /// Extract the readable recovered runs from a candidate decryption, applying the
-/// key-echo guard for keyed XOR and the strong-recovery gate.
+/// key-echo guard and a stricter text gate for keyed XOR, plus the strong-recovery
+/// gate.
 ///
 /// Returns `None` when nothing survives (a wrong key). The `key_guard`, when set
 /// (repeating XOR), rejects runs whose source region is mostly zero or that share a
 /// long substring with the key — both signs of the key merely echoing through
-/// low-entropy bytes rather than a real decryption. The caller de-duplicates and
-/// splits the surviving runs into items.
+/// low-entropy bytes rather than a real decryption — and additionally holds each run
+/// to [`xor_run_is_wordy`], because a wrong XOR key over semi-structured data yields
+/// *printable* output that clears the shared wordiness bar about half the time. The
+/// caller de-duplicates and splits the surviving runs into items.
 ///
 /// # Arguments
 ///
@@ -1783,6 +2339,11 @@ fn recovered_runs(
             if shares_substring(&s, &String::from_utf8_lossy(key), 5) {
                 continue;
             }
+            // reject output that is printable but not text: wrong-XOR fabrications
+            // sit near the half-letters floor the shared wordiness bar accepts
+            if !xor_run_is_wordy(s.as_bytes()) {
+                continue;
+            }
         }
         kept.push((idx, s));
     }
@@ -1798,6 +2359,70 @@ fn recovered_runs(
 /// One candidate decryption: the scheme's name, the bytes it produced, and the key
 /// to test that output against for key-echo (`None` when the scheme cannot echo one).
 type SchemeAttempt<'a> = (&'a str, Vec<u8>, Option<&'a [u8]>);
+
+/// Whether a repeating-XOR recovery reads as genuine text: at least two thirds ASCII
+/// letters, with at least one vowel-bearing word — or digit-substituted prose that
+/// the shared leet-aware gate accepts.
+///
+/// The shared [`recover::is_wordy`] bar (half letters, five distinct characters) is
+/// calibrated for ciphers whose wrong keys produce random bytes. A wrong repeating-XOR
+/// key over semi-structured library data produces *printable* output, and about half
+/// of the printable range is letters, so keyboard-mash fabrications like
+/// `$&'{b-ANjegQ+` clear that bar. Real hidden strings — URLs, paths, messages — run
+/// well above two-thirds letters and always contain a pronounceable word; the
+/// fabrications have neither. Leetspeak ransom notes ("A44EN4ION!") carry digits
+/// inside their words and fail both local tests, so the shared gate's prose-shaped
+/// digit-substitution second chance is consulted before rejecting.
+///
+/// # Arguments
+///
+/// * `run` - The candidate recovered bytes
+fn xor_run_is_wordy(run: &[u8]) -> bool {
+    // test at full strength first, then once more counting leet digits as letters
+    wordy_at_crypto_bar(run, false) || wordy_at_crypto_bar(run, true)
+}
+
+/// The crypto-strength wordiness test, optionally counting leet digits as letters.
+///
+/// The leet pass keeps the same two-thirds share and vowel-word bars but maps the
+/// digit substitutions ransom notes use (`A44EN4ION!`, `IN O2DE2`) onto letters —
+/// 0→o, 1→i, 3→e, 4→a, plus 2/5/7/9 as consonants — and only for prose-shaped runs
+/// (a space and a real-letter third), so printable keyboard mash from wrong
+/// repeating-XOR keys stays dead under both passes.
+///
+/// # Arguments
+///
+/// * `run` - The candidate recovered bytes
+/// * `leet` - Whether to count digit substitutions as letters
+fn wordy_at_crypto_bar(run: &[u8], leet: bool) -> bool {
+    // the leet pass only applies to prose-shaped runs: a space present and at
+    // least a third real letters, so digit soup cannot buy its way in
+    if leet {
+        let real = run.iter().filter(|b| b.is_ascii_alphabetic()).count();
+        if !run.contains(&b' ') || real * 3 < run.len() {
+            return false;
+        }
+    }
+    // classify a byte as letter-like under the requested pass
+    let letterish = |b: u8| {
+        b.is_ascii_alphabetic()
+            || (leet && matches!(b, b'0' | b'1' | b'2' | b'3' | b'4' | b'5' | b'7' | b'9'))
+    };
+    // require a letter share of at least 2/3 (wrong-key printable output sits near 1/2)
+    let alpha = run.iter().filter(|b| letterish(**b)).count();
+    if alpha * 3 < run.len() * 2 {
+        return false;
+    }
+    // require at least one word (maximal letter-like run) carrying a vowel; the
+    // leet pass lets the vowel-shaped digits 0/1/3/4 satisfy it
+    run.split(|b| !letterish(*b)).any(|word| {
+        !word.is_empty()
+            && word.iter().any(|b| {
+                matches!(b.to_ascii_lowercase(), b'a' | b'e' | b'i' | b'o' | b'u')
+                    || (leet && matches!(b, b'0' | b'1' | b'3' | b'4'))
+            })
+    })
+}
 
 /// Whether a region claimed to be ciphertext is dominated by one repeated byte
 /// value, and so cannot be ciphertext.
@@ -1867,6 +2492,19 @@ fn shares_substring(a: &str, b: &str, n: usize) -> bool {
     a.windows(n).any(|win| b.windows(n).any(|w| w == win))
 }
 
+/// One carved candidate key token, kept with its location so neighbouring tokens can
+/// be clustered and attributed.
+struct CarvedKey {
+    /// The section the token was carved from.
+    section: String,
+    /// The absolute address the token starts at.
+    addr: u64,
+    /// The base64 token as stored in the binary.
+    token: String,
+    /// The decoded raw key bytes.
+    decoded: Vec<u8>,
+}
+
 /// Recover and flag embedded **symmetric key** material (ATT&CK T1486).
 ///
 /// Malware bakes a symmetric key (RC6/AES/…) into the binary as a base64 blob, often
@@ -1874,8 +2512,14 @@ fn shares_substring(a: &str, b: &str, n: usize) -> bool {
 /// string (the Go/packed case — so [`collect_keys`], which reads defined strings, misses
 /// it). This scans each data-like section's raw bytes for a padded base64 token that
 /// decodes to a standard key length (16/24/32 bytes) of high-entropy bytes — a candidate
-/// embedded key — and emits one flag per distinct key. It mirrors [`pem_hits`]'s raw-byte
-/// recovery of *asymmetric* key material.
+/// embedded key. It mirrors [`pem_hits`]'s raw-byte recovery of *asymmetric* key
+/// material.
+///
+/// A lone carving (or a pair) is flagged at full severity as a candidate key. A run of
+/// same-shape tokens is not N keys: every entry of a base64-wrapped encrypted string
+/// table also decodes to a key-length high-entropy blob, so clusters
+/// ([`cluster_collapses`]) are reshaped into **one** correctly-framed string-table lead
+/// ([`key_cluster_hit`]) — which also caps what a table-heavy image can emit.
 ///
 /// # Arguments
 ///
@@ -1893,8 +2537,9 @@ async fn embedded_key_hits(
     // read (cached) the section bytes and the data-reference index once
     let sections = ctx.initialized_bytes().await?;
     let index = ctx.reference_index().await?;
-    let mut hits = Vec::new();
-    // dedup by decoded key bytes, so the same key found twice is reported once
+    // carve every candidate token first (deduped by decoded key bytes), because the
+    // itemize-or-collapse decision depends on how many the whole image holds
+    let mut carved: Vec<CarvedKey> = Vec::new();
     let mut seen: HashSet<Vec<u8>> = HashSet::new();
     for (section, base, bytes) in &sections {
         // only real data sections hold embedded key material
@@ -1902,73 +2547,259 @@ async fn embedded_key_hits(
             continue;
         }
         for (off, token, decoded) in find_base64_keys(bytes) {
-            // one flag per distinct key
+            // one entry per distinct key
             if !seen.insert(decoded.clone()) {
                 continue;
             }
-            let addr = base.saturating_add(off as u64);
-            // attribute the key to the function that references its buffer, when known
-            let function = decode::buffers::referencing_function(&index, addr, KEY_REF_WINDOW);
-            let bits = decoded.len() * 8;
-            // typed, snippet-bearing name; full-content markdown; analyst reasoning
-            let name = format!(
-                "Symmetric Key (candidate) - \"{}\" @ {section} @ 0x{addr:x}",
-                short_value(&token)
-            );
-            let content = key_content(&token, section, addr, &decoded);
-            let base = format!(
-                "Found an embedded base64-encoded {}-byte ({bits}-bit) high-entropy blob in the \
-                 {section} section — a candidate symmetric encryption key (e.g. RC6/AES). Recovered \
-                 by carving a padded base64 token from the raw section bytes and decoding it; the \
-                 disassembler did not define it as a discrete string (common in Go/packed binaries, \
-                 where string data is one concatenated blob). Malware embeds such a key to encrypt \
-                 payloads/config or victim files (Data Encrypted for Impact). The key is a static \
-                 candidate; confirm against the sample.",
-                decoded.len(),
-            );
-            // scored through the shared recovery assessment so a symmetric key is ranked
-            // on the same axes as every other recovery. Raw key bytes have no
-            // self-validating structure, so the carving method's own reliability is the
-            // confidence, and the class sets the suspicion
-            let assessment = decode::assess(high().0, RecoveredKind::SymmetricKey, &token);
-            let reasoning = decode::append_assessment(base, &assessment.notes);
-            let mut hit = DetectionHit::new(
-                T1486,
-                addr,
-                function,
-                (assessment.confidence, assessment.suspicion),
-                content,
-                reasoning,
-            )
-            .name(name)
-            .kind(EvidenceKind::ContextOnly);
+            carved.push(CarvedKey {
+                section: section.clone(),
+                addr: base.saturating_add(off as u64),
+                token,
+                decoded,
+            });
+        }
+    }
+    // group neighbouring tokens into per-section clusters and shape each one once
+    let total = carved.len();
+    let mut hits = Vec::new();
+    for cluster in cluster_carved_keys(carved) {
+        if cluster_collapses(cluster.len(), total) {
+            // same-shape key-length blobs in one run are an encoded string table, not
+            // independent keys: emit the one correctly-framed table lead
+            let function = cluster.iter().find_map(|key| {
+                decode::buffers::referencing_function(&index, key.addr, KEY_REF_WINDOW)
+            });
+            let mut hit = key_cluster_hit(&cluster, total, function);
             // library-shipped material is weakened and annotated, never dropped
-            if let Some(fn_name) = function.and_then(|entry| ctx.function_name(entry)) {
-                if is_library_function(fn_name) {
-                    hit.weaken();
-                    hit.reasoning.push_str(&format!(
-                        " Weakened because the referencing function `{fn_name}` is statically \
-                         linked runtime code rather than the program's own."
-                    ));
-                }
+            let runtime_name = function
+                .and_then(|entry| ctx.function_name(entry))
+                .filter(|name| is_library_function(name));
+            if let Some(fn_name) = runtime_name {
+                hit.weaken();
+                hit.reasoning = format!(
+                    "{} Weakened because the referencing function `{fn_name}` is statically \
+                     linked runtime code rather than the program's own.",
+                    hit.reasoning
+                );
             }
-            // tie the key to the code that uses it, naming what that code was seen doing
-            let (role, detail) = key_attribution(consumers, function, "key blob", KEY_REF_WINDOW);
-            let hex: String = decoded.iter().map(|b| format!("{b:02x}")).collect();
-            let mut artifact = HitArtifact::new(
-                ArtifactClass::SymmetricKey,
-                format!("{token} (base64) = {hex}"),
-            );
-            if let Some(role) = role {
-                artifact = artifact.role(role);
+            hits.push(hit);
+        } else {
+            // a lone (or paired) carving is plausibly a real embedded key: itemize it
+            // at full severity, as a single baked-in RC6/AES key deserves
+            for key in cluster {
+                hits.push(embedded_key_hit(ctx, &index, consumers, &key));
             }
-            if let Some(detail) = detail {
-                artifact = artifact.detail(detail);
-            }
-            hits.push(hit.artifact(artifact));
         }
     }
     Ok(hits)
+}
+
+/// Build the full-severity finding for one itemized carved candidate key.
+///
+/// # Arguments
+///
+/// * `ctx` - The analysis context (resolves the referencing function's name)
+/// * `index` - The sorted data-reference index (to attribute the key blob)
+/// * `consumers` - The key-consuming functions, for artifact attribution
+/// * `key` - The carved token to flag
+fn embedded_key_hit(
+    ctx: &AnalysisContext,
+    index: &[(u64, u64)],
+    consumers: &KeyConsumers,
+    key: &CarvedKey,
+) -> DetectionHit {
+    let CarvedKey {
+        section,
+        addr,
+        token,
+        decoded,
+    } = key;
+    // attribute the key to the function that references its buffer, when known
+    let function = decode::buffers::referencing_function(index, *addr, KEY_REF_WINDOW);
+    let bits = decoded.len() * 8;
+    // typed, snippet-bearing name; full-content markdown; analyst reasoning
+    let name = format!(
+        "Symmetric Key (candidate) - \"{}\" @ {section} @ 0x{addr:x}",
+        short_value(token)
+    );
+    let content = key_content(token, section, *addr, decoded);
+    let base = format!(
+        "Found an embedded base64-encoded {}-byte ({bits}-bit) high-entropy blob in the \
+         {section} section — a candidate symmetric encryption key (e.g. RC6/AES). Recovered \
+         by carving a padded base64 token from the raw section bytes and decoding it; the \
+         disassembler did not define it as a discrete string (common in Go/packed binaries, \
+         where string data is one concatenated blob). Malware embeds such a key to encrypt \
+         payloads/config or victim files (Data Encrypted for Impact). The key is a static \
+         candidate; confirm against the sample.",
+        decoded.len(),
+    );
+    // scored through the shared recovery assessment so a symmetric key is ranked
+    // on the same axes as every other recovery. Raw key bytes have no
+    // self-validating structure, so the carving method's own reliability is the
+    // confidence, and the class sets the suspicion
+    let assessment = decode::assess(high().0, RecoveredKind::SymmetricKey, token);
+    let reasoning = decode::append_assessment(base, &assessment.notes);
+    let mut hit = DetectionHit::new(
+        T1486,
+        *addr,
+        function,
+        (assessment.confidence, assessment.suspicion),
+        content,
+        reasoning,
+    )
+    .name(name)
+    .kind(EvidenceKind::ContextOnly);
+    // library-shipped material is weakened and annotated, never dropped
+    let runtime_name = function
+        .and_then(|entry| ctx.function_name(entry))
+        .filter(|name| is_library_function(name));
+    if let Some(fn_name) = runtime_name {
+        hit.weaken();
+        hit.reasoning = format!(
+            "{} Weakened because the referencing function `{fn_name}` is statically \
+             linked runtime code rather than the program's own.",
+            hit.reasoning
+        );
+    }
+    // tie the key to the code that uses it, naming what that code was seen doing
+    let (role, detail) = key_attribution(consumers, function, "key blob", KEY_REF_WINDOW);
+    let hex: String = decoded.iter().map(|b| format!("{b:02x}")).collect();
+    let mut artifact = HitArtifact::new(
+        ArtifactClass::SymmetricKey,
+        format!("{token} (base64) = {hex}"),
+    );
+    if let Some(role) = role {
+        artifact = artifact.role(role);
+    }
+    if let Some(detail) = detail {
+        artifact = artifact.detail(detail);
+    }
+    hit.artifact(artifact)
+}
+
+/// Group carved tokens into per-section clusters of neighbours.
+///
+/// Tokens are grouped when they share a section and each starts within
+/// [`KEY_CLUSTER_GAP`] bytes of the previous one — the layout of an encoded string
+/// table. The input is in carving order (ascending address within each section), so
+/// one forward pass suffices.
+///
+/// # Arguments
+///
+/// * `carved` - The carved tokens, in per-section ascending address order
+fn cluster_carved_keys(carved: Vec<CarvedKey>) -> Vec<Vec<CarvedKey>> {
+    let mut clusters: Vec<Vec<CarvedKey>> = Vec::new();
+    for key in carved {
+        // whether the token continues the open cluster's per-section run
+        let continues = clusters
+            .last()
+            .and_then(|cluster| cluster.last())
+            .is_some_and(|last| {
+                last.section == key.section && key.addr.saturating_sub(last.addr) <= KEY_CLUSTER_GAP
+            });
+        match clusters.last_mut() {
+            // extend the open cluster when the token continues its run
+            Some(cluster) if continues => cluster.push(key),
+            // otherwise the token starts a new cluster
+            _ => clusters.push(vec![key]),
+        }
+    }
+    clusters
+}
+
+/// Whether a cluster of carved tokens is reported as one string-table lead rather
+/// than itemized candidate-key findings.
+///
+/// A cluster of [`KEY_CLUSTER_MIN`] or more is table-shaped on its own; and once the
+/// image carves more than [`MAX_LONE_KEYS`] tokens in total, even small clusters
+/// collapse — at that point itemized "candidate key" findings are a flood, not keys.
+///
+/// # Arguments
+///
+/// * `cluster_len` - The number of tokens in the cluster
+/// * `total` - The number of tokens carved image-wide
+fn cluster_collapses(cluster_len: usize, total: usize) -> bool {
+    cluster_len >= KEY_CLUSTER_MIN || total > MAX_LONE_KEYS
+}
+
+/// Build the single collapsed lead for a cluster of carved key-length tokens.
+///
+/// The cluster is framed as what the evidence supports — an encoded/encrypted string
+/// table whose entries all decode to key-length high-entropy blobs — rather than as N
+/// independent symmetric keys, and carries no key artifact: nothing in it is a
+/// validated key, and the artifact classes are pivot-class (they veto runtime
+/// weakening and rollup suppression), which a speculative table lead has no claim to.
+///
+/// # Arguments
+///
+/// * `cluster` - The clustered tokens, in ascending address order
+/// * `total` - The number of tokens carved image-wide (for the flood-context line)
+/// * `function` - The function the cluster attributes to, when one references it
+fn key_cluster_hit(cluster: &[CarvedKey], total: usize, function: Option<u64>) -> DetectionHit {
+    // the cluster's address range anchors the lead and names the table
+    let first = cluster.first().map_or(0, |key| key.addr);
+    let last = cluster.last().map_or(0, |key| key.addr);
+    let n = cluster.len();
+    let section = cluster.first().map_or("", |key| key.section.as_str());
+    // list the first few member addresses; the full list rides on the hit's sites
+    let listed: Vec<String> = cluster
+        .iter()
+        .take(KEY_CLUSTER_LISTED)
+        .map(|key| crate::thorpal::detect::context::fmt_addr(key.addr))
+        .collect();
+    let more = n.saturating_sub(KEY_CLUSTER_LISTED);
+    let addr_list = match more {
+        0 => listed.join(", "),
+        more => format!("{} (+{more} more)", listed.join(", ")),
+    };
+    // adapt the headline to the cluster size (a singleton reaches here only in a
+    // flooded image, where it reads as one more table entry rather than a key)
+    let headline = if n > 1 {
+        format!(
+            "{n} same-shape base64 blobs at 0x{first:x}–0x{last:x} — likely an \
+             encoded/encrypted string table, not {n} independent keys"
+        )
+    } else {
+        format!(
+            "a base64 key-length blob at 0x{first:x}, one of {total} carved from this \
+             image — likely an entry of an encoded/encrypted string table rather than \
+             an independent key"
+        )
+    };
+    // a sample token gives the agent something concrete to decode by hand
+    let sample = cluster
+        .first()
+        .map_or_else(String::new, |key| short_value(&key.token));
+    // the collapsed content: the range, the count, and the sample token to pivot on
+    let content = format!(
+        "### Candidate Encoded String Table\n\n{headline}.\n\n### Metadata\n\
+         - **Section:** {section}\n- **Range:** 0x{first:x}–0x{last:x}\n\
+         - **Blobs:** {n} (of {total} carved image-wide)\n- **Addresses:** {addr_list}\n\
+         - **Sample token:** `{sample}`\n"
+    );
+    let reasoning = "Each of these padded base64 tokens decodes to a standard key length \
+         (16/24/32 bytes) of high-entropy bytes — which is also exactly what every entry of \
+         a base64-wrapped encrypted string table looks like, and dozens of real embedded \
+         keys in one run is not. Treat the run as one artifact: find the routine that walks \
+         these entries (its decode is typically base64 then a short-keyed stream cipher such \
+         as RC4) and recover its single table-wide key, rather than testing each blob as a \
+         key."
+        .to_string();
+    DetectionHit::new(
+        T1486,
+        first,
+        function,
+        // a correctly-framed table pointer is reliable, but it is not a recovered key,
+        // so it sits below the per-key candidate grade
+        (Confidence::Likely, 60),
+        content,
+        reasoning,
+    )
+    .name(format!(
+        "Encoded String Table (candidate) - {n} base64 blobs @ {section} @ 0x{first:x}"
+    ))
+    .kind(EvidenceKind::ContextOnly)
+    .sites(cluster.iter().map(|key| key.addr).collect())
 }
 
 /// Build the flag `content` markdown for a recovered embedded symmetric key: the base64
@@ -2423,5 +3254,419 @@ mod tests {
         assert!(md.contains("- **Section:** .rodata"));
         assert!(md.contains("- **Encoding:** base64 → 16 bytes (128-bit)"));
         assert!(md.contains("- **Decoded (hex):** 38755b9f715dbffb20bcff5544effd39"));
+    }
+
+    /// The stricter repeating-XOR text gate rejects the fleet's fabricated recoveries
+    /// that clear the shared half-letters wordiness bar.
+    #[test]
+    fn xor_text_gate_rejects_fabricated_strings() {
+        // real fabrications from the telemetry: FlipLockerESXi's 54%-letter keyboard
+        // mash and a panic-byte XOR artifact — both pass `recover::is_wordy`
+        assert!(!xor_run_is_wordy(b"$&'{b-ANjegQ+"));
+        assert!(!xor_run_is_wordy(b"d`Lbrkh._,b%"));
+        // end to end: a long printable mash decodes "cleanly" but is not text
+        let plain = b"$&'{b-ANjegQ+#!x@Km=Pw%^rT~".to_vec();
+        let ct = encrypt(&plain);
+        // the shared gates alone accept it (so the RC4/RC6 branch still would)...
+        assert!(recovered_runs(&plain, &ct, None).is_some());
+        // ...and the XOR-only text gate is what rejects the fabrication
+        assert!(recovered_runs(&plain, &ct, Some(b"secretkey")).is_none());
+    }
+
+    /// The confirmed recovery shape (92% letters, vowel-bearing word) still
+    /// passes the stricter XOR text gate end to end.
+    #[test]
+    fn xor_text_gate_keeps_confirmed_recovery() {
+        // a confirmed pattern: key "FindFirstUrlCacheEntryW" recovering
+        // strings shaped like `N>trxQDihVDYs` (12/13 letters, vowel-bearing)
+        assert!(xor_run_is_wordy(b"N>trxQDihVDYs"));
+        // two such runs separated by a short non-printable gap, as in the real table
+        let mut plain = b"N>trxQDihVDYs".to_vec();
+        plain.extend_from_slice(&[0, 0, 0, 0]);
+        plain.extend_from_slice(b"N>trxQDihVDYs!");
+        let ct = encrypt(&plain);
+        let runs = recovered_runs(&plain, &ct, Some(b"FindFirstUrlCacheEntryW"));
+        assert!(runs.is_some());
+    }
+
+    /// Digit-substituted ransom prose passes the leet second chance while the
+    /// keyboard-mash fabrications stay dead under both passes.
+    #[test]
+    fn xor_text_gate_gives_leet_prose_a_second_chance() {
+        // real leetspeak ransom-note lines (the confirmed note shapes)
+        assert!(xor_run_is_wordy(
+            b"A44EN4ION! IN O2DE2 4O 02E6EN4 DA4A DAMAGE"
+        ));
+        assert!(xor_run_is_wordy(b"* DO NO4 MODIF9 ENC2904ED FILE3"));
+        // the page's wrong-key printable fabrications fail both passes: no space
+        // for the leet pass, and under two-thirds letters for the plain pass
+        assert!(!xor_run_is_wordy(b"$&'{b-ANjegQ+"));
+        assert!(!xor_run_is_wordy(b"d`Lbrkh._,b%"));
+        // digit soup with spaces fails the real-letter third the leet pass demands
+        assert!(!xor_run_is_wordy(b"44 020 9222 137 4479"));
+    }
+
+    /// Key↔ciphertext affinity holds for a shared referencing function or storage
+    /// adjacency, and fails for a brute-force pairing with neither tie.
+    #[test]
+    fn key_ct_affinity_requires_shared_function_or_adjacency() {
+        // a ciphertext buffer referenced by the function at 0x1000
+        let ct = CtCandidate {
+            addr: 0x9000,
+            function: Some(0x1000),
+            section: ".rodata".to_string(),
+            bytes: vec![0x80; 32],
+        };
+        // the same function references the key: affine
+        let shared = key_fixture(0x40_0000, Some(0x1000));
+        assert!(key_ct_affinity(&shared, &ct));
+        // a different function, but the key sits beside the buffer: affine
+        let near = key_fixture(0x9800, Some(0x2000));
+        assert!(key_ct_affinity(&near, &ct));
+        // no shared function and far away: a brute-force pairing, demoted
+        let stranger = key_fixture(0x40_0000, Some(0x2000));
+        assert!(!key_ct_affinity(&stranger, &ct));
+        // an unknown key address with no referencing function proves nothing
+        let unknown = key_fixture(0, None);
+        assert!(!key_ct_affinity(&unknown, &ct));
+    }
+
+    /// Build a key-candidate fixture at the given location.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The address the key string sits at (0 for unknown)
+    /// * `function` - The entry of the function referencing the key, if any
+    fn key_fixture(addr: u64, function: Option<u64>) -> KeyCandidate {
+        KeyCandidate {
+            bytes: b"CgeOvEO7hu".to_vec(),
+            display: "\"CgeOvEO7hu\"".to_string(),
+            addr,
+            function,
+        }
+    }
+
+    /// The decrypt-replay key artifact attaches only to key-class recoveries, so a
+    /// plain recovered string no longer pivot-shields its hit.
+    #[test]
+    fn decrypt_key_artifact_only_for_key_kinds() {
+        // the wrong-key fabrications are String-kind: no artifact, no pivot shield
+        assert!(!carries_key_artifact(RecoveredKind::String));
+        assert!(!carries_key_artifact(RecoveredKind::Url));
+        assert!(!carries_key_artifact(RecoveredKind::Email));
+        // key material validates the key that produced it and keeps the artifact
+        assert!(carries_key_artifact(RecoveredKind::SymmetricKey));
+        assert!(carries_key_artifact(RecoveredKind::PrivateKey));
+        assert!(carries_key_artifact(RecoveredKind::PublicKey));
+        assert!(carries_key_artifact(RecoveredKind::Certificate));
+    }
+
+    /// PEM validation rejects the writer-constant junk shapes: mismatched BEGIN/END
+    /// labels, matching-label pairs with NUL bodies, and armor-only pairs.
+    #[test]
+    fn pem_validation_rejects_writer_constant_blocks() {
+        // writer-constant junk: literally a BEGIN RSA / END EC pair
+        let mismatched = "-----BEGIN RSA PRIVATE KEY-----\n-----END EC PRIVATE KEY-----";
+        assert!(!pem_labels_match(mismatched));
+        assert!(!is_valid_pem_block(mismatched));
+        // the matching-label writer pair with NUL/garbage between the constants
+        let nul_body = "-----BEGIN RSA PRIVATE KEY-----\n\u{0}\u{0}\u{0}\u{6}garbage\n-----END RSA PRIVATE KEY-----";
+        assert!(pem_labels_match(nul_body));
+        assert!(!has_pem_body(nul_body));
+        assert!(!is_valid_pem_block(nul_body));
+        // an armor-only pair holds no body at all
+        let armor_only = "-----BEGIN RSA PRIVATE KEY-----\n-----END RSA PRIVATE KEY-----";
+        assert!(!is_valid_pem_block(armor_only));
+    }
+
+    /// PEM validation keeps real recoveries: matching labels with decodable base64
+    /// bodies, including a short single-line (Ed25519-sized) body.
+    #[test]
+    fn pem_validation_keeps_real_blocks() {
+        // a classic wrapped body line (the PKCS#1/SPKI shape of the pack's real finds)
+        let block = "-----BEGIN PUBLIC KEY-----\n\
+                     MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxYz1234567890abcdef\n\
+                     -----END PUBLIC KEY-----";
+        assert!(pem_labels_match(block));
+        assert!(has_pem_body(block));
+        assert!(is_valid_pem_block(block));
+        // the shortest real-world body shape: one ~44-char line still qualifies
+        let short_body = decode::base64::encode(&[7u8; 33]);
+        let short = format!("-----BEGIN PUBLIC KEY-----\n{short_body}\n-----END PUBLIC KEY-----");
+        assert!(is_valid_pem_block(&short));
+    }
+
+    /// Build a certificate PEM block whose body encodes the given DER-ish bytes.
+    ///
+    /// # Arguments
+    ///
+    /// * `der` - The bytes to armor as the block's body
+    fn pem_cert_fixture(der: &[u8]) -> String {
+        // wrap at the PEM width so the fixture matches a real recovered block's shape
+        let body = decode::base64::wrap(&decode::base64::encode(der), PEM_LINE_WIDTH);
+        format!("-----BEGIN CERTIFICATE-----\n{body}\n-----END CERTIFICATE-----")
+    }
+
+    /// Library-test and trust-store subjects in the decoded body are recognized;
+    /// ordinary subjects are not.
+    #[test]
+    fn library_material_marker_matches_known_subjects() {
+        // the PolarSSL test-suite CA that seeded spurious leads
+        let polarssl = pem_cert_fixture(b"0\x82junk O=PolarSSL, CN=Polarssl Test EC CA junk");
+        assert_eq!(library_material_marker(&polarssl), Some("polarssl"));
+        // the DigiCert root that filled the ignored certificate flood
+        let digicert = pem_cert_fixture(b"0\x82junk CN=DigiCert Assured ID Root CA junk");
+        assert_eq!(library_material_marker(&digicert), Some("digicert"));
+        // an ordinary subject keeps full severity (no demotion marker)
+        let clean = pem_cert_fixture(b"0\x82junk CN=update.invalid, O=Example Ops junk");
+        assert_eq!(library_material_marker(&clean), None);
+    }
+
+    /// A certificate flood collapses into one bundle lead at Unsure/40 with no
+    /// pivot-class artifact; the shaping also caps itemized recoveries.
+    #[test]
+    fn pem_recovery_shaping_bundles_and_caps() {
+        // ten recovered certificates plus one private key (a linked trust store)
+        let mut recovered: Vec<(RecoveredKind, String, DetectionHit)> = (0..10u64)
+            .map(|idx| {
+                (
+                    RecoveredKind::Certificate,
+                    ".rdata".to_string(),
+                    pem_hit_fixture(0x47_0000 + idx * 0x400),
+                )
+            })
+            .collect();
+        recovered.push((
+            RecoveredKind::PrivateKey,
+            ".rdata".to_string(),
+            pem_hit_fixture(0x50_0000),
+        ));
+        let shaped = shape_pem_recoveries(recovered);
+        // one bundle lead plus the itemized private key
+        assert_eq!(shaped.len(), 2);
+        let bundle = &shaped[0];
+        assert!(matches!(bundle.confidence, Confidence::Unsure));
+        assert_eq!(bundle.suspicion, 40);
+        // sample-scoped, every member address attached, and no pivot-class artifact
+        assert!(bundle.function.is_none());
+        assert_eq!(bundle.sites.len(), 10);
+        assert!(bundle.artifact.is_none());
+        // the content says what it is and bounds the listed addresses
+        assert!(
+            bundle
+                .content
+                .contains("Embedded certificate bundle (10 certs)")
+        );
+        assert!(bundle.content.contains("(+2 more)"));
+        assert!(bundle.name.as_deref().unwrap().contains("10 certificates"));
+        // the private key stays itemized at its own grade
+        assert_eq!(shaped[1].address, 0x50_0000);
+        // a couple of certificates stay itemized, and a flood of keys is capped
+        let few: Vec<_> = (0..2u64)
+            .map(|idx| {
+                (
+                    RecoveredKind::Certificate,
+                    ".rdata".to_string(),
+                    pem_hit_fixture(0x1000 + idx),
+                )
+            })
+            .collect();
+        assert_eq!(shape_pem_recoveries(few).len(), 2);
+        let flood: Vec<_> = (0..40u64)
+            .map(|idx| {
+                (
+                    RecoveredKind::PrivateKey,
+                    ".rdata".to_string(),
+                    pem_hit_fixture(0x2000 + idx),
+                )
+            })
+            .collect();
+        assert_eq!(shape_pem_recoveries(flood).len(), MAX_PEM_HITS);
+    }
+
+    /// Build a minimal recovered-block hit fixture at the given address.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The address the block was recovered at
+    fn pem_hit_fixture(addr: u64) -> DetectionHit {
+        DetectionHit::new(
+            T1486,
+            addr,
+            None,
+            (Confidence::Fact, 60),
+            "fixture",
+            "fixture",
+        )
+    }
+
+    /// The itemize-or-collapse decision: clusters of 3+ collapse, flooded images
+    /// collapse everything, and lone carvings keep full severity.
+    #[test]
+    fn cluster_collapses_matches_the_table_shapes() {
+        // the stealc table: 18 carvings in one run collapse into one lead
+        assert!(cluster_collapses(18, 18));
+        // the lone confirmed RC6 key stays an itemized candidate-key finding
+        assert!(!cluster_collapses(1, 1));
+        assert!(!cluster_collapses(2, 2));
+        // a flooded image collapses even its small clusters
+        assert!(cluster_collapses(2, 6));
+        assert!(cluster_collapses(1, 99));
+        // three same-shape neighbours are already table-shaped
+        assert!(cluster_collapses(3, 3));
+    }
+
+    /// Build a carved-key fixture at the given location (the stealc token shape).
+    ///
+    /// # Arguments
+    ///
+    /// * `section` - The section the token was carved from
+    /// * `addr` - The absolute address the token starts at
+    fn carved_fixture(section: &str, addr: u64) -> CarvedKey {
+        CarvedKey {
+            section: section.to_string(),
+            addr,
+            token: "OHVbn3Fdv/sgvP9VRO/9OQ==".to_string(),
+            decoded: decode::base64::decode("OHVbn3Fdv/sgvP9VRO/9OQ==").unwrap(),
+        }
+    }
+
+    /// Carved tokens group per section within the cluster gap and split otherwise.
+    #[test]
+    fn cluster_carved_keys_groups_table_runs() {
+        let carved = vec![
+            carved_fixture(".rodata", 0x1000),
+            carved_fixture(".rodata", 0x1100),
+            carved_fixture(".rodata", 0x1a00),
+            // a far-away token starts its own cluster
+            carved_fixture(".rodata", 0x9_0000),
+            // ...and a different section always does
+            carved_fixture(".data", 0x9_0010),
+        ];
+        let clusters = cluster_carved_keys(carved);
+        let sizes: Vec<usize> = clusters.iter().map(Vec::len).collect();
+        assert_eq!(sizes, vec![3, 1, 1]);
+    }
+
+    /// A stealc-style cluster is reshaped into one correctly-framed string-table lead
+    /// that keeps the table pointer the confirming agents used.
+    #[test]
+    fn key_cluster_hit_frames_the_string_table() {
+        // five table entries starting at a confirmed stealc table address
+        let cluster: Vec<CarvedKey> = (0..5u64)
+            .map(|idx| carved_fixture(".rdata", 0x1_4007_da08 + idx * 0x78))
+            .collect();
+        let hit = key_cluster_hit(&cluster, 5, Some(0x1_4000_1000));
+        // one Likely/60 lead framed as a table, not five Likely/85 key findings
+        assert!(matches!(hit.confidence, Confidence::Likely));
+        assert_eq!(hit.suspicion, 60);
+        assert!(hit.content.contains("5 same-shape base64 blobs"));
+        assert!(hit.content.contains("not 5 independent keys"));
+        // the pointer survives: the table range and every member address
+        assert!(hit.content.contains("0x14007da08"));
+        assert_eq!(hit.sites.len(), 5);
+        assert_eq!(hit.function, Some(0x1_4000_1000));
+        // no key artifact: nothing here is a validated key, so no pivot shield
+        assert!(hit.artifact.is_none());
+        assert!(
+            hit.name
+                .as_deref()
+                .unwrap()
+                .contains("Encoded String Table")
+        );
+    }
+
+    /// P-less Q-constant hits gain the hash-mixer/TEA framing note and the
+    /// always-noise mark at unchanged severity; co-scanned non-Q weak hits are
+    /// untouched.
+    #[test]
+    fn q_hits_annotated_when_p_is_absent() {
+        // a disputed shape: Q matched inside a Fibonacci-multiplier immediate
+        let mut hits = vec![
+            DetectionHit::new(
+                T1486,
+                0x1_0023_0634,
+                None,
+                low(),
+                "RC5/RC6/TEA magic constant Q (LE) constant @ 0x100230634 (section .text)",
+                "Contains the golden-ratio constant Q (0x9E3779B9)",
+            ),
+            DetectionHit::new(
+                T1486,
+                0x2000,
+                None,
+                low(),
+                "base64 standard alphabet constant @ 0x2000 (section .rodata)",
+                "Contains the standard base64 alphabet",
+            ),
+        ];
+        annotate_p_less_q_hits(&mut hits);
+        // the Q hit now frames what a P-less match does and does not support
+        assert!(hits[0].reasoning.contains("P (0xB7E15163) is absent"));
+        assert!(hits[0].reasoning.contains("TEA"));
+        // still seeded at the same weak severity (routing stays the seeder's call)
+        assert!(matches!(hits[0].confidence, Confidence::Untrusted));
+        assert_eq!(hits[0].suspicion, 15);
+        // and marked as noise the seeder may roll up regardless of toolchain
+        assert!(hits[0].always_noise);
+        // the base64 hit is not a Q hit and is untouched
+        assert!(!hits[1].reasoning.contains("absent"));
+        assert!(!hits[1].always_noise);
+    }
+
+    /// The catalogs mark only the inherently noisy entries as always-noise.
+    #[test]
+    fn noise_assertions_cover_the_ubiquitous_entries() {
+        // both base64 alphabets are noise wherever they appear; the Q constants
+        // are not (the P-absence annotation decides that per image)
+        for sig in WEAK_SIGS {
+            let expected = sig.name.starts_with("base64");
+            assert_eq!(sig.always_noise, expected, "{}", sig.name);
+        }
+        // the presence-only CryptoAPI utility calls are noise; the cipher calls are not
+        for spec in APIS {
+            let expected = matches!(spec.key, "CryptAcquireContext" | "CryptStringToBinary");
+            assert_eq!(spec.always_noise, expected, "{}", spec.key);
+        }
+    }
+
+    /// `CryptoAPI` reasonings are capability-neutral: the dual-use roles are named and
+    /// no ransomware role is asserted.
+    #[test]
+    fn apis_use_capability_neutral_wording() {
+        for spec in APIS {
+            // the asserted-role claims that drew the disputes are gone
+            assert!(
+                !spec.reasoning.contains("core of ransomware"),
+                "{}",
+                spec.key
+            );
+            assert!(
+                !spec.reasoning.contains("ransomware key-management"),
+                "{}",
+                spec.key
+            );
+            assert!(
+                !spec.reasoning.contains("ransomware crypto scheme"),
+                "{}",
+                spec.key
+            );
+        }
+        // the encrypt API names the dual-use roles and conditions the T1486 claim
+        let encrypt = APIS.iter().find(|spec| spec.key == "CryptEncrypt").unwrap();
+        assert!(encrypt.reasoning.contains("C2"));
+        assert!(encrypt.reasoning.contains("T1486 only"));
+        // key import names the C2 exchange the disputes kept pointing at
+        let import = APIS
+            .iter()
+            .find(|spec| spec.key == "CryptImportKey")
+            .unwrap();
+        assert!(import.reasoning.contains("C2 session-key exchange"));
+        // the provider-setup call admits it is capability-neutral
+        let acquire = APIS
+            .iter()
+            .find(|spec| spec.key == "CryptAcquireContext")
+            .unwrap();
+        assert!(acquire.reasoning.contains("capability-neutral"));
     }
 }

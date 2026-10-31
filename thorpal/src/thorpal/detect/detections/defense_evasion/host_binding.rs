@@ -22,9 +22,14 @@
 //! 2. **Name candidates** — computer, domain, and account names have no shape at
 //!    all, so they are only recovered from *inside* a function that calls a name
 //!    enumerator. The enumeration is what makes the literal a candidate.
-//! 3. **Binary identifiers** — six-byte MAC and sixteen-byte GUID values stored
-//!    as bytes rather than text, searched **only** in the buffers that
-//!    enumerating functions reference.
+//! 3. **Binary identifiers** — sixteen-byte GUID values stored as bytes rather
+//!    than text, searched **only** in the buffers that enumerating functions
+//!    reference. The GUID is the only shape searched at the byte level: its
+//!    version and variant fields are checkable structure, where six raw MAC
+//!    bytes have none — a byte-level MAC search fabricates addresses out of
+//!    ordinary compiler output (format strings, C++ metadata, security cookies,
+//!    import tables) faster than neighbourhood tests can reject them, so a
+//!    stored MAC is only ever recovered from a text rendering.
 //! 4. **Pooled literals** — the same rendered shapes as (1), but read out of the
 //!    raw bytes of the data blocks, so that a value in a concatenated literal
 //!    pool the string finder never split into strings is still recovered.
@@ -32,15 +37,18 @@
 //! # Why the enumerator matters so much here
 //!
 //! Every one of these shapes is cheap to match and expensive to be wrong about.
-//! A six-byte pattern occurs constantly in any binary; an `XXXX-XXXX` hex run is
-//! also a part number; a short identifier is also a registry subkey. What
+//! A rendered identifier also appears in documentation; an `XXXX-XXXX` hex run
+//! is also a part number; a short identifier is also a registry subkey. What
 //! separates an environmental key from a coincidence is not the value — it is
 //! that the program *asks the operating system for the same class of value* and
-//! then compares. So a literal with no enumerator anywhere near it is reported
-//! at [`low`] and [`EvidenceKind::ContextOnly`]; a literal inside an enumerating
-//! function is [`medium`]; and only an observed comparison feeding a branch
-//! earns [`EvidenceKind::ControlFlowGated`], which is what lets `validate.rs`
-//! confirm it. Nothing here is ever *emitted* at `Confidence::Fact` — a shape
+//! then compares. So a literal with no observed comparison is reported at
+//! [`low`] and [`EvidenceKind::ContextOnly`] whether or not an enumerating
+//! function references it — co-location is attribution, not evidence of keying —
+//! and only an observed comparison feeding a branch earns [`medium`] and
+//! [`EvidenceKind::ControlFlowGated`], which is what lets `validate.rs` confirm
+//! it. That comparison tier is also the only one that claims **T1480.001** at
+//! all; everything short of it is reported as **T1082** identity context (see
+//! [`score_identity`]). Nothing here is ever *emitted* at `Confidence::Fact` — a shape
 //! match is not a fact about the machine it appears to name. A hit can still
 //! reach the top of the scale afterwards, but only on evidence this module does
 //! not have: a branch `validate.rs` observed, or capa independently asserting the
@@ -58,6 +66,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::{Context, Result};
 
+use crate::thorpal::detect::confidence::Confidence;
 use crate::thorpal::detect::context::{AnalysisContext, Section, fmt_addr, parse_addr};
 use crate::thorpal::detect::decode::buffers::referencing_function;
 use crate::thorpal::detect::detections::{
@@ -65,7 +74,7 @@ use crate::thorpal::detect::detections::{
     is_library_function, low, medium, normalize,
 };
 use crate::thorpal::detect::indicators::{
-    HostIdKind, find_blob_host_identifiers, find_host_identifiers, is_degenerate_mac,
+    HostIdKind, HostIdMatch, find_blob_host_identifiers, find_host_identifiers, is_ubiquitous_guid,
     match_runtime_marker, plausible_host_name,
 };
 
@@ -96,68 +105,12 @@ const BLOB_REF_WINDOW: u64 = 256;
 /// How many bytes of a referenced buffer the binary scan reads.
 ///
 /// The scan is deliberately narrow: it looks at what an enumerating function
-/// points at, not at the whole image. A structure holding an adapter address or
-/// a machine GUID sits within a few hundred bytes of the pointer that reaches it.
+/// points at, not at the whole image. A structure holding a machine GUID sits
+/// within a few hundred bytes of the pointer that reaches it.
 const BINARY_SCAN_WINDOW: usize = 512;
 
-/// How many bytes either side of a binary MAC candidate are read to decide whether
-/// it is really a slice of a table.
-///
-/// Wide enough to hold several elements of any plausible stride — four elements of
-/// the widest [`crate::thorpal::detect::decode::recover`] tests for — and narrow enough that a single
-/// adapter structure next to unrelated data is judged on its own bytes.
-const MAC_CONTEXT_RADIUS: usize = 24;
-
-/// How long a run of text a binary MAC candidate may touch before it is read as a
-/// slice of that text rather than as an address.
-///
-/// Six printable bytes in a row are unremarkable — a real address hits the printable
-/// range about a third of the time per octet — so the bar is on the run the candidate
-/// belongs to, not on the candidate. Eight is past the length any address can reach on
-/// its own (six bytes) and short enough to catch the string fragments that produce
-/// these: a program name, a flag word, a fragment of a usage banner.
-const MAC_TEXT_RUN: usize = 8;
-
-/// How much of a binary MAC candidate must lie inside a run of text before the run
-/// explains it.
-///
-/// A candidate that merely abuts a string — a printable byte or two of overlap with a
-/// long banner next door — is not a slice of it. Half the candidate is the bar, and it
-/// is safe to set that low because C strings are terminated: a real datum stored after
-/// one is separated from it by the NUL, which breaks the run, so the only candidates
-/// that reach into a long run of text are the ones cut out of it.
-const MAC_TEXT_OVERLAP: usize = 3;
-
-/// What share of a binary MAC candidate's neighbourhood must be printable ASCII or
-/// NUL before the neighbourhood is read as a string table rather than as data.
-///
-/// [`in_text_run`] measures one run and needs it to be [`MAC_TEXT_RUN`] long, which a
-/// table of short strings never is: `--help\0\0--sleep\0--delay\0` is six-, seven-,
-/// and six-byte runs, so a window straddling any of them reads as an address with two
-/// NULs in it — under the half-zeros bar and past every other test [`render_mac`] has.
-/// The table is obvious a little further out, though, because a C string table is
-/// nothing but printable bytes and terminators.
-///
-/// The bar is total — *every* byte in the neighbourhood — which is both where the
-/// measurement puts it and the most conservative place it could go. Swept over the
-/// sample binaries' data sections, of the 241,735 six-byte windows that clear
-/// [`render_mac`] and [`in_int_table`], the density buckets are flat at two to five
-/// thousand windows each until the last one:
-///
-/// | neighbourhood printable-or-NUL | windows | share |
-/// |--------------------------------|---------|-------|
-/// | 90–94%                         | 11,108  | 4.6%  |
-/// | 95–99%                         | 7,222   | 3.0%  |
-/// | 100%                           | 43,695  | 18.1% |
-///
-/// The sixfold spike in the last bucket is the string tables and nothing else, so the
-/// knee is at the top and there is no reason to reach below it. What that costs a
-/// genuine address is bounded by the candidate's own six bytes, which are inside the
-/// window it is judged on: one byte of a stored address that is neither printable nor
-/// NUL — a high byte, a control byte — puts the neighbourhood under 100% by itself and
-/// makes the test unreachable. Six such bytes in a row land in range about six times in
-/// a hundred, and those six must then be surrounded by nothing but text.
-const MAC_STRING_TABLE_SHARE: usize = 100;
+/// How many bytes a GUID occupies when stored as raw data.
+const GUID_BYTE_LEN: u64 = 16;
 
 /// The widths a stored address is written at, in bytes.
 ///
@@ -175,12 +128,24 @@ const POINTER_WIDTHS: [u64; 2] = [8, 4];
 /// crowd out its one MAC address. Truncation is always logged.
 const MAX_PER_CLASS: usize = 24;
 
+/// The most GUID literal findings reported when nothing reads a machine GUID.
+///
+/// Without an observed GUID enumerator, GUID-shaped literals are overwhelmingly
+/// interface identifiers, resource references, and toolchain constants, so only
+/// a handful are worth a finding each; the rest fold into one summary line (see
+/// [`guid_overflow_hit`]). The allowance is deliberately above the one-to-three
+/// unique campaign GUIDs a keyed sample actually carries.
+const MAX_UNATTRIBUTED_GUIDS: usize = 6;
+
 /// The most name candidates reported from any single enumerating function.
 ///
-/// A function that reads the computer name and then formats it into a dozen log
-/// messages references a dozen strings; the first few are enough to show the
-/// analyst what is being compared.
-const MAX_NAMES_PER_FUNCTION: usize = 8;
+/// Candidates are already comparison-gated (see [`name_candidate_hits`]), so a
+/// function legitimately checking a name list needs only a few shown
+/// individually; anything past the cap folds into one summary line.
+const MAX_NAMES_PER_FUNCTION: usize = 3;
+
+/// The most overflowed values a summary line spells out before counting the rest.
+const MAX_LISTED_OVERFLOW: usize = 12;
 
 /// What a host-identity value describes.
 ///
@@ -226,20 +191,6 @@ impl IdentityClass {
             HostIdKind::MacAddress => Self::MacAddress,
             HostIdKind::Guid => Self::Guid,
             HostIdKind::VolumeSerial => Self::VolumeSerial,
-        }
-    }
-
-    /// How many bytes this class occupies when stored as raw data.
-    ///
-    /// Only the two classes [`scan_window`] searches for have a fixed width; the
-    /// others are text, and are never found by the byte scan.
-    fn byte_len(self) -> u64 {
-        match self {
-            Self::MacAddress => 6,
-            Self::Guid => 16,
-            // a name or serial is a string, so its width is whatever it is — no
-            // caller reaches this, and one byte claims nothing beyond the value
-            Self::VolumeSerial | Self::MachineName | Self::AccountName => 1,
         }
     }
 
@@ -542,6 +493,15 @@ struct EnumeratingFunction {
     labels: BTreeSet<&'static str>,
     /// The call sites of the enumerators, when they were resolved from imports.
     sites: Vec<u64>,
+    /// Whether this function *is* a linked runtime's own routine.
+    ///
+    /// Set when a [`RUNTIME_ENUMERATORS`] marker matched the function's name: the
+    /// marker names the runtime's wrapper itself (`os.Hostname`, `whoami::`), not
+    /// a caller of it, so the function's data references are the runtime reaching
+    /// its own tables. A wrapper still anchors the enumeration finding — the read
+    /// is real — but it never anchors a stored-value scan, a name candidate, or
+    /// the attribution of a recovered value (see [`anchor_for`]).
+    runtime_wrapper: bool,
 }
 
 impl EnumeratingFunction {
@@ -573,24 +533,57 @@ impl Detection for HostBinding {
         let mut hits = Vec::new();
         // report the enumeration itself (T1082), so the analyst sees the read even
         // when no stored value is recovered to compare it against
-        hits.extend(enumeration_hits(ctx, &enumerators));
+        hits.extend(enumeration_hits(
+            |entry| ctx.function_name(entry).map(str::to_string),
+            &enumerators,
+        ));
         // ...and the same read where stripping left only the runtime's own name table
         hits.extend(runtime_symbol_hits(ctx, &enumerators));
+        // whether anything reads a machine GUID: without that read, GUID literals
+        // fall under the tighter unattributed allowance
+        let guid_enumerated = enumerators
+            .values()
+            .any(|record| record.classes.contains(&IdentityClass::Guid));
         // the two text passes search the same bytes by different routes, so they share
-        // a cap tally and a set of claimed addresses: a value the string table already
-        // yielded must not be reported a second time by the raw scan
+        // a cap tally, a set of claimed addresses (a value the string table already
+        // yielded must not be reported a second time by the raw scan), and the list of
+        // unattributed GUIDs their caps dropped
         let mut counts: BTreeMap<IdentityClass, usize> = BTreeMap::new();
         let mut claimed: BTreeSet<u64> = BTreeSet::new();
+        let mut guid_overflow: Vec<(String, u64)> = Vec::new();
         // 1) identity values rendered as text in the string table
-        hits.extend(literal_hits(ctx, &enumerators, &mut counts, &mut claimed).await?);
+        hits.extend(
+            literal_hits(
+                ctx,
+                &enumerators,
+                &mut counts,
+                &mut claimed,
+                guid_enumerated,
+                &mut guid_overflow,
+            )
+            .await?,
+        );
         // 2) name literals, which have no shape and are only candidates because an
         //    enumerating function references them
         hits.extend(name_candidate_hits(ctx, &enumerators).await?);
-        // 3) identity values stored as raw bytes in the buffers those functions reach
+        // 3) GUIDs stored as raw bytes in the buffers those functions reach
         hits.extend(binary_hits(ctx, &enumerators).await?);
         // 4) ...and the text renderings the string finder could not see, because the
         //    literal they sit in was never terminated
-        hits.extend(blob_literal_hits(ctx, &enumerators, &mut counts, &claimed).await?);
+        hits.extend(
+            blob_literal_hits(
+                ctx,
+                &enumerators,
+                &mut counts,
+                &claimed,
+                guid_enumerated,
+                &mut guid_overflow,
+            )
+            .await?,
+        );
+        // the GUIDs the unattributed allowance dropped, as one visible summary line
+        // rather than a silent truncation
+        hits.extend(guid_overflow_hit(&guid_overflow));
         Ok(hits)
     }
 }
@@ -632,6 +625,7 @@ async fn find_enumerators(ctx: &AnalysisContext) -> Result<HashMap<u64, Enumerat
                 classes: BTreeSet::new(),
                 labels: BTreeSet::new(),
                 sites: Vec::new(),
+                runtime_wrapper: false,
             });
             record.classes.insert(spec.class);
             record.labels.insert(spec.label);
@@ -654,9 +648,12 @@ async fn find_enumerators(ctx: &AnalysisContext) -> Result<HashMap<u64, Enumerat
             classes: BTreeSet::new(),
             labels: BTreeSet::new(),
             sites: Vec::new(),
+            runtime_wrapper: false,
         });
         record.classes.insert(marker.class);
         record.labels.insert(marker.label);
+        // the marker names the runtime's own routine, however it was first found
+        record.runtime_wrapper = true;
     }
     // keep the site lists tidy so the validator sees each site once
     for record in found.values_mut() {
@@ -672,13 +669,16 @@ async fn find_enumerators(ctx: &AnalysisContext) -> Result<HashMap<u64, Enumerat
 /// clustering, and crash reporting all do it — so this is [`low`] and carries no
 /// artifact. Its value is that it names the functions the analyst should read
 /// next, and it is the anchor everything else in this module correlates against.
+/// Functions whose recovered name marks recognized runtime/library code (glibc,
+/// the loader — see [`is_library_function`]) are skipped outright: the runtime
+/// reads identity for its own housekeeping, not as the sample's behavior.
 ///
 /// # Arguments
 ///
-/// * `ctx` - The analysis context (for function names)
+/// * `name_of` - Resolves a function entry to its recovered name, when one exists
 /// * `enumerators` - The functions found reading machine identity
 fn enumeration_hits(
-    ctx: &AnalysisContext,
+    name_of: impl Fn(u64) -> Option<String>,
     enumerators: &HashMap<u64, EnumeratingFunction>,
 ) -> Vec<DetectionHit> {
     // stable ordering so the report does not churn between runs
@@ -686,27 +686,35 @@ fn enumeration_hits(
     ordered.sort_by_key(|record| record.entry);
     ordered
         .into_iter()
-        .map(|record| {
+        .filter_map(|record| {
+            // resolve the recovered name once: it both gates and labels the hit
+            let name = name_of(record.entry);
+            // a recognized runtime/library routine (glibc, the loader) reads
+            // identity for its own housekeeping, never as the sample's behavior
+            if name.as_deref().is_some_and(is_library_function) {
+                return None;
+            }
             // anchor at the first call site when there is one, else the function
             let address = record.sites.first().copied().unwrap_or(record.entry);
-            let named = ctx
-                .function_name(record.entry)
-                .map_or_else(|| fmt_addr(record.entry), str::to_string);
-            DetectionHit::new(
-                T1082,
-                address,
-                Some(record.entry),
-                low(),
-                format!("Reads machine identity in {named}: {}", record.describe()),
-                format!(
-                    "`{named}` asks the operating system for machine-identifying values via {}. \
-                     Reading these is ordinary by itself — licensing, telemetry, clustering, and \
-                     crash reporting all do it — but it is the read that makes any stored value \
-                     of the same class in this program a candidate environmental key.",
-                    record.describe(),
-                ),
+            let named = name.unwrap_or_else(|| fmt_addr(record.entry));
+            Some(
+                DetectionHit::new(
+                    T1082,
+                    address,
+                    Some(record.entry),
+                    low(),
+                    format!("Reads machine identity in {named}: {}", record.describe()),
+                    format!(
+                        "`{named}` asks the operating system for machine-identifying values via \
+                         {}. Reading these is ordinary by itself — licensing, telemetry, \
+                         clustering, and crash reporting all do it — but it is the read that \
+                         makes any stored value of the same class in this program a candidate \
+                         environmental key.",
+                        record.describe(),
+                    ),
+                )
+                .kind(EvidenceKind::ContextOnly),
             )
-            .kind(EvidenceKind::ContextOnly)
         })
         .collect()
 }
@@ -807,7 +815,7 @@ fn runtime_symbol_hits(
 // 1) Shaped literals in the string table
 // ===========================================================================
 
-/// Whether another finding of `class` fits under the per-class cap.
+/// Whether another finding of `class` fits under `cap`.
 ///
 /// Counts the finding when it does, so a caller only has to ask. The first value a
 /// class drops is logged, once, because a silent truncation reads as "that was all
@@ -817,22 +825,29 @@ fn runtime_symbol_hits(
 ///
 /// * `counts` - The per-class tally, updated in place
 /// * `class` - The class the candidate belongs to
+/// * `cap` - The most individual findings this class may report
 /// * `source` - What the tally covers, named in the warning
-fn admits(counts: &mut BTreeMap<IdentityClass, usize>, class: IdentityClass, source: &str) -> bool {
+fn admits(
+    counts: &mut BTreeMap<IdentityClass, usize>,
+    class: IdentityClass,
+    cap: usize,
+    source: &str,
+) -> bool {
     let count = counts.entry(class).or_default();
     // under the cap: take the finding and charge it to the class
-    if *count < MAX_PER_CLASS {
+    if *count < cap {
         *count += 1;
         return true;
     }
     // exactly at the cap: this is the first value being dropped, so say so and step
     // one past the cap to keep the rest of the class quiet
-    if *count == MAX_PER_CLASS {
+    if *count == cap {
         tracing::warn!(
             class = class.label(),
-            cap = MAX_PER_CLASS,
+            cap,
             source,
-            "host-identity cap reached; further values of this class are omitted from the report"
+            "host-identity cap reached; further values of this class are left out of the \
+             per-value findings"
         );
         *count += 1;
     }
@@ -841,12 +856,21 @@ fn admits(counts: &mut BTreeMap<IdentityClass, usize>, class: IdentityClass, sou
 
 /// Recover MAC, GUID, and volume-serial literals and attribute each to a function.
 ///
+/// GUIDs carry two pieces of flood control the rarer shapes do not need: the
+/// ubiquitous platform identifiers are dropped outright (see
+/// [`is_ubiquitous_guid`]), and the GUIDs found inside one defined string are
+/// reported as one finding listing them all rather than one finding each — a
+/// string holding several is a stored table, and each sibling is more of the one
+/// fact, not another fact.
+///
 /// # Arguments
 ///
 /// * `ctx` - The analysis context
 /// * `enumerators` - The functions found reading machine identity
 /// * `counts` - The per-class cap tally, shared with [`blob_literal_hits`]
 /// * `claimed` - The addresses reported here, recorded for [`blob_literal_hits`]
+/// * `guid_enumerated` - Whether anything was observed reading a machine GUID
+/// * `guid_overflow` - The unattributed GUIDs dropped by the cap, for the summary
 ///
 /// # Errors
 ///
@@ -857,7 +881,16 @@ async fn literal_hits(
     enumerators: &HashMap<u64, EnumeratingFunction>,
     counts: &mut BTreeMap<IdentityClass, usize>,
     claimed: &mut BTreeSet<u64>,
+    guid_enumerated: bool,
+    guid_overflow: &mut Vec<(String, u64)>,
 ) -> Result<Vec<DetectionHit>> {
+    // the GUID allowance: with no GUID read observed anywhere, far fewer GUID
+    // literals are worth a finding each
+    let guid_cap = if guid_enumerated {
+        MAX_PER_CLASS
+    } else {
+        MAX_UNATTRIBUTED_GUIDS
+    };
     let mut hits = Vec::new();
     // built lazily: only an unreferenced literal needs the data-reference index
     let mut index: Option<Vec<(u64, u64)>> = None;
@@ -870,13 +903,18 @@ async fn literal_hits(
         let Some(base) = parse_addr(&string.address) else {
             continue;
         };
-        for found in matches {
-            let class = IdentityClass::from_shape(found.kind);
-            // record where the value sits before any cap can drop it, so the raw scan
-            // stays quiet about it either way — a capped class is already saturated
+        // record where every value sits before any filter or cap can drop it, so
+        // the raw scans stay quiet about these bytes either way
+        for found in &matches {
             claimed.insert(base.saturating_add(found.at as u64));
+        }
+        // group the string's reportable GUIDs; the other shapes pass through
+        let (guids, others) = split_string_matches(matches);
+        // MAC and serial literals: one finding per value, since the shapes are rare
+        for found in others {
+            let class = IdentityClass::from_shape(found.kind);
             // honor the per-class cap, logging the first value dropped
-            if !admits(counts, class, "string table") {
+            if !admits(counts, class, MAX_PER_CLASS, "string table") {
                 continue;
             }
             // find the functions that use this literal, preferring real xrefs
@@ -895,8 +933,133 @@ async fn literal_hits(
                 .await?,
             );
         }
+        // GUIDs: one finding for the whole string, however many it holds
+        if guids.is_empty() {
+            continue;
+        }
+        if !admits(counts, IdentityClass::Guid, guid_cap, "string table") {
+            // the summary line stands in for the values the unattributed cap drops
+            if !guid_enumerated {
+                guid_overflow.extend(guids.into_iter().map(|found| (found.value, base)));
+            }
+            continue;
+        }
+        // find the functions that use this literal, preferring real xrefs
+        let users = literal_users(ctx, &string.address, base, DATA_REF_WINDOW, &mut index).await?;
+        // the origin names every sibling GUID, so the one finding lists them all;
+        // scoring reads the first value, which costs nothing real — a string
+        // holding several GUIDs is a stored table, not a compared key
+        let origin = if guids.len() == 1 {
+            format!("string literal at {}", fmt_addr(base))
+        } else {
+            format!(
+                "string literal at {} holding {} GUIDs: {}",
+                fmt_addr(base),
+                guids.len(),
+                guids
+                    .iter()
+                    .map(|found| format!("`{}`", found.value))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )
+        };
+        hits.push(
+            build_identity_hit(
+                ctx,
+                enumerators,
+                IdentityClass::Guid,
+                &guids[0].value,
+                base,
+                &users,
+                &origin,
+            )
+            .await?,
+        );
     }
     Ok(hits)
+}
+
+/// Split one defined string's identity matches into reportable GUIDs and the rest.
+///
+/// The GUIDs come back as one group — several GUIDs inside one defined string are
+/// one stored table, reported as one finding — with the ubiquitous platform
+/// identifiers already dropped; the other shapes pass through untouched for their
+/// per-value findings.
+///
+/// # Arguments
+///
+/// * `matches` - Every identity literal found in the string, in text order
+fn split_string_matches(matches: Vec<HostIdMatch>) -> (Vec<HostIdMatch>, Vec<HostIdMatch>) {
+    // split the GUIDs from the other shapes
+    let (guids, others): (Vec<_>, Vec<_>) = matches
+        .into_iter()
+        .partition(|found| found.kind == HostIdKind::Guid);
+    // drop the interface and class identifiers every COM/DirectX client carries
+    let guids = guids
+        .into_iter()
+        .filter(|found| !is_ubiquitous_guid(&found.value))
+        .collect();
+    (guids, others)
+}
+
+/// Render a bounded, backtick-quoted list of overflowed values.
+///
+/// # Arguments
+///
+/// * `values` - The values to list, in report order
+fn list_values<'a>(values: impl ExactSizeIterator<Item = &'a str>) -> String {
+    // how many are left unspelled once the listing is bounded
+    let rest = values.len().saturating_sub(MAX_LISTED_OVERFLOW);
+    // quote the bounded prefix
+    let listed = values
+        .take(MAX_LISTED_OVERFLOW)
+        .map(|value| format!("`{value}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    // count the tail rather than spelling it, so the summary stays one line
+    if rest > 0 {
+        format!("{listed} and {rest} more")
+    } else {
+        listed
+    }
+}
+
+/// One summary finding for the unattributed GUIDs past the reporting cap.
+///
+/// Emitted only when nothing in the program was observed reading a machine GUID
+/// (see [`MAX_UNATTRIBUTED_GUIDS`]): the dropped values are named in one line so
+/// the truncation is visible without each value spending a finding of its own.
+/// Returns `None` when nothing was dropped.
+///
+/// # Arguments
+///
+/// * `overflow` - The dropped `(value, address)` pairs, in recovery order
+fn guid_overflow_hit(overflow: &[(String, u64)]) -> Option<DetectionHit> {
+    // the first dropped value anchors the summary; none dropped means no summary
+    let (_, address) = overflow.first()?;
+    // spell the values out, bounded so a flooded binary stays one line
+    let listed = list_values(overflow.iter().map(|(value, _)| value.as_str()));
+    Some(
+        DetectionHit::new(
+            T1082,
+            *address,
+            None,
+            low(),
+            format!(
+                "{} further GUID literals beyond the unattributed reporting cap",
+                overflow.len()
+            ),
+            format!(
+                "Nothing in this program was observed reading a machine GUID, so GUID-shaped \
+                 literals are reported individually only up to a cap of \
+                 {MAX_UNATTRIBUTED_GUIDS}. {} more were recovered past it: {listed}. Without an \
+                 enumerator these are overwhelmingly interface identifiers, resource references, \
+                 and toolchain constants rather than environmental keys.",
+                overflow.len(),
+            ),
+        )
+        .kind(EvidenceKind::ContextOnly),
+    )
 }
 
 /// Resolve the functions that reference a literal, falling back to its buffer.
@@ -959,7 +1122,11 @@ async fn literal_users(
 /// generic way to find them is by where they are used: a literal referenced by
 /// the same function that just asked the OS for a name is a candidate expected
 /// value. Nothing outside such a function is considered, because outside one the
-/// filter would accept most short identifiers in the binary.
+/// filter would accept most short identifiers in the binary — and even inside
+/// one, a candidate is only reported when the function's decompilation shows the
+/// literal in a comparison. Mere co-location means nothing here: an enumerating
+/// function references its log fields, registry value names, and decoy pools
+/// just as readily as a key it checks, and only the comparison separates them.
 ///
 /// # Arguments
 ///
@@ -1004,6 +1171,11 @@ async fn name_candidate_hits(
         {
             continue;
         }
+        // nor is a linked runtime's own wrapper, which references the runtime's
+        // literals as a matter of course
+        if record.runtime_wrapper {
+            continue;
+        }
         // the class to report: prefer the account reading when both are present,
         // since an account name is the narrower claim
         let class = if record.classes.contains(&IdentityClass::AccountName) {
@@ -1013,7 +1185,22 @@ async fn name_candidate_hits(
         };
         // every static data address this function reaches that resolves to a string
         let candidates = referenced_names(ctx, record.entry, &by_address).await?;
-        for value in candidates.into_iter().take(MAX_NAMES_PER_FUNCTION) {
+        // keep only the candidates the decompilation shows in a comparison — a
+        // referenced-but-never-compared literal is a log field or a decoy, not an
+        // expected value. The decompile is memoized, so this costs no bridge
+        // traffic beyond what `build_identity_hit` fetches for scoring anyway
+        let mut gated: Vec<NameCandidate> = Vec::new();
+        for value in candidates {
+            if observed_comparison(ctx, record.entry, &value.text)
+                .await
+                .is_some()
+            {
+                gated.push(value);
+            }
+        }
+        // report the first few individually; the rest fold into one summary line
+        let overflow = gated.split_off(gated.len().min(MAX_NAMES_PER_FUNCTION));
+        for value in &gated {
             hits.push(
                 build_identity_hit(
                     ctx,
@@ -1030,8 +1217,52 @@ async fn name_candidate_hits(
                 .await?,
             );
         }
+        // the candidates past the cap, as one visible line instead of a silent drop
+        let named = ctx
+            .function_name(record.entry)
+            .map_or_else(|| fmt_addr(record.entry), str::to_string);
+        hits.extend(name_overflow_hit(&named, record.entry, &overflow));
     }
     Ok(hits)
+}
+
+/// One summary finding for a function's compared name candidates past the cap.
+///
+/// Returns `None` when nothing overflowed.
+///
+/// # Arguments
+///
+/// * `named` - The enumerating function's display name
+/// * `entry` - The enumerating function's entry address
+/// * `overflow` - The gated candidates past [`MAX_NAMES_PER_FUNCTION`]
+fn name_overflow_hit(named: &str, entry: u64, overflow: &[NameCandidate]) -> Option<DetectionHit> {
+    // nothing overflowed, so there is nothing to summarize
+    if overflow.is_empty() {
+        return None;
+    }
+    // spell the values out, bounded so a pathological function stays one line
+    let listed = list_values(overflow.iter().map(|candidate| candidate.text.as_str()));
+    Some(
+        DetectionHit::new(
+            T1082,
+            entry,
+            Some(entry),
+            low(),
+            format!(
+                "{} further stored name candidates compared in {named}",
+                overflow.len()
+            ),
+            format!(
+                "`{named}` reads a machine or account name and its decompilation shows {} \
+                 further name-shaped literals in comparisons beyond the \
+                 {MAX_NAMES_PER_FUNCTION} reported individually: {listed}. Each carries the \
+                 same evidence shape as the reported candidates and can be checked the same \
+                 way.",
+                overflow.len(),
+            ),
+        )
+        .kind(EvidenceKind::ContextOnly),
+    )
 }
 
 /// One name literal a function references.
@@ -1078,6 +1309,10 @@ async fn referenced_names(
         if !plausible_host_name(&string.value) {
             continue;
         }
+        // the inputs of enumeration itself are never the expected value
+        if is_enumeration_input(string.value.trim()) {
+            continue;
+        }
         candidates.push(NameCandidate {
             address: addr,
             text: string.value.trim().to_string(),
@@ -1086,16 +1321,53 @@ async fn referenced_names(
     Ok(candidates)
 }
 
+/// The literals that are enumeration *inputs* rather than candidate keys.
+///
+/// A function that reads host identity through the registry or the resolver
+/// references these names in order to ask the question — `RegQueryValueExA(h,
+/// "MachineGuid", …)`, glibc consulting `RES_OPTIONS` — so one of them next to an
+/// enumerator is the enumeration working as designed, not a stored expected value.
+const ENUMERATION_INPUTS: &[&str] = &[
+    // the registry value names Windows identity and licensing data is read by
+    "InstallDate",
+    "RegisteredOwner",
+    "RegisteredOrganization",
+    "MachineGuid",
+    "DigitalProductId",
+    "ProductId",
+    // the environment variables the libc resolver consults
+    "RES_OPTIONS",
+    "HOSTALIASES",
+    "LOCALDOMAIN",
+];
+
+/// Whether a name literal is one of the enumeration-input words.
+///
+/// # Arguments
+///
+/// * `value` - The trimmed literal to test
+fn is_enumeration_input(value: &str) -> bool {
+    // registry value names compare case-insensitively, so match them that way
+    ENUMERATION_INPUTS
+        .iter()
+        .any(|input| value.eq_ignore_ascii_case(input))
+}
+
 // ===========================================================================
 // 3) Binary identifiers in the buffers enumerators reach
 // ===========================================================================
 
-/// Recover six-byte MAC and sixteen-byte GUID values stored as raw bytes.
+/// Recover sixteen-byte GUID values stored as raw bytes.
 ///
 /// Scoped hard: only the buffers an enumerating function references are read,
-/// and only when the program enumerates that class of identity at all. An
-/// unscoped six-byte scan matches constantly, and an unscoped sixteen-byte GUID
-/// scan matches every compiled-in interface identifier a COM client carries.
+/// and only when the program enumerates a machine GUID at all — an unscoped
+/// sixteen-byte scan matches every compiled-in interface identifier a COM client
+/// carries. The GUID is also the only shape searched at the byte level. Six raw
+/// MAC bytes carry no verifiable structure, so scanning referenced buffers for
+/// them fabricates addresses out of format strings, C++ RTTI metadata, MSVC
+/// security cookies, and import tables faster than neighbourhood tests can
+/// reject them — stored MACs are recovered only from their text renderings (the
+/// string-table and literal-pool passes).
 ///
 /// # Arguments
 ///
@@ -1110,35 +1382,27 @@ async fn binary_hits(
     ctx: &AnalysisContext,
     enumerators: &HashMap<u64, EnumeratingFunction>,
 ) -> Result<Vec<DetectionHit>> {
-    // nothing enumerates identity, so nothing scopes the scan
-    if enumerators.is_empty() {
-        return Ok(Vec::new());
-    }
-    // which classes the program actually reads — a MAC scan is only justified by
-    // adapter enumeration, and a GUID scan only by a machine-GUID read
-    let read: BTreeSet<IdentityClass> = enumerators
+    // only an observed machine-GUID read justifies the byte-level search
+    if !enumerators
         .values()
-        .flat_map(|record| record.classes.iter().copied())
-        .collect();
-    if !read.contains(&IdentityClass::MacAddress) && !read.contains(&IdentityClass::Guid) {
+        .any(|record| record.classes.contains(&IdentityClass::Guid))
+    {
         return Ok(Vec::new());
     }
     let sections = ctx.sections().await?;
     let index = ctx.reference_index().await?;
     let mut hits = Vec::new();
     let mut counts: BTreeMap<IdentityClass, usize> = BTreeMap::new();
-    for ((class, at, value), (section, users)) in
-        collect_stored_values(&sections, &index, enumerators)
-    {
+    for ((at, value), (section, users)) in collect_stored_values(&sections, &index, enumerators) {
         // honor the per-class cap, logging the first value dropped
-        if !admits(&mut counts, class, "raw bytes") {
+        if !admits(&mut counts, IdentityClass::Guid, MAX_PER_CLASS, "raw bytes") {
             continue;
         }
         hits.push(
             build_identity_hit(
                 ctx,
                 enumerators,
-                class,
+                IdentityClass::Guid,
                 &value,
                 at,
                 &users,
@@ -1155,10 +1419,10 @@ async fn binary_hits(
     Ok(hits)
 }
 
-/// Find the stored identity values the enumerating functions reach.
+/// Find the stored GUIDs the enumerating functions reach.
 ///
-/// Returns one entry per value, keyed by what it is and where it is, holding the
-/// block it was found in and every enumerating function that reaches it.
+/// Returns one entry per value, keyed by where it is, holding the block it was
+/// found in and every enumerating function that reaches it.
 ///
 /// Collecting before building is what makes a stored value one finding. The same
 /// bytes are found again from every enumerating function whose referenced buffer
@@ -1169,11 +1433,13 @@ async fn binary_hits(
 /// functions become what they are, which is more attribution for one finding.
 ///
 /// The scan each function drives is scoped to what *that* function reads rather
-/// than to what the program reads somewhere. The only thing that makes six bytes a
-/// hardware address rather than six bytes is that they sit in a buffer belonging to
-/// a routine that handles hardware addresses, so a routine that reads the account
-/// name lends the pattern nothing, and letting it do so both invents values and
-/// credits them to a function that never touched one.
+/// than to what the program reads somewhere. The only thing that makes sixteen
+/// bytes a stored machine GUID rather than an interface identifier is that they
+/// sit in a buffer belonging to a routine that handles machine GUIDs, so a routine
+/// that reads the account name lends the pattern nothing, and letting it do so
+/// both invents values and credits them to a function that never touched one. A
+/// linked runtime's own wrapper is excluded for the same reason: its references
+/// are the runtime reaching its own tables, not the author's data.
 ///
 /// # Arguments
 ///
@@ -1184,23 +1450,19 @@ fn collect_stored_values<'a>(
     sections: &'a [Section],
     index: &[(u64, u64)],
     enumerators: &HashMap<u64, EnumeratingFunction>,
-) -> BTreeMap<(IdentityClass, u64, String), (&'a Section, Vec<u64>)> {
-    let mut candidates: BTreeMap<(IdentityClass, u64, String), (&Section, Vec<u64>)> =
-        BTreeMap::new();
+) -> BTreeMap<(u64, String), (&'a Section, Vec<u64>)> {
+    let mut candidates: BTreeMap<(u64, String), (&Section, Vec<u64>)> = BTreeMap::new();
     // walk only the data addresses the enumerating functions reference
     for (addr, entry) in index {
         let Some(record) = enumerators.get(entry) else {
             continue;
         };
-        // scan for the classes this function was seen reading, and only the two the
-        // byte scan can look for
-        let read: BTreeSet<IdentityClass> = record
-            .classes
-            .iter()
-            .copied()
-            .filter(|class| matches!(class, IdentityClass::MacAddress | IdentityClass::Guid))
-            .collect();
-        if read.is_empty() {
+        // only a function seen reading a machine GUID scopes the GUID scan
+        if !record.classes.contains(&IdentityClass::Guid) {
+            continue;
+        }
+        // a runtime's own wrapper references the runtime's data, never the author's
+        if record.runtime_wrapper {
             continue;
         }
         // read a short window; identity structures sit next to the pointer
@@ -1216,16 +1478,16 @@ fn collect_stored_values<'a>(
         if !holds_stored_data(section) {
             continue;
         }
-        for (offset, class, value) in scan_window(window, &read) {
+        for (offset, value) in scan_window(window) {
             let at = addr.saturating_add(offset as u64);
             // a candidate sharing bytes with a stored pointer is a slice of a pointer
             // table, not a value — this is judged against the whole block rather than
             // the window so a candidate at the window's edge is still judged
-            if straddles_pointer(sections, section, at, class.byte_len()) {
+            if straddles_pointer(sections, section, at, GUID_BYTE_LEN) {
                 continue;
             }
             let users = &mut candidates
-                .entry((class, at, value))
+                .entry((at, value))
                 .or_insert_with(|| (section, Vec::new()))
                 .1;
             // one function can reference two buffers that both cover the value
@@ -1274,21 +1536,19 @@ fn is_asset_section(name: &str) -> bool {
 
 /// Whether a section holds stored fields rather than instructions.
 ///
-/// A six-byte scan needs a haystack where six consecutive bytes plausibly form one
-/// value. Data blocks are such a haystack: a stored address is written as a field and
-/// read back as a field, so a match is aligned with something the program treats as a
-/// unit. Instruction bytes are not. A code block is a dense stream in which the byte
-/// boundaries belong to opcodes and operands, and a window slid across it produces
-/// address-shaped sextets at whatever offsets the encoding happens to allow — the
-/// giveaway is that several of them overlap, being different views of the same bytes,
-/// which no stored field can be.
+/// A byte scan needs a haystack where consecutive bytes plausibly form one value.
+/// Data blocks are such a haystack: a stored identifier is written as a field and
+/// read back as a field, so a match is aligned with something the program treats as
+/// a unit. Instruction bytes are not. A code block is a dense stream in which the
+/// byte boundaries belong to opcodes and operands, so a shape matched across it is
+/// a view of whatever the encoding happens to allow, not a field.
 ///
 /// Executability is the test rather than a name list because it is the property that
 /// actually matters and it holds across formats; a scan restricted to blocks Ghidra
 /// says are not executed cannot read code as data whatever the block is called. Note
 /// this also excludes the writable-and-executable block a runtime-obfuscated sample
 /// carries, which is correct for a different reason: before it is written to it holds
-/// a compressed or encrypted stream, and a six-byte pattern found in high-entropy
+/// a compressed or encrypted stream, and a shaped pattern found in high-entropy
 /// noise is chance.
 ///
 /// # Arguments
@@ -1300,23 +1560,21 @@ fn holds_stored_data(section: &Section) -> bool {
 
 /// Whether a candidate overlaps a stored pointer, and so is a slice of one.
 ///
-/// The neighbourhood tests in [`scan_window`] all ask what a region is made of —
-/// text, terminators, small integers on a stride. This one asks a different and
-/// sharper question, and gets a definite answer: a byte that belongs to a stored
-/// address cannot also belong to a hardware address, so a candidate overlapping one
-/// is not a value, it is a window that happens to span the end of one field and the
-/// start of the next.
+/// [`render_guid`] asks what a candidate's own bytes are; this asks a different and
+/// sharper question about the bytes around them, and gets a definite answer: a byte
+/// that belongs to a stored address cannot also belong to a stored identifier, so a
+/// candidate overlapping one is not a value, it is a window that happens to span the
+/// end of one field and the start of the next.
 ///
-/// The reason it matters is that pointer tables are where the remaining fabrications
-/// come from once the text tests are in place, and every compiled binary is full of
-/// them: vtables, relocated data pointers, jump tables, and — the densest source,
-/// because each of its entries is a pointer followed by a mangled type name, so the
-/// boundary between plain text and a pointer recurs every few bytes — a C++ runtime's
-/// type-descriptor table.
+/// The reason it matters is that pointer tables are where byte-scan fabrications
+/// come from, and every compiled binary is full of them: vtables, relocated data
+/// pointers, jump tables, and — the densest source, because each of its entries is a
+/// pointer followed by a mangled type name, so the boundary between plain text and a
+/// pointer recurs every few bytes — a C++ runtime's type-descriptor table.
 ///
 /// A word counts only when it is aligned to its own width and decodes to an address
 /// inside a loaded block, which is what keeps this from rejecting real values: for
-/// six arbitrary bytes to be read as part of a pointer, the bytes beside them have to
+/// arbitrary bytes to be read as part of a pointer, the bytes beside them have to
 /// land in the program's own address range, and the ranges a loaded image occupies
 /// are a vanishing fraction of what sixty-four bits can express.
 ///
@@ -1370,79 +1628,32 @@ fn read_word(section: &Section, at: u64, width: u64) -> Option<u64> {
     (value != 0).then_some(value)
 }
 
-/// Find binary MAC and GUID values inside a window of bytes.
+/// Find binary GUID values inside a window of bytes.
 ///
-/// Returns `(offset, class, rendered value)` per match.
+/// Returns `(offset, rendered value)` per match. The GUID is the only shape this
+/// scan looks for: its RFC 4122 version and variant fields are structure
+/// [`render_guid`] can verify, where six raw MAC bytes have nothing to check —
+/// any six-byte scan over real data fabricates addresses out of format strings,
+/// C++ RTTI/EH metadata, MSVC security cookies, and import tables, so stored
+/// MACs are recovered only from their separator-bearing text renderings.
 ///
 /// # Arguments
 ///
 /// * `window` - The bytes to scan
-/// * `read` - The identity classes the program was observed enumerating
-fn scan_window(
-    window: &[u8],
-    read: &BTreeSet<IdentityClass>,
-) -> Vec<(usize, IdentityClass, String)> {
+fn scan_window(window: &[u8]) -> Vec<(usize, String)> {
     let mut found = Vec::new();
-    // GUIDs first: sixteen bytes with real structure, so they are far safer to
-    // claim than six arbitrary ones, and they consume the bytes a MAC would take.
-    // The search runs whether or not the program was seen reading a GUID, because
-    // its two jobs are separable: only an observed enumerator makes a GUID worth
-    // *reporting*, but the bytes are spoken for either way, and a well-known device
-    // or interface class GUID sliced six bytes at a time is otherwise one of the
-    // richest sources of fabricated addresses a Windows binary has
-    let mut claimed: Vec<(usize, usize)> = Vec::new();
-    let report_guids = read.contains(&IdentityClass::Guid);
     // step over a match rather than past it by one: two GUIDs cannot overlap, so
     // a byte already inside one is not the start of another
     let mut offset = 0;
     while offset + 16 <= window.len() {
-        let bytes = &window[offset..offset + 16];
-        if let Some(value) = render_guid(bytes) {
-            if report_guids {
-                found.push((offset, IdentityClass::Guid, value));
-            }
-            claimed.push((offset, offset + 16));
+        // claim the sixteen bytes when they verify as a GUID
+        if let Some(value) = render_guid(&window[offset..offset + 16]) {
+            found.push((offset, value));
             offset += 16;
             continue;
         }
         offset += 1;
     }
-    if read.contains(&IdentityClass::MacAddress) {
-        // same non-overlap rule, and it matters far more here: six bytes carry no
-        // internal structure, so a table this slides across yields a fresh "address"
-        // at every single byte offset, each one a shifted copy of the last
-        let mut offset = 0;
-        while offset + 6 <= window.len() {
-            // never re-report bytes a GUID already accounts for
-            if let Some((_, end)) = claimed
-                .iter()
-                .find(|(start, end)| offset < *end && *start < offset + 6)
-            {
-                offset = *end;
-                continue;
-            }
-            // six bytes cannot tell a table apart from an address, nor a fragment of
-            // a string apart from one, so ask the bytes around them: a candidate
-            // lying inside a stride table with a column that is empty in every
-            // element is a slice of that table, most often one straddling the
-            // boundary between two of its elements, a candidate lying inside a run
-            // of text is a slice of the text, and a candidate whose neighbourhood is
-            // nothing but text and terminators is a slice of a table of short strings
-            // that no single run of is long enough to explain it
-            if !in_int_table(window, offset)
-                && !in_text_run(window, offset)
-                && !in_string_table(window, offset)
-            {
-                if let Some(value) = render_mac(&window[offset..offset + 6]) {
-                    found.push((offset, IdentityClass::MacAddress, value));
-                    offset += 6;
-                    continue;
-                }
-            }
-            offset += 1;
-        }
-    }
-    found.sort_by_key(|(offset, _, _)| *offset);
     found
 }
 
@@ -1486,174 +1697,6 @@ fn render_guid(bytes: &[u8]) -> Option<String> {
     ))
 }
 
-/// Whether the six bytes at `offset` sit inside a table of little-endian integers.
-///
-/// [`render_mac`] judges a candidate on its own six bytes, which is all it has, and
-/// that is not enough against the shape that produces most fabricated addresses: a
-/// compiler-emitted table of offsets or pointers, whose elements are far smaller
-/// than the width they are stored in and so carry a column of zeros at every stride.
-/// A six-byte window slid across one of those picks up the tail of one element and
-/// the head of the next, and the result is two zero bytes and four plausible ones —
-/// one short of the all-zero-OUI and half-zeros bars, and indistinguishable from a
-/// real address without looking wider.
-///
-/// So look wider. [`crate::thorpal::detect::decode::recover::is_wide_int_table`] already names this
-/// exact layout for the decode engine; the same test over the candidate's
-/// neighbourhood answers the same question here.
-///
-/// # Arguments
-///
-/// * `window` - The scanned bytes
-/// * `offset` - Where in `window` the six-byte candidate starts
-fn in_int_table(window: &[u8], offset: usize) -> bool {
-    // read the candidate plus a margin either side, clamped to the window
-    let start = offset.saturating_sub(MAC_CONTEXT_RADIUS);
-    let end = offset
-        .saturating_add(6 + MAC_CONTEXT_RADIUS)
-        .min(window.len());
-    crate::thorpal::detect::decode::recover::is_wide_int_table(&window[start..end])
-}
-
-/// Whether the six bytes at `offset` sit inside a run of text.
-///
-/// The other half of what [`render_mac`] cannot see from six bytes. A binary's data
-/// blocks are mostly strings — program names, format templates, usage banners, log
-/// messages — and a six-byte window slid along one of those produces an address at
-/// every offset, each a shifted copy of the last, all of them plausible: text bytes
-/// are non-zero, non-repeating, and rarely all-even, so every filter in `render_mac`
-/// passes. String terminators make it worse rather than better, because the pair of
-/// NULs between two literals reads as the leading zeros of a sparse-looking address.
-///
-/// So measure the run the candidate belongs to. The candidate's bytes are extended
-/// through their printable neighbours in both directions; if the run that results is
-/// long enough to be a real string ([`MAC_TEXT_RUN`]) and enough of the candidate is
-/// inside it ([`MAC_TEXT_OVERLAP`]), the string explains the bytes and no address is
-/// claimed. An adapter address stored next to a string is untouched: it overlaps that
-/// string's run by at most a byte or two of its own.
-///
-/// # Arguments
-///
-/// * `window` - The scanned bytes
-/// * `offset` - Where in `window` the six-byte candidate starts
-fn in_text_run(window: &[u8], offset: usize) -> bool {
-    // the printable bytes of the candidate itself, as a span within it — a candidate
-    // split by a NUL is judged on the longer side, since that is the side that
-    // continues into a string
-    let Some((seed_start, seed_len)) = longest_text_span(&window[offset..offset + 6]) else {
-        return false;
-    };
-    if seed_len < MAC_TEXT_OVERLAP {
-        return false;
-    }
-    // walk the run out through the neighbouring bytes in both directions
-    let mut start = offset + seed_start;
-    let mut end = start + seed_len;
-    while start > 0 && is_text_byte(window[start - 1]) {
-        start -= 1;
-    }
-    while end < window.len() && is_text_byte(window[end]) {
-        end += 1;
-    }
-    end - start >= MAC_TEXT_RUN
-}
-
-/// Whether the six bytes at `offset` sit inside a table of short strings.
-///
-/// The gap between the other two neighbourhood tests. [`in_int_table`] wants a column
-/// of zeros on a stride and [`in_text_run`] wants one run of [`MAC_TEXT_RUN`] bytes;
-/// a run of option names or error strings is neither — each string is too short to
-/// clear the run bar on its own, and the NULs between them fall wherever the strings
-/// end rather than on any stride. What the region does have is composition: it is
-/// made of printable bytes and terminators and nothing else, which data holding a
-/// stored address is not ([`MAC_STRING_TABLE_SHARE`] records the measurement).
-///
-/// # Arguments
-///
-/// * `window` - The scanned bytes
-/// * `offset` - Where in `window` the six-byte candidate starts
-fn in_string_table(window: &[u8], offset: usize) -> bool {
-    // read the candidate plus a margin either side, clamped to the window
-    let start = offset.saturating_sub(MAC_CONTEXT_RADIUS);
-    let end = offset
-        .saturating_add(6 + MAC_CONTEXT_RADIUS)
-        .min(window.len());
-    let context = &window[start..end];
-    // a neighbourhood too small to have a composition is not evidence of one
-    if context.len() < 6 + MAC_CONTEXT_RADIUS {
-        return false;
-    }
-    // every byte either belongs to a string or terminates one
-    let textual = context
-        .iter()
-        .filter(|byte| is_text_byte(**byte) || **byte == 0)
-        .count();
-    textual * 100 >= context.len() * MAC_STRING_TABLE_SHARE
-}
-
-/// Whether a byte is one a string would be made of.
-///
-/// Printable ASCII plus the three whitespace controls a banner or a log template
-/// carries. Deliberately not the high range: a byte over `0x7f` is as likely to be
-/// binary as it is to be one half of a UTF-8 codepoint, and reading it as text would
-/// let any dense region pass for a string.
-///
-/// # Arguments
-///
-/// * `byte` - The byte to classify
-fn is_text_byte(byte: u8) -> bool {
-    (0x20..=0x7e).contains(&byte) || matches!(byte, b'\t' | b'\n' | b'\r')
-}
-
-/// The longest run of text bytes in `bytes`, as `(start, length)`.
-///
-/// # Arguments
-///
-/// * `bytes` - The bytes to search
-fn longest_text_span(bytes: &[u8]) -> Option<(usize, usize)> {
-    let mut best: Option<(usize, usize)> = None;
-    let mut run_start = None;
-    // close the open run at every non-text byte, and once more past the end
-    for index in 0..=bytes.len() {
-        match (index < bytes.len() && is_text_byte(bytes[index]), run_start) {
-            (true, None) => run_start = Some(index),
-            (false, Some(start)) => {
-                let len = index - start;
-                if best.is_none_or(|(_, best_len)| len > best_len) {
-                    best = Some((start, len));
-                }
-                run_start = None;
-            }
-            _ => {}
-        }
-    }
-    best
-}
-
-/// Render six bytes as a MAC address, if they could plausibly be one.
-///
-/// Six bytes have no internal structure to check, so the only available filters are
-/// the degenerate cases [`is_degenerate_mac`] names. What actually makes this
-/// defensible is the caller's scoping — the bytes come from a buffer an
-/// adapter-enumerating function references — not this filter.
-///
-/// # Arguments
-///
-/// * `bytes` - Exactly six bytes
-fn render_mac(bytes: &[u8]) -> Option<String> {
-    // the sentinels, fill patterns, counters, group addresses, and sparse windows
-    // that are the only thing six bytes on their own can be judged against
-    if is_degenerate_mac(bytes) {
-        return None;
-    }
-    Some(
-        bytes
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<Vec<_>>()
-            .join(":"),
-    )
-}
-
 // ===========================================================================
 // 4) Shaped literals in a concatenated literal pool
 // ===========================================================================
@@ -1679,10 +1722,10 @@ fn render_mac(bytes: &[u8]) -> Option<String> {
 /// # Why this is not scoped to the enumerating functions
 ///
 /// [`binary_hits`] searches only the buffers an enumerating function references,
-/// because six raw bytes on their own mean nothing. A rendered address is a
-/// different proposition — seventeen characters in a fixed grammar, with the
-/// degenerate renderings already filtered — so the shape carries its own weight and
-/// a hit with no enumerator behind it is simply reported at [`low`], exactly as the
+/// because raw bytes on their own prove nothing. A rendered value is a different
+/// proposition — a fixed grammar with separators, with the degenerate renderings
+/// already filtered — so the shape carries its own weight and a hit with no
+/// enumerator behind it is simply reported at [`low`], exactly as the
 /// string-table pass reports one.
 ///
 /// Scoping it that way would also blind it on precisely the images it exists for. A
@@ -1696,6 +1739,8 @@ fn render_mac(bytes: &[u8]) -> Option<String> {
 /// * `enumerators` - The functions found reading machine identity
 /// * `counts` - The per-class cap tally, shared with [`literal_hits`]
 /// * `claimed` - The addresses [`literal_hits`] already reported
+/// * `guid_enumerated` - Whether anything was observed reading a machine GUID
+/// * `guid_overflow` - The unattributed GUIDs dropped by the cap, for the summary
 ///
 /// # Errors
 ///
@@ -1706,7 +1751,15 @@ async fn blob_literal_hits(
     enumerators: &HashMap<u64, EnumeratingFunction>,
     counts: &mut BTreeMap<IdentityClass, usize>,
     claimed: &BTreeSet<u64>,
+    guid_enumerated: bool,
+    guid_overflow: &mut Vec<(String, u64)>,
 ) -> Result<Vec<DetectionHit>> {
+    // the GUID allowance, matching `literal_hits` so the shared tally stays coherent
+    let guid_cap = if guid_enumerated {
+        MAX_PER_CLASS
+    } else {
+        MAX_UNATTRIBUTED_GUIDS
+    };
     let sections = ctx.sections().await?;
     // built lazily, and only reached by a literal with no reference of its own
     let mut index: Option<Vec<(u64, u64)>> = None;
@@ -1737,8 +1790,22 @@ async fn blob_literal_hits(
             if claimed.contains(&at) {
                 continue;
             }
-            // honor the per-class cap, logging the first value dropped
-            if !admits(counts, class, "literal pool") {
+            // the interface and class identifiers every COM/DirectX client carries
+            if class == IdentityClass::Guid && is_ubiquitous_guid(&found.value) {
+                continue;
+            }
+            // honor the per-class cap, logging the first value dropped; GUIDs run
+            // under the unattributed allowance when nothing reads one
+            let cap = if class == IdentityClass::Guid {
+                guid_cap
+            } else {
+                MAX_PER_CLASS
+            };
+            if !admits(counts, class, cap, "literal pool") {
+                // the summary line stands in for the values the unattributed cap drops
+                if class == IdentityClass::Guid && !guid_enumerated {
+                    guid_overflow.push((found.value, at));
+                }
                 continue;
             }
             // attribute it the same way a defined string is attributed, but with a
@@ -1773,9 +1840,10 @@ async fn blob_literal_hits(
 /// Build one host-identity finding, scored by how well it correlates.
 ///
 /// This is where the module's whole false-positive contract lives: the value's
-/// shape sets nothing but the class, and everything about the score comes from
-/// whether an enumerating function uses it and whether a comparison was actually
-/// observed.
+/// shape sets nothing but the class, co-location with an enumerating function
+/// sets nothing but the attribution, and only an observed comparison earns the
+/// environmental-keying claim — [`score_identity`] is the one place that ladder
+/// is written down.
 ///
 /// # Arguments
 ///
@@ -1799,18 +1867,8 @@ async fn build_identity_hit(
     users: &[u64],
     origin: &str,
 ) -> Result<DetectionHit> {
-    // the strongest attribution available: a user that also enumerates this very
-    // class of identity, then any user that enumerates identity at all
-    let matched = users
-        .iter()
-        .filter_map(|entry| enumerators.get(entry))
-        .find(|record| record.classes.contains(&class))
-        .or_else(|| {
-            users
-                .iter()
-                .filter_map(|entry| enumerators.get(entry))
-                .next()
-        });
+    // the strongest attribution available, never a runtime's own wrapper
+    let matched = anchor_for(users, enumerators, class);
     // the function the artifact is attributed to
     let primary = matched
         .map(|record| record.entry)
@@ -1828,59 +1886,31 @@ async fn build_identity_hit(
         None => None,
     };
     // scoring: the correlation and the comparison are the whole basis
-    let (severity, kind) = match (matched, comparison) {
-        // a comparison feeding a branch is the guardrail itself; the validator
-        // re-checks the control flow, which is what `ControlFlowGated` requests
-        (Some(_), Some(true)) => (medium(), EvidenceKind::ControlFlowGated),
-        // used by the enumerating function, but no comparison was visible
-        (Some(_), _) => (medium(), EvidenceKind::ContextOnly),
-        // a bare literal of the right shape and nothing corroborating it
-        (None, _) => (low(), EvidenceKind::ContextOnly),
-    };
-    // the headline: the value, its class, and who reads it
-    let content = match matched {
-        Some(record) => format!(
-            "Stored {} `{value}` used by {named}, which reads the same class of value via {}",
+    let (technique, severity, kind) = score_identity(matched.is_some(), comparison);
+    // the headline: the value, its class, and the strongest observed relationship —
+    // a keying phrase only where the comparison was actually seen
+    let content = match (matched, comparison) {
+        (Some(record), Some(true)) => format!(
+            "Stored {} `{value}` compared in a branch by {named}, which reads the machine's own \
+             value via {}",
             class.label(),
             record.describe(),
         ),
-        None => format!("Stored {} `{value}`", class.label()),
+        (Some(record), _) => format!(
+            "Stored {} `{value}` co-located with the identity read in {named} ({})",
+            class.label(),
+            record.describe(),
+        ),
+        (None, _) => format!("Stored {} `{value}`", class.label()),
     };
+    // a runtime wrapper among the users reads identity, so the unattributed
+    // reasoning must talk about whose data this is rather than deny the read
+    let wrapper_user = users
+        .iter()
+        .filter_map(|entry| enumerators.get(entry))
+        .any(|record| record.runtime_wrapper);
     // the reasoning: what was recovered, what corroborates it, and what does not
-    let mut reasoning = format!(
-        "A {} is stored in this program as {origin}. ",
-        class.label()
-    );
-    match (matched, comparison) {
-        (Some(record), Some(true)) => reasoning.push_str(&format!(
-            "`{named}` obtains the machine's own value via {} and the decompilation shows this \
-             literal compared inside a branch condition — the program takes a different path \
-             depending on whether it is running on this specific machine. That is an execution \
-             guardrail: on any other host the guarded code never runs, so both sandbox detonation \
-             and a static read that misses the check will show the sample doing nothing.",
-            record.describe(),
-        )),
-        (Some(record), _) => reasoning.push_str(&format!(
-            "`{named}` obtains the machine's own value via {} and also references this literal, so \
-             the program holds both the live value and a stored one of the same class in the same \
-             place. No comparison was visible in the decompilation, so this is co-location rather \
-             than an observed check — the literal may equally be a default, a log field, or a \
-             value being sent rather than tested.",
-            record.describe(),
-        )),
-        (None, _) => {
-            reasoning.push_str(
-                "Nothing in this program was observed reading the machine's own value of this \
-                 class, so there is no evidence the literal is used as a guardrail. It is \
-                 reported because the value itself is pivotable — it names a specific machine, \
-                 adapter, or account — but a literal of this shape is equally often a vendor \
-                 identifier, a protocol constant, a test vector, or documentation.",
-            );
-            if !named.is_empty() {
-                reasoning.push_str(&format!(" It is referenced by `{named}`."));
-            }
-        }
-    }
+    let reasoning = identity_reasoning(class, origin, &named, matched, comparison, wrapper_user);
     // the artifact: value plus the attribution the flag boundary would drop
     let mut artifact = HitArtifact::new(class.artifact(), value);
     // the role must name the *observed* relationship, never a guessed one
@@ -1904,10 +1934,144 @@ async fn build_identity_hit(
     // supplementary context: the other users, or why there is no attribution
     artifact = artifact.detail(attribution_detail(ctx, users, primary, origin));
     Ok(
-        DetectionHit::new(T1480_001, address, primary, severity, content, reasoning)
+        DetectionHit::new(technique, address, primary, severity, content, reasoning)
             .kind(kind)
             .artifact(artifact),
     )
+}
+
+/// Compose the reasoning for one host-identity finding.
+///
+/// Split out of [`build_identity_hit`] so the evidence prose sits in one place:
+/// each arm states exactly what was observed and claims nothing past it.
+///
+/// # Arguments
+///
+/// * `class` - What the value identifies
+/// * `origin` - A phrase describing where the value was recovered from
+/// * `named` - The attributed function's display name, empty when none exists
+/// * `matched` - The enumerating function anchoring the value, when one does
+/// * `comparison` - What the decompilation showed for the value
+/// * `wrapper_user` - Whether a runtime's own wrapper is among the value's users
+fn identity_reasoning(
+    class: IdentityClass,
+    origin: &str,
+    named: &str,
+    matched: Option<&EnumeratingFunction>,
+    comparison: Option<bool>,
+    wrapper_user: bool,
+) -> String {
+    // open with what was recovered and where
+    let mut reasoning = format!(
+        "A {} is stored in this program as {origin}. ",
+        class.label()
+    );
+    // then say what corroborates it, and just as plainly what does not
+    match (matched, comparison) {
+        (Some(record), Some(true)) => reasoning.push_str(&format!(
+            "`{named}` obtains the machine's own value via {} and the decompilation shows this \
+             literal compared inside a branch condition — the program takes a different path \
+             depending on whether it is running on this specific machine. That is an execution \
+             guardrail: on any other host the guarded code never runs, so both sandbox detonation \
+             and a static read that misses the check will show the sample doing nothing.",
+            record.describe(),
+        )),
+        (Some(record), _) => reasoning.push_str(&format!(
+            "`{named}` obtains the machine's own value via {} and also references this literal, so \
+             the program holds both the live value and a stored one of the same class in the same \
+             place. No comparison was visible in the decompilation, so this is co-location rather \
+             than an observed check — the literal may equally be a default, a log field, or a \
+             value being sent rather than tested — and co-location on its own is reported as \
+             identity context, not as keying.",
+            record.describe(),
+        )),
+        (None, _) => {
+            // a runtime wrapper among the users does read identity, so the honest
+            // sentence is about whose data this is, not that nothing reads the class
+            if wrapper_user {
+                reasoning.push_str(
+                    "The only identity-reading code referencing it is a linked runtime's own \
+                     routine, which reaches its own data this way as a matter of course — that \
+                     is the runtime being present, not the program checking identity against a \
+                     stored key.",
+                );
+            } else {
+                reasoning.push_str(
+                    "Nothing in this program was observed reading the machine's own value of this \
+                     class, so there is no evidence the literal is used as a guardrail. It is \
+                     reported because the value itself is pivotable — it names a specific machine, \
+                     adapter, or account — but a literal of this shape is equally often a vendor \
+                     identifier, a protocol constant, a test vector, or documentation.",
+                );
+            }
+            if !named.is_empty() {
+                reasoning.push_str(&format!(" It is referenced by `{named}`."));
+            }
+        }
+    }
+    reasoning
+}
+
+/// The enumerating function a recovered value is attributed to, if any qualifies.
+///
+/// Prefers a user that enumerates the value's own class, then any user that
+/// enumerates identity at all. A linked runtime's own wrapper never qualifies: a
+/// marker match means the function *is* the runtime routine (`os.Hostname`), so
+/// its references are the runtime reaching its own tables rather than the
+/// author's check, and letting it anchor a value would dress library data up as
+/// co-location.
+///
+/// # Arguments
+///
+/// * `users` - The functions referencing the value, in address order
+/// * `enumerators` - The functions found reading machine identity
+/// * `class` - The value's identity class
+fn anchor_for<'a>(
+    users: &[u64],
+    enumerators: &'a HashMap<u64, EnumeratingFunction>,
+    class: IdentityClass,
+) -> Option<&'a EnumeratingFunction> {
+    // the users that enumerate identity and are not a runtime's own routine
+    let qualified: Vec<&EnumeratingFunction> = users
+        .iter()
+        .filter_map(|entry| enumerators.get(entry))
+        .filter(|record| !record.runtime_wrapper)
+        .collect();
+    // prefer the user reading this very class, then any identity reader at all
+    qualified
+        .iter()
+        .find(|record| record.classes.contains(&class))
+        .copied()
+        .or_else(|| qualified.first().copied())
+}
+
+/// Score an identity hit from its attribution and comparison evidence.
+///
+/// The module's severity ladder, kept in one auditable step: the
+/// environmental-keying claim — **T1480.001** at [`medium`] with
+/// [`EvidenceKind::ControlFlowGated`] — is reserved for a value an enumerating
+/// function visibly compares in a branch condition, which is the only shape the
+/// validator can then confirm. Everything short of that (co-location with an
+/// enumerator, a comparison that guards nothing, a bare literal) is reported as
+/// **T1082** identity context at [`low`], because co-location alone does not
+/// evidence keying: victim-id generators, recon writers, and self-checks all
+/// read identity to *use* it rather than to test it.
+///
+/// # Arguments
+///
+/// * `matched` - Whether an enumerating function (not a runtime wrapper) uses the value
+/// * `comparison` - What [`comparison_in`] observed in that function, when one uses it
+fn score_identity(
+    matched: bool,
+    comparison: Option<bool>,
+) -> (AttackTechnique, (Confidence, i64), EvidenceKind) {
+    match (matched, comparison) {
+        // a comparison feeding a branch is the guardrail itself; the validator
+        // re-checks the control flow, which is what `ControlFlowGated` requests
+        (true, Some(true)) => (T1480_001, medium(), EvidenceKind::ControlFlowGated),
+        // anything less is context for the Discovery picture, never a keying claim
+        _ => (T1082, low(), EvidenceKind::ContextOnly),
+    }
 }
 
 /// Describe the remaining users, or say plainly that attribution failed.
@@ -2067,205 +2231,246 @@ mod tests {
         assert!(render_guid(&[0u8; 16]).is_none());
     }
 
-    /// The binary MAC filter rejects the degenerate runs that dominate raw data.
+    /// The byte scan recovers structured GUIDs and never carves MAC addresses.
     #[test]
-    fn render_mac_rejects_degenerate_runs() {
-        assert_eq!(
-            render_mac(&[0x00, 0x1a, 0x2b, 0x3c, 0x4d, 0x5e]).as_deref(),
-            Some("00:1a:2b:3c:4d:5e")
-        );
-        // sentinels, fill patterns, and counters
-        assert!(render_mac(&[0x00; 6]).is_none());
-        assert!(render_mac(&[0xff; 6]).is_none());
-        assert!(render_mac(&[0xcc; 6]).is_none());
-        assert!(render_mac(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06]).is_none());
-        // an odd first octet is a group address, not an adapter's own
-        assert!(render_mac(&[0x01, 0x1a, 0x2b, 0x3c, 0x4d, 0x5e]).is_none());
-        // an all-zero OUI is not an assigned manufacturer prefix
-        assert!(render_mac(&[0x00, 0x00, 0x00, 0x3c, 0x4d, 0x5e]).is_none());
-        // half zeros is a window over a table of small little-endian numbers, which
-        // is what a pointer or offset table looks like six bytes at a time
-        assert!(render_mac(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x00]).is_none());
-        assert!(render_mac(&[0x00, 0x00, 0x5c, 0xb1, 0x02, 0x00]).is_none());
-        assert!(render_mac(&[0x5c, 0xb1, 0x02, 0x00, 0x00, 0x00]).is_none());
-    }
-
-    /// One table does not become several addresses by being read at every offset.
-    #[test]
-    fn scan_window_does_not_report_shifted_copies() {
-        let read: BTreeSet<IdentityClass> = [IdentityClass::MacAddress].into_iter().collect();
-        // two real addresses back to back, so a sliding scan would find a third
-        // straddling the pair
-        let window = [
-            0x00, 0x1a, 0x2b, 0x3c, 0x4d, 0x5e, 0x00, 0x0c, 0x29, 0x77, 0x88, 0x99,
-        ];
-        let found = scan_window(&window, &read);
-        assert_eq!(found.len(), 2);
-        assert_eq!(found[0].2, "00:1a:2b:3c:4d:5e");
-        assert_eq!(found[1].2, "00:0c:29:77:88:99");
-        // a table of 64-bit little-endian offsets yields nothing at all
-        let table: Vec<u8> = [0x0002_b1b8_u64, 0x0002_b1a4, 0x0002_b18c, 0x0002_b174]
-            .iter()
-            .flat_map(|value| value.to_le_bytes())
-            .collect();
-        assert!(scan_window(&table, &read).is_empty());
-    }
-
-    /// A window straddling two elements of an offset table is not an address.
-    #[test]
-    fn scan_window_rejects_a_slice_of_an_int_table() {
-        let read: BTreeSet<IdentityClass> = [IdentityClass::MacAddress].into_iter().collect();
-        // a table of 64-bit offsets with one flags word among them; the six bytes
-        // spanning the flags word's tail and the next offset's head read as
-        // `00:00:80:70:b3:02` — only two zeros, so the six-byte filters all pass
-        let mut table: Vec<u8> = Vec::new();
-        for value in [
-            0x0002_b34c_u64,
-            0x0002_b358,
-            0x8000_0000_0000_009c,
-            0x0002_b370,
-        ] {
-            table.extend_from_slice(&value.to_le_bytes());
-        }
-        for value in [0x0002_b384_u64, 0x0002_b39c, 0x0002_b3b2] {
-            table.extend_from_slice(&value.to_le_bytes());
-        }
-        // the six bytes on their own are indistinguishable from a real address...
-        assert_eq!(
-            render_mac(&table[21..27]).as_deref(),
-            Some("00:00:80:70:b3:02")
-        );
-        // ...but in the company of the table they came from, they are a slice of it
-        assert!(scan_window(&table, &read).is_empty());
-
-        // an adapter address in an ordinary buffer is still claimed. The trailing
-        // filler is one repeated byte so that it cannot itself render as an address
-        // and consume the one under test
-        let mut buffer = vec![0x00, 0x0c, 0x29, 0x77, 0x88, 0x99];
-        buffer.extend_from_slice(&[0xcc; 24]);
-        assert!(
-            scan_window(&buffer, &read)
-                .iter()
-                .any(|(_, _, value)| value == "00:0c:29:77:88:99")
-        );
-    }
-
-    /// A table of short strings is not a source of addresses, run by run.
-    #[test]
-    fn scan_window_rejects_slices_of_a_string_table() {
-        let read: BTreeSet<IdentityClass> = [IdentityClass::MacAddress].into_iter().collect();
-        // a command-line option table exactly as one sample stores it. No run in it
-        // reaches `MAC_TEXT_RUN`, and the NULs land where the strings end rather than
-        // on any stride, so neither of the other two neighbourhood tests sees it
-        let table = b"y is 600 seconds.\n\0\0\0\0--help\0\0--sleep\0--delay\0[!] Inv";
-        // the windows it yields are addresses by every test six bytes can apply...
-        assert_eq!(
-            render_mac(b"help\0\0").as_deref(),
-            Some("68:65:6c:70:00:00")
-        );
-        assert_eq!(render_mac(b"delay\0").as_deref(), Some("64:65:6c:61:79:00"));
-        // ...and none of them is one
-        assert!(scan_window(table, &read).is_empty());
-
-        // the same for a table of error strings, where the runs are longer but the
-        // windows that straddle two of them still are not
-        let errors = b"\0\0vector too long\0: \0\0\0\0\0\0generic\0invalid char fil";
-        assert!(scan_window(errors, &read).is_empty());
-
-        // an address stored at the head of an interface record keeps its own bytes.
-        // The candidate is inside the neighbourhood it is judged on, so its own
-        // high bytes put the region under the bar even though the rest is text.
-        // Its octets are also chosen so none of them can serve as a GUID's version
-        // nibble, which would otherwise let the sixteen-byte pass claim them first
-        let mut buffer = vec![0x00, 0x0e, 0x0c, 0xb7, 0x88, 0xf9];
-        buffer.extend_from_slice(b"\0eth0\0adapter name\0\0up\0\0\0\0\0");
-        assert!(
-            scan_window(&buffer, &read)
-                .iter()
-                .any(|(_, _, value)| value == "00:0e:0c:b7:88:f9")
-        );
-    }
-
-    /// A GUID's bytes are not re-reported as a MAC address inside it.
-    #[test]
-    fn scan_window_lets_the_guid_claim_its_bytes() {
-        let read: BTreeSet<IdentityClass> = [IdentityClass::Guid, IdentityClass::MacAddress]
-            .into_iter()
-            .collect();
-        let window = [
+    fn scan_window_recovers_guids_and_never_carves_macs() {
+        // a version-4, RFC 4122-variant GUID is recovered wherever it sits; the
+        // filler's version nibble (0xc) keeps it from forming a second candidate
+        let mut window = vec![0xcc; 8];
+        window.extend_from_slice(&[
             0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x48, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
-            0xff, 0x02,
-        ];
-        let found = scan_window(&window, &read);
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].1, IdentityClass::Guid);
-        // with GUID enumeration absent the GUID is no longer worth reporting, but its
-        // bytes are still its own — the six-byte scan does not get to carve addresses
-        // out of a device class GUID just because nobody was seen reading one
-        let mac_only: BTreeSet<IdentityClass> = [IdentityClass::MacAddress].into_iter().collect();
-        assert!(scan_window(&window, &mac_only).is_empty());
-
-        // the device class GUID a Windows program carries verbatim, laid out as it is
-        // in memory and padded the way the compiler aligns it
-        let class_guid = [
-            0x67, 0xe9, 0x36, 0x4d, 0x25, 0xe3, 0xce, 0x11, 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1,
-            0x03, 0x18,
-        ];
-        let mut buffer = vec![0x00; 8];
-        buffer.extend_from_slice(&class_guid);
-        buffer.extend_from_slice(&[0x00; 8]);
-        // read six bytes at a time it offers two entirely plausible addresses...
+            0xff, 0x00,
+        ]);
+        window.extend_from_slice(&[0xcc; 8]);
+        let found = scan_window(&window);
         assert_eq!(
-            render_mac(&buffer[6..12]).as_deref(),
-            Some("00:00:67:e9:36:4d")
+            found,
+            vec![(8, "44332211-6655-4877-99aa-bbccddeeff00".to_string())]
         );
-        assert_eq!(
-            render_mac(&buffer[14..20]).as_deref(),
-            Some("ce:11:bf:c1:08:00")
-        );
-        // ...and neither is claimed, because the GUID they are cut from claims them
-        assert!(scan_window(&buffer, &mac_only).is_empty());
+        // no six-byte window is ever claimed as a MAC address, whatever it renders
+        // as. The MSVC /GS cookie constant, whose bytes read as `32:a2:df:2d:99:2b`...
+        let mut cookie = 0x0000_2B99_2DDF_A232u64.to_le_bytes().to_vec();
+        cookie.extend_from_slice(&[0xcc; 16]);
+        assert_eq!(scan_window(&cookie), vec![]);
+        // ...the repeating banner filler that reads as `a2:c2:a2:c2:a2:c2`...
+        assert_eq!(scan_window(&[0xa2, 0xc2].repeat(16)), vec![]);
+        // ...the CRT case-map stride that reads as `10:10:10:10:10:00`...
+        let mut case_map = vec![0x10; 16];
+        case_map[5] = 0x00;
+        assert_eq!(scan_window(&case_map), vec![]);
+        // ...and even a perfectly plausible stored adapter address: six raw bytes
+        // carry no verifiable structure, so no byte scan ever claims one
+        let mut mac = vec![0x08, 0x00, 0x27, 0xaa, 0xbb, 0xcc];
+        mac.extend_from_slice(&[0x00; 18]);
+        assert_eq!(scan_window(&mac), vec![]);
     }
 
-    /// A six-byte window over a string is a piece of the string, not an address.
+    /// The keying claim is reserved for a comparison observed in a branch.
     #[test]
-    fn scan_window_rejects_a_slice_of_a_text_run() {
-        let read: BTreeSet<IdentityClass> = [IdentityClass::MacAddress].into_iter().collect();
-        // two adjacent C strings, the shape a program's own name and one of its flag
-        // words have in a data block. Every six-byte window over this passes the
-        // filters `render_mac` can apply on its own — including the ones spanning the
-        // terminators, which read as an address with a sparse leading OUI
-        let mut window = b"al-khaser.exe\0\0\0CODE_INJECTIONS\0".to_vec();
-        window.extend_from_slice(&[0x00; 8]);
-        assert_eq!(
-            render_mac(&window[1..7]).as_deref(),
-            Some("6c:2d:6b:68:61:73")
-        );
-        assert_eq!(
-            render_mac(&window[14..20]).as_deref(),
-            Some("00:00:43:4f:44:45")
-        );
-        assert!(scan_window(&window, &read).is_empty());
+    fn score_identity_reserves_the_keying_claim_for_a_branch_comparison() {
+        // a branch comparison in an enumerating user: the guardrail tier
+        let (technique, severity, kind) = score_identity(true, Some(true));
+        assert_eq!(technique.id, "T1480.001");
+        assert!(matches!(severity.0, Confidence::Unsure));
+        assert_eq!(severity.1, medium().1);
+        assert_eq!(kind, EvidenceKind::ControlFlowGated);
+        // co-location with no visible comparison: Discovery context, never keying
+        let (technique, severity, kind) = score_identity(true, None);
+        assert_eq!(technique.id, "T1082");
+        assert!(matches!(severity.0, Confidence::Untrusted));
+        assert_eq!(severity.1, low().1);
+        assert_eq!(kind, EvidenceKind::ContextOnly);
+        // a comparison that guards nothing scores the same as none
+        let (technique, _, kind) = score_identity(true, Some(false));
+        assert_eq!(technique.id, "T1082");
+        assert_eq!(kind, EvidenceKind::ContextOnly);
+        // a bare literal with no enumerating user at all
+        let (technique, severity, kind) = score_identity(false, None);
+        assert_eq!(technique.id, "T1082");
+        assert!(matches!(severity.0, Confidence::Untrusted));
+        assert_eq!(kind, EvidenceKind::ContextOnly);
+    }
 
-        // an address that merely sits next to a string keeps its bytes: two of its
-        // octets happen to be printable, which explains nothing, and the terminator
-        // between it and the string keeps the two runs apart
-        let mut buffer = vec![0x00, 0x0c, 0x29, 0x77, 0x88, 0x99];
-        buffer.extend_from_slice(b"\0Checking VBox\0");
-        buffer.extend_from_slice(&[0x00; 8]);
-        assert!(!in_text_run(&buffer, 0));
+    /// Identity reads inside recognized library code are skipped; the sample's own seed.
+    #[test]
+    fn enumeration_hits_skip_recognized_library_functions() {
+        // a glibc resolver internal and the sample's own reader, both enumerating
+        let enumerators: HashMap<u64, EnumeratingFunction> = [
+            (
+                0x1000,
+                enumerator(0x1000, IdentityClass::MachineName, "gethostname"),
+            ),
+            (
+                0x2000,
+                enumerator(0x2000, IdentityClass::MachineName, "GetComputerName"),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        // the resolver names 0x1000 as glibc internals; 0x2000 is the sample's own
+        let hits = enumeration_hits(
+            |entry| (entry == 0x1000).then(|| "__nss_hostname_digits_dots".to_string()),
+            &enumerators,
+        );
+        // only the sample's own reader survives the library skip
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].function, Some(0x2000));
+    }
+
+    /// Attribution prefers the class's own reader and never a runtime wrapper.
+    #[test]
+    fn anchor_for_never_selects_a_runtime_wrapper() {
+        // the runtime's own hostname routine, plus two user-code enumerators
+        let mut wrapper = enumerator(0x1000, IdentityClass::MachineName, "Go os.Hostname");
+        wrapper.runtime_wrapper = true;
+        let enumerators: HashMap<u64, EnumeratingFunction> = [
+            (0x1000, wrapper),
+            (
+                0x2000,
+                enumerator(0x2000, IdentityClass::AccountName, "GetUserName"),
+            ),
+            (
+                0x3000,
+                enumerator(0x3000, IdentityClass::MachineName, "GetComputerName"),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        // a wrapper-only user set anchors nothing: library data is not co-location
+        assert!(anchor_for(&[0x1000], &enumerators, IdentityClass::MachineName).is_none());
+        // with user code among the users, the class's own reader wins
+        let anchored = anchor_for(
+            &[0x1000, 0x2000, 0x3000],
+            &enumerators,
+            IdentityClass::MachineName,
+        )
+        .expect("a user-code anchor");
+        assert_eq!(anchored.entry, 0x3000);
+        // and any identity reader beats no anchor when the class has no reader
+        let fallback = anchor_for(&[0x1000, 0x2000], &enumerators, IdentityClass::MachineName)
+            .expect("the fallback anchor");
+        assert_eq!(fallback.entry, 0x2000);
+    }
+
+    /// The decoy, encoded, and argument-only literals the comparison gate drops.
+    #[test]
+    fn name_gate_drops_literals_without_a_visible_comparison() {
+        // a crypter decoy: written once to a never-read global, never compared
+        let decoy = "  *(char **)0x466660 = \"MrwxeppHexi\";\n";
+        assert_eq!(comparison_in(decoy, "MrwxeppHexi"), None);
+        // a brute-force credential: passed as an argument, never compared
+        let argument = "  uVar1 = LogonUserA(\"Administrator\",local_20,pcVar3,2,0,&local_8);\n";
+        assert_eq!(comparison_in(argument, "Administrator"), None);
+        // the true-positive shape keeps its evidence: a name checked in a branch
+        let guarded = "  if (strcmp(local_buf, \"WIN-TARGET-01\") == 0) goto run_payload;\n";
+        assert_eq!(comparison_in(guarded, "WIN-TARGET-01"), Some(true));
+    }
+
+    /// Registry value names and resolver variables are enumeration inputs, not keys.
+    #[test]
+    fn enumeration_inputs_are_not_name_candidates() {
+        // the registry value names an identity reader passes to RegQueryValueEx
+        assert!(is_enumeration_input("InstallDate"));
+        assert!(is_enumeration_input("RegisteredOwner"));
+        assert!(is_enumeration_input("RegisteredOrganization"));
+        assert!(is_enumeration_input("MachineGuid"));
+        assert!(is_enumeration_input("DigitalProductId"));
+        assert!(is_enumeration_input("ProductId"));
+        // matching is case-insensitive, as the registry itself is
+        assert!(is_enumeration_input("machineguid"));
+        // the resolver environment variables glibc consults
+        assert!(is_enumeration_input("RES_OPTIONS"));
+        assert!(is_enumeration_input("HOSTALIASES"));
+        assert!(is_enumeration_input("LOCALDOMAIN"));
+        // a hostname-shaped literal is still a candidate
+        assert!(!is_enumeration_input("WIN-TARGET-01"));
+        // and so is an encoded blob — the comparison gate judges those instead
+        assert!(!is_enumeration_input("MrwxeppHexi"));
+    }
+
+    /// The name candidates past the cap fold into one artifact-less summary.
+    #[test]
+    fn name_overflow_hit_summarizes_the_candidates_past_the_cap() {
+        // nothing past the cap, nothing to say
+        assert!(name_overflow_hit("FUN_00442cb5", 0x44_2cb5, &[]).is_none());
+        let overflow = vec![
+            NameCandidate {
+                address: 0x1000,
+                text: "HOST-A".to_string(),
+            },
+            NameCandidate {
+                address: 0x1008,
+                text: "HOST-B".to_string(),
+            },
+        ];
+        let hit =
+            name_overflow_hit("FUN_00442cb5", 0x44_2cb5, &overflow).expect("a summary finding");
+        // one low Discovery line, carrying no artifact, anchored at the function
+        assert_eq!(hit.technique.id, "T1082");
+        assert!(matches!(hit.confidence, Confidence::Untrusted));
+        assert_eq!(hit.suspicion, low().1);
+        assert_eq!(hit.kind, EvidenceKind::ContextOnly);
+        assert!(hit.artifact.is_none());
+        assert_eq!(hit.function, Some(0x44_2cb5));
+        // it counts and names what was folded
+        assert!(hit.content.contains("2 further"));
+        assert!(hit.reasoning.contains("`HOST-A`"));
+        assert!(hit.reasoning.contains("`HOST-B`"));
+    }
+
+    /// One string's GUIDs come back as one group, platform ids already dropped.
+    #[test]
+    fn split_string_matches_groups_guids_and_drops_platform_ids() {
+        // a config string holding two unique GUIDs, one OLE automation id, and a MAC
+        let matches = find_host_identifiers(
+            "cfg 916d809c-5949-4ca3-b1d4-7e2f0a68c315 then 00020400-0000-0000-c000-000000000046 \
+             and ac634028-9bf2-4876-8a52-6b43e4b1f2d7 via 00:1a:2b:3c:4d:5e",
+        );
+        let (guids, others) = split_string_matches(matches);
+        // the two unique GUIDs form one group; the platform id is dropped
+        assert_eq!(guids.len(), 2);
         assert!(
-            scan_window(&buffer, &read)
+            guids
                 .iter()
-                .any(|(_, _, value)| value == "00:0c:29:77:88:99")
+                .any(|found| found.value.starts_with("916d809c"))
         );
-        // ...while the window that starts on the terminator and runs into the string
-        // is a piece of the string, however well it renders
-        assert_eq!(
-            render_mac(&buffer[6..12]).as_deref(),
-            Some("00:43:68:65:63:6b")
+        assert!(
+            guids
+                .iter()
+                .any(|found| found.value.starts_with("ac634028"))
         );
-        assert!(in_text_run(&buffer, 6));
+        // the MAC literal passes through for its own per-value finding
+        assert_eq!(others.len(), 1);
+        assert_eq!(others[0].kind, HostIdKind::MacAddress);
+    }
+
+    /// The unattributed GUIDs past the cap fold into one bounded summary.
+    #[test]
+    fn guid_overflow_hit_summarizes_the_dropped_values() {
+        // nothing dropped, nothing to say
+        assert!(guid_overflow_hit(&[]).is_none());
+        // fourteen dropped values: twelve are spelled out, the rest are counted
+        let overflow: Vec<(String, u64)> = (0u64..14)
+            .map(|index| {
+                (
+                    format!("0000000{index:x}-aaaa-4bbb-8ccc-ddddeeee0000"),
+                    0x40_0000 + index,
+                )
+            })
+            .collect();
+        let hit = guid_overflow_hit(&overflow).expect("a summary finding");
+        // one low Discovery line anchored at the first dropped value, no artifact
+        assert_eq!(hit.technique.id, "T1082");
+        assert!(matches!(hit.confidence, Confidence::Untrusted));
+        assert!(hit.artifact.is_none());
+        assert_eq!(hit.address, 0x40_0000);
+        assert!(hit.content.contains("14 further GUID literals"));
+        // the listing is bounded so the summary stays one line
+        assert!(
+            hit.reasoning
+                .contains("`00000000-aaaa-4bbb-8ccc-ddddeeee0000`")
+        );
+        assert!(hit.reasoning.contains("and 2 more"));
     }
 
     /// The comparison reader separates a guarded check from a bare mention.
@@ -2283,7 +2488,7 @@ mod tests {
         assert_eq!(comparison_in(guarded, "OTHER-HOST"), None);
     }
 
-    /// The cap is per class and shared across the passes that count against it.
+    /// The cap is per class, caller-set, and shared across the counting passes.
     #[test]
     fn admits_caps_each_class_independently() {
         let mut counts: BTreeMap<IdentityClass, usize> = BTreeMap::new();
@@ -2294,17 +2499,36 @@ mod tests {
             } else {
                 "literal pool"
             };
-            assert!(admits(&mut counts, IdentityClass::MacAddress, source));
+            assert!(admits(
+                &mut counts,
+                IdentityClass::MacAddress,
+                MAX_PER_CLASS,
+                source
+            ));
         }
         // saturated, and it stays saturated rather than resetting for a later pass
         assert!(!admits(
             &mut counts,
             IdentityClass::MacAddress,
+            MAX_PER_CLASS,
             "literal pool"
         ));
-        assert!(!admits(&mut counts, IdentityClass::MacAddress, "raw bytes"));
-        // a different class has its own allowance
-        assert!(admits(&mut counts, IdentityClass::Guid, "string table"));
+        // a different class has its own allowance, under its own cap: the tighter
+        // unattributed GUID allowance refuses a seventh value
+        for _ in 0..MAX_UNATTRIBUTED_GUIDS {
+            assert!(admits(
+                &mut counts,
+                IdentityClass::Guid,
+                MAX_UNATTRIBUTED_GUIDS,
+                "string table"
+            ));
+        }
+        assert!(!admits(
+            &mut counts,
+            IdentityClass::Guid,
+            MAX_UNATTRIBUTED_GUIDS,
+            "literal pool"
+        ));
     }
 
     /// A resource block holds packaged content, not runtime identity.
@@ -2364,17 +2588,21 @@ mod tests {
             classes: [class].into_iter().collect(),
             labels: [label].into_iter().collect(),
             sites: Vec::new(),
+            runtime_wrapper: false,
         }
     }
 
-    /// A block holding one stored address, with every reference reaching it.
+    /// A block holding one stored GUID, with every reference reaching it.
     ///
-    /// The address leads the block so nothing precedes it to be sliced with, and the
-    /// filler behind it is one repeated byte, which [`render_mac`] rejects outright —
-    /// so the block holds exactly one candidate and a test over it is measuring the
-    /// bookkeeping rather than the scan.
+    /// The GUID leads the block so nothing precedes it to be sliced with, and the
+    /// filler behind it is one repeated byte whose version nibble (0xa) is not a
+    /// defined UUID version — so the block holds exactly one candidate and a test
+    /// over it is measuring the bookkeeping rather than the scan.
     fn stored_value_section() -> Section {
-        let mut bytes = vec![0x08, 0x00, 0x27, 0xaa, 0xbb, 0xcc];
+        let mut bytes = vec![
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x48, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+            0xff, 0x00,
+        ];
         bytes.resize(0x40, 0xaa);
         Section {
             name: ".data".to_string(),
@@ -2396,11 +2624,11 @@ mod tests {
         let enumerators: HashMap<u64, EnumeratingFunction> = [
             (
                 0x1000,
-                enumerator(0x1000, IdentityClass::MacAddress, "GetAdaptersInfo"),
+                enumerator(0x1000, IdentityClass::Guid, "GetSystemFirmwareTable"),
             ),
             (
                 0x2000,
-                enumerator(0x2000, IdentityClass::MacAddress, "GetAdaptersAddresses"),
+                enumerator(0x2000, IdentityClass::Guid, "Rust machine-uid"),
             ),
         ]
         .into_iter()
@@ -2413,41 +2641,63 @@ mod tests {
         ];
         let found = collect_stored_values(&sections, &index, &enumerators);
         assert_eq!(found.len(), 1);
-        let ((class, at, value), (section, users)) = found.into_iter().next().unwrap();
-        assert_eq!(class, IdentityClass::MacAddress);
+        let ((at, value), (section, users)) = found.into_iter().next().unwrap();
         assert_eq!(at, 0x40_1000);
-        assert_eq!(value, "08:00:27:aa:bb:cc");
+        assert_eq!(value, "44332211-6655-4877-99aa-bbccddeeff00");
         assert_eq!(section.name, ".data");
         // the second function is more attribution for the one value, not a second
         // finding, and the repeated reference is not a third
         assert_eq!(users, vec![0x2000, 0x1000]);
     }
 
-    /// A function reading a different class does not justify the scan.
+    /// Only an observed GUID read justifies the byte scan, and nothing else joins it.
     #[test]
-    fn collect_stored_values_scopes_the_scan_to_what_the_function_reads() {
+    fn collect_stored_values_scopes_the_scan_to_guid_readers() {
         let sections = vec![stored_value_section()];
-        // this function reads the account name, so six bytes in the data it
-        // references are six bytes, not a hardware address
+        // an adapter-address reader does not scope a byte scan at all: six raw MAC
+        // bytes carry no structure, so no byte-level search exists for that class
         let enumerators: HashMap<u64, EnumeratingFunction> = [(
             0x3000,
-            enumerator(0x3000, IdentityClass::AccountName, "GetUserName"),
+            enumerator(0x3000, IdentityClass::MacAddress, "GetAdaptersInfo"),
         )]
         .into_iter()
         .collect();
         let index = [(0x40_1000, 0x3000)];
         assert!(collect_stored_values(&sections, &index, &enumerators).is_empty());
-
         // and it stays out of the attribution when another function does read one
         let mut enumerators = enumerators;
         enumerators.insert(
             0x1000,
-            enumerator(0x1000, IdentityClass::MacAddress, "GetAdaptersInfo"),
+            enumerator(0x1000, IdentityClass::Guid, "GetSystemFirmwareTable"),
         );
         let index = [(0x40_1000, 0x3000), (0x40_1000, 0x1000)];
         let found = collect_stored_values(&sections, &index, &enumerators);
         assert_eq!(found.len(), 1);
         assert_eq!(found.into_values().next().unwrap().1, vec![0x1000]);
+    }
+
+    /// A linked runtime's own wrapper never anchors the stored-value scan.
+    #[test]
+    fn collect_stored_values_skips_runtime_wrappers() {
+        let sections = vec![stored_value_section()];
+        // the runtime's own GUID routine referencing the buffer scopes nothing
+        let mut wrapper = enumerator(0x1000, IdentityClass::Guid, "Rust machine-uid");
+        wrapper.runtime_wrapper = true;
+        let enumerators: HashMap<u64, EnumeratingFunction> =
+            [(0x1000, wrapper)].into_iter().collect();
+        let index = [(0x40_1000, 0x1000)];
+        assert!(collect_stored_values(&sections, &index, &enumerators).is_empty());
+        // the same reference from ordinary user code is scanned
+        let enumerators: HashMap<u64, EnumeratingFunction> = [(
+            0x1000,
+            enumerator(0x1000, IdentityClass::Guid, "GetSystemFirmwareTable"),
+        )]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            collect_stored_values(&sections, &index, &enumerators).len(),
+            1
+        );
     }
 
     /// Build a section fixture carrying only what the scan gates read.
@@ -2521,25 +2771,18 @@ mod tests {
         };
         let map = [rdata, data.clone()];
         // a window spanning the spare's trailing zeros and the descriptor's pointer
-        // renders as an address, and is six bytes of two different fields
-        assert_eq!(
-            render_mac(&data.bytes[0x0e..0x14]).as_deref(),
-            Some("00:00:e8:cf:01:40")
-        );
-        assert!(straddles_pointer(&map, &data, 0x1_4004_487e, 6));
-        // and so does one spanning the end of a mangled name and the pointer that
+        // is bytes of two different fields, not one stored value
+        assert!(straddles_pointer(&map, &data, 0x1_4004_487e, GUID_BYTE_LEN));
+        // and so is one spanning the end of a mangled name and the pointer that
         // opens the next descriptor
-        assert_eq!(
-            render_mac(&data.bytes[0x3c..0x42]).as_deref(),
-            Some("40:40:00:00:e8:cf")
-        );
-        assert!(straddles_pointer(&map, &data, 0x1_4004_48ac, 6));
-        // the stored address in its own slot shares no byte with a pointer
-        assert_eq!(
-            render_mac(&data.bytes[0x50..0x56]).as_deref(),
-            Some("00:1a:2b:3c:4d:5e")
-        );
-        assert!(!straddles_pointer(&map, &data, 0x1_4004_48c0, 6));
+        assert!(straddles_pointer(&map, &data, 0x1_4004_48ac, GUID_BYTE_LEN));
+        // a stored field in its own slot shares no byte with a pointer
+        assert!(!straddles_pointer(
+            &map,
+            &data,
+            0x1_4004_48c0,
+            GUID_BYTE_LEN
+        ));
         // and a word decoding to an address outside every loaded block is a number,
         // so the descriptor's integer field claims nothing
         assert!(!straddles_pointer(&map, &data, 0x1_4004_4878, 6));

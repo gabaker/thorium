@@ -8,6 +8,7 @@
 //!
 //! [`DetectionHit`]: crate::thorpal::detect::detections::DetectionHit
 
+pub mod artifact_gates;
 pub mod authenticode;
 pub mod confidence;
 pub mod context;
@@ -19,6 +20,7 @@ pub mod indicators;
 pub mod provenance_types;
 pub mod script_detections;
 pub mod toolchain;
+pub mod validate;
 pub mod yara;
 
 use ghidra_cli::models::Instruction;

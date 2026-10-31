@@ -65,10 +65,118 @@ set of open **questions** — see [Question Seeding](#question-seeding) below.
 | `encoded_strings` | T1027/T1140 | Decoder loops, trivial-scheme blobs, layered decodes — with recovered plaintext |
 | `packing` | T1027.002 | Structural packing signals, entropy, packer family markers |
 | `host_binding` | T1480.001/T1082 | Hardcoded MACs/GUIDs/serials/names the sample is keyed to |
+| `api_hashing` | T1027.007 | Hash-constant catalogs + static resolution of hashed imports against export-name tables |
+| `embedded_content` | T1027.009 | Binwalk-style magic scan + PNG chunk/CRC validation for grafted payloads |
+| `signature_anomaly` | T1553.002 | Authenticode digests that do not verify — grafted certificate tables |
 | `native_api` | T1106 | Raw ntdll `Nt*`/`Zw*` use, direct `SYSCALL`/`INT 0x2E` (PE only) |
+| `injection_win32` | T1055 | Classic Win32 injection chains, scored on same-function co-occurrence |
 | `network_comms` | T1071/T1095/T1571/T1573 | Protocol API families, string IOCs, carved URLs, hardcoded ports |
 | `crypto_capability` | T1486 | Crypto byte signatures, PEM/DER keys, CryptoAPI imports, static decrypt replay |
 | `ransomware_behavior` | T1486 | Drive/file enumeration + rename APIs, ransom-note phrases |
+| `yara` | — | Operator-supplied YARA rule packs over the raw bytes (family identification) |
+
+## What the Telemetry Says
+---
+
+Every stored session's forum records what became of each seeded lead: an agent posted
+supporting evidence (**confirmed**), posted disproving evidence (**disputed** — the
+false-positive signal), engaged without a stance (**neutral**), or never touched it
+(**ignored**). The tally is defined in
+[the telemetry docs](../telemetry/possible_today.md#8-were-detector-leads-useful-or-false-positives)
+and browsable per session with `thorctl analyze telemetry explore`. The review folded those
+outcomes across the stored sessions, and each detector's page root-causes its false
+positives against the detector source.
+
+Most seeded leads were never engaged, and most of the threads agents did engage ended
+disputed. Three structural findings recur across detectors:
+
+- **The detectors' own confidence is inverted.** `likely`-rated leads are disputed far more
+  often than `unsure` leads, and `fact`-rated leads were never confirmed. The confident
+  tiers lean on exactly the heuristics (template overclaim, recovered "values") that agents
+  can decisively disprove.
+- **Recovered artifacts are the false-positive epicenter.** Leads carrying a recovered
+  artifact are disputed far more often than leads without. A carved MAC, a "recovered
+  plaintext", or a mis-framed key invites — and loses — scrutiny that a plain API
+  observation never attracts, and fabricated values cost multi-agent dataflow work to
+  disprove.
+- **Volume without engagement.** The two biggest detectors flood dozens of leads per
+  session in their worst cases; high thread-ignore rates are not agents triaging and
+  declining — they are leads nothing ever reads, bought at seeding-token cost.
+
+Per-detector review pages:
+
+- [`signature_anomaly`](./detectors/signature_anomaly.md)
+- [`network_comms`](./detectors/network_comms.md)
+- [`encoded_strings`](./detectors/encoded_strings.md)
+- [`embedded_content`](./detectors/embedded_content.md)
+- [`yara`](./detectors/yara.md)
+- [`packing`](./detectors/packing.md)
+- [`native_api`](./detectors/native_api.md)
+- [`sandbox_time_evasion`](./detectors/sandbox_time_evasion.md)
+- [`debugger_evasion`](./detectors/debugger_evasion.md)
+- [`crypto_capability`](./detectors/crypto_capability.md)
+- [`self_deletion`](./detectors/self_deletion.md)
+- [`sandbox_user_activity`](./detectors/sandbox_user_activity.md)
+- [`host_binding`](./detectors/host_binding.md)
+- [`ransomware_behavior`](./detectors/ransomware_behavior.md)
+- [`sandbox_system_checks`](./detectors/sandbox_system_checks.md)
+- [`anti_instrumentation`](./detectors/anti_instrumentation.md)
+
+Some detectors earn their engagement — `signature_anomaly`, `native_api`, and `yara` are
+rarely disputed when engaged, and `network_comms` / `encoded_strings`, despite high dispute
+rates, seeded the C2 endpoints, kill switches, ransom notes, and decoded configs that
+anchored the analyses that worked. Others are consistently disputed when engaged:
+`host_binding`, `sandbox_user_activity`, `sandbox_system_checks`, `crypto_capability`,
+and `debugger_evasion` lose far more engagements than they win, mostly to the same root
+causes — bare dual-use API sightings asserted as evasion, carved or "recovered" values
+that are compiler metadata or garbage decodes, and library/CRT code not recognized as such.
+
+Each detector's page breaks its false positives into verified mechanisms with code anchors,
+explains what floods its ignore pile, and proposes static fixes checked against the
+detector's true positives so the fixes don't suppress what the detector gets right. The
+per-detector mechanisms repeatedly trace to shared machinery — presence-only API hits at
+catalog-asserted severity, per-instruction scans with no grouping or caps, suppression
+disabled without a toolchain fingerprint and vetoed by any (even fabricated) artifact,
+MSVC-only library recognition — so the
+[cross-cutting engine measures](./detectors/engine.md) page collects the central fixes
+and a telemetry-grounded forum-admission policy. The shape finding behind its
+demote-don't-drop stance: itemized rollup lines are confirmed far more often than they are
+disputed, while finding-shape leads are disputed far more often than they are confirmed.
+
+Two honest caveats on reading these outcomes. Engagement is agent-driven: dispute rates
+measure the leads agents chose to test, and the ignored mass is unmeasured, not implicitly
+clean. And the session store spans detector versions; every mechanism documented on the
+pages was verified still-active against the code the review examined.
+
+**Overhaul status (2026-10-31).** The static fixes proposed on the per-detector and
+engine pages shipped as a fleet-wide overhaul: the validation pass
+(`detect/validate.rs` — argument recovery, result-use gating, severity clamp with
+verified re-raise), the artifact validity gates, per-function grouping with per-program
+caps, the import census, extended library/runtime recognition, call-site reference-type
+filtering, string-catalog matching modes, the seeder's per-detector admission budgets
+with census posts, fingerprint-free weak-grade rollups, per-detector file-level buckets,
+and re-routed question derivation. Two sub-passes were retired outright rather than
+hardened — `host_binding`'s binary MAC carving and
+`sandbox_system_checks`' per-function survey-API findings (now one file-level inventory
+line) — and `debugger_evasion` dropped its `NtClose` entry and gated `OutputDebugString`
+on last-error co-location. Each page's "What would reduce the noise" section records any
+deviation between the proposal and what shipped.
+
+The overhaul was A/B-validated by replaying the detectors over previously analyzed
+binaries (reusing their analyzed Ghidra projects via the `detect_replay` example) and
+matching the output against the recorded telemetry leads: total seeded volume fell
+substantially, with true-positive value preserved up to deliberate reshapes (per-function
+merges, cluster collapses) and a handful of archived-project drift cases where the
+session-era program state (agent-defined strings, imported children) no longer exists on
+disk to replay against. The replay surfaced four true regressions that were fixed
+test-first: indirect import calls (`mov reg, [import]; call reg`) now count as call-site
+evidence when the referencing site sits inside a function (the VMProtect import-slot
+false sites still drop); decoder-verified recoveries bypass output-shape fabrication
+gates, with a new interleaved `(value, key)` pair-storage decode and a leetspeak-aware
+wordiness second chance (digit-substituted ransom notes recover; keyboard-mash
+fabrications stay dead); glued known-header templates (`Content-Type:…`) classify again;
+and the network IOC digest lists addresses ahead of fabric so capped lines never drop a
+C2 value.
 
 The per-detector improvement notes below are tagged by what they buy:
 
@@ -245,6 +353,26 @@ produces.
   timezone checks (`GetTimeZoneInformation` plus a compared bias) — the "corporate victim
   only" and regional variants of the same guardrail.
 
+### api_hashing
+
+Dynamic API resolution / API hashing (T1027.007). Collects candidate 32-bit hash values —
+compare/argument immediates in code and aligned immediate tables in data — and statically
+resolves them against precomputed hash tables of well-known export, DLL, and process names
+(the decode engine's apihash matcher) under FNV-1a, ROR13, CRC32, and djb2 (add/xor
+variants). A finding fires only when **three or more distinct values resolve under one
+algorithm** — self-validating evidence, since random constants cannot hash to real export
+names — so an import-less binary gains named capabilities before the agents' first tool
+call. The finding carries the resolved-name list as a decoded-data artifact with a
+hash→name map.
+
+Severities: resolution findings `likely`; at most four resolver-function findings per
+program (one finding per resolver naming all of its imports), the remainder rolled into
+one `unsure` summary. Bare hash-algorithm constants (the ROR-13 idiom, the CRC-32
+polynomial or its table, FNV-1a offset/prime, djb2's 5381) are never standalone findings —
+they appear only as low-severity corroboration beside a resolution finding, since CRC-32
+tables and friends are ubiquitous in benign code. A PEB loader walk or export-directory
+walk in the resolver is named in the reasoning as corroboration but never required.
+
 ## Execution
 ---
 
@@ -262,8 +390,29 @@ Flags programs that drop below the Win32 layer: a twenty-entry ntdll catalog (`N
   `ptrace` case), and naming the syscall turns "manual syscall present" into "manually invokes
   `NtAllocateVirtualMemory`".
 - **(coverage)** Heaven's-gate detection (far jump/call to selector `0x33` in a 32-bit image)
-  and the manual PEB→`Ldr` export-walk idiom, which also feeds the proposed API-hashing
+  and the manual PEB→`Ldr` export-walk idiom, which also feeds the `api_hashing`
   detector.
+
+### injection_win32
+
+Process injection, Win32 layer (T1055). Finds the classic Win32 injection sequence
+`native_api` cannot see (it covers only the ntdll spellings): stage A *allocate/open*
+(`OpenProcess`, `VirtualAllocEx`), stage B *write* (`WriteProcessMemory`, plus
+`NtWriteVirtualMemory` matched as an ordinary import for mixed-layer injectors), stage C
+*execute* (`CreateRemoteThread`/`Ex`, `QueueUserAPC`, `RtlCreateUserThread`, or the
+`SetThreadContext`+`ResumeThread` hijack pair — counted only when both halves sit in one
+function, since each half alone is debugger/thread tooling).
+
+**Scoring is chain co-occurrence only; there are no per-API findings.** Every catalogued
+API is routine in benign installers, debuggers, and crash reporters, so presence alone
+seeds nothing. Two distinct stages sharing one function rate `unsure`; all three rate
+`likely` — the rare, specific injection shape. Stages present only in separate functions
+collapse into a single `untrusted` file-level note naming the split. Calls inside
+recognized C-runtime/support code are dropped, as are `OpenProcess` sites provably passed
+`GetCurrentProcessId`/`GetCurrentProcess` (the self-inspection idiom; the proof bar is
+narrow, so enumerate-and-skip-self loops are never excluded). At most four chain findings
+per program, strongest first, with one summary line rolling up the rest; no finding
+attaches a recovered artifact.
 
 ## Command and Control
 ---
@@ -338,15 +487,19 @@ phrase strings. It exists to corroborate `crypto_capability`, not to stand alone
 ---
 
 Ordered by expected payoff against the goal: recover statically what the agents would
-otherwise spend tokens deriving.
+otherwise spend tokens deriving. The first two entries shipped in the 2026-10-31 overhaul
+as [`api_hashing`](#api_hashing) and [`injection_win32`](#injection_win32); they stay
+listed here for the design rationale.
 
-1. **API hashing / dynamic resolution** (T1027.007) — a catalog of known hash constants
+1. **API hashing / dynamic resolution** (T1027.007) — *shipped as `api_hashing`.* A
+   catalog of known hash constants
    (ROR13, CRC32 polynomial, FNV offset/prime, djb2's 5381) plus the PEB-walk and
    `GetProcAddress`-loop idioms. With precomputed hash tables for the common export names,
    hashed imports can be *resolved statically* — turning an opaque import-less binary into one
    with named capabilities before the agent's first tool call. The single biggest token saver
    on this list, and `native_api`'s PEB-walk work feeds it.
-2. **Process injection, Win32 layer** (T1055) — `VirtualAllocEx` + `WriteProcessMemory` +
+2. **Process injection, Win32 layer** (T1055) — *shipped as `injection_win32`.*
+   `VirtualAllocEx` + `WriteProcessMemory` +
    `CreateRemoteThread`/`QueueUserAPC`/`SetThreadContext`, scored on the *chain* co-occurring
    in one function. `native_api` covers only the ntdll spellings; classic Win32 injection is
    currently invisible.

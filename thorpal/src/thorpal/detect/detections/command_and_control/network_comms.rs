@@ -18,12 +18,16 @@
 //!    HTTP **request fabric** the program builds its traffic out of: User-Agents,
 //!    header names and templates, cookie material, URI paths and templates, methods,
 //!    and media types. Each flag carries the parsed fields for pivoting/hunting, and
-//!    each class is capped separately so no class starves another. The recovered
-//!    indicators are then grouped into pools by [`super::ioc_pools`].
+//!    each class is capped separately so no class starves another. Validity gates
+//!    fold the junk shapes — fragment-bearing documentation URLs, dotted quads with
+//!    no networking code reference or sitting in VERSIONINFO/resource data — plus
+//!    any per-class overflow into one unseeded-IOC digest instead of per-lead flags.
+//!    The recovered indicators are then grouped into pools by [`super::ioc_pools`].
 //! 4. **Hardcoded ports** — the constant passed to `htons()`/`ntohs()` is recovered
 //!    from the calling code (and, in an optimized build where the compiler folded the
-//!    byte swap, from the 16-bit store into `sockaddr_in.sin_port`); a non-standard
-//!    port is flagged as T1571.
+//!    byte swap, from the 16-bit store into `sockaddr_in.sin_port` — accepted only
+//!    inside functions already carrying raw-socket hits, with character-store
+//!    immediates rejected); a non-standard port is flagged as T1571.
 //!
 //! All hits are [`EvidenceKind::ContextOnly`]: networking is capability/context
 //! evidence, validated by reachability + clustering (a socket call's return value
@@ -33,13 +37,14 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::thorpal::detect::confidence::Confidence;
 use anyhow::{Context, Result};
-use ghidra_cli::models::{Instruction, Symbol};
+use ghidra_cli::models::{Instruction, StringData, Symbol};
 
 use crate::thorpal::detect::context::{AnalysisContext, SectionBytes, fmt_addr, parse_addr};
 use crate::thorpal::detect::decode::buffers::{is_data_section, referencing_function};
 use crate::thorpal::detect::detections::{
     ApiSpec, ArtifactClass, AttackTechnique, Detection, DetectionHit, EvidenceKind, HitArtifact,
-    api_call_hits, build_api_hit, high, is_library_function, low, medium, normalize, parse_imm,
+    api_call_hits, build_api_hit, confidence_rank, high, is_library_function, low, medium,
+    normalize, parse_imm,
 };
 use crate::thorpal::detect::indicators::{
     HttpArtifact, UrlIoc, classify_http, is_standard_port, parse_endpoint, parse_ipv4_literal,
@@ -61,13 +66,16 @@ const DATA_REF_WINDOW: u64 = 4096;
 const MAX_LISTED_SITES: usize = 12;
 
 /// The max hardcoded-URL flags surfaced from strings.
-const MAX_URL_HITS: usize = 40;
+///
+/// Overflow is not lost: values past the cap land in the unseeded-IOC digest, so
+/// trimming the cap trades per-lead flags for one digest line each.
+const MAX_URL_HITS: usize = 16;
 
 /// The max bare `host:port` endpoint flags surfaced from strings.
-const MAX_ENDPOINT_HITS: usize = 40;
+const MAX_ENDPOINT_HITS: usize = 16;
 
 /// The max bare IP-literal flags surfaced from strings.
-const MAX_IP_HITS: usize = 24;
+const MAX_IP_HITS: usize = 8;
 
 /// The max flags surfaced *per* HTTP request-fabric class.
 ///
@@ -75,7 +83,7 @@ const MAX_IP_HITS: usize = 24;
 /// to come first in the string table starve every other one, which is how a single
 /// hand-built request template ends up missing from a report full of URI paths — and
 /// the template is the more useful of the two.
-const MAX_HTTP_CLASS_HITS: usize = 12;
+const MAX_HTTP_CLASS_HITS: usize = 6;
 
 /// The max functions flagged per runtime-symbol marker (a Go binary may have hundreds
 /// of `net/http` functions; a handful of representatives is enough for an analyst).
@@ -89,6 +97,17 @@ const MAX_PORT_HITS: usize = 24;
 
 /// How many instructions before a `htons()` call are searched for its argument.
 const PORT_ARG_WINDOW: usize = 8;
+
+/// The byte distance within which a defined VERSIONINFO key string marks a bare IP
+/// literal as resource metadata rather than an indicator.
+///
+/// In a `VS_VERSION_INFO` block the key strings (`FileVersion`, `ProductVersion`)
+/// sit immediately before their values, so a dotted quad this close to one is a
+/// version number, not an address.
+const VERSIONINFO_NEIGHBOR_WINDOW: u64 = 512;
+
+/// The max values itemized in the unseeded-IOC digest's body.
+const MAX_DIGEST_LINES: usize = 40;
 
 /// The Network communication detection (ATT&CK T1071 family).
 pub struct NetworkComms;
@@ -150,98 +169,121 @@ const WEB_APIS: &[ApiSpec] = &[
     // --- WinINet (wininet.dll) ---
     ApiSpec {
         key: "InternetOpen",
+        always_noise: false,
         severity: low(),
         reasoning: "Calls InternetOpen (WinINet) to initialize an HTTP/FTP session — the setup step \
                     before connecting to a remote server. Common, hence low on its own.",
     },
     ApiSpec {
         key: "InternetConnect",
+        always_noise: false,
         severity: medium(),
         reasoning: "Calls InternetConnect (WinINet) to open a connection to a named host/port — a \
-                    direct network-communication capability (candidate C2 endpoint).",
+                    direct network-communication capability; the host and port passed here name \
+                    the endpoint this code talks to.",
     },
     ApiSpec {
         key: "InternetOpenUrl",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls InternetOpenUrl (WinINet) to fetch a URL directly — used to pull a \
-                    payload/second stage or beacon to a hardcoded C2 URL.",
+        reasoning: "Calls InternetOpenUrl (WinINet) to fetch a URL directly — the one-call fetch a \
+                    downloader or beacon would use, and equally the one an updater uses. The URL \
+                    argument names the endpoint worth recovering.",
     },
     ApiSpec {
         key: "HttpOpenRequest",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls HttpOpenRequest (WinINet) to build an HTTP request (GET/POST) to a C2 \
-                    server — the request-construction step of HTTP command-and-control.",
+        reasoning: "Calls HttpOpenRequest (WinINet) to build an HTTP request (GET/POST) — the \
+                    request-construction step of any HTTP exchange, hand-rolled C2 included.",
     },
     ApiSpec {
         key: "HttpSendRequest",
+        always_noise: false,
         severity: medium(),
         reasoning: "Calls HttpSendRequest (WinINet) to send an HTTP request — active HTTP \
-                    communication with a remote server (C2 beacon or exfiltration).",
+                    communication with a remote server; whether that is a beacon, an upload, or \
+                    ordinary client traffic depends on what the surrounding code sends.",
     },
     ApiSpec {
         key: "InternetReadFile",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls InternetReadFile (WinINet) to read the HTTP response body — how a \
-                    downloader/beacon receives a payload or C2 commands.",
+        reasoning: "Calls InternetReadFile (WinINet) to read the HTTP response body — the receive \
+                    half of an HTTP exchange, where a downloader or beacon would take delivery and \
+                    where any client reads its response.",
     },
     ApiSpec {
         key: "InternetWriteFile",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls InternetWriteFile (WinINet) to upload data over HTTP — an exfiltration / \
-                    C2 upload capability.",
+        reasoning: "Calls InternetWriteFile (WinINet) to upload data over HTTP — an HTTP upload \
+                    capability, the primitive an exfiltration or form post rides.",
     },
     // --- WinHTTP (winhttp.dll) ---
     ApiSpec {
         key: "WinHttpOpen",
+        always_noise: false,
         severity: low(),
         reasoning: "Calls WinHttpOpen to initialize a WinHTTP session — the setup step before an \
                     HTTP(S) connection. Common, hence low on its own.",
     },
     ApiSpec {
         key: "WinHttpConnect",
+        always_noise: false,
         severity: medium(),
         reasoning: "Calls WinHttpConnect to open a connection to a named host/port over WinHTTP — a \
-                    direct network-communication capability (candidate C2 endpoint).",
+                    direct network-communication capability; the host and port passed here name \
+                    the endpoint this code talks to.",
     },
     ApiSpec {
         key: "WinHttpOpenRequest",
+        always_noise: false,
         severity: medium(),
         reasoning: "Calls WinHttpOpenRequest to build an HTTP request over WinHTTP — the \
-                    request-construction step of HTTP command-and-control.",
+                    request-construction step of any HTTP exchange, hand-rolled C2 included.",
     },
     ApiSpec {
         key: "WinHttpSendRequest",
+        always_noise: false,
         severity: medium(),
         reasoning: "Calls WinHttpSendRequest to send an HTTP(S) request via WinHTTP — active HTTP \
-                    communication with a remote server (C2 beacon or exfiltration).",
+                    communication with a remote server; whether that is a beacon, an upload, or \
+                    ordinary client traffic depends on what the surrounding code sends.",
     },
     ApiSpec {
         key: "WinHttpReceiveResponse",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls WinHttpReceiveResponse to receive an HTTP response via WinHTTP — how a \
-                    beacon/downloader receives C2 commands or a payload.",
+        reasoning: "Calls WinHttpReceiveResponse to receive an HTTP response via WinHTTP — the \
+                    receive half of a WinHTTP exchange, where a beacon or downloader would take \
+                    delivery.",
     },
     ApiSpec {
         key: "WinHttpReadData",
+        always_noise: false,
         severity: medium(),
         reasoning: "Calls WinHttpReadData to read an HTTP(S) response body via WinHTTP — the \
-                    receive half of HTTP command-and-control.",
+                    receive half of an HTTP(S) exchange.",
     },
     ApiSpec {
         key: "WinHttpWriteData",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls WinHttpWriteData to upload a request body via WinHTTP — an exfiltration / \
-                    C2 upload capability.",
+        reasoning: "Calls WinHttpWriteData to upload a request body via WinHTTP — an HTTP upload \
+                    capability, the primitive an exfiltration or form post rides.",
     },
     // --- urlmon (one-call downloaders) ---
     ApiSpec {
         key: "URLDownloadToFile",
+        always_noise: false,
         severity: high(),
         reasoning: "Calls URLDownloadToFile (urlmon) to fetch a URL straight to disk — a one-call \
                     downloader, overwhelmingly used to stage a second-stage payload.",
     },
     ApiSpec {
         key: "URLDownloadToCacheFile",
+        always_noise: false,
         severity: high(),
         reasoning: "Calls URLDownloadToCacheFile (urlmon) to fetch a URL into the WinINet cache — a \
                     one-call downloader used to stage a second-stage payload.",
@@ -249,27 +291,32 @@ const WEB_APIS: &[ApiSpec] = &[
     // --- libcurl (cross-platform HTTP client) ---
     ApiSpec {
         key: "curl_global_init",
+        always_noise: false,
         severity: low(),
         reasoning: "Calls curl_global_init — the sample links libcurl and initializes it, the setup \
                     step before any HTTP(S) transfer. Common, hence low on its own.",
     },
     ApiSpec {
         key: "curl_easy_init",
+        always_noise: false,
         severity: low(),
         reasoning: "Calls curl_easy_init to create a libcurl transfer handle — the sample carries a \
                     full HTTP(S) client. Setup only, hence low on its own.",
     },
     ApiSpec {
         key: "curl_easy_setopt",
+        always_noise: false,
         severity: medium(),
         reasoning: "Calls curl_easy_setopt to configure a libcurl transfer (URL, POST body, headers, \
-                    user-agent, TLS verification) — the C2 endpoint and request shape are set here.",
+                    user-agent, TLS verification) — the endpoint and request shape are set here, so \
+                    this call is where the transfer's target is pinned down.",
     },
     ApiSpec {
         key: "curl_easy_perform",
+        always_noise: false,
         severity: medium(),
         reasoning: "Calls curl_easy_perform to execute an HTTP(S) transfer via libcurl — active \
-                    network communication (beacon, download, or exfiltration).",
+                    network communication, moving whatever the handle was configured to move.",
     },
 ];
 
@@ -277,74 +324,91 @@ const WEB_APIS: &[ApiSpec] = &[
 const DNS_APIS: &[ApiSpec] = &[
     ApiSpec {
         key: "DnsQuery",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls DnsQuery to issue a DNS request directly — resolves a C2 domain, and (with \
-                    TXT/NULL record types) is the primitive behind DNS-tunnelled C2.",
+        reasoning: "Calls DnsQuery to issue a DNS request directly — resolves a hostname of the \
+                    program's choosing, and (with TXT/NULL record types) is the primitive behind \
+                    DNS-tunnelled C2.",
     },
     // Ghidra reports the real Windows exports `DnsQuery_A` / `DnsQuery_W`, which the
     // catalog normalizer reduces to `DnsQuery_` (a trailing A/W is stripped).
     ApiSpec {
         key: "DnsQuery_",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls DnsQuery_A/W to issue a DNS request directly — resolves a C2 domain, and \
-                    (with TXT/NULL record types) is the primitive behind DNS-tunnelled C2.",
+        reasoning: "Calls DnsQuery_A/W to issue a DNS request directly — resolves a hostname of the \
+                    program's choosing, and (with TXT/NULL record types) is the primitive behind \
+                    DNS-tunnelled C2.",
     },
     ApiSpec {
         key: "DnsQuery_UTF8",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls DnsQuery_UTF8 to issue a DNS request directly — resolves a C2 domain, and \
-                    (with TXT/NULL record types) is the primitive behind DNS-tunnelled C2.",
+        reasoning: "Calls DnsQuery_UTF8 to issue a DNS request directly — resolves a hostname of \
+                    the program's choosing, and (with TXT/NULL record types) is the primitive \
+                    behind DNS-tunnelled C2.",
     },
     ApiSpec {
         key: "DnsQueryEx",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls DnsQueryEx to issue an (asynchronous) DNS request directly — resolves a C2 \
-                    domain without going through the higher-level connect APIs.",
+        reasoning: "Calls DnsQueryEx to issue an (asynchronous) DNS request directly — resolves a \
+                    hostname without going through the higher-level connect APIs.",
     },
     ApiSpec {
         key: "getaddrinfo",
+        always_noise: false,
         severity: medium(),
         reasoning: "Calls getaddrinfo to resolve a hostname to an address — the standard first step \
-                    of connecting to a named (C2) host.",
+                    of connecting to any named host; the artifact worth hunting is the name it is \
+                    given.",
     },
     ApiSpec {
         key: "GetAddrInfo",
+        always_noise: false,
         severity: medium(),
         reasoning: "Calls GetAddrInfoA/W to resolve a hostname to an address — the standard first \
-                    step of connecting to a named (C2) host.",
+                    step of connecting to any named host; the artifact worth hunting is the name \
+                    it is given.",
     },
     ApiSpec {
         key: "GetAddrInfoEx",
+        always_noise: false,
         severity: medium(),
         reasoning: "Calls GetAddrInfoEx to resolve a hostname (optionally asynchronously) — the \
-                    first step of connecting to a named (C2) host.",
+                    first step of connecting to a named host.",
     },
     ApiSpec {
         key: "gethostbyname",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls gethostbyname to resolve a hostname to an address — the legacy resolver, \
-                    still the classic tell of a hardcoded C2 domain.",
+        reasoning: "Calls gethostbyname to resolve a hostname to an address — the legacy resolver; \
+                    when a family hardcodes a domain, this is the classic API that resolves it.",
     },
     ApiSpec {
         key: "WSAAsyncGetHostByName",
+        always_noise: false,
         severity: medium(),
         reasoning: "Calls WSAAsyncGetHostByName to resolve a hostname asynchronously — resolves a \
-                    (C2) domain without blocking the calling thread.",
+                    domain without blocking the calling thread.",
     },
     ApiSpec {
         key: "getnameinfo",
+        always_noise: false,
         severity: low(),
         reasoning: "Calls getnameinfo to reverse-resolve an address to a hostname — network-aware \
                     code, but weak on its own.",
     },
     ApiSpec {
         key: "res_query",
+        always_noise: false,
         severity: medium(),
         reasoning: "Calls res_query (libresolv) to issue a raw DNS query — bypasses the system \
                     resolver cache and is the usual primitive for DNS-tunnelled C2.",
     },
     ApiSpec {
         key: "res_search",
+        always_noise: false,
         severity: medium(),
         reasoning: "Calls res_search (libresolv) to issue a raw DNS query — bypasses the system \
                     resolver cache and is the usual primitive for DNS-tunnelled C2.",
@@ -359,129 +423,156 @@ const DNS_APIS: &[ApiSpec] = &[
 const SOCKET_APIS: &[ApiSpec] = &[
     ApiSpec {
         key: "WSAStartup",
+        always_noise: false,
         severity: low(),
         reasoning: "Calls WSAStartup to initialize Winsock — the mandatory setup step before any \
                     socket use. Ubiquitous in network-capable code, hence low on its own.",
     },
     ApiSpec {
         key: "socket",
+        always_noise: false,
         severity: low(),
         reasoning: "Calls socket() to create a TCP/UDP socket — the sample can speak a raw \
                     transport protocol directly, without an HTTP library.",
     },
     ApiSpec {
         key: "WSASocket",
+        always_noise: false,
         severity: low(),
         reasoning: "Calls WSASocket to create a socket (often with overlapped I/O) — the sample can \
                     speak a raw transport protocol directly.",
     },
     ApiSpec {
         key: "connect",
+        always_noise: false,
         severity: medium(),
         reasoning: "Calls connect() to open a TCP connection to a remote endpoint — direct \
-                    non-application-layer communication with a candidate C2 host:port.",
+                    non-application-layer communication; the sockaddr built nearby names the \
+                    host:port this code reaches for.",
     },
     ApiSpec {
         key: "WSAConnect",
+        always_noise: false,
         severity: medium(),
         reasoning: "Calls WSAConnect to open a connection to a remote endpoint — direct \
-                    non-application-layer communication with a candidate C2 host:port.",
+                    non-application-layer communication; the sockaddr built nearby names the \
+                    host:port this code reaches for.",
     },
     ApiSpec {
         key: "bind",
+        always_noise: false,
         severity: low(),
         reasoning: "Calls bind() to bind a socket to a local address/port — with listen()/accept() \
                     this is a listener (a bind shell or reverse-connect fallback).",
     },
     ApiSpec {
         key: "listen",
+        always_noise: false,
         severity: medium(),
         reasoning: "Calls listen() to accept inbound connections — the sample runs a server, the \
                     shape of a bind shell or an implant awaiting operator connections.",
     },
     ApiSpec {
         key: "accept",
+        always_noise: false,
         severity: medium(),
         reasoning: "Calls accept() to take an inbound connection — the sample runs a server, the \
                     shape of a bind shell or an implant awaiting operator connections.",
     },
     ApiSpec {
         key: "send",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls send() to write to a connected socket — active outbound traffic (beacon \
-                    check-in or data exfiltration).",
+        reasoning: "Calls send() to write to a connected socket — active outbound traffic, the \
+                    write a beacon check-in or an exfiltration push would ride and that any \
+                    protocol client makes.",
     },
     ApiSpec {
         key: "WSASend",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls WSASend to write to a connected socket — active outbound traffic (beacon \
-                    check-in or data exfiltration).",
+        reasoning: "Calls WSASend to write to a connected socket — active outbound traffic, the \
+                    write a beacon check-in or an exfiltration push would ride and that any \
+                    protocol client makes.",
     },
     ApiSpec {
         key: "recv",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls recv() to read from a connected socket — inbound traffic, i.e. how a \
-                    beacon receives operator commands or a payload.",
+        reasoning: "Calls recv() to read from a connected socket — inbound traffic, the read a \
+                    command loop or any protocol client blocks on.",
     },
     ApiSpec {
         key: "WSARecv",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls WSARecv to read from a connected socket — inbound traffic, i.e. how a \
-                    beacon receives operator commands or a payload.",
+        reasoning: "Calls WSARecv to read from a connected socket — inbound traffic, the read a \
+                    command loop or any protocol client blocks on.",
     },
     ApiSpec {
         key: "sendto",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls sendto() to send a UDP datagram to an explicit destination — connectionless \
-                    C2/exfiltration that leaves no TCP session behind.",
+        reasoning: "Calls sendto() to send a UDP datagram to an explicit destination — \
+                    connectionless traffic that leaves no TCP session behind, the shape of \
+                    UDP-based C2 and of ordinary datagram protocols alike.",
     },
     ApiSpec {
         key: "recvfrom",
+        always_noise: false,
         severity: medium(),
         reasoning: "Calls recvfrom() to receive a UDP datagram — the receive half of connectionless \
-                    (UDP) command-and-control.",
+                    (UDP) traffic.",
     },
     ApiSpec {
         key: "closesocket",
+        always_noise: false,
         severity: low(),
         reasoning: "Calls closesocket to tear down a socket — corroborates socket use, but carries \
                     no signal on its own.",
     },
     ApiSpec {
         key: "setsockopt",
+        always_noise: false,
         severity: low(),
         reasoning: "Calls setsockopt to configure a socket (timeouts, keep-alive, reuse) — typical \
                     of a resilient beacon loop, but weak on its own.",
     },
     ApiSpec {
         key: "ioctlsocket",
+        always_noise: false,
         severity: low(),
         reasoning: "Calls ioctlsocket to change socket I/O mode (e.g. non-blocking) — typical of a \
                     polling beacon loop, but weak on its own.",
     },
     ApiSpec {
         key: "select",
+        always_noise: false,
         severity: low(),
         reasoning: "Calls select() to multiplex socket I/O — the shape of a polling C2 loop, but far \
                     too common to mean much on its own.",
     },
     ApiSpec {
         key: "poll",
+        always_noise: false,
         severity: low(),
         reasoning: "Calls poll() to multiplex socket I/O — the shape of a polling C2 loop, but far \
                     too common to mean much on its own.",
     },
     ApiSpec {
         key: "inet_addr",
+        always_noise: false,
         severity: low(),
-        reasoning: "Calls inet_addr to convert a dotted-quad string into an address — the sample \
-                    connects to an IP literal rather than a resolved name (no DNS artifact to hunt).",
+        reasoning: "Calls inet_addr to convert a dotted-quad string into an address — paired with \
+                    connect() this reaches an IP literal with no DNS artifact to hunt, but the \
+                    same call also feeds local addresses and configuration.",
     },
     ApiSpec {
         key: "inet_pton",
+        always_noise: false,
         severity: low(),
         reasoning: "Calls inet_pton to convert an IPv4/IPv6 literal into an address — the sample \
-                    connects to an IP literal rather than a resolved name.",
+                    can address an IP literal directly rather than a resolved name.",
     },
 ];
 
@@ -492,48 +583,56 @@ const SOCKET_APIS: &[ApiSpec] = &[
 const QUIC_APIS: &[ApiSpec] = &[
     ApiSpec {
         key: "MsQuicOpen",
+        always_noise: false,
         severity: medium(),
         reasoning: "Calls MsQuicOpen (Microsoft msquic) to start a QUIC stack — HTTP/3-over-UDP \
                     traffic that is TLS-encrypted end to end and bypasses HTTP-aware inspection.",
     },
     ApiSpec {
         key: "MsQuicOpenVersion",
+        always_noise: false,
         severity: medium(),
         reasoning: "Calls MsQuicOpenVersion (Microsoft msquic) to start a QUIC stack — \
                     HTTP/3-over-UDP traffic that bypasses HTTP-aware inspection.",
     },
     ApiSpec {
         key: "quiche_connect",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls quiche_connect to open a QUIC connection — HTTP/3-over-UDP C2 that is \
-                    TLS-encrypted end to end and bypasses HTTP-aware inspection.",
+        reasoning: "Calls quiche_connect to open a QUIC connection — HTTP/3-over-UDP traffic that \
+                    is TLS-encrypted end to end and bypasses HTTP-aware inspection.",
     },
     ApiSpec {
         key: "quiche_conn_send",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls quiche_conn_send to write QUIC datagrams — active HTTP/3-over-UDP traffic \
-                    (beacon or exfiltration).",
+        reasoning: "Calls quiche_conn_send to write QUIC datagrams — active HTTP/3-over-UDP \
+                    traffic, the send half of the channel.",
     },
     ApiSpec {
         key: "quiche_conn_recv",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls quiche_conn_recv to read QUIC datagrams — the receive half of \
-                    HTTP/3-over-UDP command-and-control.",
+        reasoning: "Calls quiche_conn_recv to read QUIC datagrams — the receive half of an \
+                    HTTP/3-over-UDP channel.",
     },
     ApiSpec {
         key: "ngtcp2_conn_client_new",
+        always_noise: false,
         severity: medium(),
         reasoning: "Calls ngtcp2_conn_client_new to create a QUIC client connection — \
-                    HTTP/3-over-UDP C2 that bypasses HTTP-aware inspection.",
+                    HTTP/3-over-UDP traffic that bypasses HTTP-aware inspection.",
     },
     ApiSpec {
         key: "ngtcp2_conn_writev_stream",
+        always_noise: false,
         severity: medium(),
         reasoning: "Calls ngtcp2_conn_writev_stream to write a QUIC stream — active \
-                    HTTP/3-over-UDP traffic (beacon or exfiltration).",
+                    HTTP/3-over-UDP traffic, the send half of the channel.",
     },
     ApiSpec {
         key: "lsquic_engine_new",
+        always_noise: false,
         severity: medium(),
         reasoning: "Calls lsquic_engine_new to start a QUIC engine — HTTP/3-over-UDP traffic that is \
                     TLS-encrypted end to end and bypasses HTTP-aware inspection.",
@@ -544,81 +643,94 @@ const QUIC_APIS: &[ApiSpec] = &[
 const TLS_APIS: &[ApiSpec] = &[
     ApiSpec {
         key: "SSL_CTX_new",
+        always_noise: false,
         severity: low(),
         reasoning: "Calls SSL_CTX_new (OpenSSL) to build a TLS context — the setup step of an \
                     encrypted channel. Common in benign software, hence low on its own.",
     },
     ApiSpec {
         key: "TLS_client_method",
+        always_noise: false,
         severity: low(),
         reasoning: "Calls TLS_client_method (OpenSSL) to select the client-side TLS method — the \
                     sample initiates (rather than accepts) encrypted connections.",
     },
     ApiSpec {
         key: "SSL_new",
+        always_noise: false,
         severity: low(),
         reasoning: "Calls SSL_new (OpenSSL) to create a TLS session object — the setup step of an \
                     encrypted channel. Common in benign software, hence low on its own.",
     },
     ApiSpec {
         key: "SSL_connect",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls SSL_connect (OpenSSL) to perform the TLS handshake as a client — the C2 \
-                    channel is encrypted, so its contents are opaque on the wire.",
+        reasoning: "Calls SSL_connect (OpenSSL) to perform the TLS handshake as a client — the \
+                    program's channel is encrypted, so its contents are opaque on the wire.",
     },
     ApiSpec {
         key: "SSL_do_handshake",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls SSL_do_handshake (OpenSSL) to drive the TLS handshake — the C2 channel is \
-                    encrypted, so its contents are opaque on the wire.",
+        reasoning: "Calls SSL_do_handshake (OpenSSL) to drive the TLS handshake — the program's \
+                    channel is encrypted, so its contents are opaque on the wire.",
     },
     ApiSpec {
         key: "SSL_write",
+        always_noise: false,
         severity: medium(),
         reasoning: "Calls SSL_write (OpenSSL) to send data over TLS — encrypted outbound traffic \
-                    (beacon check-in or exfiltration) that network inspection cannot read.",
+                    that network inspection cannot read.",
     },
     ApiSpec {
         key: "SSL_read",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls SSL_read (OpenSSL) to receive data over TLS — encrypted inbound traffic, \
-                    i.e. operator commands that network inspection cannot read.",
+        reasoning: "Calls SSL_read (OpenSSL) to receive data over TLS — encrypted inbound traffic \
+                    that network inspection cannot read.",
     },
     ApiSpec {
         key: "mbedtls_ssl_setup",
+        always_noise: false,
         severity: low(),
         reasoning: "Calls mbedtls_ssl_setup to configure an mbedTLS session — the setup step of an \
                     encrypted channel (mbedTLS is common in small, statically-linked implants).",
     },
     ApiSpec {
         key: "mbedtls_ssl_handshake",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls mbedtls_ssl_handshake to perform a TLS handshake — the C2 channel is \
-                    encrypted, so its contents are opaque on the wire.",
+        reasoning: "Calls mbedtls_ssl_handshake to perform a TLS handshake — the program's channel \
+                    is encrypted, so its contents are opaque on the wire.",
     },
     ApiSpec {
         key: "AcquireCredentialsHandle",
+        always_noise: false,
         severity: low(),
         reasoning: "Calls AcquireCredentialsHandle (SChannel/SSPI) to obtain TLS credentials — the \
                     setup step of a Windows-native encrypted channel.",
     },
     ApiSpec {
         key: "InitializeSecurityContext",
+        always_noise: false,
         severity: medium(),
         reasoning: "Calls InitializeSecurityContext (SChannel/SSPI) to drive a TLS handshake using \
-                    the Windows-native TLS stack — an encrypted C2 channel built without OpenSSL.",
+                    the Windows-native TLS stack — an encrypted channel built without OpenSSL.",
     },
     ApiSpec {
         key: "EncryptMessage",
+        always_noise: false,
         severity: medium(),
         reasoning: "Calls EncryptMessage (SChannel/SSPI) to encrypt an outbound record — data sent \
                     over a Windows-native TLS channel that inspection cannot read.",
     },
     ApiSpec {
         key: "DecryptMessage",
+        always_noise: false,
         severity: medium(),
-        reasoning: "Calls DecryptMessage (SChannel/SSPI) to decrypt an inbound record — operator \
-                    traffic received over a Windows-native TLS channel.",
+        reasoning: "Calls DecryptMessage (SChannel/SSPI) to decrypt an inbound record — data \
+                    received over a Windows-native TLS channel that inspection cannot read.",
     },
 ];
 
@@ -845,6 +957,190 @@ async fn ordinal_hits(
         }
     }
     Ok(hits)
+}
+
+// ===========================================================================
+// 1c) Setup/plumbing collapse (one capability finding per function)
+// ===========================================================================
+
+/// The setup/plumbing APIs collapsed into one per-function capability finding.
+///
+/// Exactly the `low()`-graded session/socket/TLS setup calls from the catalogs above:
+/// ubiquitous in network-capable code, so a function calling several of them reads
+/// better as one "network capability" anchor than as one finding per API. The calls
+/// that move traffic (`connect`/`send`/`recv`/`HttpSendRequest`/…) are `medium` and
+/// keep their own findings.
+const PLUMBING_APIS: &[&str] = &[
+    "WSAStartup",
+    "socket",
+    "WSASocket",
+    "bind",
+    "setsockopt",
+    "ioctlsocket",
+    "select",
+    "poll",
+    "closesocket",
+    "inet_addr",
+    "inet_pton",
+    "InternetOpen",
+    "WinHttpOpen",
+    "curl_global_init",
+    "curl_easy_init",
+    "SSL_CTX_new",
+    "SSL_new",
+    "TLS_client_method",
+    "AcquireCredentialsHandle",
+];
+
+/// The plumbing API a call-site hit flags, when the hit is collapsible.
+///
+/// Reads the API name off the hit's content head (the shared `build_api_hit` format
+/// leads with the normalized name in every variant) and admits only resolved
+/// call-site hits: the hit must sit in a known function and carry the `low()` setup
+/// grade — a `medium` traffic-moving call, a symbol/IOC hit, and the function-less
+/// "imported but never called" hits all keep their own flags.
+///
+/// # Arguments
+///
+/// * `hit` - The candidate hit
+fn plumbing_key(hit: &DetectionHit) -> Option<&'static str> {
+    // only a hit attributed to a function can join a per-function capability group
+    hit.function?;
+    // plumbing is exactly the low() setup grade; anything stronger keeps its flag
+    if !matches!(hit.confidence, Confidence::Untrusted) {
+        return None;
+    }
+    // the content head is the normalized API name in every build_api_hit format
+    let head = hit.content.split_whitespace().next()?;
+    PLUMBING_APIS
+        .iter()
+        .copied()
+        .find(|api| api.eq_ignore_ascii_case(head))
+}
+
+/// Merge one function's plumbing hits into a single capability finding.
+///
+/// Keeps everything the per-API findings carried — every API name and every call
+/// site — but says it once, in capability language, with no per-call intent claim.
+///
+/// # Arguments
+///
+/// * `name` - The function's name, when it has one
+/// * `entry` - The function's entry address
+/// * `members` - The `(api, hit)` pairs collapsing into this finding
+fn plumbing_hit(
+    name: Option<&str>,
+    entry: u64,
+    members: &[(&'static str, DetectionHit)],
+) -> DetectionHit {
+    // group every call site under its API so repeats (thunked + direct) merge
+    let mut by_api: BTreeMap<&'static str, Vec<u64>> = BTreeMap::new();
+    for (api, hit) in members {
+        // a hit with no explicit site list is anchored at its primary address
+        let sites = if hit.sites.is_empty() {
+            vec![hit.address]
+        } else {
+            hit.sites.clone()
+        };
+        by_api.entry(api).or_default().extend(sites);
+    }
+    // render each API with its (sorted, deduped) sites and pool the full site list
+    let mut all_sites: Vec<u64> = Vec::new();
+    let mut listed: Vec<String> = Vec::new();
+    for (api, sites) in &mut by_api {
+        sites.sort_unstable();
+        sites.dedup();
+        all_sites.extend(sites.iter().copied());
+        let rendered = sites
+            .iter()
+            .map(|site| fmt_addr(*site))
+            .collect::<Vec<_>>()
+            .join(", ");
+        listed.push(format!("{api} @ {rendered}"));
+    }
+    all_sites.sort_unstable();
+    all_sites.dedup();
+    // the members' technique when they agree, else the T1071 family parent
+    let technique = match members.first() {
+        Some((_, first)) => {
+            // any disagreement means mixed setup, which only the parent covers
+            if members
+                .iter()
+                .all(|(_, hit)| hit.technique.id == first.technique.id)
+            {
+                first.technique.clone()
+            } else {
+                T1071
+            }
+        }
+        None => T1071,
+    };
+    // anchor at the earliest call site so the finding opens on real code
+    let address = all_sites.first().copied().unwrap_or(entry);
+    // name the function so the finding reads without cross-referencing
+    let func = name.map_or_else(|| fmt_addr(entry), str::to_string);
+    let content = format!("network capability setup in {func} — {}", listed.join("; "));
+    let apis: Vec<&str> = by_api.keys().copied().collect();
+    let reasoning = format!(
+        "This function performs the setup half of network communication: {}. Each of these APIs \
+         is ubiquitous in network-capable code (benign and malicious alike), so they are reported \
+         once per function as a capability anchor rather than one finding per API — every API \
+         name and call site is listed above. Corroborate what the capability is used for at the \
+         traffic-moving calls (connect/send/recv/HttpSendRequest and peers) and at the endpoints \
+         this function builds.",
+        apis.join(", ")
+    );
+    // assemble the merged hit; attach the site list only when there is more than one
+    let mut hit = DetectionHit::new(technique, address, Some(entry), low(), content, reasoning)
+        .name(format!(
+            "Network Capability Setup - {} APIs @ {}",
+            by_api.len(),
+            fmt_addr(address)
+        ))
+        .kind(EvidenceKind::ContextOnly);
+    if all_sites.len() > 1 {
+        hit = hit.sites(all_sites);
+    }
+    hit
+}
+
+/// Collapse the per-API setup/plumbing hits that share one function into single
+/// capability findings.
+///
+/// A networked binary otherwise wallpapers the report with one `low()` finding per
+/// setup API per calling function (`WSAStartup`, `socket`, `setsockopt`, …) —
+/// capability restatements that bury the traffic-moving calls. Functions with a
+/// single plumbing hit keep the ordinary per-API finding, and everything `medium()`
+/// and above passes through untouched.
+///
+/// # Arguments
+///
+/// * `ctx` - The analysis context (names the merged findings' functions)
+/// * `hits` - The API/ordinal call-site hits to collapse
+fn collapse_plumbing(ctx: &AnalysisContext, hits: Vec<DetectionHit>) -> Vec<DetectionHit> {
+    // split the collapsible plumbing calls out from everything else
+    let mut kept = Vec::with_capacity(hits.len());
+    let mut groups: BTreeMap<u64, Vec<(&'static str, DetectionHit)>> = BTreeMap::new();
+    for hit in hits {
+        // a hit outside the plumbing set keeps its own finding untouched
+        match plumbing_key(&hit) {
+            Some(api) => {
+                // plumbing_key only admits hits with a resolved function
+                let entry = hit.function.unwrap_or_default();
+                groups.entry(entry).or_default().push((api, hit));
+            }
+            None => kept.push(hit),
+        }
+    }
+    // merge each function's plumbing group; a lone setup call is not wallpaper
+    for (entry, members) in groups {
+        if members.len() < 2 {
+            kept.extend(members.into_iter().map(|(_, hit)| hit));
+            continue;
+        }
+        kept.push(plumbing_hit(ctx.function_name(entry), entry, &members));
+    }
+    kept
 }
 
 // ===========================================================================
@@ -1148,7 +1444,6 @@ impl NetIoc {
                 HttpArtifact::HeaderName
                 | HttpArtifact::HeaderTemplate
                 | HttpArtifact::CookieName
-                | HttpArtifact::Method
                 | HttpArtifact::ContentType => ArtifactClass::HttpHeader,
             },
         }
@@ -1181,28 +1476,29 @@ impl NetIoc {
         }
     }
 
-    /// The `(confidence, suspicion)` severity for this IOC.
-    fn severity(&self) -> (Confidence, i64) {
+    /// The `(confidence, suspicion)` class severity for this IOC.
+    ///
+    /// Class-level: the unreferenced-string downgrade is applied by [`ioc_hit`], not
+    /// here, so the pool pass can also read this as a member's substance. Fragment
+    /// URLs never reach it — they are folded into the digest before scoring.
+    pub(super) fn severity(&self) -> (Confidence, i64) {
         match self {
             // a Tor hidden service is a deliberate anonymity choice — strong signal
             NetIoc::Url(url) if url.is_onion() => high(),
-            // a URL nobody can request is still reported, but it is not an indicator
-            NetIoc::Url(url) if url.has_fragment() => low(),
             // a hardcoded URL or endpoint is a meaningful, pivotable indicator
             NetIoc::Url(_) | NetIoc::Endpoint { .. } => medium(),
             // the request fabric scores by how much of it the program had to write
             // itself: a presented User-Agent or a hand-built template is a fingerprint,
-            // while a bare method or media type is shared with every HTTP client alive
+            // while a bare media type is shared with every HTTP client alive
             NetIoc::Http { artifact, .. } => match artifact {
                 HttpArtifact::UserAgent
                 | HttpArtifact::RequestTemplate
                 | HttpArtifact::HeaderTemplate
                 | HttpArtifact::UriTemplate
                 | HttpArtifact::CookieName => medium(),
-                HttpArtifact::UriPath
-                | HttpArtifact::HeaderName
-                | HttpArtifact::Method
-                | HttpArtifact::ContentType => low(),
+                HttpArtifact::UriPath | HttpArtifact::HeaderName | HttpArtifact::ContentType => {
+                    low()
+                }
             },
             // a bare dotted quad is indistinguishable from a version number statically
             NetIoc::Ip { .. } => low(),
@@ -1279,16 +1575,6 @@ impl NetIoc {
                  so the operator deliberately anonymized the C2 endpoint and it cannot be sinkholed \
                  or resolved by ordinary DNS telemetry. Recovered statically from a defined string, \
                  with the scheme/host/port/path parsed out for hunting.",
-                url.raw
-            ),
-            // a URL carrying a fragment is addressed at a reader, not at a server
-            NetIoc::Url(url) if url.has_fragment() => format!(
-                "Hardcoded {} URL ({}) embedded in the binary. It carries a `#` fragment, which a \
-                 client resolves locally and never transmits, so the URL is written to be opened \
-                 by a person rather than requested by the program — documentation and manual-page \
-                 links in linked library code are the usual source. Reported for completeness; \
-                 treat the host as an indicator only if something else corroborates it.",
-                url.scheme.to_uppercase(),
                 url.raw
             ),
             NetIoc::Url(url) => format!(
@@ -1368,11 +1654,6 @@ fn http_reasoning(artifact: HttpArtifact, raw: &str) -> String {
             "URI path template ({raw:?}) filled in at request time. The fixed segments still hunt \
              as a pattern, and the placeholder marks where the program injects per-victim data — an \
              identifier, a task number, or encoded output."
-        ),
-        HttpArtifact::Method => format!(
-            "HTTP request method ({raw:?}) stored as a literal. Weak on its own — every HTTP client \
-             carries these strings — but it pins which verb the program's own request-building code \
-             emits, which narrows what the traffic looks like."
         ),
         HttpArtifact::ContentType => format!(
             "Media type ({raw:?}) the program sends or accepts. Weak on its own, but it says what \
@@ -1608,6 +1889,9 @@ const MAX_CARVED_URLS: usize = 200;
 ///
 /// Printable ASCII minus the characters RFC 3986 requires to be percent-encoded, so the
 /// run stops on its own at whitespace, at a NUL, and at the quoting a URL cannot cross.
+/// `#` also terminates the run even though it is legal in a URL: a fragment is never
+/// transmitted (RFC 3986 §3.5), so carving past one only merges a documentation link
+/// with whatever literal follows it in the blob.
 ///
 /// # Arguments
 ///
@@ -1616,7 +1900,7 @@ fn is_url_byte(byte: u8) -> bool {
     byte.is_ascii_graphic()
         && !matches!(
             byte,
-            b'"' | b'<' | b'>' | b'\\' | b'^' | b'`' | b'{' | b'|' | b'}'
+            b'"' | b'<' | b'>' | b'\\' | b'^' | b'`' | b'{' | b'|' | b'}' | b'#'
         )
 }
 
@@ -1655,7 +1939,7 @@ fn cut_at_nested_scheme(run: &str) -> &str {
 /// Cut a run just after a resource extension that is followed by more lowercase text.
 ///
 /// A URL ending `.css` is complete; `.csshz8l2` is that URL with the start of the next
-/// literal stuck to it. The lookahead is the whole test — a following `?`, `#`, `/` or
+/// literal stuck to it. The lookahead is the whole test — a following `?`, `/` or
 /// end-of-run all mean the extension is genuinely part of a longer, valid URL, so only
 /// a letter continuing straight on is treated as the seam.
 ///
@@ -1862,6 +2146,138 @@ async fn carved_url_records(
     Ok(records)
 }
 
+/// Whether a section holds compiled-in resources (`.rsrc`) rather than program data.
+///
+/// # Arguments
+///
+/// * `name` - The section name
+fn is_resource_section(name: &str) -> bool {
+    // PE resources live in .rsrc; no data section shares the token
+    name.to_ascii_lowercase().contains("rsrc")
+}
+
+/// The defined-string values that key a PE `VS_VERSION_INFO` block.
+///
+/// A dotted quad stored next to one of these is a FileVersion/ProductVersion value,
+/// not an address.
+const VERSIONINFO_KEYS: &[&str] = &["VS_VERSION_INFO", "FileVersion", "ProductVersion"];
+
+/// The validity gates a recovered IOC record must clear before it becomes a finding.
+///
+/// Built once per run from facts the earlier sub-passes already have — the networking
+/// functions found by the API/symbol passes, the section table, and the defined
+/// strings — so the per-record test is pure and cheap. A record a gate rejects is not
+/// dropped: [`ioc_string_hits`] folds it into the unseeded-IOC digest, where its value
+/// stays visible verbatim for corroboration.
+struct IocGates<'a> {
+    /// Entries of functions carrying a networking API/symbol hit.
+    network_funcs: &'a HashSet<u64>,
+    /// The `[start, end)` address ranges of resource sections.
+    resource_ranges: Vec<(u64, u64)>,
+    /// The addresses of defined VERSIONINFO key strings.
+    versioninfo_addrs: Vec<u64>,
+}
+
+impl<'a> IocGates<'a> {
+    /// Build the gates from the section table and defined strings.
+    ///
+    /// # Arguments
+    ///
+    /// * `sections` - The initialized section bytes (names + bounds)
+    /// * `strings` - The defined strings (for the VERSIONINFO key addresses)
+    /// * `network_funcs` - Entries of functions carrying a networking API/symbol hit
+    fn new(
+        sections: &[SectionBytes],
+        strings: &[StringData],
+        network_funcs: &'a HashSet<u64>,
+    ) -> Self {
+        // the resource sections' address ranges, from the section table
+        let resource_ranges = sections
+            .iter()
+            .filter(|(name, _, _)| is_resource_section(name))
+            .map(|(_, base, bytes)| (*base, base + bytes.len() as u64))
+            .collect();
+        // where the VERSIONINFO keys live, so their neighbours can be recognized
+        let versioninfo_addrs = strings
+            .iter()
+            .filter(|string| {
+                let trimmed = string.value.trim();
+                VERSIONINFO_KEYS
+                    .iter()
+                    .any(|key| trimmed.eq_ignore_ascii_case(key))
+            })
+            .filter_map(|string| parse_addr(&string.address))
+            .collect();
+        IocGates {
+            network_funcs,
+            resource_ranges,
+            versioninfo_addrs,
+        }
+    }
+
+    /// The reason a record must go to the digest instead of its own finding, if any.
+    ///
+    /// Fragment URLs are reader-facing by construction (the fragment never goes on the
+    /// wire), and a bare IP literal only earns a finding when real code in a
+    /// networking-capable function references it and it does not sit in
+    /// resource/VERSIONINFO data — a dotted quad is otherwise statically
+    /// indistinguishable from a version number.
+    ///
+    /// # Arguments
+    ///
+    /// * `record` - The recovered indicator and its attribution
+    /// * `resolve` - Resolves a code site to its containing function's entry
+    fn reject(
+        &self,
+        record: &IocRecord,
+        resolve: impl Fn(u64) -> Option<u64>,
+    ) -> Option<&'static str> {
+        match &record.ioc {
+            // a fragment is never transmitted, so the URL was written for a reader
+            NetIoc::Url(url) if url.has_fragment() => Some(
+                "carries a `#` fragment, so it is a reader-facing (documentation) link that is \
+                 never transmitted",
+            ),
+            NetIoc::Ip { .. } => {
+                // a quad inside a resource section is version metadata, not an address
+                if self
+                    .resource_ranges
+                    .iter()
+                    .any(|(start, end)| record.string_addr >= *start && record.string_addr < *end)
+                {
+                    return Some(
+                        "stored in a resource section, where a dotted quad is version \
+                                 metadata",
+                    );
+                }
+                // a quad next to the VERSIONINFO keys is a FileVersion-style value
+                if self
+                    .versioninfo_addrs
+                    .iter()
+                    .any(|addr| record.string_addr.abs_diff(*addr) <= VERSIONINFO_NEIGHBOR_WINDOW)
+                {
+                    return Some(
+                        "adjacent to VERSIONINFO keys, so it reads as a \
+                                 FileVersion/ProductVersion value",
+                    );
+                }
+                // a bare IP needs a true code reference from networking-capable code
+                let used = record.sites.iter().any(|site| {
+                    resolve(*site).is_some_and(|entry| self.network_funcs.contains(&entry))
+                });
+                if !used {
+                    return Some(
+                        "not referenced from any function that does networking, so it is \
+                                 indistinguishable from a version number",
+                    );
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Whether a function is linked runtime or library code rather than the program's own.
 ///
 /// A statically linked HTTP or TLS stack ships the entire request fabric as literals —
@@ -1874,7 +2290,7 @@ async fn carved_url_records(
 /// # Arguments
 ///
 /// * `name` - The referencing function's name, if it has one
-fn is_runtime_function(name: Option<&str>) -> bool {
+pub(super) fn is_runtime_function(name: Option<&str>) -> bool {
     // no name, no claim — an unnamed function is the program's until shown otherwise
     name.is_some_and(|name| is_library_function(name) || symbol_marker(name).is_some())
 }
@@ -1948,14 +2364,42 @@ fn ioc_detail(ctx: &AnalysisContext, record: &IocRecord, runtime: bool) -> Strin
     parts.join("; ")
 }
 
+/// Whether an IOC hit's recovered value earns the pivot-protected artifact payload.
+///
+/// Only the endpoint class is gated: a `NetworkEndpoint` artifact vetoes rollup
+/// suppression wherever its bucket sits (see the seeder's protected-artifact rule),
+/// so it has to be backed by a code xref or a medium-or-better hit. The fabric
+/// classes (`UriPath`/`UserAgent`/`HttpHeader`) carry no veto and keep their
+/// artifacts unconditionally.
+///
+/// # Arguments
+///
+/// * `class` - The artifact class the IOC inventories under
+/// * `sites` - The code sites referencing the string
+/// * `severity` - The hit's `(confidence, suspicion)` severity as reported
+fn endpoint_artifact_justified(
+    class: ArtifactClass,
+    sites: &[u64],
+    severity: (Confidence, i64),
+) -> bool {
+    // non-endpoint classes are never pivot-protected, so they are never gated
+    if class != ArtifactClass::NetworkEndpoint {
+        return true;
+    }
+    // a code xref is direct evidence; a medium+ grade carries its own weight
+    !sites.is_empty() || confidence_rank(severity.0) >= confidence_rank(Confidence::Unsure)
+}
+
 /// Build the flag for one recovered indicator.
 ///
-/// Returns `None` for the request-fabric classes that carry nothing distinguishing once
-/// they are known to be the linked runtime's own — a bare method, media type, or
-/// standard header name reached only from library code tells an analyst nothing, and
-/// listing it invites the reader to attribute it to the sample's author. Every other
-/// class is kept and weakened instead of dropped, because a User-Agent or URI path in
-/// runtime code may still be the one the program actually sends.
+/// Returns `None` for a fragment-bearing URL (a reader-facing link the program never
+/// transmits — the gates route those to the digest) and for the request-fabric classes
+/// that carry nothing distinguishing once they are known to be the linked runtime's
+/// own — a bare method, media type, or standard header name reached only from library
+/// code tells an analyst nothing, and listing it invites the reader to attribute it to
+/// the sample's author. Every other class is kept and weakened instead of dropped,
+/// because a User-Agent or URI path in runtime code may still be the one the program
+/// actually sends.
 ///
 /// # Arguments
 ///
@@ -1968,6 +2412,11 @@ fn ioc_hit(ctx: &AnalysisContext, record: &IocRecord) -> Option<DetectionHit> {
         sites,
         function,
     } = record;
+    // a URL carrying a fragment is addressed at a reader, never a server (RFC 3986
+    // §3.5: the fragment never goes on the wire), so it is digest material only
+    if matches!(ioc, NetIoc::Url(url) if url.has_fragment()) {
+        return None;
+    }
     // who owns the literal, and whether that owner is the program or its runtime
     let name = function.and_then(|entry| ctx.function_name(entry));
     let runtime = is_runtime_function(name);
@@ -1976,7 +2425,7 @@ fn ioc_hit(ctx: &AnalysisContext, record: &IocRecord) -> Option<DetectionHit> {
         && matches!(ioc, NetIoc::Http { artifact, .. }
         if matches!(
             artifact,
-            HttpArtifact::Method | HttpArtifact::ContentType | HttpArtifact::HeaderName
+            HttpArtifact::ContentType | HttpArtifact::HeaderName
         ))
     {
         return None;
@@ -2012,11 +2461,6 @@ fn ioc_hit(ctx: &AnalysisContext, record: &IocRecord) -> Option<DetectionHit> {
         }
         (None, _) => content.push_str("- **Used by:** (no referencing function resolved)\n"),
     }
-    let mut artifact = HitArtifact::new(ioc.artifact_class(), ioc.value());
-    if let Some(role) = ioc_role(record, runtime) {
-        artifact = artifact.role(role);
-    }
-    artifact = artifact.detail(ioc_detail(ctx, record, runtime));
     let mut hit = DetectionHit::new(
         ioc.technique(),
         address,
@@ -2031,8 +2475,18 @@ fn ioc_hit(ctx: &AnalysisContext, record: &IocRecord) -> Option<DetectionHit> {
         short_value(ioc.value()),
         fmt_addr(address)
     ))
-    .kind(EvidenceKind::ContextOnly)
-    .artifact(artifact);
+    .kind(EvidenceKind::ContextOnly);
+    // a pivot-protected endpoint artifact needs real evidence behind it: it vetoes
+    // rollup suppression wherever its bucket sits, so an unreferenced low-grade value
+    // keeps its content but not the artifact payload
+    if endpoint_artifact_justified(ioc.artifact_class(), sites, severity) {
+        let mut artifact = HitArtifact::new(ioc.artifact_class(), ioc.value());
+        if let Some(role) = ioc_role(record, runtime) {
+            artifact = artifact.role(role);
+        }
+        artifact = artifact.detail(ioc_detail(ctx, record, runtime));
+        hit = hit.artifact(artifact);
+    }
     // attach every other use site so the validator sees them all
     if sites.len() > 1 {
         hit = hit.sites(sites.clone());
@@ -2044,26 +2498,41 @@ fn ioc_hit(ctx: &AnalysisContext, record: &IocRecord) -> Option<DetectionHit> {
     Some(hit)
 }
 
-/// Turn the recovered indicators into one flag each, capped per class.
+/// Turn the recovered indicators into one flag each, capped per class, folding the
+/// gate-rejected and cap-overflow values into one unseeded-IOC digest.
 ///
 /// The cap is counted per [`NetIoc::kind`] rather than over the whole pass, and every
 /// class that truncates is named in a warning — a silent cap reads as "everything was
-/// covered" when it was not.
+/// covered" when it was not, and the digest keeps the folded values visible besides.
 ///
 /// # Arguments
 ///
 /// * `ctx` - The analysis context
 /// * `records` - Every recovered indicator, from [`ioc_records`]
-fn ioc_string_hits(ctx: &AnalysisContext, records: &[IocRecord]) -> Vec<DetectionHit> {
+/// * `gates` - The validity gates junk-shaped records are rejected by
+fn ioc_string_hits(
+    ctx: &AnalysisContext,
+    records: &[IocRecord],
+    gates: &IocGates,
+) -> Vec<DetectionHit> {
     let mut hits = Vec::new();
+    // the records folded into the digest instead of seeding their own flag
+    let mut digest: Vec<(&IocRecord, &'static str)> = Vec::new();
     // how many of each class have been flagged, and how many its cap turned away
     let mut flagged: HashMap<&'static str, usize> = HashMap::new();
     let mut dropped: BTreeMap<&'static str, usize> = BTreeMap::new();
     for record in records {
         let kind = record.ioc.kind();
-        // stop flagging this class (but keep counting) once it has had its share
+        // the validity gates route junk-shaped records to the digest, not to flags
+        if let Some(reason) = gates.reject(record, |site| ctx.containing_function(site)) {
+            digest.push((record, reason));
+            continue;
+        }
+        // stop flagging this class once it has had its share, folding the overflow
+        // into the digest (and keep counting, so the warning below stays honest)
         if flagged.get(kind).copied().unwrap_or(0) >= record.ioc.cap() {
             *dropped.entry(kind).or_default() += 1;
+            digest.push((record, "its class's per-sample flag cap was reached"));
             continue;
         }
         let Some(hit) = ioc_hit(ctx, record) else {
@@ -2072,16 +2541,116 @@ fn ioc_string_hits(ctx: &AnalysisContext, records: &[IocRecord]) -> Vec<Detectio
         *flagged.entry(kind).or_default() += 1;
         hits.push(hit);
     }
-    // never truncate silently — name the class and how many of it went unreported
+    // never truncate silently — name the class and how many of it went unflagged
     for (kind, count) in dropped {
         tracing::warn!(
             class = kind,
             dropped = count,
-            "network IOC class cap reached; additional distinct indicators of this class were not \
-             flagged",
+            "network IOC class cap reached; additional distinct indicators of this class were \
+             folded into the digest",
         );
     }
+    // one digest post keeps every folded value visible without a flag apiece
+    if !digest.is_empty() {
+        hits.push(digest_hit(&digest));
+    }
     hits
+}
+
+/// How early a folded record's class lists in the digest (lower lists first).
+///
+/// The digest's line cap ([`MAX_DIGEST_LINES`]) truncates in listing order, so the
+/// order has to put the values an analyst can pivot on ahead of the ones that only
+/// corroborate: addresses first (a folded C2 IP — `220.181.87.80` — must never fall
+/// off the list behind header fabric), URI paths next (they localize a server), the
+/// header classes after that, and whole-request fabric last, since it is rebuilt
+/// from the pieces above it.
+///
+/// # Arguments
+///
+/// * `ioc` - The folded record's classified indicator
+fn digest_priority(ioc: &NetIoc) -> u8 {
+    match ioc {
+        // addresses are what the digest exists to keep visible
+        NetIoc::Ip { .. } | NetIoc::Url(_) | NetIoc::Endpoint { .. } => 0,
+        NetIoc::Http { artifact, .. } => match artifact {
+            // URI paths and templates localize a server, so they list next
+            HttpArtifact::UriPath | HttpArtifact::UriTemplate => 1,
+            // header classes corroborate rather than pivot
+            HttpArtifact::UserAgent
+            | HttpArtifact::CookieName
+            | HttpArtifact::ContentType
+            | HttpArtifact::HeaderTemplate
+            | HttpArtifact::HeaderName => 2,
+            // whole-request fabric lists last
+            HttpArtifact::RequestTemplate => 3,
+        },
+    }
+}
+
+/// Build the one digest finding that lists every unseeded IOC string verbatim.
+///
+/// Folded values are records, not leads: none earns a finding of its own, but each
+/// stays visible — verbatim, with its address and the reason it was folded — so an
+/// analyst can still corroborate or pivot on one that turns out to matter. Entries
+/// list in class-priority order ([`digest_priority`]; the sort is stable, so ties
+/// keep their insertion order), which is also the order the line cap truncates in.
+/// The digest carries no artifact payload, so the seeding machinery is free to fold
+/// it in turn.
+///
+/// # Arguments
+///
+/// * `entries` - The folded records and the reason each was folded
+fn digest_hit(entries: &[(&IocRecord, &'static str)]) -> DetectionHit {
+    // list addresses ahead of paths, headers and fabric, so the line cap below
+    // never drops a pivotable value in favor of request fabric
+    let mut ordered: Vec<&(&IocRecord, &'static str)> = entries.iter().collect();
+    ordered.sort_by_key(|(record, _)| digest_priority(&record.ioc));
+    // one line per folded value, capped so a flood stays readable
+    let mut lines: Vec<String> = ordered
+        .iter()
+        .take(MAX_DIGEST_LINES)
+        .map(|(record, reason)| {
+            format!(
+                "- `{}` — {} @ {} — {reason}",
+                record.ioc.value(),
+                record.ioc.kind(),
+                fmt_addr(record.string_addr)
+            )
+        })
+        .collect();
+    // never truncate silently, in the digest either
+    if entries.len() > MAX_DIGEST_LINES {
+        lines.push(format!(
+            "- … and {} more not listed here",
+            entries.len() - MAX_DIGEST_LINES
+        ));
+    }
+    // the digest body: what the list is, then the list itself
+    let content = format!(
+        "### Unseeded network IOC strings\n\n{} strings matched a network-IOC shape but were \
+         folded into this digest instead of seeding findings. Each value is listed verbatim for \
+         corroboration.\n\n{}\n",
+        entries.len(),
+        lines.join("\n")
+    );
+    DetectionHit::new(
+        T1071,
+        0,
+        None,
+        low(),
+        content,
+        "These strings matched a network-IOC shape but failed a validity gate (a reader-facing \
+         fragment URL; a version-number-shaped quad in resource data or with no networking code \
+         reference) or overflowed their class's flag cap. They are recorded here verbatim rather \
+         than seeded as individual findings: treat a value as an indicator only if something \
+         else corroborates it.",
+    )
+    .name(format!(
+        "Network IOC Digest - {} unseeded strings",
+        entries.len()
+    ))
+    .kind(EvidenceKind::ContextOnly)
 }
 
 // ===========================================================================
@@ -2145,9 +2714,13 @@ fn port_arg(preceding: &[Instruction]) -> Option<u16> {
 /// An optimizing compiler folds `htons(4444)` into the constant it produces, so the
 /// call disappears and the network-order value is stored directly
 /// (`MOV word ptr [RBP + -0x1e], 0x5c11`). `sin_port` is big-endian, so the host
-/// port is the byte-swapped immediate. Only accepted when the result is plausible —
-/// a well-known port or one above 1023 — since any 16-bit store would otherwise
-/// match.
+/// port is the byte-swapped immediate. Character-store artifacts are rejected before
+/// the swap: a single-byte immediate (an ASCII/UTF-16 char, a size field, a flag)
+/// byte-swaps to a multiple-of-256 "port", and an immediate whose both bytes are
+/// ASCII alphanumeric is a two-character string fragment (`"rs"`, `"nW"`) laid down
+/// by stack string building. The swapped result is then only accepted when it is
+/// plausible — a well-known port or one above 1023 — since any 16-bit store would
+/// otherwise match.
 ///
 /// # Arguments
 ///
@@ -2165,7 +2738,19 @@ fn folded_port(insn: &Instruction) -> Option<u16> {
     }
     // the last operand is the stored immediate, in network (big-endian) order
     let imm = parse_imm(ops.rsplit(',').next()?.trim())?;
-    let port = port_from_imm(imm)?.swap_bytes();
+    let stored = port_from_imm(imm)?;
+    // a single-byte store is a character/size/flag write, never a sockaddr port:
+    // byte-swapped it manufactures exactly the multiple-of-256 "ports" ('G' → 18176)
+    if stored < 0x100 {
+        return None;
+    }
+    // a store whose both bytes are ASCII alphanumerics is a two-character string
+    // fragment ("rs" → 29299, "nW" → 28247), not a network-order port
+    let bytes = stored.to_le_bytes();
+    if bytes[0].is_ascii_alphanumeric() && bytes[1].is_ascii_alphanumeric() {
+        return None;
+    }
+    let port = stored.swap_bytes();
     // reject implausible results: any 16-bit store would otherwise look like a port
     (port >= 1024 || is_standard_port(port)).then_some(port)
 }
@@ -2174,16 +2759,19 @@ fn folded_port(insn: &Instruction) -> Option<u16> {
 ///
 /// Two sub-passes: the argument of every `htons()`/`ntohs()` call (found via the
 /// import table, and via any call whose operand names the helper — which covers a
-/// statically-linked build), and — inside functions already shown to do networking —
-/// the folded `sin_port` store an optimizing compiler leaves behind. A non-standard
-/// port is reported as **T1571**; a well-known one as T1095 context. Bounded by
-/// [`MAX_PORT_HITS`], and recognized runtime/library functions are skipped.
+/// statically-linked build), and — inside functions already carrying raw-socket
+/// (T1095) hits — the folded `sin_port` store an optimizing compiler leaves behind.
+/// A non-standard port is reported as **T1571**; a well-known one as T1095 context.
+/// Bounded by [`MAX_PORT_HITS`], and recognized runtime/library functions are
+/// skipped.
 ///
 /// # Arguments
 ///
 /// * `ctx` - The analysis context
-/// * `network_funcs` - Entries of functions already flagged as doing networking,
-///   which gates the (weaker) folded-store sub-pass
+/// * `socket_funcs` - Entries of functions carrying raw-socket (T1095) API/symbol
+///   hits, which gates the (weaker) folded-store sub-pass — only sockaddr-building
+///   code stores ports, while WinINet/WinHTTP callers build API-name strings on the
+///   stack that read as byte-swapped "ports"
 /// * `libraries` - The importing library of each import, from [`import_libraries`]
 ///
 /// # Errors
@@ -2192,7 +2780,7 @@ fn folded_port(insn: &Instruction) -> Option<u16> {
 #[tracing::instrument(name = "network_comms::port_hits", skip_all, err(Debug))]
 async fn port_hits(
     ctx: &AnalysisContext,
-    network_funcs: &HashSet<u64>,
+    socket_funcs: &HashSet<u64>,
     libraries: &HashMap<String, String>,
 ) -> Result<Vec<DetectionHit>> {
     // the whole-program disassembly (cached), indexed by function entry for lookups
@@ -2274,14 +2862,16 @@ async fn port_hits(
         hits.push(port_hit(ctx, site, entry, port, false));
     }
 
-    // ---- folded htons: a constant sin_port store in a networking function --
+    // ---- folded htons: a constant sin_port store in a raw-socket function --
     for (entry, insns) in &all {
         // stop once the report has enough recovered ports
         if hits.len() >= MAX_PORT_HITS {
             break;
         }
-        // only trust a bare 16-bit store inside a function already doing networking
-        if !network_funcs.contains(entry) {
+        // only trust a bare 16-bit store inside a function already carrying raw-socket
+        // hits: sockaddr builders live there, while WinINet/WinHTTP callers only
+        // manufacture folded "ports" out of their stack-built strings
+        if !socket_funcs.contains(entry) {
             continue;
         }
         // a runtime/library function's constants are not the sample's C2
@@ -2385,38 +2975,45 @@ impl Detection for NetworkComms {
     async fn run(&self, ctx: &AnalysisContext) -> Result<Vec<DetectionHit>> {
         // collect hits from each sub-pass
         let mut hits = Vec::new();
-
         // 1) networking API call sites, one catalog per technique
         hits.extend(api_call_hits(ctx, T1071_001, WEB_APIS, EvidenceKind::ContextOnly).await?);
         hits.extend(api_call_hits(ctx, T1071_004, DNS_APIS, EvidenceKind::ContextOnly).await?);
         hits.extend(api_call_hits(ctx, T1095, SOCKET_APIS, EvidenceKind::ContextOnly).await?);
         hits.extend(api_call_hits(ctx, T1071, QUIC_APIS, EvidenceKind::ContextOnly).await?);
         hits.extend(api_call_hits(ctx, T1573, TLS_APIS, EvidenceKind::ContextOnly).await?);
-
         // 1b) the same Winsock APIs where they are imported by ordinal, which the
         // name-keyed catalogs above cannot see; the library map tells the ordinals apart
         let libraries = import_libraries(ctx).await;
         hits.extend(ordinal_hits(ctx, &libraries).await?);
-
         // 2) statically-linked Go/Rust networking package symbols (no import table)
         hits.extend(symbol_hits(ctx));
-
-        // the functions already shown to do networking; a bare 16-bit port store is
-        // only trustworthy inside one of these (see `port_hits`)
+        // the functions already shown to do networking gate the bare-IP IOC pass and
+        // the fabric-only pools; the raw-socket (T1095) subset gates the folded
+        // sin_port sub-pass, since only sockaddr-building code stores ports
         let network_funcs: HashSet<u64> = hits.iter().filter_map(|hit| hit.function).collect();
-
+        let socket_funcs: HashSet<u64> = hits
+            .iter()
+            .filter(|hit| hit.technique.id == T1095.id)
+            .filter_map(|hit| hit.function)
+            .collect();
+        // 1c) collapse the low-severity setup/plumbing API hits into one capability
+        // finding per function, so the wallpaper does not bury the traffic-moving calls
+        let mut hits = collapse_plumbing(ctx, hits);
         // 3) network IOCs (URLs, endpoints, request fabric, IP literals) from strings.
         // The records are recovered once, uncapped: the per-indicator flags apply the
         // per-class caps, while the pooling pass needs the whole set to see structure.
         let records = ioc_records(ctx).await?;
-        hits.extend(ioc_string_hits(ctx, &records));
-
+        // the validity gates that fold junk-shaped records into the digest instead
+        let gates = IocGates::new(
+            &ctx.initialized_bytes().await?,
+            &ctx.strings,
+            &network_funcs,
+        );
+        hits.extend(ioc_string_hits(ctx, &records, &gates));
         // 3b) the pools those indicators fall into, and how the code selects from them
-        hits.extend(super::ioc_pools::pool_hits(ctx, &records).await?);
-
+        hits.extend(super::ioc_pools::pool_hits(ctx, &records, &network_funcs).await?);
         // 4) hardcoded ports recovered from socket-setup code (non-standard → T1571)
-        hits.extend(port_hits(ctx, &network_funcs, &libraries).await?);
-
+        hits.extend(port_hits(ctx, &socket_funcs, &libraries).await?);
         Ok(hits)
     }
 }
@@ -2548,10 +3145,9 @@ mod tests {
     /// The seam rules leave a URL that is genuinely longer alone.
     #[test]
     fn carve_url_keeps_a_complete_url_whole() {
-        // an extension followed by a query, a fragment, or nothing is not a seam
+        // an extension followed by a query or nothing is not a seam
         for url in [
             "https://a.example.com/style.css?v=2",
-            "https://a.example.com/style.css#top",
             "https://a.example.com/assets/index.php",
             "https://a.example.com:8443/a/b/c",
             "http://a.example.com/download/setup",
@@ -2564,6 +3160,25 @@ mod tests {
         assert_eq!(
             carve_url(b"https://a.example.com/p/login.aspxmalformed", 0),
             Some("https://a.example.com/p/login.aspx")
+        );
+    }
+
+    /// A carve run terminates at `#`: a fragment never goes on the wire, so carving
+    /// past one only merges a documentation link with the next blob literal.
+    #[test]
+    fn carve_url_stops_at_a_fragment() {
+        // the getrandom doc link must not swallow the adjacent '/dev/urandom' literal
+        assert_eq!(
+            carve_url(
+                b"https://docs.rs/getrandom#nodejs-es-module-support/dev/urandom",
+                0
+            ),
+            Some("https://docs.rs/getrandom")
+        );
+        // a '#' straight after a complete path bounds the URL there too
+        assert_eq!(
+            carve_url(b"https://a.example.com/style.css#top", 0),
+            Some("https://a.example.com/style.css")
         );
     }
 
@@ -2826,5 +3441,352 @@ mod tests {
         assert!(content.contains("- **Path:** /gate.php"));
         assert!(content.contains("- **String address:** 0x4a1000"));
         assert!(content.contains("- **Referenced from:** 0x401234"));
+    }
+
+    /// Character-store immediates are rejected by the folded-port recovery.
+    #[test]
+    fn folded_port_rejects_character_store_artifacts() {
+        // single-byte stores: the wide chars 'G'/'E'/'T' of a stack-built L"GET"
+        // (previously misread as ports 18176/17664/21504), the 'd' of "udevd" (25600),
+        // the '1' of " 2>&1" (12544), framing sizes 20/92 (5120/23552), and
+        // STARTUPINFO.wShowWindow = 5 (1280)
+        for imm in [
+            "0x47", "0x45", "0x54", "0x64", "0x31", "0x14", "0x5c", "0x5",
+        ] {
+            assert_eq!(
+                folded_port(&insn("MOV", &format!("word ptr [EBP + -0x18],{imm}"))),
+                None,
+                "{imm}"
+            );
+        }
+        // two-letter string fragments: the "rs" tail of "LogonHours" (29299) and the
+        // "nW"/"oW"/"le" API-name fragments (28247/28503/27749)
+        for imm in ["0x7372", "0x576e", "0x576f", "0x656c"] {
+            assert_eq!(
+                folded_port(&insn("MOV", &format!("word ptr [EBP + -0x18],{imm}"))),
+                None,
+                "{imm}"
+            );
+        }
+    }
+
+    /// Real folded `sin_port` stores still recover through the character-store rules.
+    #[test]
+    fn folded_port_keeps_real_folded_ports() {
+        // htons(443) folds to 0xbb01 and htons(8080) to 0x901f — neither is a
+        // single-byte store, and neither byte pair is alphanumeric-only
+        assert_eq!(
+            folded_port(&insn("MOV", "word ptr [RAX],0xbb01")),
+            Some(443)
+        );
+        assert_eq!(
+            folded_port(&insn("MOV", "word ptr [RAX],0x901f")),
+            Some(8080)
+        );
+    }
+
+    /// Build an IOC record for the gate tests.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The string the record was recovered from
+    /// * `string_addr` - Where the string is stored
+    /// * `sites` - The code sites referencing it
+    fn ioc_record(value: &str, string_addr: u64, sites: Vec<u64>) -> IocRecord {
+        IocRecord {
+            ioc: classify_ioc(value).expect("value classifies"),
+            string_addr,
+            sites,
+            function: None,
+        }
+    }
+
+    /// Build a defined string at an address for the gate tests.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The string's decoded value
+    /// * `address` - The string's address, as hex text
+    fn defined_string(value: &str, address: &str) -> StringData {
+        StringData {
+            address: address.to_string(),
+            value: value.to_string(),
+            length: value.len(),
+            encoding: None,
+            references: Vec::new(),
+        }
+    }
+
+    /// Fragment URLs fold into the digest; the killswitch-shaped URL does not.
+    #[test]
+    fn ioc_gates_fold_fragment_urls_only() {
+        let network_funcs: HashSet<u64> = HashSet::new();
+        let gates = IocGates::new(&[], &[], &network_funcs);
+        // a documentation link carrying a fragment is digest material
+        let doc = ioc_record(
+            "https://docs.rs/getrandom#nodejs-es-module-support",
+            0x1e_6000,
+            Vec::new(),
+        );
+        assert!(gates.reject(&doc, |_| None).is_some());
+        // the WannaCry-killswitch URL shape (no fragment) still seeds a finding
+        let killswitch = ioc_record(
+            "http://www.iuqerfsodp9ifjaposdfjhgosurijfaewrwergwea.com",
+            0x40_c000,
+            vec![0x40_1000],
+        );
+        assert!(gates.reject(&killswitch, |_| Some(0x40_0f00)).is_none());
+    }
+
+    /// Bare IPs need a code reference from networking-capable code to seed.
+    #[test]
+    fn ioc_gates_require_networking_code_use_for_bare_ips() {
+        let network_funcs: HashSet<u64> = [0x40_3b8b].into_iter().collect();
+        let gates = IocGates::new(&[], &[], &network_funcs);
+        // the VERSIONINFO FileVersion value '1.0.0.0' has no code reference at all
+        let version = ioc_record("1.0.0.0", 0x40_4200, Vec::new());
+        assert!(gates.reject(&version, |_| None).is_some());
+        // a quad referenced only from a non-networking function folds as well
+        let unrelated = ioc_record("3.51.124.11", 0x44_01b0, vec![0x40_2000]);
+        assert!(gates.reject(&unrelated, |_| Some(0x40_1f00)).is_some());
+        // '127.0.0.1' referenced from inside the function carrying a WSAStartup hit
+        // (the confirmed pattern) keeps seeding
+        let loopback = ioc_record("127.0.0.1", 0x40_8000, vec![0x40_3c56]);
+        assert!(
+            gates
+                .reject(&loopback, |site| (site == 0x40_3c56).then_some(0x40_3b8b))
+                .is_none()
+        );
+    }
+
+    /// IPs stored in resource data or beside VERSIONINFO keys are version metadata.
+    #[test]
+    fn ioc_gates_skip_resource_section_and_versioninfo_ips() {
+        let network_funcs: HashSet<u64> = [0x40_1000].into_iter().collect();
+        // a .rsrc section holding the first quad, and a FileVersion key by the second
+        let sections = vec![(".rsrc".to_string(), 0x40_4000, vec![0u8; 0x800])];
+        let strings = vec![defined_string("FileVersion", "440190")];
+        let gates = IocGates::new(&sections, &strings, &network_funcs);
+        // '1.0.0.0' at 0x404200 sits inside .rsrc, wherever it is referenced from
+        let in_rsrc = ioc_record("1.0.0.0", 0x40_4200, vec![0x40_5000]);
+        assert!(gates.reject(&in_rsrc, |_| Some(0x40_1000)).is_some());
+        // '3.51.124.11' at 0x4401b0 sits beside the FileVersion key at 0x440190
+        let beside_key = ioc_record("3.51.124.11", 0x44_01b0, vec![0x40_5000]);
+        assert!(gates.reject(&beside_key, |_| Some(0x40_1000)).is_some());
+    }
+
+    /// The digest lists every folded value verbatim with its address and reason.
+    #[test]
+    fn digest_hit_lists_folded_values_verbatim() {
+        let doc = ioc_record(
+            "https://docs.rs/getrandom#nodejs-es-module-support",
+            0x1e_6000,
+            Vec::new(),
+        );
+        let version = ioc_record("1.0.0.0", 0x40_4200, Vec::new());
+        let entries = vec![
+            (&doc, "carries a `#` fragment"),
+            (
+                &version,
+                "not referenced from any function that does networking",
+            ),
+        ];
+        let hit = digest_hit(&entries);
+        // one file-scoped finding with no pivot artifact, at the low grade
+        assert!(hit.function.is_none());
+        assert!(hit.artifact.is_none());
+        assert_eq!(
+            severity_key((hit.confidence, hit.suspicion)),
+            severity_key(low())
+        );
+        // every value appears verbatim with its address and the reason it folded
+        assert!(
+            hit.content
+                .contains("https://docs.rs/getrandom#nodejs-es-module-support")
+        );
+        assert!(hit.content.contains("1.0.0.0"));
+        assert!(hit.content.contains("0x404200"));
+        assert!(hit.content.contains("carries a `#` fragment"));
+        assert!(
+            hit.name
+                .as_deref()
+                .is_some_and(|name| name.contains("2 unseeded"))
+        );
+    }
+
+    /// The digest lists addresses ahead of request fabric, so the line cap never
+    /// drops them.
+    ///
+    /// The confirmed C2 IP `220.181.87.80` folded past position 40 in insertion
+    /// order and fell off the digest behind header fabric. Entries are ordered by
+    /// class priority — IPs/URLs/endpoints first, URI paths next, fabric last —
+    /// before the cap, with insertion order breaking ties, so the IP is always
+    /// listed and only fabric overflows into the "and N more" tail.
+    #[test]
+    fn digest_lists_addresses_ahead_of_fabric_past_the_line_cap() {
+        // fifty header-fabric records, then the confirmed C2 IP dead last
+        let mut records: Vec<IocRecord> = (0u64..50)
+            .map(|i| ioc_record(&format!("X-Pad-{i}: v{i}"), 0x40_0000 + i, Vec::new()))
+            .collect();
+        records.push(ioc_record("220.181.87.80", 0x41_2000, Vec::new()));
+        let entries: Vec<(&IocRecord, &'static str)> = records
+            .iter()
+            .map(|record| (record, "its class's per-sample flag cap was reached"))
+            .collect();
+        let hit = digest_hit(&entries);
+        // the IP survives the 40-line cap despite arriving past it
+        assert!(hit.content.contains("220.181.87.80"), "{}", hit.content);
+        // it lists ahead of every fabric line
+        let ip_at = hit.content.find("220.181.87.80").expect("ip listed");
+        let fabric_at = hit.content.find("X-Pad-0").expect("fabric listed");
+        assert!(ip_at < fabric_at, "{}", hit.content);
+        // ties keep insertion order (the sort is stable)
+        let pad0 = hit.content.find("X-Pad-0:").expect("pad 0");
+        let pad1 = hit.content.find("X-Pad-1:").expect("pad 1");
+        assert!(pad0 < pad1);
+        // the overflow is still counted honestly: 51 entries, 40 lines
+        assert!(hit.content.contains("and 11 more"), "{}", hit.content);
+    }
+
+    /// The pivot-protected endpoint artifact needs an xref or a medium grade.
+    #[test]
+    fn endpoint_artifact_needs_an_xref_or_a_medium_grade() {
+        // an unreferenced low-grade endpoint value keeps content only, no artifact
+        assert!(!endpoint_artifact_justified(
+            ArtifactClass::NetworkEndpoint,
+            &[],
+            low()
+        ));
+        // a referenced endpoint (the killswitch URL shape) keeps its artifact
+        assert!(endpoint_artifact_justified(
+            ArtifactClass::NetworkEndpoint,
+            &[0x40_1000],
+            low()
+        ));
+        // a medium-grade endpoint carries its own weight even unreferenced
+        assert!(endpoint_artifact_justified(
+            ArtifactClass::NetworkEndpoint,
+            &[],
+            medium()
+        ));
+        // fabric classes are never pivot-protected, so they are never gated
+        assert!(endpoint_artifact_justified(
+            ArtifactClass::HttpHeader,
+            &[],
+            low()
+        ));
+    }
+
+    /// Build a low-severity API call hit for the plumbing-collapse tests.
+    ///
+    /// # Arguments
+    ///
+    /// * `api` - The API name leading the content
+    /// * `technique` - The technique the hit evidences
+    /// * `function` - The calling function's entry, when known
+    /// * `site` - The call site address
+    fn api_hit(
+        api: &str,
+        technique: AttackTechnique,
+        function: Option<u64>,
+        site: u64,
+    ) -> DetectionHit {
+        DetectionHit::new(
+            technique,
+            site,
+            function,
+            low(),
+            format!("{api} call @ {}", fmt_addr(site)),
+            "test reasoning".to_string(),
+        )
+        .kind(EvidenceKind::ContextOnly)
+    }
+
+    /// Only low-grade setup calls inside a known function are collapsible.
+    #[test]
+    fn plumbing_key_admits_only_low_setup_call_hits() {
+        // a plumbing call attributed to a function collapses
+        assert_eq!(
+            plumbing_key(&api_hit("WSAStartup", T1095, Some(0x40_1000), 0x40_1010)),
+            Some("WSAStartup")
+        );
+        // a traffic-moving (medium) call keeps its own finding
+        let mut connect = api_hit("connect", T1095, Some(0x40_1000), 0x40_1020);
+        connect.confidence = medium().0;
+        connect.suspicion = medium().1;
+        assert_eq!(plumbing_key(&connect), None);
+        // an "imported but never called" hit has no function and stays as-is
+        assert_eq!(plumbing_key(&api_hit("socket", T1095, None, 0)), None);
+        // a non-plumbing API never collapses, whatever its grade
+        assert_eq!(
+            plumbing_key(&api_hit(
+                "getnameinfo",
+                T1071_004,
+                Some(0x40_1000),
+                0x40_1030
+            )),
+            None
+        );
+    }
+
+    /// A function's plumbing hits merge into one capability finding that keeps every
+    /// API name and call site.
+    #[test]
+    fn plumbing_hits_merge_into_one_capability_finding() {
+        // the confirmed cheap anchors: WSAStartup + socket + setsockopt in one function
+        let members = vec![
+            (
+                "WSAStartup",
+                api_hit("WSAStartup", T1095, Some(0x40_1000), 0x40_1010),
+            ),
+            (
+                "socket",
+                api_hit("socket", T1095, Some(0x40_1000), 0x40_1020),
+            ),
+            (
+                "setsockopt",
+                api_hit("setsockopt", T1095, Some(0x40_1000), 0x40_1030),
+            ),
+        ];
+        let hit = plumbing_hit(Some("reverse_shell"), 0x40_1000, &members);
+        // one low-grade finding, anchored at the earliest site in the function
+        assert_eq!(hit.function, Some(0x40_1000));
+        assert_eq!(hit.address, 0x40_1010);
+        assert_eq!(
+            severity_key((hit.confidence, hit.suspicion)),
+            severity_key(low())
+        );
+        // the anchors survive the merge: every API name, every site, the function
+        for text in [
+            "WSAStartup",
+            "socket",
+            "setsockopt",
+            "0x401010",
+            "0x401020",
+            "0x401030",
+            "reverse_shell",
+        ] {
+            assert!(hit.content.contains(text), "{text}");
+        }
+        // agreeing members keep their technique, and the reasoning stays capability-level
+        assert_eq!(hit.technique.id, T1095.id);
+        assert!(!hit.reasoning.contains("C2"));
+    }
+
+    /// Mixed-catalog plumbing falls back to the T1071 family parent.
+    #[test]
+    fn plumbing_hit_mixes_techniques_to_the_parent() {
+        let members = vec![
+            (
+                "WSAStartup",
+                api_hit("WSAStartup", T1095, Some(0x40_1000), 0x40_1010),
+            ),
+            (
+                "InternetOpen",
+                api_hit("InternetOpen", T1071_001, Some(0x40_1000), 0x40_1020),
+            ),
+        ];
+        let hit = plumbing_hit(None, 0x40_1000, &members);
+        assert_eq!(hit.technique.id, T1071.id);
     }
 }

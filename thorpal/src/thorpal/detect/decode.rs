@@ -519,19 +519,17 @@ const SUSPICIOUS_COMMANDS: &[&str] = &[
     "dd if=",
 ];
 
-/// Shell operators + common command prefixes that mark a recovered string as a
-/// command line (raises confidence: a valid command is unlikely to decode by chance).
-const COMMAND_MARKERS: &[&str] = &[
-    "&&",
-    "||",
-    " | ",
-    "; ",
-    " > ",
-    " >> ",
-    "2>&1",
-    ">/dev/",
-    "$(",
-    "${",
+/// Shell operators that mark a recovered string as a command line only in
+/// combination: table-decoded junk is full of `|` and `&` runs, so one of these on
+/// its own is no evidence of anything.
+const COMMAND_OPERATORS: &[&str] = &[
+    "&&", "||", " | ", "; ", " > ", " >> ", "2>&1", ">/dev/", "$(", "${",
+];
+
+/// Alphabetic command tokens — interpreter paths and command words a fabricated
+/// decode essentially never spells. At least one of these must accompany an
+/// operator before a string reads as a command line.
+const COMMAND_TOKENS: &[&str] = &[
     "/bin/",
     "/usr/bin/",
     "sh -c",
@@ -690,17 +688,37 @@ pub fn suspicious_command(text: &str) -> Option<&'static str> {
         .find(|c| lower.contains(c))
 }
 
-/// Whether the recovered text looks like a shell command line (a shell operator or a
-/// known command prefix). A valid command is very unlikely to decode by chance, so
-/// this is evidence the decode is real (raises confidence).
+/// Whether the recovered text looks like a shell command line. A valid command is
+/// very unlikely to decode by chance, so this is evidence the decode is real
+/// (raises confidence).
+///
+/// A curated destructive/LOLBin command ([`suspicious_command`]) matches on its
+/// own. Anything else needs at least two distinct markers of which one is an
+/// alphabetic command token: a lone `||`/`&&`/`; ` substring is what a decoded
+/// lookup table's punctuation runs look like, so on its own it is no evidence of
+/// a command at all.
 ///
 /// # Arguments
 ///
 /// * `text` - The recovered text
 #[must_use]
 pub fn looks_shell_command(text: &str) -> bool {
+    // a curated destructive/download/persistence command stands on its own
+    if suspicious_command(text).is_some() {
+        return true;
+    }
+    // count the distinct operators and command tokens the text carries
     let lower = text.to_ascii_lowercase();
-    suspicious_command(text).is_some() || COMMAND_MARKERS.iter().any(|m| lower.contains(m))
+    let operators = COMMAND_OPERATORS
+        .iter()
+        .filter(|marker| lower.contains(*marker))
+        .count();
+    let tokens = COMMAND_TOKENS
+        .iter()
+        .filter(|marker| lower.contains(*marker))
+        .count();
+    // two distinct markers, at least one of them an alphabetic command token
+    tokens >= 1 && operators + tokens >= 2
 }
 
 /// A content-driven confidence + suspicion assessment for a recovered item, with a
@@ -965,6 +983,57 @@ mod tests {
         assert!(!is_high_entropy_url("https://google.com/search"));
         // an onion is not double-counted as a high-entropy URL
         assert!(!is_high_entropy_url("http://msydqstlz2kzerdg.onion/gate"));
+    }
+
+    /// A lone shell operator does not mark junk as a command; real command
+    /// lines still match.
+    #[test]
+    fn looks_shell_command_needs_more_than_a_lone_operator() {
+        // table-decode fabrications carry `|`/`&` runs and nothing else
+        assert!(!looks_shell_command("~~|~||z~||z|zzx|zxz|"));
+        assert!(!looks_shell_command("=&&jL66Zl??A~"));
+        // one operator alone — or several with no command word — is still junk
+        assert!(!looks_shell_command("a || b"));
+        assert!(!looks_shell_command("x && y || z"));
+        // an operator plus an alphabetic command token reads as a command
+        assert!(looks_shell_command("echo pwned && exit"));
+        assert!(looks_shell_command("sleep 5 ; /bin/kill -9 $$"));
+        // a curated destructive command stands on its own
+        assert!(looks_shell_command("dd if=/dev/urandom of=/dev/sda"));
+    }
+
+    /// Table-decode junk with a lone operator stays at the Untrusted/25 floor.
+    #[test]
+    fn assess_leaves_lone_operator_junk_at_the_floor() {
+        // a popcount fabrication: `||` runs, nothing else — stays at the floor
+        let junk = assess(
+            Confidence::Untrusted,
+            RecoveredKind::String,
+            "~~|~||z~||z|zzx|zxz|",
+        );
+        assert!(matches!(junk.confidence, Confidence::Untrusted));
+        assert_eq!(junk.suspicion, 25);
+        assert!(
+            junk.notes
+                .iter()
+                .all(|note| !note.contains("shell command"))
+        );
+        // AES T-table junk: a lone `&&` — same
+        let junk = assess(
+            Confidence::Untrusted,
+            RecoveredKind::String,
+            "=&&jL66Zl??A~",
+        );
+        assert!(matches!(junk.confidence, Confidence::Untrusted));
+        assert_eq!(junk.suspicion, 25);
+        // a real multi-marker command still earns the raise
+        let cmd = assess(
+            Confidence::Untrusted,
+            RecoveredKind::String,
+            "echo 1 > /tmp/.lock && sleep 5",
+        );
+        assert!(matches!(cmd.confidence, Confidence::Unsure));
+        assert_eq!(cmd.suspicion, 50);
     }
 
     /// Confidence and suspicion move on independent axes.
