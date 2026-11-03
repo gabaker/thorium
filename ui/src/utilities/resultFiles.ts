@@ -23,6 +23,7 @@ const inFlight = new Map<string, Promise<ArrayBuffer | null>>();
  * @param resultId - The unique id of the specific result/run (used as the cache key + API path).
  * @param name - The name of the result file to fetch.
  * @param errorHandler - Called with a formatted message if the download fails.
+ * @param repo - Whether `sha256` is a repo's URL, so the file is read from the repo's results.
  * @returns The file bytes, or `null` if the request failed.
  */
 export async function fetchResultFileCached(
@@ -31,6 +32,7 @@ export async function fetchResultFileCached(
   resultId: string,
   name: string,
   errorHandler: (error: string) => void,
+  repo = false,
 ): Promise<ArrayBuffer | null> {
   const cached = getCachedResultFile(resultId, name);
   if (cached) {
@@ -42,7 +44,7 @@ export async function fetchResultFileCached(
   if (pending) {
     return pending;
   }
-  const request = getResultsFile(sha256, tool, resultId, name, errorHandler)
+  const request = getResultsFile(sha256, tool, resultId, name, errorHandler, repo)
     .then((res) => {
       const bytes = res?.data ?? null;
       if (bytes) {

@@ -2,7 +2,7 @@ import styled from 'styled-components';
 
 // project imports
 import { BUTTON_BAR_MARGIN } from '@components/shared/buttons/tokens';
-import { SectionRow } from './shared.styled';
+import { EditSectionRow } from './shared.styled';
 
 export const InfoRow = styled.div`
   display: flex;
@@ -62,7 +62,7 @@ export const FormatBar = styled.div`
 `;
 
 /// A form section with spacing above it (edit mode)
-export const SpacedSectionRow = styled(SectionRow)`
+export const SpacedSectionRow = styled(EditSectionRow)`
   margin-top: 0.5rem;
 `;
 
@@ -74,16 +74,4 @@ export const SpacedInfoRow = styled(InfoRow)`
 /// Spacing wrapper for the order update error alert
 export const OrderErrorSpacer = styled.div`
   margin-top: ${BUTTON_BAR_MARGIN};
-`;
-
-/// The creator badge (replaces the react-bootstrap Badge with the bg-blue utility)
-export const CreatorBadge = styled.span`
-  display: inline-block;
-  padding: 0.35em 0.65em;
-  font-size: 0.75em;
-  font-weight: 700;
-  line-height: 1;
-  color: #fff;
-  background-color: #0066cc;
-  border-radius: 0.375rem;
 `;

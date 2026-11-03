@@ -193,7 +193,9 @@ interface FieldsProps {
   resetKey?: number;
 }
 
-function getSemVerString(version: SemVer): string {
+function getSemVerString(version: SemVer | string): string {
+  // the API sends a semantic version as its string form
+  if (typeof version === 'string') return version;
   let s = `${version.major}.${version.minor}.${version.patch}`;
   if (version.pre) s += `-${version.pre}`;
   if (version.build) s += `+${version.build}`;

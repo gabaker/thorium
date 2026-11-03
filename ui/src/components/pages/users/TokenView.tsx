@@ -1,32 +1,50 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 import { useNavigate } from 'react-router';
-import { Alert, Badge, Button, Col, Container, Modal, OverlayTrigger, Row, Tooltip } from 'react-bootstrap';
 import styled from 'styled-components';
 import { FaClipboard, FaCheck } from 'react-icons/fa6';
+import { FaEye, FaEyeSlash } from 'react-icons/fa';
+import { MdDelete } from 'react-icons/md';
+import { toast } from 'react-toastify';
 
 // project imports
+import {
+  ActionsCell,
+  ActionsHeader,
+  CellNote,
+  GroupsCell,
+  MaskedToken,
+  NameCell,
+  NoWrapCell,
+  PanelDescription,
+  PanelHead,
+  PanelBanner,
+  PanelHeading,
+  PanelNotice,
+  PanelSubsection,
+  RowActions,
+  ScopedPanel,
+  TableFrame,
+  TokenTable,
+  TokenValue,
+} from './ScopedTokens.styled';
+import RunTokenTable, { TokenGroups } from './RunTokenTable';
+import { ScopedTokenForm } from './ScopedTokenForm';
+import { formatExpire, grantableDeveloperPermissions, splitScopedTokens } from './scopedTokens';
+import { ScopedTokenList } from './useScopedTokens';
+import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
+import { Button, ButtonSize, ButtonVariant, IconButton } from '@components/shared/buttons';
+import Modal from '@components/shared/modal/Modal';
+import { OverlayTipTop } from '@components/shared/overlay/tips';
+import Time from '@components/shared/Time';
 import Subtitle from '@components/shared/titles/Subtitle';
 import { useAuth } from '@utilities/auth';
-import { createScopedToken, deleteScopedToken, listScopedTokens, updateScopedToken } from '@thorpi/users';
+import { createScopedToken, deleteScopedToken, updateScopedToken } from '@thorpi/users';
+import { BUTTON_BADGE_GAP, spacers } from '@styles';
 import { ScopedToken, ScopedTokenRole, ScopedTokenRoleKey, ScopedTokenUpdate, UserInfo } from '@models/users';
-import { ScopedTokenForm } from './ScopedTokenForm';
-import styles from './TokenViewStyles.module.scss';
-import { FaEye, FaEyeSlash, FaQuestionCircle } from 'react-icons/fa';
-import { toast } from 'react-toastify';
-import { BUTTON_BADGE_GAP } from '@styles';
-import { OverlayTipTop } from '@components/shared/overlay/tips';
-import { ButtonSize, ButtonVariant, IconButton } from '@components/shared/buttons';
-import { MdDelete } from 'react-icons/md';
 
-// ─── styled helpers ───────────────────────────────────────────────────────────
-
-const ScopedSection = styled.div`
-  margin-top: 1.5rem;
-`;
-
-// ─── Shared form ──────────────────────────────────────────────────────────────
 // ─── Root token ───────────────────────────────────────────────────────────────
 
+/** Asks before revoking the user's root token, which logs them out. */
 const RevokeTokenModal = ({ show, onHide }: { show: boolean; onHide: () => void }) => {
   const { revoke } = useAuth();
   const navigate = useNavigate();
@@ -36,19 +54,18 @@ const RevokeTokenModal = ({ show, onHide }: { show: boolean; onHide: () => void 
     });
   };
   return (
-    <Modal show={show} onHide={onHide}>
-      <Modal.Header closeButton>
-        <Modal.Title>Revoke Your Token?</Modal.Title>
-      </Modal.Header>
-      <Modal.Body>
-        Revoking your token will automatically log you out of this page and any currently running or queued analysis jobs (reactions) may
-        fail. Are you sure?
-      </Modal.Body>
-      <Modal.Footer className="d-flex justify-content-center">
-        <Button className="danger-btn" onClick={() => handleRevoke()}>
+    <Modal
+      show={show}
+      onClose={onHide}
+      title="Revoke Your Token?"
+      actions={
+        <Button variant={ButtonVariant.Danger} onClick={() => handleRevoke()}>
           Confirm
         </Button>
-      </Modal.Footer>
+      }
+    >
+      Revoking your token will automatically log you out of this page and any currently running or queued analysis jobs (reactions) may
+      fail. Are you sure?
     </Modal>
   );
 };
@@ -59,15 +76,29 @@ const TokenLine = styled.div`
   display: flex;
   align-items: center;
   gap: ${BUTTON_BADGE_GAP};
+`;
 
-  .wrap-token {
-    flex: 1;
-    min-width: 0;
-  }
+/** The root token's value, or its mask while hidden; a long token breaks anywhere rather than widening the page. */
+const TokenText = styled.span`
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+`;
 
-  p {
-    margin: 0;
-  }
+/** The root token's labels in a narrow first column and its value and expiry beside them. */
+const RootTokenGrid = styled.div`
+  display: grid;
+  grid-template-columns: minmax(5rem, 1fr) 5fr;
+  align-items: center;
+  gap: ${spacers.four} ${spacers.three};
+`;
+
+/** The groups a scoped token would limit the user to, scrolled when the list is long. */
+const ScopeGroups = styled.ul`
+  max-height: 12rem;
+  overflow: auto;
+  margin: 0;
+  padding-left: ${spacers.five};
 `;
 
 // Red trash control (next to the show/hide eye) that opens the revoke-token confirmation.
@@ -88,67 +119,55 @@ const RevokeTokenButton = styled.button`
   }
 `;
 
+/** The user's root token, hidden until shown, with its expiry and the revoke control. */
 const RootToken = () => {
   const [showRevokeModal, setShowRevokeModal] = useState(false);
   const [tokenShowing, setTokenShowing] = useState(false);
   const { userInfo, clearScopedToken, scopedToken } = useAuth();
 
   return (
-    <Container>
-      <Row>
-        <Col xs={2}>
-          <Subtitle>Token</Subtitle>
-        </Col>
-        <Col xs={10}>
-          <TokenLine>
-            <div className="wrap-token">
-              {tokenShowing ? (
-                <p>{userInfo?.token}</p>
-              ) : (
-                <p className="hidden">****************************************************************</p>
-              )}
-            </div>
-            {scopedToken && <Button onClick={() => clearScopedToken()}>Use Root Token</Button>}
-            {/* eye toggle reveals/masks the token in place */}
-            <OverlayTipTop tip={tokenShowing ? 'Hide' : 'Show'}>
-              <IconButton
-                variant={ButtonVariant.Icon}
-                size={ButtonSize.Small}
-                onClick={() => setTokenShowing((prev) => !prev)}
-                aria-label={tokenShowing ? 'Hide token' : 'Show token'}
-              >
-                {tokenShowing ? <FaEyeSlash size={18} /> : <FaEye size={18} />}
-              </IconButton>
-            </OverlayTipTop>
-            {/* red trash opens the revoke-token confirmation */}
-            <OverlayTipTop tip={scopedToken !== undefined ? 'Disabled Scoped Token to revoke root token' : 'Revoke Token'}>
-              <RevokeTokenButton
-                type="button"
-                onClick={() => setShowRevokeModal(true)}
-                aria-label="Revoke Token"
-                disabled={scopedToken !== undefined}
-              >
-                <MdDelete size={22} />
-              </RevokeTokenButton>
-            </OverlayTipTop>
-          </TokenLine>
-        </Col>
-      </Row>
-      <Row className="pt-3">
-        <Col xs={2}>
-          <Subtitle>Expiry</Subtitle>
-        </Col>
-        <Col>
-          <p>{userInfo?.token_expiration}</p>
-        </Col>
-      </Row>
+    <RootTokenGrid>
+      <Subtitle>Token</Subtitle>
+      <TokenLine>
+        <TokenText>{tokenShowing ? userInfo?.token : '****************************************************************'}</TokenText>
+        {scopedToken && (
+          <Button variant={ButtonVariant.Secondary} size={ButtonSize.Small} onClick={() => clearScopedToken()}>
+            Use Root Token
+          </Button>
+        )}
+        {/* eye toggle reveals/masks the token in place */}
+        <OverlayTipTop tip={tokenShowing ? 'Hide' : 'Show'}>
+          <IconButton
+            variant={ButtonVariant.Icon}
+            size={ButtonSize.Small}
+            onClick={() => setTokenShowing((prev) => !prev)}
+            aria-label={tokenShowing ? 'Hide token' : 'Show token'}
+          >
+            {tokenShowing ? <FaEyeSlash size={18} /> : <FaEye size={18} />}
+          </IconButton>
+        </OverlayTipTop>
+        {/* red trash opens the revoke-token confirmation */}
+        <OverlayTipTop tip={scopedToken !== undefined ? 'Disabled Scoped Token to revoke root token' : 'Revoke Token'}>
+          <RevokeTokenButton
+            type="button"
+            onClick={() => setShowRevokeModal(true)}
+            aria-label="Revoke Token"
+            disabled={scopedToken !== undefined}
+          >
+            <MdDelete size={22} />
+          </RevokeTokenButton>
+        </OverlayTipTop>
+      </TokenLine>
+      <Subtitle>Expiry</Subtitle>
+      <span>{userInfo?.token_expiration ? <Time>{userInfo.token_expiration}</Time> : null}</span>
       <RevokeTokenModal show={showRevokeModal} onHide={() => setShowRevokeModal(false)} />
-    </Container>
+    </RootTokenGrid>
   );
 };
 
 // ─── Create modal ─────────────────────────────────────────────────────────────
 
+/** The props of {@link CreateTokenModal}. */
 type CreateModalProps = {
   show: boolean;
   availableGroups: string[];
@@ -156,6 +175,7 @@ type CreateModalProps = {
   onCreated: () => void;
 };
 
+/** The dialog that creates a scoped token. */
 const CreateTokenModal = ({ show, availableGroups, onHide, onCreated }: CreateModalProps) => {
   const [name, setName] = useState('');
   const [selectedGroups, setSelectedGroups] = useState<string[]>([]);
@@ -163,6 +183,7 @@ const CreateTokenModal = ({ show, availableGroups, onHide, onCreated }: CreateMo
   const [expires, setExpires] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const { userInfo } = useAuth();
 
   const reset = () => {
     setName('');
@@ -211,44 +232,48 @@ const CreateTokenModal = ({ show, availableGroups, onHide, onCreated }: CreateMo
   };
 
   return (
-    <Modal show={show} onHide={handleHide}>
-      <Modal.Header closeButton>
-        <Modal.Title>New Scoped Token</Modal.Title>
-      </Modal.Header>
-      <Modal.Body>
-        {error && <Alert variant="danger">{error}</Alert>}
-        <ScopedTokenForm
-          name={name}
-          onNameChange={setName}
-          availableGroups={availableGroups}
-          selectedGroups={selectedGroups}
-          role={role}
-          onRoleChange={setRole}
-          onGroupToggle={toggleGroup}
-          expires={expires}
-          onExpiresChange={setExpires}
-        />
-      </Modal.Body>
-      <Modal.Footer>
-        <Button variant="secondary" onClick={handleHide}>
-          Cancel
-        </Button>
-        <Button className="primary-btn" onClick={() => void handleSubmit()} disabled={submitting}>
-          {submitting ? 'Creating…' : 'Create'}
-        </Button>
-      </Modal.Footer>
+    <Modal
+      show={show}
+      onClose={handleHide}
+      title="New scoped token"
+      actions={
+        <>
+          <Button variant={ButtonVariant.Secondary} onClick={handleHide}>
+            Cancel
+          </Button>
+          <Button onClick={() => void handleSubmit()} disabled={submitting}>
+            {submitting ? 'Creating…' : 'Create'}
+          </Button>
+        </>
+      }
+    >
+      {error && <AlertBanner>{error}</AlertBanner>}
+      <ScopedTokenForm
+        name={name}
+        onNameChange={setName}
+        availableGroups={availableGroups}
+        selectedGroups={selectedGroups}
+        role={role}
+        onRoleChange={setRole}
+        onGroupToggle={toggleGroup}
+        expires={expires}
+        onExpiresChange={setExpires}
+        grantable={grantableDeveloperPermissions(userInfo?.role)}
+      />
     </Modal>
   );
 };
 
 // ─── Delete modal ─────────────────────────────────────────────────────────────
 
+/** The props of {@link DeleteTokenModal}. */
 type DeleteModalProps = {
   token: ScopedToken | null;
   onHide: () => void;
   onDeleted: () => void;
 };
 
+/** Asks before deleting a scoped token; open while a token is given. */
 const DeleteTokenModal = ({ token, onHide, onDeleted }: DeleteModalProps) => {
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -272,32 +297,34 @@ const DeleteTokenModal = ({ token, onHide, onDeleted }: DeleteModalProps) => {
   };
 
   return (
-    <Modal show={!!token} onHide={handleHide}>
-      <Modal.Header closeButton>
-        <Modal.Title>Delete Scoped Token?</Modal.Title>
-      </Modal.Header>
-      <Modal.Body>
-        {error && <Alert variant="danger">{error}</Alert>}
-        {token && (
-          <p>
-            Delete <strong>{token.name}</strong>? This cannot be undone.
-          </p>
-        )}
-      </Modal.Body>
-      <Modal.Footer>
-        <Button variant="secondary" onClick={handleHide}>
-          Cancel
-        </Button>
-        <Button className="danger-btn" onClick={() => void handleDelete()} disabled={submitting}>
-          {submitting ? 'Deleting…' : 'Delete'}
-        </Button>
-      </Modal.Footer>
+    <Modal
+      show={!!token}
+      onClose={handleHide}
+      title="Delete Scoped Token?"
+      actions={
+        <>
+          <Button variant={ButtonVariant.Secondary} onClick={handleHide}>
+            Cancel
+          </Button>
+          <Button variant={ButtonVariant.Danger} onClick={() => void handleDelete()} disabled={submitting}>
+            {submitting ? 'Deleting…' : 'Delete'}
+          </Button>
+        </>
+      }
+    >
+      {error && <AlertBanner>{error}</AlertBanner>}
+      {token && (
+        <p>
+          Delete <strong>{token.name}</strong>? This cannot be undone.
+        </p>
+      )}
     </Modal>
   );
 };
 
 // ─── Edit modal ───────────────────────────────────────────────────────────────
 
+/** The props of {@link EditTokenModal}. */
 type EditModalProps = {
   token: ScopedToken | null;
   availableGroups: string[];
@@ -305,6 +332,7 @@ type EditModalProps = {
   onUpdated: () => void;
 };
 
+/** The dialog that changes a scoped token's groups, role, and expiry; open while a token is given. */
 const EditTokenModal = ({ token, availableGroups, onHide, onUpdated }: EditModalProps) => {
   const [selectedGroups, setSelectedGroups] = useState<string[]>([]);
   const [expires, setExpires] = useState('');
@@ -312,9 +340,10 @@ const EditTokenModal = ({ token, availableGroups, onHide, onUpdated }: EditModal
   const [clearExpires, setClearExpires] = useState(false);
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const { userInfo } = useAuth();
 
   useEffect(() => {
-    //refresh any time token selected
+    // the form starts from the chosen token's values each time a token is chosen
     if (token) {
       setSelectedGroups(token.groups);
       // token.expires is a full ISO string — take YYYY-MM-DD prefix
@@ -364,42 +393,46 @@ const EditTokenModal = ({ token, availableGroups, onHide, onUpdated }: EditModal
   };
 
   return (
-    <Modal show={!!token} onHide={handleHide}>
-      <Modal.Header closeButton>
-        <Modal.Title>Edit Scoped Token{token ? ` — ${token.name}` : ''}</Modal.Title>
-      </Modal.Header>
-      <Modal.Body>
-        {error && <Alert variant="danger">{error}</Alert>}
-        <ScopedTokenForm
-          availableGroups={availableGroups}
-          selectedGroups={selectedGroups}
-          onGroupToggle={toggleGroup}
-          role={role}
-          onRoleChange={setRole}
-          expires={expires}
-          onExpiresChange={setExpires}
-          showClearExpires={!!token?.expires}
-          clearExpires={clearExpires}
-          onClearExpiresChange={(v) => setClearExpires(v)}
-        />
-      </Modal.Body>
-      <Modal.Footer>
-        <Button variant="secondary" onClick={handleHide}>
-          Cancel
-        </Button>
-        <Button className="primary-btn" onClick={() => void handleSubmit()} disabled={submitting}>
-          {submitting ? 'Saving…' : 'Save'}
-        </Button>
-      </Modal.Footer>
+    <Modal
+      show={!!token}
+      onClose={handleHide}
+      title={`Edit Scoped Token${token ? ` — ${token.name}` : ''}`}
+      actions={
+        <>
+          <Button variant={ButtonVariant.Secondary} onClick={handleHide}>
+            Cancel
+          </Button>
+          <Button onClick={() => void handleSubmit()} disabled={submitting}>
+            {submitting ? 'Saving…' : 'Save'}
+          </Button>
+        </>
+      }
+    >
+      {error && <AlertBanner>{error}</AlertBanner>}
+      <ScopedTokenForm
+        availableGroups={availableGroups}
+        selectedGroups={selectedGroups}
+        onGroupToggle={toggleGroup}
+        role={role}
+        onRoleChange={setRole}
+        expires={expires}
+        onExpiresChange={setExpires}
+        showClearExpires={!!token?.expires}
+        clearExpires={clearExpires}
+        onClearExpiresChange={(v) => setClearExpires(v)}
+        grantable={grantableDeveloperPermissions(userInfo?.role)}
+      />
     </Modal>
   );
 };
 
+/** The props of {@link SelectModal}. */
 type SelectModalProps = {
   token: ScopedToken | null;
   onHide: () => void;
 };
 
+/** Asks before this tab starts using a scoped token; open while a token is given. */
 const SelectModal = ({ token, onHide }: SelectModalProps) => {
   const { setScopedToken } = useAuth();
 
@@ -414,63 +447,27 @@ const SelectModal = ({ token, onHide }: SelectModalProps) => {
   });
 
   return (
-    <Modal show={!!token} onHide={onHide}>
-      <Modal.Header closeButton>
-        <Modal.Title>Activate Scoped Token{token ? ` — ${token.name}` : ''}</Modal.Title>
-      </Modal.Header>
-      <Modal.Body>
-        Select "{token?.name}" as token? This will limit visibility to the following groups:
-        <ul className={styles.auto_overflow}>{groups}</ul>
-        Several features of Thorium UI may be unusable with a scoped token. To re-enable full functionality, disable the scoped token.
-      </Modal.Body>
-      <Modal.Footer>
-        <Button variant="secondary" onClick={onHide}>
-          Cancel
-        </Button>
-        <Button variant="primary" onClick={() => void handleSubmit()}>
-          Change Token
-        </Button>
-      </Modal.Footer>
+    <Modal
+      show={!!token}
+      onClose={onHide}
+      title={`Activate Scoped Token${token ? ` — ${token.name}` : ''}`}
+      actions={
+        <>
+          <Button variant={ButtonVariant.Secondary} onClick={onHide}>
+            Cancel
+          </Button>
+          <Button onClick={() => handleSubmit()}>Change Token</Button>
+        </>
+      }
+    >
+      <p>Select &quot;{token?.name}&quot; as token? This will limit visibility to the following groups:</p>
+      <ScopeGroups>{groups}</ScopeGroups>
+      <p>Several features of Thorium UI may be unusable with a scoped token. To re-enable full functionality, disable the scoped token.</p>
     </Modal>
   );
 };
 
-function formatExpire(expires: string | null): string {
-  if (!expires) return '-';
-  return expires.length > 10 ? expires.slice(0, 10) : expires;
-}
-
-const TokenGroupDisplay = ({ groups }: { groups: string[] }) => {
-  if (groups.length === 0) {
-    return <span className={styles.muted_value}>-</span>;
-  }
-
-  const sortedGroups = [...groups].sort();
-  const visibleGroups = sortedGroups.slice(0, 2);
-  const hasMore = sortedGroups.length > 2;
-
-  const description = sortedGroups.join('\n');
-
-  const tooltip = <Tooltip className={styles.badge_tip}>{description}</Tooltip>;
-
-  return (
-    <div className={styles.group_list}>
-      {visibleGroups.map((g) => (
-        <Badge key={g} pill bg="" className={`bg-blue ${styles.group_badge}`} title={g}>
-          {g}
-        </Badge>
-      ))}
-      {hasMore && (
-        <OverlayTrigger overlay={tooltip}>
-          <Badge pill bg="" className={`bg-blue ${styles.group_badge}`}>
-            {sortedGroups.length - 2} more...
-          </Badge>
-        </OverlayTrigger>
-      )}
-    </div>
-  );
-};
-
+/** One scoped token's table row: its value, role, groups, expiries, and actions. */
 const TokenRow = ({
   tok,
   selected,
@@ -511,87 +508,71 @@ const TokenRow = ({
   const selectedName = selected ? 'Deactivate' : scopedToken !== undefined ? 'Switch' : 'Activate';
 
   return (
-    <tr className={selected ? styles.selected_row : ''}>
-      <td className={styles.name_cell}>{tok.name}</td>
-      <td className={styles.token_cell}>
-        <Button size="sm" variant="link" className="p-1" title="Copy token" onClick={handleCopy}>
-          {copied ? <FaCheck /> : <FaClipboard />}
-        </Button>
-        <span className={styles.masked_token}>***********</span>
+    <tr data-active={selected}>
+      <NameCell>{tok.name}</NameCell>
+      <td>
+        <TokenValue>
+          <IconButton variant={ButtonVariant.Icon} size={ButtonSize.Small} aria-label={`Copy token ${tok.name}`} onClick={handleCopy}>
+            {copied ? <FaCheck /> : <FaClipboard />}
+          </IconButton>
+          <MaskedToken>***********</MaskedToken>
+        </TokenValue>
       </td>
       <td>
         <TokenRoleView role={tok.role} />
       </td>
-      <td className={styles.groups_cell}>
-        <TokenGroupDisplay groups={tok.groups} />
-      </td>
-      <td className={styles.expiry_cell}>{formatExpire(tok.token_expiration)}</td>
-      <td className={styles.expiry_cell}>{formatExpire(tok.expires)}</td>
-      <td className={styles.actions_cell}>
-        <div className={styles.action_buttons}>
-          <Button size="sm" className="secondary-btn" onClick={handleSelect}>
+      <GroupsCell>
+        <TokenGroups groups={tok.groups} />
+      </GroupsCell>
+      <NoWrapCell>{formatExpire(tok.token_expiration)}</NoWrapCell>
+      <NoWrapCell>{formatExpire(tok.expires)}</NoWrapCell>
+      <ActionsCell>
+        <RowActions>
+          <Button variant={ButtonVariant.Secondary} size={ButtonSize.Small} onClick={handleSelect}>
             {selectedName}
           </Button>
-          <Button size="sm" className="secondary-btn" onClick={() => onEdit(tok)} disabled={scopedToken !== undefined}>
+          <Button
+            variant={ButtonVariant.Secondary}
+            size={ButtonSize.Small}
+            onClick={() => onEdit(tok)}
+            disabled={scopedToken !== undefined}
+          >
             Edit
           </Button>
-          <Button size="sm" className="danger-btn" onClick={() => onDelete(tok)} disabled={scopedToken !== undefined}>
+          <Button variant={ButtonVariant.Danger} size={ButtonSize.Small} onClick={() => onDelete(tok)} disabled={scopedToken !== undefined}>
             Delete
           </Button>
-        </div>
-      </td>
+        </RowActions>
+      </ActionsCell>
     </tr>
   );
 };
 
+// A user role, with the enabled developer permissions listed under a developer role and the full
+// permission set in the cell's title.
 const TokenRoleView = ({ role }: { role: ScopedTokenRole }) => {
   if (role === ScopedTokenRoleKey.User) {
     return <span>{role}</span>;
   }
+  const permissions = Object.entries(role.Developer);
+  const enabled = permissions.filter(([, value]) => value).map(([key]) => key);
   return (
-    <>
-      <OverlayTrigger
-        overlay={
-          <Tooltip id="developer-role-tooltip">
-            <div className="text-start">
-              {Object.entries(role.Developer).map(([key, value]) => (
-                <div key={key}>
-                  <strong>{key}:</strong> {value ? 'true' : 'false'}
-                </div>
-              ))}
-            </div>
-          </Tooltip>
-        }
-      >
-        <span>
-          Developer
-          <span className={styles.developer_question}>
-            <FaQuestionCircle></FaQuestionCircle>
-          </span>
-        </span>
-      </OverlayTrigger>
-    </>
+    <span title={permissions.map(([key, value]) => `${key}: ${value ? 'true' : 'false'}`).join('\n')}>
+      Developer
+      {enabled.length > 0 && <CellNote>{enabled.join(', ')}</CellNote>}
+    </span>
   );
 };
 
+/** The groups a scoped token can be limited to: the user's own groups, even while a scoped token is active. */
 const getAvailGroups = (userInfo: UserInfo | null): string[] => {
   if (!userInfo) return [];
   if (userInfo.actual_groups !== undefined) return userInfo.actual_groups;
   return userInfo.groups;
 };
 
-const sortTokens = (tokens: ScopedToken[], scopedToken?: ScopedToken) =>
-  [...tokens].sort((a, b) => {
-    if (scopedToken) {
-      if (scopedToken.name === a.name) return -1;
-      if (scopedToken.name === b.name) return 1;
-    }
-    return a.name.localeCompare(b.name);
-  });
-
-const ScopedTokens = () => {
-  const [tokens, setTokens] = useState<ScopedToken[]>([]);
-  const [listError, setListError] = useState('');
+/** The scoped token panel: the user's tokens, their dialogs, and the run tokens listed for reference. */
+const ScopedTokens = ({ list }: { list: ScopedTokenList }) => {
   const [showCreate, setShowCreate] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<ScopedToken | null>(null);
   const [editTarget, setEditTarget] = useState<ScopedToken | null>(null);
@@ -601,60 +582,45 @@ const ScopedTokens = () => {
 
   const availableGroups = getAvailGroups(userInfo);
 
-  const refresh = useCallback(() => {
-    void listScopedTokens((msg) => setListError(msg)).then((result) => {
-      if (result) {
-        setListError('');
-        setTokens(result);
-      }
-    });
-  }, []);
+  const { userTokens, runTokens } = useMemo(() => splitScopedTokens(list.tokens, scopedToken), [list.tokens, scopedToken]);
 
-  const sortedTokens = useMemo(() => sortTokens(tokens, scopedToken), [tokens, scopedToken]);
-
-  useEffect(() => {
-    refresh();
-  }, [refresh, scopedToken]);
+  // the modals reload the list after they change a token
+  const reload = () => void list.reload();
 
   return (
-    <ScopedSection className={styles.token_section}>
-      <div className={styles.token_section_header}>
-        <Subtitle>Scoped Tokens</Subtitle>
-        <Button
-          variant="secondary"
-          size="sm"
-          className={styles.create_button}
-          onClick={() => setShowCreate(true)}
-          disabled={scopedToken !== undefined}
-        >
-          New Scoped Token
+    <ScopedPanel>
+      <PanelHead>
+        <PanelHeading>
+          <Subtitle>Scoped tokens</Subtitle>
+          <PanelDescription>Tokens limited to a subset of your groups.</PanelDescription>
+        </PanelHeading>
+        <Button variant={ButtonVariant.Ok} size={ButtonSize.Small} onClick={() => setShowCreate(true)} disabled={scopedToken !== undefined}>
+          + New scoped token
         </Button>
-      </div>
-      {listError && (
-        <Row>
-          <Col>
-            <Alert variant="danger">{listError}</Alert>
-          </Col>
-        </Row>
+      </PanelHead>
+      {list.error && (
+        <PanelBanner>
+          <AlertBanner severity={Severity.Error}>{list.error}</AlertBanner>
+        </PanelBanner>
       )}
-      {sortedTokens.length === 0 ? (
-        <p className="pt-3">No scoped tokens yet.</p>
-      ) : (
-        <div className={styles.table_wrap}>
-          <table className={styles.token_view_table}>
+      {!list.loaded && list.loading && <PanelNotice role="status">Loading scoped tokens…</PanelNotice>}
+      {list.loaded && userTokens.length === 0 && <PanelNotice>No scoped tokens yet.</PanelNotice>}
+      {userTokens.length > 0 && (
+        <TableFrame $busy={list.loading} aria-busy={list.loading}>
+          <TokenTable aria-label="Scoped tokens">
             <thead>
               <tr>
                 <th>Name</th>
                 <th>Token</th>
                 <th>Role</th>
                 <th>Groups</th>
-                <th>Value Expiry</th>
-                <th>Token Expiry</th>
-                <th>Actions</th>
+                <th>Value expiry</th>
+                <th>Token expiry</th>
+                <ActionsHeader>Actions</ActionsHeader>
               </tr>
             </thead>
             <tbody>
-              {sortedTokens.map((tok) => (
+              {userTokens.map((tok) => (
                 <TokenRow
                   key={tok.name}
                   selected={scopedToken?.name === tok.name}
@@ -665,8 +631,22 @@ const ScopedTokens = () => {
                 />
               ))}
             </tbody>
-          </table>
-        </div>
+          </TokenTable>
+        </TableFrame>
+      )}
+      {runTokens.length > 0 && (
+        <PanelSubsection>
+          <PanelHead>
+            <PanelHeading>
+              <Subtitle>Run tokens</Subtitle>
+              <PanelDescription>
+                Thorium creates a run token for each workflow or tool run and ends it with the run. They are listed for reference and cannot
+                be changed here.
+              </PanelDescription>
+            </PanelHeading>
+          </PanelHead>
+          <RunTokenTable tokens={runTokens} />
+        </PanelSubsection>
       )}
 
       <CreateTokenModal
@@ -675,7 +655,7 @@ const ScopedTokens = () => {
         onHide={() => setShowCreate(false)}
         onCreated={() => {
           setShowCreate(false);
-          refresh();
+          reload();
         }}
       />
       <DeleteTokenModal
@@ -683,7 +663,7 @@ const ScopedTokens = () => {
         onHide={() => setDeleteTarget(null)}
         onDeleted={() => {
           setDeleteTarget(null);
-          refresh();
+          reload();
         }}
       />
       <EditTokenModal
@@ -692,22 +672,23 @@ const ScopedTokens = () => {
         onHide={() => setEditTarget(null)}
         onUpdated={() => {
           setEditTarget(null);
-          refresh();
+          reload();
         }}
       />
       <SelectModal token={selectTarget} onHide={() => setSelectTarget(null)} />
-    </ScopedSection>
+    </ScopedPanel>
   );
 };
 
 // ─── Public export ────────────────────────────────────────────────────────────
 
-const TokenView = () => {
+/** The profile's token section: the root token and the scoped tokens. */
+const TokenView = ({ list }: { list: ScopedTokenList }) => {
   return (
     <>
       <RootToken />
       <hr />
-      <ScopedTokens />
+      <ScopedTokens list={list} />
     </>
   );
 };

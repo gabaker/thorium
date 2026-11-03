@@ -35,6 +35,16 @@ export interface TabItem<K extends string = string> {
   action?: TabAction;
   /** Whether the tab is selectable. */
   disabled?: boolean;
+  /** Optional test id for the tab button. */
+  testId?: string;
+}
+
+/** Where a {@link Tabs} bar places its tabs along the line. */
+export enum TabsAlign {
+  /** Tabs start at the left edge */
+  Start = 'start',
+  /** Tabs are centred, and wrapped rows stay centred */
+  Center = 'center',
 }
 
 /** Props for the controlled {@link Tabs} component. */
@@ -51,4 +61,6 @@ export interface TabsProps<K extends string = string> {
   'aria-label'?: string;
   /** Drop the tab list's own bottom border (e.g. when placed inline on a bordered header). */
   flush?: boolean;
+  /** Where the tabs sit along the line, Start unless given. */
+  align?: TabsAlign;
 }

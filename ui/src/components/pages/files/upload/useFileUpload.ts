@@ -1,3 +1,4 @@
+import { useQueryClient } from '@tanstack/react-query';
 import { useMemo, useReducer, useRef } from 'react';
 import {
   AssociationCreate,
@@ -15,6 +16,7 @@ import { uploadFile } from '@thorpi/files';
 import { SampleSubmissionResponse } from '@models/files';
 import { ReactionSelection } from '@models/reactions';
 import { submitReactions } from '../reactions/reactions';
+import { invalidateRunLists } from '@utilities/queries/runs';
 
 export function createSemaphore(limit: number) {
   let active = 0;
@@ -137,6 +139,7 @@ export function uploadReducer(state: UploadState, action: UploadAction): UploadS
 }
 
 export function useFileUpload() {
+  const client = useQueryClient();
   const [state, dispatch] = useReducer(uploadReducer, DEFAULT_UPLOAD_STATE);
   const controllerRef = useRef(new AbortController());
 
@@ -172,6 +175,8 @@ export function useFileUpload() {
   ) => {
     const allRunReactionsRes: ReactionSubmitResult[] = [];
     return submitReactions(sha256, submitReactionsList).then((submitRes: ReactionSubmitResult[]) => {
+      // the new reactions belong in every cached run list
+      void invalidateRunLists(client);
       let error = false;
       submitRes.forEach((value: ReactionSubmitResult, index: number) => {
         if (value.error !== '') {

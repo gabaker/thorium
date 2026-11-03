@@ -36,19 +36,29 @@ interface CondensedEntityTagProps {
   tags: Tags;
   resource?: Entities;
   align?: TagAlign;
+  // tag keys to leave out of the list, compared without regard to case
+  excludeKeys?: string[];
+  // whether the empty-state banner spans the full width of its container rather than being inset
+  fullWidthEmpty?: boolean;
 }
 
-const CondensedEntityTags: React.FC<CondensedEntityTagProps> = ({ tags, resource, align = TagAlign.Center }) => {
-  const excludeTags: string[] = [];
-  const generalTags = filterExcludedTags(tags, excludeTags);
-  const tlpTags = filterIncludedTags(tags, ['TLP']);
-  const tagsCount = Object.keys(tags).length;
+const CondensedEntityTags: React.FC<CondensedEntityTagProps> = ({
+  tags,
+  resource,
+  align = TagAlign.Center,
+  excludeKeys = [],
+  fullWidthEmpty = false,
+}) => {
+  const generalTags = filterExcludedTags(tags, excludeKeys);
+  const tlpTags = filterIncludedTags(generalTags, ['TLP']);
+  // the count covers only the tags that can be shown, so a list of only excluded tags reads as empty
+  const tagsCount = Object.keys(generalTags).length;
   return (
     <>
       {tagsCount == 0 && (
-        <div className="px-3 py-2">
-          <AlertBanner severity={Severity.Info} className="ms-4 me-4">
-            No Tags Found
+        <div className={fullWidthEmpty ? 'py-2' : 'px-3 py-2'}>
+          <AlertBanner severity={Severity.Info} className={fullWidthEmpty ? '' : 'ms-4 me-4'}>
+            {fullWidthEmpty ? 'No tags found.' : 'No Tags Found'}
           </AlertBanner>
         </div>
       )}

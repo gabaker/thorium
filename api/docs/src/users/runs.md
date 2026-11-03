@@ -29,8 +29,8 @@ supported as a legacy form: it works whenever its first word isn't a kind. New p
 pipeline created earlier with such a name must be started with `thorctl run pipeline <NAME>` or
 `thorctl pipelines run`. The kind forms above are preferred. How tools and workflows are built is covered in [Tools and Tool
 Instances](../developers/tools.md) and [AI Agents, Toolsets, and
-Workflows](../developers/agents_workflows.md). Runs are started and followed with Thorctl or the
-API.
+Workflows](../developers/agents_workflows.md). Runs are started and followed with Thorctl, the
+API, or the Web UI's Launch and Runs pages.
 
 ### Flags every run command shares
 ---

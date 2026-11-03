@@ -1,9 +1,11 @@
+import { QueryClient, useQueryClient } from '@tanstack/react-query';
 import React, { createContext, JSX, useContext, useEffect, useState } from 'react';
 import { Navigate } from 'react-router';
 
 // project imports
-import { authUserPass, createUser, logout, whoami } from '@thorpi/users';
-import { UserInfo, RoleKey, ScopedToken } from '@models/users';
+import { authUserPass, checkSession, createUser, logout } from '@thorpi/users';
+import { UserInfo, RoleKey, ScopedToken, SessionState } from '@models/users';
+import { announceIdentityChange, onIdentityChange } from './identityChannel';
 import { clearTagDataFromLocalStorage, fetchLocalStorageTags } from './tags';
 import { clearScopedSession, getScopedFromSession, setScopedSession } from '@thorpi/client';
 
@@ -79,6 +81,21 @@ export function buildRevokeCookie() {
   return `THORIUM_TOKEN=; Secure; SameSite=Strict; max-age=0; path=/; domain=${location.hostname}`;
 }
 
+/**
+ * Follow the identity changes other tabs announce: each one drops this tab's cached reads, which belong to the
+ * identity the tab had, and then lets the tab take up the session the shared cookie now holds.
+ *
+ * @param queryClient - This tab's query cache.
+ * @param resync - Called after the cache is dropped, to read the session cookie again.
+ * @returns A function that stops following the other tabs.
+ */
+export function followOtherTabs(queryClient: QueryClient, resync: () => void): () => void {
+  return onIdentityChange(() => {
+    queryClient.clear();
+    resync();
+  });
+}
+
 /*
  * Thorium auth hooks for login, logout and token revocation
  */
@@ -87,20 +104,38 @@ function useAuthProvider() {
   const [token, setToken] = useState(getCookie('THORIUM_TOKEN')); // set time of last userInfo update
   const [lastUpdateDate, setLastUpdateDate] = useState(Date.now());
   const [activeScopedToken, setActiveScopedToken] = useState<ScopedToken | undefined>(getScopedFromSession());
+  const queryClient = useQueryClient();
+  // the query cache holds what one identity could read, so it is dropped whenever the identity behind requests changes
+  // (login, registration, logout, impersonation, an expired session, or a scoped token starting or ending) and the next
+  // session in the tab reads afresh
+  const clearCachedReads = () => queryClient.clear();
+  // the session cookie is shared by every tab, so a change to it also drops the other tabs' cached reads; a scoped
+  // token lives in this tab's session storage, so starting or ending one stays out of this
+  const changeSharedIdentity = () => {
+    clearCachedReads();
+    announceIdentityChange();
+  };
+  // the server refused the session (401 or 403): forget it in this tab and the others; a network error or 5xx never
+  // gets here, so a passing outage keeps the session until a later check reaches the server
+  const endExpiredSession = () => {
+    clearTagDataFromLocalStorage();
+    document.cookie = buildRevokeCookie();
+    setUserInfo(null);
+    changeSharedIdentity();
+  };
 
   // options for set/get of a secure cookie
   const getUserInfo = async () => {
     // get user details
     if (token != undefined) {
-      const response = await whoami();
-      if (response) {
-        setUserInfo(response);
-        setToken(response.token);
+      const session = await checkSession();
+      if (session.state === SessionState.Valid) {
+        setUserInfo(session.user);
+        setToken(session.user.token);
         setLastUpdateDate(Date.now());
         void fetchLocalStorageTags();
-      } else {
-        clearTagDataFromLocalStorage();
-        document.cookie = buildRevokeCookie();
+      } else if (session.state === SessionState.Expired) {
+        endExpiredSession();
         setToken('');
       }
     }
@@ -128,6 +163,20 @@ function useAuthProvider() {
     // need to run whoami to get user info after login
   }, [token, activeScopedToken]);
 
+  // another tab logged in, out, or as someone else: this tab ends its scoped token, which belonged to the old session,
+  // and takes up whatever session the shared cookie now holds (setting the token reruns whoami for a new one)
+  useEffect(
+    () =>
+      followOtherTabs(queryClient, () => {
+        clearScopedSession();
+        setActiveScopedToken(undefined);
+        const next = getCookie('THORIUM_TOKEN');
+        if (next === undefined) setUserInfo(null);
+        setToken(next);
+      }),
+    [queryClient],
+  );
+
   return {
     userInfo,
     token,
@@ -141,22 +190,22 @@ function useAuthProvider() {
       }
       return;
     },
-    // validate cookie with request to Thorium whoami route
-    // a 401 response will clear cookie
+    // validate cookie with request to Thorium whoami route: a 401 or 403 ends the session, while a network error or
+    // 5xx keeps it and returns null
     async checkCookie() {
       if (!getCookie('THORIUM_TOKEN')) return null;
-      const response = await whoami();
-      if (response) {
-        setUserInfo(response);
-        setToken(response.token);
+      const session = await checkSession();
+      if (session.state === SessionState.Valid) {
+        setUserInfo(session.user);
+        setToken(session.user.token);
         setLastUpdateDate(Date.now());
-        return response;
-      } else {
-        document.cookie = buildRevokeCookie();
-        setUserInfo(null);
-        setToken(undefined);
-        return null;
+        return session.user;
       }
+      if (session.state === SessionState.Expired) {
+        endExpiredSession();
+        setToken(undefined);
+      }
+      return null;
     },
     // login via password to get Thorium token
     async login(username: string, password: string, handleError: (error: string) => void): Promise<LoginOutcome> {
@@ -171,6 +220,7 @@ function useAuthProvider() {
       }
       // set cookie with name THORIUM_TOKEN and store the user's Thorium token
       document.cookie = buildCookie(result.token, result.expires);
+      changeSharedIdentity();
       setToken(result.token);
       return LoginOutcome.LoggedIn;
     },
@@ -181,6 +231,7 @@ function useAuthProvider() {
         clearScopedSession();
         setUserInfo(null);
         document.cookie = buildRevokeCookie();
+        changeSharedIdentity();
         resolve(true);
       });
     },
@@ -204,6 +255,7 @@ function useAuthProvider() {
       }
       // auto-verified deployment: log the user in immediately
       document.cookie = buildCookie(result.token, result.expires);
+      changeSharedIdentity();
       setToken(result.token);
       return RegisterOutcome.LoggedIn;
     },
@@ -214,12 +266,14 @@ function useAuthProvider() {
       setToken(undefined);
       setUserInfo(null);
       document.cookie = buildRevokeCookie();
+      changeSharedIdentity();
       return result;
     },
     // logout of any current session and impersonate a user
     impersonate(userToken: string, tokenExpires: string) {
       // set cookie with name THORIUM_TOKEN
       document.cookie = buildCookie(userToken, tokenExpires);
+      changeSharedIdentity();
       setToken(userToken);
     },
     // finalize an OAuth login/registration by storing the issued Thorium token.
@@ -227,15 +281,18 @@ function useAuthProvider() {
     // RequireAuth) behaves exactly as it does after a password login.
     completeOAuth(token: string, expires: string) {
       document.cookie = buildCookie(token, expires);
+      changeSharedIdentity();
       setToken(token);
     },
     setScopedToken(token: ScopedToken) {
       setActiveScopedToken(token);
       setScopedSession(token);
+      clearCachedReads();
     },
     clearScopedToken() {
       setActiveScopedToken(undefined);
       clearScopedSession();
+      clearCachedReads();
     },
   };
 }

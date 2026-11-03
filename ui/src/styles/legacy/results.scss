@@ -58,6 +58,11 @@ $grid-breakpoints: (
   grid-template-columns: 3fr 1fr;
 }
 
+// with no results there is no table of contents, so the lone column spans the full width
+.results-container-single {
+  grid-template-columns: 1fr;
+}
+
 .results-toc-col {
   //flex: 2;
   padding-left: 1rem;
@@ -69,7 +74,8 @@ $grid-breakpoints: (
   position: sticky;
   top: 5rem;
   left: 3rem;
-  height: calc(100vh - 5rem);
+  // cap rather than fix the height so a short list of results does not stretch the grid row
+  max-height: calc(100vh - 5rem);
   overflow-y: auto;
 }
 
@@ -104,7 +110,9 @@ $grid-breakpoints: (
 
 // 1200px
 @media (max-width: scaling.$xl) {
-  .results-toc {
+  // the table of contents and the column that holds it are both hidden, so the results take the full width
+  .results-toc,
+  .results-toc-col {
     display: none;
   }
   .results-content {
@@ -113,7 +121,7 @@ $grid-breakpoints: (
   }
   .results-container {
     display: grid;
-    grid-template-columns: 3fr 0fr;
+    grid-template-columns: 1fr;
   }
 }
 

@@ -464,8 +464,9 @@ backup, including tools and results created after the upgrade, is lost.
   `thorium-tool: <tool id>` peer for each tool-name entry, naming the migrated tool. A
   `thorium-tool: none` peer means no tool in that group has exactly that name.
 - Remove the approvals from your values; they are reported as stale once the steps are done.
-- Tell users that images are read-only and tools replace them, and that the Web UI does not yet
-  support tools (see the known gaps in [Tools, Runs, and Models for Admins](./agentic.md)).
+- Tell users that images are read-only and tools replace them, in the Web UI as in Thorctl, and
+  which Web UI pages don't work yet (see the known gaps in [Tools, Runs, and Models for
+  Admins](./agentic.md)).
 - Give migrated tools an owner's attention over time: the first tool instance keeps the image's
   settings, including its `env`, until a new instance is published.
 

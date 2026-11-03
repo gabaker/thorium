@@ -56,3 +56,58 @@ export type Repo = {
   /// The earliest commit ever seen in this repo
   earliest?: string;
 };
+
+/// A commit of a repo with its details
+export type CommitDetails = {
+  /// The hash of this commit
+  hash: string;
+  /// The groups this commit is visible to
+  groups: string[];
+  /// When this commit was added to the repo
+  timestamp: string;
+  /// The author of this commit
+  author: string;
+  /// The topic (first line) of this commit
+  topic?: string | null;
+  /// The description of this commit
+  description?: string | null;
+  /// Whether the description was truncated
+  truncated: boolean;
+};
+
+/// A branch of a repo with its details
+export type BranchDetails = {
+  /// The name of this branch
+  name: string;
+  /// The groups this branch is visible to
+  groups: string[];
+  /// The commit this branch is on
+  commit: string;
+  /// When this branch was last updated
+  timestamp: string;
+};
+
+/// A git tag of a repo with its details
+export type GitTagDetails = {
+  /// The name of this tag
+  name: string;
+  /// The groups this tag is visible to
+  groups: string[];
+  /// The commit this tag is on
+  commit: string;
+  /// The author of this tag
+  author: string;
+  /// When this tag was last updated
+  timestamp: string;
+};
+
+/// A commit, branch, or tag of a repo with its details, as the API returns it (one key set)
+export type CommitishDetails = { Commit: CommitDetails } | { Branch: BranchDetails } | { Tag: GitTagDetails };
+
+/// A page of a repo's commitishes
+export type CommitishDetailsPage = {
+  /// The cursor of the next page, when there is one
+  cursor?: string | null;
+  /// The commitishes on this page
+  data: CommitishDetails[];
+};

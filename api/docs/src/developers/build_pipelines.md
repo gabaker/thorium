@@ -31,7 +31,7 @@ before tools): a step of the order that runs two names in parallel needs a tool 
 (`pipelines create` takes them as `--stage-tool` flags and refuses a pipeline without them.)
 
 See [Moving a pipeline to tools](./tools.md#moving-a-pipeline-to-tools). Pipelines are built and
-changed with Thorctl or the API.
+changed with Thorctl, the API, or the Web UI's Pipelines page.
 
 ### Create a pipeline
 ---

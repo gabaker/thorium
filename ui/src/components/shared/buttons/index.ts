@@ -1,6 +1,8 @@
 export { default as Button } from './Button';
 export { default as ButtonToolbar } from './ButtonToolbar';
 export { default as IconButton } from './IconButton';
+export { default as LinkButton } from './LinkButton';
+export type { LinkButtonProps } from './LinkButton';
 export { default as BuildDashboardButton, BuildDashboardResource } from './BuildDashboardButton';
 export type { BuildDashboardButtonProps } from './BuildDashboardButton';
 export { ExpandToggle, ToggleRow } from './ExpandToggle';

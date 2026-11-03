@@ -209,22 +209,27 @@ describe('getImagesInOrder', () => {
 
 describe('estimateNodeWidth', () => {
   test('short label clamps to min-width (120)', () => {
-    // "curl" = 4 chars: 4 * 7.2 + 36 = 64.8 → clamped to 120
+    // "curl" = 4 chars: 4 * 8 + 40 = 72 → clamped to 120
     expect(estimateNodeWidth('curl')).toBe(120);
   });
 
   test('medium label uses calculated width', () => {
-    // "my-analyzer-tool" = 16 chars: 16 * 7.2 + 36 = 151.2
-    expect(estimateNodeWidth('my-analyzer-tool')).toBeCloseTo(151.2);
+    // "my-analyzer-tool" = 16 chars: 16 * 8 + 40 = 168
+    expect(estimateNodeWidth('my-analyzer-tool')).toBeCloseTo(168);
   });
 
   test('long label clamps to max-width (240)', () => {
-    // "very-long-image-name-here-extra" = 31 chars: 31 * 7.2 + 36 = 259.2 → clamped to 240
+    // "very-long-image-name-here-extra" = 31 chars: 31 * 8 + 40 = 288 → clamped to 240
     expect(estimateNodeWidth('very-long-image-name-here-extra')).toBe(240);
   });
 
+  test('a stage name that overflowed the old estimate fits its node', () => {
+    // "legacy-stub" = 11 chars: 11 * 8 + 40 = 128, wider than the 84px of text room in a 120px node
+    expect(estimateNodeWidth('legacy-stub')).toBe(128);
+  });
+
   test('empty string clamps to min-width', () => {
-    // 0 * 7.2 + 36 = 36 → clamped to 120
+    // 0 * 8 + 40 = 40 → clamped to 120
     expect(estimateNodeWidth('')).toBe(120);
   });
 });
@@ -243,7 +248,7 @@ describe('estimateStageWidth', () => {
   });
 
   test('parallel stage returns widest', () => {
-    // "curl" → 120, "my-analyzer-tool" → 151.2
-    expect(estimateStageWidth(['curl', 'my-analyzer-tool'])).toBeCloseTo(151.2);
+    // "curl" → 120, "my-analyzer-tool" → 168
+    expect(estimateStageWidth(['curl', 'my-analyzer-tool'])).toBeCloseTo(168);
   });
 });

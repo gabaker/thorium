@@ -198,6 +198,26 @@ export function canDevelopAnyInGroup(group: Group, userInfo: UserInfo): boolean 
   return isAdmin(userInfo) || (isDeveloperAny(userInfo) && isDeveloperMember(group, userInfo.username));
 }
 
+/**
+ * Whether the user can edit or delete an entity that lives in the named groups. Mirrors the API's
+ * graph check for contained entities, which needs edit rights and the entities action allowed in
+ * every group of the entity.
+ *
+ * A group missing from `groups` is skipped, since the user may be unable to see it and the API
+ * makes the final decision.
+ *
+ * @param groups - The details of the groups the user can see.
+ * @param names - The names of every group the entity is in.
+ * @param userInfo - The user to check.
+ * @returns `false` when a visible group of the entity refuses the user, otherwise `true`.
+ */
+export function canEditEntityInGroups(groups: Group[], names: string[], userInfo: UserInfo): boolean {
+  return names.every((name) => {
+    const group = groups.find((entry) => entry.name === name);
+    return group === undefined || (canEditGroupData(group, userInfo) && group.allowed.entities !== false);
+  });
+}
+
 // ---- Resource action gates (mirror route macros) ----
 
 /**
@@ -257,4 +277,34 @@ export function canModifyPipeline(pipeline: Pipeline, group: Group, userInfo: Us
  */
 export function canDeletePipeline(pipeline: Pipeline, group: Group, userInfo: UserInfo): boolean {
   return pipeline.creator == userInfo.username || canModifyGroup(group, userInfo);
+}
+
+// ---- Entity (tool, toolset, agent, workflow) gates ----
+
+/**
+ * Whether the user may edit a shared entity in one of its groups. Mirrors the per-group check of
+ * `Group::check_graph` with `Group::editable` and the `entities` allow flag.
+ *
+ * The allow flag applies to admins too, so an admin is blocked by a group that disallows entities.
+ *
+ * @param group - The group the entity is in.
+ * @param userInfo - The user to check.
+ * @returns `true` if the user may edit entities in the group.
+ */
+export function canEditEntityInGroup(group: Group, userInfo: UserInfo): boolean {
+  const member = isAdmin(userInfo) || userInfo.groups.includes(group.name);
+  return member && canEditGroupData(group, userInfo) && group.allowed.entities;
+}
+
+/**
+ * Whether the user holds the group role that deletes another user's shared entity. Mirrors the
+ * per-group manager-or-owner check of the entity delete route.
+ *
+ * @param group - The group the entity is in.
+ * @param userInfo - The user to check.
+ * @returns `true` if the user is an admin, owner, or manager of the group.
+ */
+export function canDeleteEntityInGroup(group: Group, userInfo: UserInfo): boolean {
+  const member = isAdmin(userInfo) || userInfo.groups.includes(group.name);
+  return member && canModifyGroup(group, userInfo);
 }

@@ -4,8 +4,9 @@ import { ImageVersion } from '@models/images';
 /**
  * Format an {@link ImageVersion} for display.
  *
- * Renders a `SemVer` as `vMAJOR.MINOR.PATCH` with optional `-pre` and `+build` suffixes,
- * or a `Custom` version as its raw string.
+ * Renders a `SemVer` as `vMAJOR.MINOR.PATCH` with optional `-pre` and `+build` suffixes
+ * (from either the string form the API sends or the object form), or a `Custom` version as its raw
+ * string.
  *
  * @param version - The image/tool version, or `undefined`.
  * @returns A display string (e.g. `v1.2.3`, `v1.2.3-alpha.1+build.5`, or the custom string),
@@ -16,6 +17,7 @@ export function formatImageVersion(version?: ImageVersion): string {
   if (version.Custom) return version.Custom;
   const semver = version.SemVer;
   if (!semver) return '';
+  if (typeof semver === 'string') return `v${semver}`;
   let out = `v${semver.major}.${semver.minor}.${semver.patch}`;
   if (semver.pre) out += `-${semver.pre}`;
   if (semver.build) out += `+${semver.build}`;

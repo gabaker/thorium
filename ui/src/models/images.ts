@@ -3,7 +3,8 @@ import { OutputCollection, OutputDisplayType } from './results';
 import { Volume } from './volumes';
 
 export type ImageVersion = {
-  SemVer?: SemVer;
+  /// The API sends a semantic version as its string form (`1.2.3`); the object form is kept for older data
+  SemVer?: SemVer | string;
   Custom?: string;
 };
 

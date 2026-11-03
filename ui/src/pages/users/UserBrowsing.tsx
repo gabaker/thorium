@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Badge, ButtonGroup, Button, Col, Form, Modal, Row } from 'react-bootstrap';
+import { ButtonGroup, Button, Col, Form, Modal, Row } from 'react-bootstrap';
 import styled from 'styled-components';
 import AlertBanner from '@components/shared/alerts/AlertBanner';
 

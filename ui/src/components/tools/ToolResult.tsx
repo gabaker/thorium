@@ -32,6 +32,7 @@ import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
 import { IconButton } from '@components/shared/buttons';
 import { ButtonSize } from '@components/shared/buttons/types';
 import { OverlayTipTop } from '@components/shared/overlay/tips';
+import { useResultsOnRepo } from '@components/tools/ResultSourceContext';
 import { Tabs, TabItem } from '@components/shared/tabs';
 import { downloadResultsAsZip } from '@utilities/zip';
 import { useAuth } from '@utilities/auth';
@@ -56,6 +57,8 @@ interface ToolResultProps {
 
 const ToolResult = ({ results, header, sha256, tool, updateInView, updateURLSection }: ToolResultProps) => {
   const { checkCookie } = useAuth();
+  // a repo's results have no entity routes, so the Entities tab is left out for them
+  const repo = useResultsOnRepo();
   const [activeIndex, setActiveIndex] = useState(0);
   const [activeTab, setActiveTab] = useState<ToolResultTabKey>(ToolResultTabKey.Result);
   const [showDiff, setShowDiff] = useState(false);
@@ -137,10 +140,10 @@ const ToolResult = ({ results, header, sha256, tool, updateInView, updateURLSect
     }
     // count the total number of entities (sum of per-type counts), not the number of types
     const entityCount = result?.entities ? Object.values(result.entities).reduce((sum, n) => sum + n, 0) : 0;
-    if (entityCount > 0)
+    if (entityCount > 0 && !repo)
       items.push({ key: ToolResultTabKey.Entities, label: 'Entities', count: entityCount, tip: 'Potential identified entities' });
     return items;
-  }, [result, childrenMeta.isManual, childrenMeta.status, childrenMeta.fetch]);
+  }, [result, repo, childrenMeta.isManual, childrenMeta.status, childrenMeta.fetch]);
 
   // if the active tab disappears after switching versions, fall back to Result
   useEffect(() => {
@@ -157,7 +160,7 @@ const ToolResult = ({ results, header, sha256, tool, updateInView, updateURLSect
   };
 
   const handleDownloadAll = () => {
-    if (result) void downloadResultsAsZip(sha256, tool, result, () => void checkCookie());
+    if (result) void downloadResultsAsZip(sha256, tool, result, () => void checkCookie(), repo);
   };
 
   if (!result) return null;

@@ -14,8 +14,11 @@ export const TERMINAL_OFFSET = 70;
 // them before/after the first/last image.
 export const CLUSTER_THRESHOLD = 100;
 
-const MONO_CHAR_WIDTH = 7.2;
-const NODE_PADDING = 36; // 16px padding-left + 16px padding-right + 3px border-left + 1px border-right
+// Rendered width of one 12px semi-bold monospace character, rounded up: measured labels run about 7.7px
+// per character, and underestimating clips a name that would otherwise fit (for example `legacy-stub`).
+const MONO_CHAR_WIDTH = 8;
+// 16px padding-left + 16px padding-right + 3px border-left + 1px border-right, plus 4px of slack
+const NODE_PADDING = 40;
 const NODE_MIN_WIDTH = 120;
 const NODE_MAX_WIDTH = 240;
 

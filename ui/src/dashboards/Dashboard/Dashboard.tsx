@@ -10,7 +10,6 @@ import DashboardDataProvider from './DashboardDataProvider';
 import DashboardGraphTile from './DashboardGraphTile';
 import DashboardOmnibar from './DashboardOmnibar';
 import { makeDepthClause, withDepthClause } from './depthClause';
-import PaneExpandToggle from './PaneExpandToggle';
 import { decodeSeedParams } from './seedParams';
 import StatsPanel from './StatsPanel';
 import {
@@ -23,14 +22,12 @@ import {
   PaneScroll,
   StatsRow,
   TileHeader,
-  TileHeaderActions,
   TileHeaderRow,
   ULTRA_WIDE_BREAKPOINT,
 } from './styles';
 import { resetFilterClauses, toggleTagValue } from './tagFilter';
 import { getDepthFromClauses } from '@components/associations/browsing/EntityBrowser/browserHelpers';
 import { EntityBrowserProvider } from '@components/associations/browsing/EntityBrowser/EntityBrowserContext';
-import EntitySortControls from '@components/associations/browsing/EntityBrowser/controls/EntitySortControls';
 import { MAX_DEPTH } from '@components/associations/browsing/EntityBrowser/omnibarOptions';
 import { SortMode } from '@components/associations/browsing/EntityBrowser/types';
 import { GraphDataProvider, useGraphData } from '@components/associations/data/GraphDataContext';
@@ -368,11 +365,9 @@ const DashboardBody: React.FC<DashboardBodyProps> = ({
   const graphFocused = mode === ContentMode.Expanded && expandedPane === PaneFocus.Graph;
   const browserOrder = graphFocused ? 1 : 0;
   const graphOrder = graphFocused ? 0 : 1;
-  // the expand/collapse toggles are a shared state: while EITHER pane is expanded, BOTH toggles read as
-  // "collapse" and clicking either restores the split view; only in the split view do they read as "expand"
-  // (each focusing its own pane). So the two buttons never disagree.
+  // the graph pane's expand toggle reads as "collapse" while either pane is expanded, and clicking it then
+  // restores the split view; only in the split view does it read as "expand" (focusing the graph pane)
   const anyExpanded = mode === ContentMode.Expanded;
-  const toggleBrowserExpand = useCallback(() => setPanel(anyExpanded ? '' : PaneFocus.Browser), [anyExpanded, setPanel]);
   const toggleGraphExpand = useCallback(() => setPanel(anyExpanded ? '' : PaneFocus.Graph), [anyExpanded, setPanel]);
 
   // measure the two split columns so the reactions tile can tuck under the SHORTER one (greedy masonry)

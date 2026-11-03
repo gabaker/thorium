@@ -23,6 +23,12 @@ import {
   FaFileCode,
   FaLaptopCode,
   FaHammer,
+  FaPlay,
+  FaRobot,
+  FaBoxes,
+  FaProjectDiagram,
+  FaBrain,
+  FaHistory,
 } from 'react-icons/fa';
 import { FaBinoculars, FaBoxesStacked, FaHardDrive, FaFolderTree, FaDiagramProject, FaMagnifyingGlass } from 'react-icons/fa6';
 import { MdBusinessCenter } from 'react-icons/md';
@@ -37,6 +43,8 @@ export interface NavSubItem {
   label: string;
   icon: NavIcon;
   path: string;
+  // Marks a read-only legacy screen; the sidebar shows a small "legacy" badge beside the label.
+  legacy?: boolean;
 }
 
 export interface NavCategory {
@@ -80,11 +88,24 @@ export const NAV_ITEMS: NavCategory[] = [
     ],
   },
   {
+    label: 'Run',
+    icon: FaPlay,
+    children: [
+      { label: 'Launch', icon: FaPlay, path: '/launch' },
+      { label: 'Runs', icon: FaHistory, path: '/runs' },
+    ],
+  },
+  {
     label: 'Tools',
     icon: FaTools,
     children: [
+      { label: 'Tools', icon: FaTools, path: '/tools' },
+      { label: 'Toolsets', icon: FaBoxes, path: '/toolsets' },
+      { label: 'Agents', icon: FaRobot, path: '/agents' },
+      { label: 'Workflows', icon: FaProjectDiagram, path: '/workflows' },
+      { label: 'Models', icon: FaBrain, path: '/models' },
       { label: 'Pipelines', icon: FaSitemap, path: '/pipelines' },
-      { label: 'Images', icon: FaCube, path: '/images' },
+      { label: 'Images', icon: FaCube, path: '/images', legacy: true },
       { label: 'Stats', icon: FaChartLine, path: '/stats' },
     ],
   },

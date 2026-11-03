@@ -59,4 +59,5 @@ This will provide a list of the pipeline's notifications color-coded to their le
 
 Notifications are also returned by the API: `GET /api/images/notifications/{group}/{image}` and
 `GET /api/pipelines/notifications/{group}/{pipeline}` list them, and `GET /api/users/notifications/` lists yours.
-Notifications are not shown in the Web UI yet.
+The Web UI shows the notifications of model endpoints, profiles, and credentials on its Models page;
+image, pipeline, and your own notifications aren't shown in the Web UI yet.
