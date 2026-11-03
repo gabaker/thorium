@@ -580,6 +580,200 @@ async fn a_dry_run_drops_nothing_and_a_missing_view_is_created() -> Result<(), E
     Ok(())
 }
 
+/// Write sample rows to `samples_list` many at a time, for tests that need a base table whose
+/// view takes a while to build
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to use
+/// * `keyspace` - The keyspace to write to
+/// * `count` - How many rows to write
+async fn seed_many_samples(session: &Session, keyspace: &str, count: u32) -> Result<(), Error> {
+    use futures::StreamExt;
+    // prepare the insert once for every row
+    let cql = format!(
+        "INSERT INTO {keyspace}.samples_list (group, year, bucket, uploaded, id, sha256, name) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)"
+    );
+    let insert = session
+        .prepare(cql.as_str())
+        .await
+        .map_err(|err| Error::new(format!("{cql}: {err}")))?;
+    // write each row with its own sha256, spread over 64 buckets, a few hundred in flight
+    let failed = futures::stream::iter(0..count)
+        .map(|i| {
+            let values = (
+                "views",
+                2026_i32,
+                i32::try_from(i % 64).expect("small bucket"),
+                scylla::value::CqlTimestamp(1_700_000_000_000 + i64::from(i)),
+                Uuid::new_v4(),
+                format!("{i:064x}"),
+                format!("sample-{i}"),
+            );
+            let insert = &insert;
+            async move { session.execute_unpaged(insert, values).await.map(|_| ()) }
+        })
+        .buffer_unordered(256)
+        .filter_map(|written| async move { written.err() })
+        .collect::<Vec<_>>()
+        .await;
+    // name the first failed write, if any
+    match failed.first() {
+        Some(err) => Err(Error::new(format!("{cql}: {err}"))),
+        None => Ok(()),
+    }
+}
+
+/// Write a `system.built_views` row for a view, standing in for the row Scylla keeps for a
+/// dropped view until its view builder handles the drop
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to use
+/// * `keyspace` - The view's keyspace
+/// * `name` - The view
+async fn plant_built_row(session: &Session, keyspace: &str, name: &str) -> Result<(), Error> {
+    // a one-node Scylla takes writes to its local list of built views
+    session
+        .query_unpaged(
+            "INSERT INTO system.built_views (keyspace_name, view_name) VALUES (?, ?)",
+            (keyspace, name),
+        )
+        .await
+        .map_err(|err| Error::new(format!("planting a built_views row: {err}")))?;
+    Ok(())
+}
+
+/// Delete a view's `system.built_views` row, as Scylla's view builder does once it handles the
+/// view's drop
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to use
+/// * `keyspace` - The view's keyspace
+/// * `name` - The view
+async fn clear_built_row(session: &Session, keyspace: &str, name: &str) -> Result<(), Error> {
+    // delete the one row
+    session
+        .query_unpaged(
+            "DELETE FROM system.built_views WHERE keyspace_name = ? AND view_name = ?",
+            (keyspace, name),
+        )
+        .await
+        .map_err(|err| Error::new(format!("clearing a built_views row: {err}")))?;
+    Ok(())
+}
+
+/// Wait until Scylla has handled a view's drop and cleared its `system.built_views` row
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to use
+/// * `keyspace` - The view's keyspace
+/// * `name` - The dropped view
+async fn drop_handled(session: &Session, keyspace: &str, name: &str) -> Result<(), Error> {
+    // poll for up to a minute
+    let cql = format!(
+        "SELECT view_name FROM system.built_views WHERE keyspace_name = '{keyspace}' AND \
+         view_name = '{name}'"
+    );
+    let started = Instant::now();
+    while !rows(session, &cql).await?.is_empty() {
+        if started.elapsed() > Duration::from_secs(60) {
+            return Err(Error::new(format!("the drop of {name} was never handled")));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Ok(())
+}
+
+/// A recreate doesn't take what a dropped view left in `system.built_views` as the new view's
+/// build: it creates the view only once that row is gone and returns with the view fully built,
+/// and a row that outlasts the wait's limit fails it, naming the view as missing
+///
+/// After `DROP MATERIALIZED VIEW` returns, Scylla keeps the dropped view's row until its view
+/// builder handles the drop, which takes seconds while the builder is busy. A planted row that the
+/// test clears later stands in for it on a single node; a cluster's `view_build_status` rows are
+/// waited for the same way but can't be planted (Scylla 6.2 doesn't keep a row written there).
+#[tokio::test]
+async fn a_recreate_waits_out_the_dropped_views_built_row() -> Result<(), Error> {
+    // a converged keyspace with sample rows and its samples view dropped by hand
+    let _guard = RESTART.read().await;
+    let session = test_utilities::scylla_session().await?;
+    let peers = rows(&session, "SELECT peer FROM system.peers").await?.len();
+    if peers > 0 {
+        eprintln!("skipped: a built_views row can only stand in for the build state on one node");
+        return Ok(());
+    }
+    let conf = applied(&session, "views_stale_row").await?;
+    let ks = conf.thorium.namespace.clone();
+    let samples = view("samples");
+    seed_many_samples(&session, &ks, 50_000).await?;
+    let expected = expected_keys(&session, &ks, &samples).await?;
+    assert_eq!(expected.len(), 50_000);
+    exec(&session, &format!("DROP MATERIALIZED VIEW {ks}.samples")).await?;
+    // let Scylla clear the dropped view's own row before planting one in its place
+    drop_handled(&session, &ks, "samples").await?;
+    // a row Scylla clears a few seconds into the recreate holds the create back until then
+    plant_built_row(&session, &ks, "samples").await?;
+    let recreate = [samples];
+    let (held, cleared) = tokio::join!(
+        async {
+            recreate_views(
+                &session,
+                &conf,
+                &recreate,
+                false,
+                Some(Duration::from_secs(600)),
+                &|_| (),
+            )
+            .await
+            .map_err(|err| Error::new(err.to_string()))?;
+            // read the view the moment the recreate returns, without waiting any further
+            view_keys(&session, &ks, &samples).await
+        },
+        async {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            clear_built_row(&session, &ks, "samples").await
+        }
+    );
+    cleared?;
+    // the view holds every base row once the recreate returns
+    assert_eq!(
+        held?.len(),
+        expected.len(),
+        "the recreate returned while the view was still building"
+    );
+    // a row that outlasts the limit fails the recreate before the create, so the view is missing
+    exec(&session, &format!("DROP MATERIALIZED VIEW {ks}.samples")).await?;
+    drop_handled(&session, &ks, "samples").await?;
+    plant_built_row(&session, &ks, "samples").await?;
+    let expired = recreate_views(
+        &session,
+        &conf,
+        &[samples],
+        false,
+        Some(Duration::from_secs(2)),
+        &|_| (),
+    )
+    .await;
+    clear_built_row(&session, &ks, "samples").await?;
+    match expired {
+        Err(ViewError::NotCreated {
+            view,
+            error: ApplyError::DropUnfinished { views, .. },
+        }) => {
+            assert_eq!(view, "samples");
+            assert_eq!(views, ["samples"]);
+        }
+        other => panic!("expected the dropped view's row to fail the recreate: {other:?}"),
+    }
+    assert_eq!(object_id(&session, &ks, "samples").await?, None);
+    exec(&session, &format!("DROP KEYSPACE IF EXISTS {ks}")).await?;
+    Ok(())
+}
+
 /// A `view_build_status` row left by a host that is no longer a cluster member doesn't hold a
 /// built view back, and a member without a `SUCCESS` row is named as the one the view waits on
 ///

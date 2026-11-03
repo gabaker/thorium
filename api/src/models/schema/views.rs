@@ -6,9 +6,9 @@
 
 use scylla::client::session::Session;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use super::apply::{ApplyError, read_texts, wait_for_views};
+use super::apply::{ApplyError, read_texts, wait_for_drop, wait_for_views};
 use super::{ObjectDef, SchemaDefinition, SchemaObject, ViewDef};
 use crate::Conf;
 
@@ -177,7 +177,8 @@ pub fn recreate_warning(view: &ViewDef) -> String {
 ///
 /// Each view must be declared and its base table must exist: otherwise the call refuses before
 /// anything is dropped. Routes reading a view fail while it is dropped, then see missing rows until
-/// its build finishes, which scans the whole base table.
+/// its build finishes, which scans the whole base table. Each view is created only once Scylla
+/// has cleared the dropped view's build state, so the wait can't take it for the new build.
 ///
 /// # Arguments
 ///
@@ -185,8 +186,9 @@ pub fn recreate_warning(view: &ViewDef) -> String {
 /// * `conf` - The Thorium config, for the keyspace
 /// * `views` - The declared views to recreate
 /// * `dry_run` - Return the statements without executing them
-/// * `view_wait` - The longest to wait for the builds before failing with the views and hosts
-///   still building; `None` waits for as long as they take
+/// * `view_wait` - The longest to wait, in all, for Scylla to clear each dropped view's build
+///   state and then for the builds, before failing with the view left dropped or with the views
+///   and hosts still building; `None` waits for as long as they take
 /// * `progress` - Receives the warning for each view and the progress of the builds
 pub async fn recreate_views(
     session: &Session,
@@ -249,7 +251,8 @@ pub async fn recreate_views(
             });
         }
     }
-    // drop and create each view in turn, saying first what it costs
+    // drop and create each view in turn, saying first what it costs, all within one limit
+    let started = Instant::now();
     for view in views {
         progress(&recreate_warning(view));
         // drop the view, which tolerates one already gone
@@ -258,6 +261,14 @@ pub async fn recreate_views(
             .query_unpaged(drop_view.as_str(), ())
             .await
             .map_err(|err| ApplyError::query(&drop_view, err))?;
+        // create it only once Scylla has cleared the dropped view's build state, which the wait
+        // below would otherwise take as the new view's
+        wait_for_drop(session, &stored, view.name, started, view_wait)
+            .await
+            .map_err(|error| ViewError::NotCreated {
+                view: view.name.to_owned(),
+                error,
+            })?;
         // a create failing after the drop leaves the view missing, which the error says
         session
             .query_unpaged(create_view.as_str(), ())
@@ -267,8 +278,9 @@ pub async fn recreate_views(
                 error: ApplyError::query(&create_view, err),
             })?;
     }
-    // wait until every recreated view has built
+    // wait until every recreated view has built, within what's left of the limit
     let names = views.iter().map(|view| view.name).collect::<Vec<_>>();
-    wait_for_views(session, &stored, &names, view_wait, progress).await?;
+    let left = view_wait.map(|limit| limit.saturating_sub(started.elapsed()));
+    wait_for_views(session, &stored, &names, left, progress).await?;
     Ok(report)
 }

@@ -172,6 +172,14 @@ pub enum ApplyError {
         /// Each view still building, with the hosts that haven't reported it built
         stuck: Vec<StuckView>,
     },
+    /// Scylla still reported dropped views as built when the wait's limit passed, so they weren't
+    /// created again: a view created under the name meanwhile would be taken as built
+    DropUnfinished {
+        /// How long the wait lasted, in seconds
+        waited: u64,
+        /// The dropped views Scylla still reported as built
+        views: Vec<String>,
+    },
     /// A statement failed
     Query {
         /// The statement that failed
@@ -294,6 +302,13 @@ impl std::fmt::Display for ApplyError {
             ApplyError::ViewWaitExpired { waited, stuck } => {
                 write!(f, "{}", StuckView::expired(*waited, stuck))
             }
+            ApplyError::DropUnfinished { waited, views } => write!(
+                f,
+                "Scylla still reported the dropped views {} as built after {waited}s, so they \
+                 weren't created again (a busy Scylla clears a dropped view's build state late; \
+                 a longer `--view-wait-secs` gives it time)",
+                quoted(views)
+            ),
             ApplyError::Query { statement, error } => write!(f, "`{statement}` failed: {error}"),
         }
     }
@@ -383,6 +398,10 @@ const VIEW_POLL: Duration = Duration::from_secs(1);
 
 /// How often to report the views still building
 const VIEW_REPORT: Duration = Duration::from_secs(10);
+
+/// How often to check whether Scylla has cleared a dropped view's build state, which is usually
+/// gone within moments of the drop
+const DROP_POLL: Duration = Duration::from_millis(200);
 
 /// How long `thoradm schema apply` waits for views to build unless `--view-wait-secs` says
 /// otherwise, in seconds: five hours, which leaves the operator's six hour schema-apply Job time to
@@ -1149,6 +1168,48 @@ pub(super) async fn wait_for_views(
             reported = Some(Instant::now());
         }
         tokio::time::sleep(VIEW_POLL).await;
+    }
+}
+
+/// Wait until a dropped view no longer reads as built anywhere, so a view created again under its
+/// name can't be taken as built from what the dropped one left behind
+///
+/// `DROP MATERIALIZED VIEW` returns before Scylla's view builder clears the dropped view's
+/// `system.built_views` row and `system_distributed.view_build_status` rows, which takes seconds
+/// while the builder is busy. On a cluster no member may still report the view built, since a
+/// member's stale row would stand in for its new build.
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to read with
+/// * `keyspace` - The keyspace, as Scylla stores its name
+/// * `view` - The dropped view
+/// * `started` - When the limit started counting
+/// * `limit` - The longest to wait from `started`; `None` waits for as long as clearing takes
+pub(super) async fn wait_for_drop(
+    session: &Session,
+    keyspace: &str,
+    view: &str,
+    started: Instant,
+    limit: Option<Duration>,
+) -> Result<(), ApplyError> {
+    loop {
+        // stop once neither the node's list nor any member's status row reports the view built
+        let builds = view_builds(session, keyspace, &[view]).await?;
+        let cleared = builds
+            .iter()
+            .all(|build| !build.built && build.nodes.is_none_or(|(done, _)| done == 0));
+        if cleared {
+            return Ok(());
+        }
+        // fail once the limit passes with the dropped view still reported as built
+        if limit.is_some_and(|limit| started.elapsed() >= limit) {
+            return Err(ApplyError::DropUnfinished {
+                waited: started.elapsed().as_secs(),
+                views: vec![view.to_owned()],
+            });
+        }
+        tokio::time::sleep(DROP_POLL).await;
     }
 }
 
