@@ -45,6 +45,7 @@ const IMAGE_WRITES_POINTER: &str =
     "Images can no longer be created or updated; use tools (thorctl tools create|edit|publish)";
 
 /// The name probed to find out whether Thorium accepts image writes at all
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 const IMAGE_WRITE_PROBE: &str = "thorctl-write-check";
 
 /// Check whether an error is Thorium refusing an image write

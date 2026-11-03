@@ -119,6 +119,7 @@ pub fn for_worker_in(base: &Path, worker: &Worker) -> PathBuf {
 ///
 /// * `path` - The keys file being copied
 /// * `uid` - The uid the agent runs as
+#[cfg(any(target_os = "linux", test))]
 pub fn uid_copy(path: &Path, uid: u32) -> PathBuf {
     // the copy sits next to the keys file in a directory for the uid
     let parent = path.parent().unwrap_or(path);

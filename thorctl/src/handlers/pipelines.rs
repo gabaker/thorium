@@ -1,5 +1,4 @@
 use itertools::Itertools;
-use thorium::CtlConf;
 use thorium::models::{EntityMetadata, Pipeline, PipelineUpdate};
 use thorium::{Error, Thorium};
 use uuid::Uuid;
@@ -19,6 +18,7 @@ pub(crate) mod view;
 cfg_if::cfg_if! {
     if #[cfg(any(target_os = "linux", target_os = "macos"))] {
         use futures::stream::{self, StreamExt};
+        use thorium::CtlConf;
 
         use crate::args::pipelines::{ExportPipelines, ImportPipelines};
         use crate::handlers::imports::{

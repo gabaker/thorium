@@ -420,6 +420,7 @@ fn create_private_file(path: &Path, content: &str) -> Result<(), Error> {
 /// * `path` - The directory to create (must not exist yet)
 fn create_private_dir(path: &Path) -> Result<(), Error> {
     // create exclusively, restricting permissions on unix
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
