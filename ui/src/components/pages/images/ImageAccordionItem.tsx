@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import type { FC } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router';
 
 // project imports
 import ImageInfo from './ImageInfo';

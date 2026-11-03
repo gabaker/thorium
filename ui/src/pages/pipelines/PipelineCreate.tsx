@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router';
 
 // project imports
 import { Fields, OrderField, PipelineFormMode, Triggers } from '@components/pages/pipelines';

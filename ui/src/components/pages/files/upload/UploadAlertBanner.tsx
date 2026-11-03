@@ -1,7 +1,7 @@
 import React, { Fragment } from 'react';
 import { Row } from 'react-bootstrap';
 import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import RunReactionAlerts from '../reactions/RunReactionAlerts';
 import { ReactionSubmitResult } from './types';
 

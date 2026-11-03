@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite';
 import { fileURLToPath } from 'node:url';
-import react from '@vitejs/plugin-react';
+import react, { reactCompilerPreset } from '@vitejs/plugin-react';
+import babel from '@rolldown/plugin-babel';
 import fs from 'node:fs';
 import path from 'node:path';
 //import { visualizer } from 'rollup-plugin-visualizer'
@@ -9,7 +10,7 @@ import path from 'node:path';
 type ChunkMap = Record<string, string[]>;
 
 function loadChunkMap(relPath: string): ChunkMap {
-  const p = path.resolve(__dirname, relPath);
+  const p = path.resolve(import.meta.dirname, relPath);
   const raw = fs.readFileSync(p, 'utf8');
   return JSON.parse(raw) as ChunkMap;
 }
@@ -98,19 +99,19 @@ export default defineConfig(() => {
     },
     assetsInclude: ['src/assets/*.txt', 'mitre_tags/*.tags'],
     plugins: [
-      react({
-        babel: {
-          plugins: [
-            ['babel-plugin-react-compiler', {}],
-            [
-              'babel-plugin-styled-components',
-              {
-                displayName: true,
-                fileName: false,
-              },
-            ],
+      react(),
+      // run the React Compiler and the styled-components display names through Babel
+      babel({
+        presets: [reactCompilerPreset()],
+        plugins: [
+          [
+            'babel-plugin-styled-components',
+            {
+              displayName: true,
+              fileName: false,
+            },
           ],
-        },
+        ],
       }),
       // use for debugging bundle size and chunking, remove for production builds
       //visualizer({ filename: 'dist/stats.html', gzipSize: true, brotliSize: true }),

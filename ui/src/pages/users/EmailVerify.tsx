@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router';
 
 // project imports
 import { CardBox, Centered, Message } from '../oauth/shared.styled';

@@ -1,5 +1,5 @@
 import React, { createContext, JSX, useContext, useEffect, useState } from 'react';
-import { Navigate } from 'react-router-dom';
+import { Navigate } from 'react-router';
 
 // project imports
 import { authUserPass, createUser, logout, whoami } from '@thorpi/users';

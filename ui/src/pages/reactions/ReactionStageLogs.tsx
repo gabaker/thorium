@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams } from 'react-router';
 import { ButtonToolbar, ButtonGroup, Button, Card } from 'react-bootstrap';
 import { FaAngleDown, FaAngleDoubleDown, FaAngleDoubleUp, FaAngleUp } from 'react-icons/fa';
 

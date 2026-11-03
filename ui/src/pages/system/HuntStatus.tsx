@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Badge, Col, ProgressBar, Row, Table } from 'react-bootstrap';
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import styled from 'styled-components';
 
 // project imports

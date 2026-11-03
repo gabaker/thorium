@@ -1,5 +1,5 @@
 import { JSX, useEffect, useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router';
 import { Button, Card, Form, Row } from 'react-bootstrap';
 import styled from 'styled-components';
 

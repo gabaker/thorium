@@ -1,6 +1,6 @@
 // EntityDetails.tsx
 import React, { useEffect, useState, createContext, useContext, Fragment, JSX, useMemo, useCallback, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router';
 import { Button, Card, Row, Col, Form, Modal } from 'react-bootstrap';
 import { FaBackspace, FaRegEdit, FaSave, FaTrash } from 'react-icons/fa';
 import { FaFileCirclePlus, FaSquarePlus } from 'react-icons/fa6';

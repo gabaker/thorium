@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import { Button, ButtonToolbar, Card, Col, FormCheck, Modal, Row } from 'react-bootstrap';
 import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
 import { FaTrash } from 'react-icons/fa';

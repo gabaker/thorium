@@ -1,6 +1,6 @@
 import { Button } from 'react-bootstrap';
 import { FaMagnifyingGlass } from 'react-icons/fa6';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router';
 
 // project imports
 import { OverlayTipBottom } from '@components/shared/overlay/tips';
