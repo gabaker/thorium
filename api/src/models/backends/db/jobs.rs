@@ -2,6 +2,7 @@ use axum::http::StatusCode;
 use bb8_redis::redis::cmd;
 use chrono::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::hash::BuildHasher;
 use tracing::{Level, event, instrument, span};
 use uuid::Uuid;
 
@@ -1358,7 +1359,7 @@ pub async fn error(
 /// * `shared` - Shared Thorium objects
 #[rustfmt::skip]
 #[instrument(name = "db::jobs::find_in_running", skip(uuids, shared), fields(uuids = uuids.len()), err(Debug))]
-pub async fn find_in_running(stream: &str, uuids: &HashSet<&Uuid>, shared: &Shared) -> Result<HashMap<Uuid, String>, ApiError> {
+pub async fn find_in_running<S: BuildHasher>(stream: &str, uuids: &HashSet<&Uuid, S>, shared: &Shared) -> Result<HashMap<Uuid, String>, ApiError> {
     // build the score settings to use when reading
     let max = i64::MAX;
     // read through this stream 10k items at a time
@@ -1381,7 +1382,7 @@ pub async fn find_in_running(stream: &str, uuids: &HashSet<&Uuid>, shared: &Shar
 /// * `page_size` - The number of entries to read in each page
 /// * `read_page` - Reads the page of entries starting at an offset
 #[rustfmt::skip]
-async fn scan_running_pages<F, Fut>(uuids: &HashSet<&Uuid>, page_size: u64, mut read_page: F) -> Result<HashMap<Uuid, String>, ApiError>
+async fn scan_running_pages<F, Fut, S: BuildHasher>(uuids: &HashSet<&Uuid, S>, page_size: u64, mut read_page: F) -> Result<HashMap<Uuid, String>, ApiError>
 where
     F: FnMut(u64) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<String>, ApiError>>,
@@ -1705,7 +1706,7 @@ mod tests {
         scan_running_pages(&uuids, 2, |pos| {
             // read the requested page from the current state of the stream
             let mut stream = stream.lock().unwrap();
-            let start = (pos as usize).min(stream.len());
+            let start = usize::try_from(pos).unwrap().min(stream.len());
             let end = (start + 2).min(stream.len());
             let page = stream[start..end].to_vec();
             // once the first page is read, jobs that were already read finish and are removed

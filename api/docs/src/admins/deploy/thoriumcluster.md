@@ -324,6 +324,7 @@ The Thorium image's entrypoint is `./thorium-operator operate` (working director
 ```
 thorium-operator operate [--url <URL>] [--namespace <NAMESPACE>]
 thorium-operator crd [--apply]
+thorium-operator uninstall --namespace <NAMESPACE> [--name <NAME>] [--timeout <SECONDS>]
 ```
 
 | Option | Notes |
@@ -337,6 +338,13 @@ established, so the CRD always matches the running operator. `thorium-operator c
 the same and exits, using the in-cluster service account or the local kube config; the chart's
 pre-upgrade hook (`operator.crdHook`) runs it so the new CRD is in place before Helm changes the
 `ThoriumCluster`.
+
+`thorium-operator uninstall` deletes the `ThoriumCluster` `<NAME>` (default `thorium`) in
+`<NAMESPACE>` and waits up to `--timeout` seconds (default 240) for the running operator's
+finalizer to clean it up and release it, checking every 5 seconds. It exits 0 once the cluster is
+gone (or if it was already gone) and 1 if the delete is refused or the timeout passes, printing
+the cluster's last status. The chart's `pre-delete` hook (`operator.uninstallHook`) runs it, so
+its account only needs `get` and `delete` on that one `ThoriumCluster`.
 
 With `KUBECONFIG` set, the operator builds a client for every context in that kube config and
 manages each Kubernetes cluster under its context name. Without it, the operator uses its service

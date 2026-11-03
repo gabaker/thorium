@@ -964,14 +964,24 @@ cfg_if::cfg_if! {
         impl WorkflowInstanceEntityRequest {
             /// Parse the submitted workflow instance of an entity form
             ///
+            /// An instance over the size limit is refused before it is parsed.
+            ///
             /// # Arguments
             ///
             /// * `form` - The submitted metadata form
-            pub fn parse_form(form: &mut EntityMetadataForm) -> Result<WorkflowInstanceEntity, ApiError> {
+            /// * `max_bytes` - The most bytes the raw instance may have
+            pub fn parse_form(form: &mut EntityMetadataForm, max_bytes: u64) -> Result<WorkflowInstanceEntity, ApiError> {
                 // the instance is required
                 let Some(raw) = form.workflow_instance.take() else {
                     return bad!("a workflow instance needs a workflow_instance".to_owned());
                 };
+                // it can't be larger than the instances limit
+                let len = raw.len() as u64;
+                if len > max_bytes {
+                    return bad!(format!(
+                        "workflow_instance is {len} bytes, over the {max_bytes} bytes thorium.limits.body.instances allows"
+                    ));
+                }
                 // it must be a whole workflow instance
                 match serde_json::from_str(&raw) {
                     Ok(instance) => Ok(instance),

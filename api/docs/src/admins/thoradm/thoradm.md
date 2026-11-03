@@ -458,7 +458,7 @@ The restore runs in this order:
    Each node is written as registered, with no heartbeat: its workers were Redis state, so each
    node must check in again before the scheduler counts it.
 6. **The schema, after loading**, under the writer lease again. `schema apply` runs again and creates every view the table
-   restores dropped from the schema, waiting for them to build with no time limit and logging the
+   restores dropped from the schema, waiting up to five hours for them to build and logging the
    views still building every ten seconds: no API restart is needed. A view whose name a table
    holds is refused, naming the view, and the table has to be dropped by hand (see
    the Views paragraph below). Then restore writes the backup's schema record (see [The Schema
@@ -1137,12 +1137,12 @@ default TTL differs from the live one is altered.
   table, key, clustering order, filter, or selected columns, as views created by older releases
   have) is dropped and created again, since Scylla can't alter a view. `schema apply` logs how each
   view differed, lists it under `views_recreated` in its report, and waits for every node to build
-  it before it records anything. Views hold no data of their own, but routes reading one fail
-  while it is dropped and see missing rows until its build finishes, which scans the base table:
-  about 10 to 25 seconds per million base rows per view in benchmarks. A dry run logs how each
-  view it would recreate differs. A view the registry doesn't declare is never compared or
-  dropped, and a declared view whose live definition can't be read is left as it is and named in
-  a warning; `--recreate-view` replaces it if it is out of date.
+  it, within `--view-wait-secs`, before it records anything. Views hold no data of their own, but
+  routes reading one fail while it is dropped and see missing rows until its build finishes, which
+  scans the base table: about 10 to 25 seconds per million base rows per view in benchmarks. A dry
+  run logs how each view it would recreate differs. A view the registry doesn't declare is never
+  compared or dropped, and a declared view whose live definition can't be read is left as it is and
+  named in a warning; `--recreate-view` replaces it if it is out of date.
 - `--recreate-view <view>` (repeatable) drops a declared materialized view and recreates it from the
   declaration, then waits for it to build. Routes that read the view fail while it is dropped and
   then see missing rows until its build finishes. It asks for confirmation unless `--yes` is given,
@@ -1222,7 +1222,7 @@ no longer creates them, a keyspace an older release created keeps them with thei
 starting Thorium against that keyspace leaves them alone. `thoradm schema diff` reports a live one
 as an acknowledged `unexpected` object, so it raises no drift. They cost disk and, for the view,
 write work, and an admin can remove them on purpose. Two commands list and drop legacy objects.
-Neither runs unless you type it, and `thoradm schema apply` never drops anything.
+Neither runs unless you type it, and `thoradm schema apply` never drops one.
 
 Each object is named `<backend>:<name>`, such as `scylla:events`. A legacy object is one Thorium's
 registry of retired objects lists; only those can be dropped. (The `entities_by_name` view was

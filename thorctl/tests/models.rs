@@ -89,7 +89,7 @@ async fn allow_test_endpoints() -> Result<(), Error> {
     Ok(())
 }
 
-/// Wait for the manual refresh of an endpoint to be queued and answer it the way the AI worker
+/// Wait for the manual refresh of an endpoint to be queued and answer it the way the workflows worker
 /// does, with an admin report
 ///
 /// # Arguments
@@ -117,7 +117,7 @@ async fn answer_refresh(
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    // send the listing as the AI worker would
+    // send the listing as the workflows worker would
     let report =
         ModelRefreshReport::listed(models.iter().map(|id| ListedModel::new(*id)).collect());
     admin

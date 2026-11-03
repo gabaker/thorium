@@ -1817,9 +1817,15 @@ async fn seed_commitishes(session: &Session, keyspace: &str, count: u32) -> Resu
 /// * `session` - The Scylla session to use
 /// * `keyspace` - The keyspace whose view is replaced
 async fn old_committed_repo_data(session: &Session, keyspace: &str) -> Result<(), Error> {
-    // drop the declared view, then lay down the old table and the view built on it
+    // drop the declared view and let Scylla clear its build state, then lay down the old table
+    // and the view built on it
+    exec(
+        session,
+        &format!("DROP MATERIALIZED VIEW IF EXISTS {keyspace}.committed_repo_data"),
+    )
+    .await?;
+    drop_handled(session, keyspace, "committed_repo_data").await?;
     for cql in [
-        format!("DROP MATERIALIZED VIEW IF EXISTS {keyspace}.committed_repo_data"),
         format!(
             "CREATE TABLE IF NOT EXISTS {keyspace}.commits_list (group TEXT, year INT, bucket INT, \
              repo TEXT, timestamp TIMESTAMP, hash TEXT, repo_data TEXT, PRIMARY KEY ((group, \
@@ -1945,7 +1951,6 @@ async fn a_samples_view_with_an_old_filter_is_recreated() -> Result<(), Error> {
     seed_samples(&session, &ks, 200).await?;
     // swap the view for one that keeps only bucket 0, which hides most rows
     exec(&session, &format!("DROP MATERIALIZED VIEW {ks}.samples")).await?;
-    // the dropped view's built row would otherwise pass for the filtered view's build
     drop_handled(&session, &ks, "samples").await?;
     exec(&session, &filtered_samples(&ks)).await?;
     settled_build(&session, &ks).await?;
@@ -2014,6 +2019,7 @@ async fn apply_leaves_an_undeclared_view_alone() -> Result<(), Error> {
     )
     .await?;
     exec(&session, &format!("DROP MATERIALIZED VIEW {ks}.samples")).await?;
+    drop_handled(&session, &ks, "samples").await?;
     exec(&session, &filtered_samples(&ks)).await?;
     let extra = object_id(&session, &ks, "extra_by_name").await?;
     assert!(extra.is_some());
@@ -2051,7 +2057,6 @@ async fn a_view_build_past_the_view_wait_fails_and_the_retry_waits_for_it() -> R
     let ks = conf.thorium.namespace.clone();
     seed_many_samples(&session, &ks, 40_000).await?;
     exec(&session, &format!("DROP MATERIALIZED VIEW {ks}.samples")).await?;
-    // the dropped view's built row would otherwise pass for the filtered view's build
     drop_handled(&session, &ks, "samples").await?;
     exec(&session, &filtered_samples(&ks)).await?;
     settled_build(&session, &ks).await?;

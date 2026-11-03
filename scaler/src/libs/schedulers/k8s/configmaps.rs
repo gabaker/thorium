@@ -162,7 +162,7 @@ impl ConfigMaps {
             // update the secret for this user
             match self.create(ns, &name, "passwd", &passwd).await {
                 // log that we setup this users /etc/passwd
-                Ok(_) => {
+                Ok(()) => {
                     event!(Level::INFO, msg = "Setup /etc/passwd",);
                     true
                 }

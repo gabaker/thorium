@@ -13,7 +13,7 @@ use crate::utils::{ApiError, Shared};
 use crate::{at_least, bad};
 
 impl From<Deadline> for StreamObj {
-    /// Cast a deadline to a StreamObj
+    /// Cast a deadline to a `StreamObj`
     ///
     /// The member is written in a fixed field order without the timestamp, so it can be rebuilt
     /// byte for byte from its job and removed by exact match. The pipeline and stage labels are
@@ -311,7 +311,9 @@ impl Stream {
             // if this map has a depth of zero drop it
             if map.depth == 0 {
                 continue;
-            } else if map.depth > 10_000 && level < 10 {
+            }
+            // remap deep maps in smaller chunks until we hit our recursion limit
+            if map.depth > 10_000 && level < 10 {
                 // remap this in smaller chunks
                 remapped.append(
                     &mut Self::mapper(
@@ -348,8 +350,9 @@ impl Stream {
     fn accumulated_depth_exceeds(count: i64, new: &[StreamDepth], min: u64) -> bool {
         // count latest by folding the current windows depths onto the accumulator
         let count = new.iter().fold(count, |count, submap| count + submap.depth);
-        // short circuit if we have accumulated more than our minimum bound
-        count > min as i64
+        // short circuit if we have accumulated more than our minimum bound, saturating a bound
+        // too large for an i64
+        count > i64::try_from(min).unwrap_or(i64::MAX)
     }
 
     /// Maps a stream into pages using mapper

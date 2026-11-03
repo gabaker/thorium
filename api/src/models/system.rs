@@ -37,12 +37,16 @@ pub struct SystemInfoParams {
 }
 
 /// Info about data in the current backend
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "one flag per scaler cache; the fields are the API's wire format"
+)]
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct SystemInfo {
     /// Whether the k8s scaler cache needs to be updated
     pub k8s_cache: bool,
-    /// Whether the bare_metal scaler cache needs to be updated
+    /// Whether the `bare_metal` scaler cache needs to be updated
     pub bare_metal_cache: bool,
     /// Whether the windows scaler cache needs to be updated
     pub windows_cache: bool,
@@ -1293,6 +1297,7 @@ impl NodeListParams {
     ///
     /// * `scaler` - The scaler to add clusters for
     /// * `config` - The Thorium config
+    #[must_use]
     pub fn clusters_from_config(mut self, config: &Conf) -> Self {
         // respect any clusters that were already requested
         if !self.clusters.is_empty() {
@@ -1309,7 +1314,7 @@ impl NodeListParams {
                         match &cluster.alias {
                             Some(alias) => self.clusters.push(alias.clone()),
                             None => self.clusters.push(name.clone()),
-                        };
+                        }
                     }
                 }
                 ImageScaler::BareMetal => {
@@ -1362,7 +1367,7 @@ impl NodeListParams {
                         match &cluster.alias {
                             Some(alias) => self.clusters.push(alias.clone()),
                             None => self.clusters.push(name.clone()),
-                        };
+                        }
                     }
                 }
                 ImageScaler::BareMetal => {

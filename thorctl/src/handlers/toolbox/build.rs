@@ -330,8 +330,8 @@ struct BuildImageVersion {
     #[serde(skip_serializing_if = "Option::is_none")]
     config_from: Option<String>,
     /// The description from this image's `description.md`, set only when the config is fetched
-    /// from a URL (an inline config holds the description itself); import fills it into the
-    /// fetched config when that has none
+    /// from a URL (an inline config holds the description itself); import applies it over the
+    /// fetched config's description
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     /// The embedded Thorium image config (request JSON)
@@ -656,9 +656,10 @@ fn load_network_policies(
 ///
 /// The markdown file is the single source of truth for tool documentation:
 /// when present beside the manifest it wins over any inline description, with
-/// a warning when it overrides a differing non-empty value. Configs fetched
-/// from URLs at import time can't be injected into, so that combination only
-/// warns. A description.md that exists but can't be read (permissions, non-UTF-8 text) is
+/// a warning when it overrides a differing non-empty value. A config fetched
+/// from a URL at import time can't be injected into, so the caller carries the
+/// returned description in the entry and import applies it over the fetched
+/// config's description in the same way. A description.md that exists but can't be read (permissions, non-UTF-8 text) is
 /// warned about rather than silently treated as absent.
 ///
 /// Returns the non-empty description.md contents when one was found, so callers can mirror it
@@ -717,12 +718,9 @@ fn apply_description_md(
                 "{name}: config is not a JSON object; skipping description.md"
             ));
         }
-        // config_from URLs are resolved at import time, after build
-        None => {
-            progress::warn(format!(
-                "{name}: description.md cannot be injected into a URL-based config"
-            ));
-        }
+        // config_from URLs are resolved at import time, after build, which applies the
+        // description the entry carries
+        None => {}
     }
     Some(description)
 }
@@ -937,7 +935,7 @@ fn build_image_version(
     let build_only = loaded.url.is_none()
         && config
             .as_ref()
-            .is_none_or(|value| value.as_object().is_some_and(|map| map.is_empty()));
+            .is_none_or(|value| value.as_object().is_some_and(serde_json::Map::is_empty));
     if build_only {
         let image_tags = derive_image_tags(
             image_name,
@@ -1928,7 +1926,7 @@ mod tests {
             .collect()
     }
 
-    /// An image_from image resolves to the target's embedded config image url
+    /// An `image_from` image resolves to the target's embedded config image url
     #[test]
     fn image_from_resolves_config_url() {
         let images = images_map(vec![("a", "1", image_entry(Some("reg/a:1"), &[]))]);

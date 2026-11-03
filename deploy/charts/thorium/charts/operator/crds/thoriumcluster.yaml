@@ -900,9 +900,9 @@ spec:
                                         Regexes restricting which emails may register through this provider
 
                                         When non-empty, any email placed on a new account through this provider — whether returned by
-                                        the IdP or supplied by the user when the IdP returns none — must match one of these regexes.
+                                        the `IdP` or supplied by the user when the `IdP` returns none — must match one of these regexes.
                                         A non-empty list is also what opts this provider into accepting a user-supplied email when the
-                                        IdP returns none. When empty (the default) the provider does not accept a user-supplied email,
+                                        `IdP` returns none. When empty (the default) the provider does not accept a user-supplied email,
                                         so a provider that returns no email claim fails closed exactly as before.
                                       items:
                                         type: string
@@ -926,7 +926,7 @@ spec:
                                       description: |-
                                         Trust the provider's `email` claim even when it omits the `email_verified` claim
 
-                                        Some IdPs never emit `email_verified` for genuinely verified addresses. This opt-in lets an
+                                        Some `IdPs` never emit `email_verified` for genuinely verified addresses. This opt-in lets an
                                         administrator trust a *specific* provider's email claim when `email_verified` is absent. It
                                         still rejects an explicit `email_verified: false`. Defaults to false so we fail closed.
                                       type: boolean
@@ -1755,6 +1755,48 @@ spec:
                         default: 0.0.0.0
                         description: The interface to bind onto
                         type: string
+                      limits:
+                        default:
+                          body:
+                            default: 16.0 MiB
+                            entities: 14.0 MiB
+                            instances: 12.0 MiB
+                        description: The limits the API applies to requests
+                        properties:
+                          body:
+                            default:
+                              default: 16.0 MiB
+                              entities: 14.0 MiB
+                              instances: 12.0 MiB
+                            description: The request body limits
+                            properties:
+                              default:
+                                default: 16.0 MiB
+                                description: |-
+                                  The largest body a route without its own limit accepts
+
+                                  Scylla refuses a single write over 16 MB by default, so a larger JSON body couldn't be
+                                  stored in one row anyway.
+                                example: 16 MiB
+                                type: string
+                              entities:
+                                default: 14.0 MiB
+                                description: |-
+                                  The largest entity create or update form, including an entity's image, and the largest
+                                  hunt create, hunt checkpoint, or YARA hit write
+                                example: 14 MiB
+                                type: string
+                              instances:
+                                default: 12.0 MiB
+                                description: |-
+                                  The largest toolset or workflow instance a create submits, checked before it is parsed
+
+                                  This also bounds the size of the warnings and names an instance stores; lower it to
+                                  store less.
+                                example: 12 MiB
+                                type: string
+                            type: object
+                        type: object
                       mcp:
                         default:
                           allowed_hosts: []
@@ -1866,7 +1908,7 @@ spec:
                           data: 1024
                           form: 1024
                           json: 1024
-                        description: The request size limits to use in the API
+                        description: Legacy request size limits that aren't enforced; see `limits.body` instead
                         properties:
                           data:
                             default: 1024
@@ -2068,7 +2110,7 @@ spec:
                                 cpu: 2
                                 memory: 1
                               fair_share_divisor: 1
-                            description: Specific settings for the BareMetal scaler
+                            description: Specific settings for the `BareMetal` scaler
                             properties:
                               clusters:
                                 additionalProperties:

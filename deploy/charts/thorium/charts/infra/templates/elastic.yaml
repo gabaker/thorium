@@ -61,8 +61,17 @@ spec:
             resources:
               requests:
                 storage: {{ .Values.elastic.storage }}
+      {{- /* elastic.config over the chart's settings, where a null removes a setting */}}
+      {{- $config := dict "node.store.allow_mmap" true "http.max_content_length" "1024mb" }}
+      {{- range $key, $value := .Values.elastic.config }}
+      {{- if kindIs "invalid" $value }}
+      {{- $_ := unset $config $key }}
+      {{- else }}
+      {{- $_ := set $config $key $value }}
+      {{- end }}
+      {{- end }}
       config:
-        {{- toYaml (mustMergeOverwrite (dict "node.store.allow_mmap" true "http.max_content_length" "1024mb") (deepCopy .Values.elastic.config)) | nindent 8 }}
+        {{- toYaml $config | nindent 8 }}
 {{- if .Values.elastic.kibana.enabled }}
 ---
 apiVersion: kibana.k8s.elastic.co/v1

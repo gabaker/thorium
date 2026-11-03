@@ -28,7 +28,7 @@ use crate::models::{
     WorkerRegistrationList, WorkerStatus, WorkerUpdate,
 };
 use crate::unauthorized;
-use crate::utils::{ApiError, AppState};
+use crate::utils::{ApiError, AppState, body_limits};
 
 /// Initializes the current backend's system info
 ///
@@ -915,7 +915,8 @@ pub fn mount(router: Router<AppState>) -> Router<AppState> {
         .route("/system/cleanup", post(cleanup))
         .route("/system/cache/reset", post(reset_cache))
         .route("/system/backup", get(backup))
-        .route("/system/restore", post(restore))
+        // a restore carries a whole backup, so it has no body limit
+        .route("/system/restore", body_limits::unlimited(post(restore)))
         .route("/system/nodes/", post(register_node).get(list_nodes))
         .route("/system/nodes/details/", get(list_node_details))
         .route(

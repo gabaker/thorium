@@ -286,7 +286,7 @@ impl Secrets {
                 )
                 .await
             {
-                Ok(_) => event!(Level::INFO, msg = "Setup registry token", namespace = ns),
+                Ok(()) => event!(Level::INFO, msg = "Setup registry token", namespace = ns),
                 Err(err) => {
                     // log that we failed to create this namespacei and are banning it
                     event!(

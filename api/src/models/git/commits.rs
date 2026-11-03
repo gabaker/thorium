@@ -77,6 +77,7 @@ impl CommitRequest {
     ///
     /// * `commit` - The commit to ingest into Thorium
     #[cfg(feature = "client")]
+    #[must_use]
     pub fn new_gix(commit: gix::Commit) -> Self {
         // decode our entire commit
         let decoded = commit.decode().unwrap();
@@ -85,7 +86,7 @@ impl CommitRequest {
         // get the timestamp for this commit
         let time = commit.time().unwrap();
         let timestamp = Utc
-            .timestamp_opt(time.seconds + time.offset as i64, 0)
+            .timestamp_opt(time.seconds + i64::from(time.offset), 0)
             .unwrap();
         // get the commit message for this commit if it exists
         let message = decoded.message();
@@ -97,7 +98,7 @@ impl CommitRequest {
             .take(80)
             .collect::<String>();
         // get our commit description if it exists
-        let description = message.body.as_ref().map(|body| body.to_string());
+        let description = message.body.as_ref().map(ToString::to_string);
         // build our commit request
         let mut req = CommitRequest {
             author,
@@ -152,7 +153,7 @@ impl BranchRequest {
         // get the timestamp for this commit
         let time = commit.time()?;
         let timestamp = Utc
-            .timestamp_opt(time.seconds + time.offset as i64, 0)
+            .timestamp_opt(time.seconds + i64::from(time.offset), 0)
             .unwrap();
         // build our branch request
         let req = BranchRequest {
@@ -193,7 +194,7 @@ impl GitTagRequest {
             let git_time = signature.time()?;
             // cast our git time to a chrono timestamp
             let timestamp = Utc
-                .timestamp_opt(git_time.seconds + git_time.offset as i64, 0)
+                .timestamp_opt(git_time.seconds + i64::from(git_time.offset), 0)
                 .unwrap();
             // build our tag request
             let tag_req = GitTagRequest {
@@ -221,7 +222,7 @@ impl GitTagRequest {
         // get the timestamp for this commit
         let time = commit.time()?;
         let timestamp = Utc
-            .timestamp_opt(time.seconds + time.offset as i64, 0)
+            .timestamp_opt(time.seconds + i64::from(time.offset), 0)
             .unwrap();
         // build our tag request
         let tag_req = GitTagRequest {
@@ -252,8 +253,8 @@ impl CommitishRequest {
     ///
     /// * `gix_ref` - The gix reference to cast
     #[cfg(feature = "client")]
-    pub fn new_gix<'a>(
-        gix_ref: &gix::Reference<'a>,
+    pub fn new_gix(
+        gix_ref: &gix::Reference<'_>,
     ) -> Result<Option<(String, Self)>, crate::client::Error> {
         // get the category of this reference
         if let Some(cat) = gix_ref.name().category() {

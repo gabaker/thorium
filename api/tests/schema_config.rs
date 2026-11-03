@@ -673,7 +673,7 @@ async fn a_changed_files_password_is_refused_while_files_exist() -> Result<(), E
         config_rows(&session, &keyspace).await?.get(FILES_PASSWORD)
     );
     // with nothing stored, the new password's identity is recorded
-    let mut unused = fresh(&session, "config_password_unused").await?;
+    let mut unused = fresh(&session, "config_password_new").await?;
     unused.thorium.files.password = first.to_owned();
     apply_declared(&session, &unused).await?;
     unused.thorium.files.password = second.to_owned();

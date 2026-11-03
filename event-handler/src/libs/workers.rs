@@ -15,16 +15,16 @@ use tokio::task::JoinHandle;
 use tracing::{Level, event, instrument};
 use uuid::Uuid;
 
-pub mod ai;
 pub mod hunts;
 pub mod reaction_triggers;
+pub mod workflows;
 
-pub use ai::AiWorker;
 pub use hunts::sigma::{SigmaRuleContext, SigmaRuleWorker};
 pub use hunts::yara::hunter::YaraHuntWorker;
 pub use hunts::yara::writer::GroupAllowances;
 pub use hunts::yara::{YaraRuleContext, YaraScannerWorker};
 pub use reaction_triggers::ReactionTriggerWorker;
+pub use workflows::WorkflowsWorker;
 
 use crate::libs::EventWorkerCache;
 use crate::libs::cache::TriggerCache;
@@ -151,8 +151,8 @@ pub enum EventWorkerKinds {
     YaraScanner,
     /// A yara hunt chunk worker
     YaraHunter,
-    /// The AI worker that builds workflow instances
-    Ai,
+    /// The workflows worker that builds toolset and workflow instances and refreshes model catalogs
+    Workflows,
 }
 
 impl EventWorkerKinds {
@@ -161,6 +161,7 @@ impl EventWorkerKinds {
     /// # Arguments
     ///
     /// * `update_kind` - The kind of update in question
+    #[must_use]
     pub fn is_subscribed(&self, update_kind: WorkerCacheUpdateKinds) -> bool {
         // get the kinds of udpates we subscribe too
         let subscribed = match self {
@@ -168,7 +169,7 @@ impl EventWorkerKinds {
             Self::SigmaScanner => SigmaRuleWorker::cache_subscriptions(),
             Self::YaraScanner => YaraScannerWorker::cache_subscriptions(),
             Self::YaraHunter => YaraHuntWorker::cache_subscriptions(),
-            Self::Ai => AiWorker::cache_subscriptions(),
+            Self::Workflows => WorkflowsWorker::cache_subscriptions(),
         };
         // check if this is something we are subscribed too
         subscribed.contains(&update_kind)
@@ -239,14 +240,15 @@ impl EventWorkerKinds {
                 // spawn this yara hunt worker
                 tokio::task::spawn(worker.start())
             }
-            EventWorkerKinds::Ai => {
+            EventWorkerKinds::Workflows => {
                 // get the send side of our states channel
-                let stats_tx = &stats_channels.ai.0;
-                // build the AI worker, which handles each batch as a whole
-                let worker =
-                    EventWorkerMutable::<AiWorker>::new(cache, thorium, &msg_rx, stats_tx, worker)
-                        .await;
-                // spawn the AI worker
+                let stats_tx = &stats_channels.workflows.0;
+                // build the workflows worker, which handles each batch as a whole
+                let worker = EventWorkerMutable::<WorkflowsWorker>::new(
+                    cache, thorium, &msg_rx, stats_tx, worker,
+                )
+                .await;
+                // spawn the workflows worker
                 tokio::task::spawn(worker.start())
             }
         };
@@ -487,12 +489,7 @@ impl<W: EventWorkerSupport> EventWorker<W> {
             // try to get any events and evaluate them
             let got_events = self.process(&opts).await?;
             // if we got some events then handle them otherwise sleep for 3 seconds
-            if !got_events {
-                // sleep for 3 seconds to keep from spamming the API needlessly
-                tokio::time::sleep(Duration::from_secs(3)).await;
-                // restart our loop and check for new events
-                continue;
-            } else {
+            if got_events {
                 // swap our current stats out
                 let stats = std::mem::take(&mut self.stats);
                 // get our inner stats value and forward it to our stats worker
@@ -500,6 +497,9 @@ impl<W: EventWorkerSupport> EventWorker<W> {
                     Some(stats_arc) => self.stats_tx.send(stats_arc.into_inner()).await?,
                     None => return Err(Error::new("Multiple Stats Arc refs?")),
                 }
+            } else {
+                // sleep for 3 seconds to keep from spamming the API needlessly
+                tokio::time::sleep(Duration::from_secs(3)).await;
             }
         }
     }
@@ -666,16 +666,14 @@ impl<W: EventWorkerMutableSupport> EventWorkerMutable<W> {
             // try to get any events and evaluate them
             let got_events = self.process(&opts).await?;
             // if we got some events then handle them otherwise sleep for 3 seconds
-            if !got_events {
-                // sleep for 3 seconds to keep from spamming the API needlessly
-                tokio::time::sleep(Duration::from_secs(3)).await;
-                // restart our loop and check for new events
-                continue;
-            } else {
+            if got_events {
                 // wipe our current stats
                 let stats = std::mem::take(&mut self.stats);
                 // we processed some events so send our latest stats
                 self.stats_tx.send(stats).await?;
+            } else {
+                // sleep for 3 seconds to keep from spamming the API needlessly
+                tokio::time::sleep(Duration::from_secs(3)).await;
             }
         }
     }

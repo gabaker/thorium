@@ -796,13 +796,13 @@ pub struct RestoreController {
     results_stream: TableRestore<OutputStream>,
     /// The tags table
     tags: TableRestore<Tag>,
-    /// The repo_data table
+    /// The `repo_data` table
     repo_data: TableRestore<RepoData>,
-    /// The repos_list table
+    /// The `repos_list` table
     repos_list: TableRestore<RepoList>,
     /// The commits table
     commitish: TableRestore<Commitish>,
-    /// The commits_list table
+    /// The `commits_list` table
     commitish_list: TableRestore<CommitishList>,
     /// The nodes table
     nodes: TableRestore<Node>,

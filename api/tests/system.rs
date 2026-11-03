@@ -637,7 +637,7 @@ async fn host_path_consistency_scan() -> Result<(), Error> {
 ///
 /// `POST /api/system/worker/{scaler}` historically discarded the caller entirely, letting any
 /// authenticated low-privilege user write attacker-chosen rows into the scaler's worker registry
-/// (a scheduling-plane DoS, and on reactor deployments a path to admin-token theft). Every sibling
+/// (a scheduling-plane `DoS`, and on reactor deployments a path to admin-token theft). Every sibling
 /// `/api/system/*` method is admin-gated. The secure behavior is that a non-admin registration is
 /// rejected with `401`.
 #[serial_test::parallel]

@@ -475,3 +475,88 @@ fn form_fields() {
         ]
     );
 }
+
+/// A submitted instance over the instances limit is refused before it is parsed, one at the
+/// limit is parsed, and invalid JSON under the limit is refused as invalid
+#[cfg(feature = "api")]
+#[test]
+fn parse_form_size_limit() {
+    // build a form submitting a whole instance
+    let form_of = |raw: &str| crate::models::EntityMetadataForm {
+        toolset_instance: Some(raw.to_owned()),
+        ..Default::default()
+    };
+    let raw = serde_json::to_string(&instance()).unwrap();
+    let len = raw.len() as u64;
+    // an instance of exactly the limit is parsed
+    ToolSetInstanceEntityRequest::parse_form(&mut form_of(&raw), len).unwrap();
+    // one byte less of limit refuses it, naming the sizes and the setting
+    let err = ToolSetInstanceEntityRequest::parse_form(&mut form_of(&raw), len - 1).unwrap_err();
+    assert_eq!(err.status(), axum::http::StatusCode::BAD_REQUEST);
+    let msg = err.msg().unwrap();
+    assert!(msg.contains(&format!("{len} bytes")), "{msg}");
+    assert!(msg.contains("thorium.limits.body.instances"), "{msg}");
+    // invalid JSON under the limit is refused as an invalid instance
+    let err =
+        ToolSetInstanceEntityRequest::parse_form(&mut form_of("{\"bogus\":"), len).unwrap_err();
+    assert_eq!(err.status(), axum::http::StatusCode::BAD_REQUEST);
+    assert!(err.msg().unwrap().contains("not a valid toolset instance"));
+}
+
+/// The largest toolset instance a resolution can build under the default limits, for a
+/// toolset in 16 groups with realistically long names, fits the default instances limit
+#[test]
+fn largest_resolved_instance_fits_default_limit() {
+    // a toolset in 16 groups, each with a 24 character name
+    let groups = (0..16)
+        .map(|index| format!("ganymede-research-grp-{index:02}"))
+        .collect::<Vec<String>>();
+    let limits = super::ToolSetLimits::default();
+    let cap = limits.max_candidates();
+    // the most members a resolution lists, each a tool in every group with long names
+    let members = (0..cap * 2)
+        .map(|index| ToolSetMember {
+            tool: Uuid::new_v4(),
+            tool_instance: Uuid::new_v4(),
+            name: format!("binary-analysis-tool-number-{index:04}"),
+            groups: groups.clone(),
+            version: "12.3.45-rc1".into(),
+            spec_hash: format!("v1:{index:064x}"),
+            function_name: format!("binary_analysis_tool_number_{index:04}"),
+            inclusion: ToolSetInclusion::ExplicitPinned,
+        })
+        .collect::<Vec<ToolSetMember>>();
+    // the most exclusions, each missing from every group and each with a warning
+    let excluded = (0..cap * (groups.len() + 2))
+        .map(|index| ToolSetExclusion {
+            tool: Uuid::new_v4(),
+            tool_instance: Some(Uuid::new_v4()),
+            name: format!("binary-analysis-tool-number-{index:04}"),
+            inclusion: ToolSetInclusion::Selector,
+            reason: ToolSetExclusionReason::NotTaggedInAllGroups,
+            missing_groups: groups.clone(),
+        })
+        .collect::<Vec<ToolSetExclusion>>();
+    let warnings = excluded
+        .iter()
+        .map(|exclusion| {
+            format!(
+                "`{}` was left out: {}",
+                exclusion.name,
+                exclusion.describe()
+            )
+        })
+        .collect::<Vec<String>>();
+    let mut largest = instance();
+    largest.tool_set_groups = groups;
+    largest.status = ToolSetInstanceStatus::Invalid {
+        errors: warnings.iter().take(cap * 2).cloned().collect(),
+    };
+    largest.warnings = warnings;
+    largest.members = members;
+    largest.excluded = excluded;
+    // its JSON fits under the default instances limit
+    let len = serde_json::to_string(&largest).unwrap().len() as u64;
+    let max = crate::conf::BodyLimits::default().instances.as_u64();
+    assert!(len < max, "{len} bytes is over the {max} byte default");
+}

@@ -821,9 +821,13 @@ pub async fn resolve_sources(
             {
                 match read_document::<PipelineRequest>(&source, base_dir).await {
                     Ok(request) => {
-                        // the description the version carries fills in a missing description
+                        // the description the version carries replaces the fetched description
                         let mut config = PipelineConfig::from(&request);
-                        shared::fill_description(&mut config.description, &version.description);
+                        shared::apply_carried_description(
+                            &format!("pipeline {name}@{label}"),
+                            &mut config.description,
+                            &version.description,
+                        );
                         version.config = Some(config);
                         version.config_from = None;
                     }

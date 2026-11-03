@@ -114,6 +114,8 @@ cluster:
   # chart generates from the backends section, such as {thorium: {cors: {insecure: false,
   # domains: [...]}}}. Maps merge key by key; lists replace the default. The generated defaults
   # take cors.insecure and scaler.crane.insecure from cors.insecure and crane.insecure below.
+  # The API's request body limits are set here too, such as {thorium: {limits: {body:
+  # {default: 16 MiB, entities: 14 MiB, instances: 12 MiB}}}} (the defaults).
   # Secrets come from configSecrets instead, since this config is stored in the ThoriumCluster
   config: {}
   # The API's CORS policy (thorium.cors.insecure). true is insecure: the API accepts
@@ -280,12 +282,13 @@ uninstallHook:
   enabled: true
   # how long to wait for the operator to clean up; the Job's deadline is 30 seconds longer
   timeoutSeconds: 240
-  # The Job only runs curl and jq against the Kubernetes API with its service account token, so
-  # it runs unprivileged and satisfies restricted Pod Security. It uses controller.nodeSelector
-  # and controller.tolerations.
+  # The Job runs `thorium-operator uninstall` from the operator image, which only talks to the
+  # Kubernetes API with its service account token and writes no files, so it runs unprivileged
+  # and satisfies restricted Pod Security. It uses controller.nodeSelector and
+  # controller.tolerations.
   resources:
     requests: { cpu: 10m, memory: 32Mi }
-    limits: { cpu: 100m, memory: 64Mi }
+    limits: { cpu: 100m, memory: 128Mi }
   podSecurityContext:
     runAsNonRoot: true
     runAsUser: 65534
@@ -305,8 +308,12 @@ uninstallHook:
 # upgrading (`thorium-operator crd --apply`, or kubectl apply of crds/thoriumcluster.yaml)
 crdHook:
   enabled: true
-  # how long the Job may run, including waiting for the CRD to be established
-  timeoutSeconds: 120
+  # how long the Job may run. The deadline also covers scheduling its pod and pulling the new
+  # image, which is the upgrade's first pull of that tag and can take minutes on a slow link; a
+  # pod that never starts (an image no node has or can pull, or no node it fits on) fails the Job
+  # with DeadlineExceeded and `failed: 1/1` (`kubectl -n <ns> describe pod -l
+  # job-name=thorium-apply-crd` shows why, since a failed hook Job is kept)
+  timeoutSeconds: 600
   resources:
     requests: { cpu: 10m, memory: 32Mi }
     limits: { cpu: 200m, memory: 128Mi }
@@ -360,9 +367,12 @@ toolbox:
   # fail the import before any change when converting an older toolbox file raised issues
   # (skipped entries or dropped fields), instead of importing what converts
   strict: false
-  # groups and network policies the toolbox references, created (if missing) before importing;
-  # the defaults match what tools/toolbox.json expects. Network policies use the Thorium API's
-  # network policy fields, so their keys are snake_case
+  # groups and network policies the toolbox references, created (if missing) before importing
+  # with `thorctl groups create` and `thorctl network-policies create`; the defaults match what
+  # tools/toolbox.json expects. Network policies use the Thorium API's network policy fields
+  # (name, groups, ingress, egress, forced_policy, default_policy), so their keys are snake_case;
+  # leaving out ingress or egress allows all traffic in that direction; each network policy needs at
+  # least one group
   groups:
     - static
   networkPolicies:
@@ -395,8 +405,8 @@ toolbox:
   # the thorctl binary the import runs, inside the Thorium image; empty picks
   # /app/binaries/linux/<arch>/thorctl for the node's architecture (x86-64 or arm64)
   thorctlPath: ""
-  # The Job only runs curl and thorctl against the Thorium API, writing nothing outside /tmp (an
-  # emptyDir), so it runs unprivileged and satisfies restricted Pod Security. It uses
+  # The Job only runs thorctl against the Thorium API, writing nothing outside /tmp (an emptyDir),
+  # so it runs unprivileged and satisfies restricted Pod Security. It uses
   # controller.nodeSelector and controller.tolerations.
   resources:
     requests: { cpu: 10m, memory: 64Mi }

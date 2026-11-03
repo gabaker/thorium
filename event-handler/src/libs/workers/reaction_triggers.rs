@@ -74,35 +74,29 @@ impl ReactionTriggerWorker {
     ///
     /// * `filtered` - The events that were filtered in this loop
     #[instrument(name = "ReactionTriggerWorker::final_eval", skip_all, fields(clears = filtered.confirmed.len()))]
-    fn final_eval<'a>(&self, filtered: &mut FilteredEvents<'a>) {
+    fn final_eval(&self, filtered: &mut FilteredEvents<'_>) {
         // Iterate over all still potential events and try to confirm a triggers
         // conditions have been met
         for (event_id, triggers) in filtered.potentials.drain(..) {
             // keep a list of confirmed triggers if we find any
             let mut found = Vec::default();
             // get this events data
-            let event = match self.event_cache.get(&event_id) {
-                Some(event) => event,
-                None => {
-                    // log this event
-                    event!(
-                        Level::ERROR,
-                        msg = "Missing event",
-                        event = event_id.to_string()
-                    );
-                    // continue our loop
-                    continue;
-                }
+            let Some(event) = self.event_cache.get(&event_id) else {
+                // log this event
+                event!(
+                    Level::ERROR,
+                    msg = "Missing event",
+                    event = event_id.to_string()
+                );
+                // continue our loop
+                continue;
             };
             // get this events user
-            let user = match self.triggers.users.get(&event.user) {
-                Some(user) => user,
-                None => {
-                    // log this event
-                    event!(Level::ERROR, msg = "Missing user", user = &event.user);
-                    // continue our loop
-                    continue;
-                }
+            let Some(user) = self.triggers.users.get(&event.user) else {
+                // log this event
+                event!(Level::ERROR, msg = "Missing user", user = &event.user);
+                // continue our loop
+                continue;
             };
             // check each still potential trigger for this event
             for (group, pipeline, trigger) in triggers {
@@ -152,16 +146,13 @@ impl ReactionTriggerWorker {
         // build reaction requests for all of our confirmed reactions
         for (id, triggers) in filtered.confirmed.drain(..) {
             // get the event data for this event id
-            let event = match self.event_cache.get(&id) {
-                Some(event) => event,
-                None => {
-                    // log that we are missing an event and continue
-                    event!(Level::ERROR, missing = true, id = id.to_string());
-                    // add this missing event to our clear list
-                    filtered.clears.push(id);
-                    // continue checking events
-                    continue;
-                }
+            let Some(event) = self.event_cache.get(&id) else {
+                // log that we are missing an event and continue
+                event!(Level::ERROR, missing = true, id = id.to_string());
+                // add this missing event to our clear list
+                filtered.clears.push(id);
+                // continue checking events
+                continue;
             };
             // get the new depth for this event
             let depth = event.depth + 1;
@@ -189,7 +180,7 @@ impl ReactionTriggerWorker {
                     // these events never confirm a trigger, so they never get here: sigma
                     // and yara scan events are consumed by their own scan workers, hunt
                     // chunk events by hunt workers, and workflow graph and model refresh
-                    // events by the AI worker
+                    // events by the workflows worker
                     EventData::SigmaScannableResults { .. }
                     | EventData::YaraScannableSample { .. }
                     | EventData::YaraHuntChunk { .. }

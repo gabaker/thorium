@@ -180,6 +180,7 @@ fn stats_zcard_targets() -> Vec<(ImageScaler, &'static str)> {
 /// * `groups` - The groups to get stats for
 /// * `shared` - Shared Thorium objects
 #[rustfmt::skip]
+#[allow(clippy::implicit_hasher, reason = "the map moves into `SystemStats`, whose groups field uses the default hasher")]
 pub async fn get_stats(
     groups: HashMap<String, GroupStats>,
     shared: &Shared

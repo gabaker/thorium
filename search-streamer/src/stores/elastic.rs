@@ -375,10 +375,9 @@ fn chunk_docs(values: Vec<Value>, max_request_size: ByteSize) -> Result<Vec<Vec<
         }
         // check if adding this value would exceed the maximum size
         if current_chunk_size + size > max_request_size_raw {
-            // Push the current chunk to the list of chunks
-            chunks.push(current_chunk);
-            // start a new chunk
-            current_chunk = Vec::new();
+            // move the current chunk to the list of chunks, leaving a new empty chunk in its place
+            chunks.push(std::mem::take(&mut current_chunk));
+            // the new chunk holds nothing yet
             current_chunk_size = 0;
         }
         // Add the value to the current chunk

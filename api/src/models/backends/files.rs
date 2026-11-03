@@ -240,11 +240,11 @@ impl Sample {
         match db::files::create(user, form, hashes, shared).await {
             Ok(resp) => {
                 // add our new object if it doesn't already exist
-                if !exists {
+                if exists {
+                    shared.s3.files.delete(&s3_id.to_string()).await?;
+                } else {
                     // this is a new object so add this id
                     db::s3::insert_s3_id(S3Objects::File, s3_id, &resp.sha256, shared).await?;
-                } else {
-                    shared.s3.files.delete(&s3_id.to_string()).await?;
                 }
                 Ok(resp)
             }

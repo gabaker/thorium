@@ -1,4 +1,4 @@
-//! An instance API over an in-memory graph for the AI worker's unit tests
+//! An instance API over an in-memory graph for the workflows worker's unit tests
 
 use chrono::Utc;
 use std::collections::BTreeSet;
@@ -39,6 +39,9 @@ pub struct FakeApi {
     pub failing_notes: BTreeSet<String>,
     /// How many creates are refused with a revision conflict before one succeeds
     pub conflicts: Mutex<usize>,
+    /// Workflow instances whose JSON is larger than this are refused with a 400 naming the
+    /// instances body limit, as the API refuses them
+    pub max_instance_bytes: Option<usize>,
 }
 
 impl FakeApi {
@@ -107,6 +110,18 @@ impl InstanceApi for FakeApi {
     ) -> Result<Uuid, Error> {
         // refuse a create while conflicts are left
         self.refuse()?;
+        // refuse an instance over the instances body limit
+        if let Some(max) = self.max_instance_bytes {
+            let len = serde_json::to_string(instance).unwrap().len();
+            if len > max {
+                return Err(Error::Thorium {
+                    code: reqwest::StatusCode::BAD_REQUEST,
+                    msg: Some(format!(
+                        "workflow_instance is {len} bytes, over the {max} bytes thorium.limits.body.instances allows"
+                    )),
+                });
+            }
+        }
         // record the instance and when it was created
         self.created.lock().unwrap().push(instance.clone());
         self.order.lock().unwrap().push(Created::Workflow);

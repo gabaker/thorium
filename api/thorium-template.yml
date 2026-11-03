@@ -36,6 +36,18 @@ thorium:
   #   k8s:
   #     # How many namespaces or user secrets to setup at once when syncing to a new cache
   #     setup_concurrency: 25
+  # Request body limits (optional). These are the defaults. A body over its limit is answered with
+  # a 413 naming the setting. File, result, repo, comment attachment, reaction cache, and
+  # serialized YARA ruleset uploads and system restores have no limit.
+  # limits:
+  #   body:
+  #     # Every route without its own limit
+  #     default: "16 MiB"
+  #     # Entity creates and updates, including an entity's image
+  #     entities: "14 MiB"
+  #     # A submitted toolset or workflow instance; this also bounds the size of the warnings and
+  #     # names an instance stores, so lower it to store less
+  #     instances: "12 MiB"
   # Authentication settings (optional). Uncomment and fill in to enable OAuth/OIDC login.
   # NOTE: OAuth registration requires email verification (auth.email below) to be configured;
   # without it new-user registration through OAuth is rejected.

@@ -15,6 +15,33 @@ mod utils;
 
 use args::{Args, SubCommands};
 
+/// Render an error that reached `main` as the text printed to stderr
+///
+/// Generic errors print as their message, errors that carry an HTTP status print on one line
+/// as `Code: <status> Error: <msg>`, other errors with a message of their own print as
+/// `<kind>: <msg>` so the source is still clear, and an error with no message prints in its
+/// debug form.
+///
+/// # Arguments
+///
+/// * `error` - The error to render
+fn render_error(error: &Error) -> String {
+    // print generic errors as plain text
+    if let Error::Generic(msg) = error {
+        return msg.clone();
+    }
+    // print errors with an HTTP status in the client's one line display form
+    if error.status().is_some() {
+        return error.to_string();
+    }
+    // prefix any other error's own message with its kind, falling back to the debug form only
+    // when the error carries no message
+    match error.msg() {
+        Some(msg) => format!("{}: {msg}", error.kind()),
+        None => format!("{error:#?}"),
+    }
+}
+
 /// Installs the interrupt handler, parses the command line, runs the matching Thorctl command,
 /// and exits with a non-zero code after printing the error if the command fails
 #[tokio::main]
@@ -83,18 +110,50 @@ async fn main() {
             utils::interrupt::exit_interrupted();
         }
         // print our error to stderr nicely if possible
-        match error {
-            // a generic error is already a human-readable message; print it bare
-            Error::Generic(msg) => eprintln!("{msg}"),
-            // otherwise prefer the error's own message, prefixed with its kind so
-            // the source is still clear, and fall back to the debug dump only when
-            // the error carries no message of its own
-            _ => match error.msg() {
-                Some(msg) => eprintln!("{}: {msg}", error.kind()),
-                None => eprintln!("{error:#?}"),
-            },
-        }
+        eprintln!("{}", render_error(&error));
         // exit with the timeout code if a --wait-for timed out, or 1 otherwise
         std::process::exit(utils::watch::exit_code());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use http::StatusCode;
+    use thorium::Error;
+
+    use super::render_error;
+
+    /// An API error renders on one line with its status code and message
+    #[test]
+    fn render_api_error_on_one_line() {
+        // build an error like the one the client returns for an unauthorized request
+        let error = Error::Thorium {
+            code: StatusCode::UNAUTHORIZED,
+            msg: Some("{\"trace\":\"x\"}".to_string()),
+        };
+        // an API error should print as the client's display text rather than a debug struct
+        assert_eq!(
+            render_error(&error),
+            "Code: 401 Unauthorized Error: {\"trace\":\"x\"}"
+        );
+    }
+
+    /// A generic error renders as its plain message
+    #[test]
+    fn render_generic_error_as_text() {
+        // a generic error should print without any prefix or quoting
+        assert_eq!(
+            render_error(&Error::Generic("no such file".to_string())),
+            "no such file"
+        );
+    }
+
+    /// An error without an HTTP status renders as its kind and its own message
+    #[test]
+    fn render_other_error_with_kind() {
+        // build an IO error that has no HTTP status
+        let error = Error::IO(std::io::Error::other("disk gone"));
+        // an error with no status should print its message prefixed with its kind
+        assert_eq!(render_error(&error), "IO: disk gone");
     }
 }

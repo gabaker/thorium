@@ -14,6 +14,7 @@ use super::{
     WorkflowCatalogUpdateFields, WorkflowInstanceEntity, WorkflowInstanceEntityRequest,
     WorkflowInstanceStatus, WorkflowInstanceTrigger, WorkflowLimits, WorkflowResultKey,
 };
+use crate::models::entities::thread_timer::ThreadTimer;
 use crate::models::{
     AgentConfig, EntityMetadataRequest, EntityMetadataUpdate, ModelAuthLevel, ModelAuthSource,
     ModelMatcher, ToolKind, ToolMechanism, ToolSpec,
@@ -645,12 +646,12 @@ fn digest_at_size_limits_is_fast() {
     instance.agents = agents;
     instance.tools = tools;
     // every agent's toolset digest and the instance digest are computed quickly
-    let start = std::time::Instant::now();
+    let timer = ThreadTimer::start();
     for agent in &instance.agents {
         agent.compute_toolset_digest(&instance.tools).unwrap();
     }
     instance.compute_digest(&BTreeMap::new()).unwrap();
-    let elapsed = start.elapsed();
+    let elapsed = timer.elapsed();
     assert!(elapsed < std::time::Duration::from_secs(3), "{elapsed:?}");
 }
 
@@ -725,5 +726,109 @@ fn result_key_parse_refuses_other_keys() {
     ] {
         assert!(WorkflowResultKey::parse(&key).is_none(), "{key}");
         assert_eq!(WorkflowResultKey::display_name(&key), key);
+    }
+}
+
+/// A submitted instance over the instances limit is refused before it is parsed, one at the
+/// limit is parsed, and invalid JSON under the limit is refused as invalid
+#[cfg(feature = "api")]
+#[test]
+fn parse_form_size_limit() {
+    // build a form submitting a whole instance
+    let form_of = |raw: &str| crate::models::EntityMetadataForm {
+        workflow_instance: Some(raw.to_owned()),
+        ..Default::default()
+    };
+    let raw = serde_json::to_string(&instance()).unwrap();
+    let len = raw.len() as u64;
+    // an instance of exactly the limit is parsed
+    WorkflowInstanceEntityRequest::parse_form(&mut form_of(&raw), len).unwrap();
+    // one byte less of limit refuses it, naming the sizes and the setting
+    let err = WorkflowInstanceEntityRequest::parse_form(&mut form_of(&raw), len - 1).unwrap_err();
+    assert_eq!(err.status(), axum::http::StatusCode::BAD_REQUEST);
+    let msg = err.msg().unwrap();
+    assert!(msg.contains(&format!("{len} bytes")), "{msg}");
+    assert!(msg.contains("thorium.limits.body.instances"), "{msg}");
+    // invalid JSON under the limit is refused as an invalid instance
+    let err =
+        WorkflowInstanceEntityRequest::parse_form(&mut form_of("{\"bogus\":"), len).unwrap_err();
+    assert_eq!(err.status(), axum::http::StatusCode::BAD_REQUEST);
+    assert!(err.msg().unwrap().contains("not a valid workflow instance"));
+}
+
+/// The largest workflow instance a resolution can list under the default crawl limits, with
+/// every tool in eight groups, realistically long names, and multi-kilobyte agent prompts, is
+/// accepted under the default instances limit
+///
+/// Every one of the 16,448 tools this lists is a distinct tool instance, and each group per tool
+/// adds about 445 KB. At eight groups per tool such an instance is about 10.4 MB; the default
+/// fits up to 11 groups per tool (about 11.8 MB), so a deployment that resolves workflows larger
+/// than that raises `thorium.limits.body.instances`.
+#[test]
+fn largest_resolved_instance_fits_default_limit() {
+    // tools in eight groups, each with a 24 character name
+    let groups = (0..8)
+        .map(|index| format!("ganymede-research-grp-{index:02}"))
+        .collect::<Vec<String>>();
+    let limits = super::CrawlLimits::default();
+    // the most tools an instance lists, each with long names
+    let tools = (0..limits.max_instance_tools())
+        .map(|index| {
+            let mut built = tool(
+                &format!("binary-analysis-tool-number-{index:05}"),
+                &format!("v1:{index:064x}"),
+            );
+            built.groups = groups.clone();
+            built.version = "12.3.45-rc1".into();
+            built
+        })
+        .collect::<Vec<InstancedTool>>();
+    // the most agents, each listing the most tools and sub-agents with long prompts
+    let listed = limits.max_listed_tools_per_agent();
+    let mut agents = (0..limits.max_agents_per_workflow)
+        .map(|index| {
+            let mut built = agent(&format!("malware-triage-agent-number-{index:02}"), &[]);
+            built.groups = groups.clone();
+            built.config.system_prompt = Some("p".repeat(8 << 10));
+            built.config.prompt = Some("q".repeat(4 << 10));
+            let start = (index * listed) % (tools.len() - listed);
+            built.tools = tools[start..start + listed]
+                .iter()
+                .map(|tool| tool.tool_instance)
+                .collect();
+            built
+        })
+        .collect::<Vec<InstancedAgent>>();
+    let ids = agents
+        .iter()
+        .map(|agent| agent.agent)
+        .collect::<Vec<Uuid>>();
+    for agent in &mut agents {
+        agent.sub_agents.clone_from(&ids);
+    }
+    let mut largest = instance();
+    largest.workflow_groups = groups;
+    largest.entry_agent = Some(ids[0]);
+    largest.agents = agents;
+    largest.tools = tools;
+    largest.warnings = (0..1024)
+        .map(|index| format!("binary-analysis-tool-number-{index:05} 0.9 is deprecated"))
+        .collect();
+    // its JSON fits under the default instances limit, and the create accepts it
+    let raw = serde_json::to_string(&largest).unwrap();
+    let len = raw.len() as u64;
+    let max = crate::conf::BodyLimits::default().instances.as_u64();
+    assert!(
+        len > 10_000_000,
+        "{len} bytes is smaller than the bound this asserts"
+    );
+    assert!(len < max, "{len} bytes is over the {max} byte default");
+    #[cfg(feature = "api")]
+    {
+        let mut form = crate::models::EntityMetadataForm {
+            workflow_instance: Some(raw),
+            ..Default::default()
+        };
+        WorkflowInstanceEntityRequest::parse_form(&mut form, max).unwrap();
     }
 }

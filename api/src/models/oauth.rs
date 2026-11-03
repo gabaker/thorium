@@ -44,7 +44,7 @@ pub enum OAuthMaybeAuthed {
     NewUser {
         /// The registration session token to pass back to `POST /oauth/{name}/register`
         token: String,
-        /// Whether the user must supply an email at registration because the IdP returned none
+        /// Whether the user must supply an email at registration because the `IdP` returned none
         email_required: bool,
     },
 }
@@ -74,7 +74,7 @@ pub struct OAuthUserCreate {
     /// The email supplied by the user when the provider returned no email claim
     ///
     /// Only honored for providers that accept a user-supplied email; it must match the provider's
-    /// approved email regexes. Ignored (must match) when the IdP already provided an email.
+    /// approved email regexes. Ignored (must match) when the `IdP` already provided an email.
     #[serde(default)]
     pub email: Option<String>,
     /// The role of this user

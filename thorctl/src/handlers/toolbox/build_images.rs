@@ -458,7 +458,7 @@ mod tests {
         (key.to_string(), value.to_string())
     }
 
-    /// A resolved `BaseImage` entry from an image, an optional arg, and an allow_override flag,
+    /// A resolved `BaseImage` entry from an image, an optional arg, and an `allow_override` flag,
     /// for terse test fixtures
     fn entry(
         image: Option<&str>,

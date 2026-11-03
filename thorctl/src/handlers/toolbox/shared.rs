@@ -7,7 +7,7 @@ use thorium::Error;
 use tokio::io::AsyncReadExt;
 use url::Url;
 
-use crate::handlers::progress::{Bar, BarKind};
+use crate::handlers::progress::{self, Bar, BarKind};
 use crate::handlers::toolbox::manifest::ToolboxManifest;
 use crate::utils;
 
@@ -151,21 +151,42 @@ pub async fn fetch_json_config<T: serde::de::DeserializeOwned>(url: &str) -> Res
         .map_err(|e| Error::new(format!("Failed to parse config from '{url}': {e}")))
 }
 
-/// Fill in a fetched config's description from the one its entry carries
+/// Apply the description an entry carries to the config fetched for it
 ///
 /// A `description.md` can't be written into a config fetched from a URL at build time, so the
-/// entry carries it and it is applied once the config is fetched. A description the fetched
-/// config already has is kept.
+/// entry carries it and it is applied once the config is fetched. Like `description.md` with an
+/// inline config, the carried description wins over the fetched config's own, with a warning when
+/// it replaces a differing non-empty one. An entry that carries nothing leaves the fetched
+/// description as it is.
+///
+/// Returns whether a differing non-empty description was replaced (and warned about).
 ///
 /// # Arguments
 ///
+/// * `name` - The entry the config belongs to, for the warning
 /// * `description` - The fetched config's description
 /// * `carried` - The description the entry carries, which may be empty
-pub(super) fn fill_description(description: &mut Option<String>, carried: &str) {
-    // only a config with no description (missing, null, or empty) takes the carried one
-    if description.as_deref().is_none_or(str::is_empty) && !carried.is_empty() {
-        *description = Some(carried.to_owned());
+pub(super) fn apply_carried_description(
+    name: &str,
+    description: &mut Option<String>,
+    carried: &str,
+) -> bool {
+    // an entry that carries no description leaves the fetched one alone
+    if carried.is_empty() {
+        return false;
     }
+    // warn when replacing a differing description so the conflict is visible
+    let replaced = description
+        .as_deref()
+        .is_some_and(|own| !own.is_empty() && own != carried);
+    if replaced {
+        progress::warn(format!(
+            "{name}: the description its toolbox entry carries overrides the differing \
+             description in its fetched config"
+        ));
+    }
+    *description = Some(carried.to_owned());
+    replaced
 }
 
 /// Resolve any URL-based configs and network policies in the manifest by fetching them
@@ -231,9 +252,10 @@ pub async fn resolve_manifest_configs(
             {
                 match fetch_json_config::<ImageRequest>(url).await {
                     Ok(mut config) => {
-                        // the description.md the entry carries fills in a missing description
+                        // the description.md the entry carries replaces the fetched description
                         if let Some(carried) = &version.description {
-                            fill_description(&mut config.description, carried);
+                            let id = utils::entry_id(None, image_name, version_name);
+                            apply_carried_description(&id, &mut config.description, carried);
                         }
                         version.config = Some(config);
                     }
@@ -268,8 +290,13 @@ pub async fn resolve_manifest_configs(
             {
                 match fetch_json_config::<PipelineRequest>(url).await {
                     Ok(mut config) => {
-                        // the description the entry carries fills in a missing description
-                        fill_description(&mut config.description, &version.description);
+                        // the description the entry carries replaces the fetched description
+                        let id = utils::entry_id(None, pipeline_name, version_name);
+                        apply_carried_description(
+                            &id,
+                            &mut config.description,
+                            &version.description,
+                        );
                         version.config = Some(config);
                     }
                     Err(err) => failures.push(format!(
@@ -296,27 +323,114 @@ pub async fn resolve_manifest_configs(
 
 #[cfg(test)]
 mod tests {
-    use super::fill_description;
+    use super::{apply_carried_description, resolve_manifest_configs};
+    use crate::handlers::progress::{Bar, BarKind};
+    use crate::handlers::toolbox::manifest::ToolboxManifest;
+    use thorium::models::{ImageRequest, PipelineRequest};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
-    /// A carried description fills a missing, null, or empty description and never replaces one
+    /// Serve one image config and one pipeline config over HTTP, each described as "fetched"
+    ///
+    /// Returns the base URL the configs are served under (`/image.json` and `/pipeline.json`).
+    async fn serve_described_configs() -> String {
+        // the two configs, each with a description of its own
+        let mut image = ImageRequest::new("g", "scan");
+        image.description = Some("fetched".to_owned());
+        let mut pipeline = PipelineRequest::new("g", "scan", serde_json::json!(["scan"]));
+        pipeline.description = Some("fetched".to_owned());
+        let image = serde_json::to_string(&image).unwrap();
+        let pipeline = serde_json::to_string(&pipeline).unwrap();
+        // answer every request with the config its path names
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            // serve requests until the test ends
+            while let Ok((mut stream, _)) = listener.accept().await {
+                // read the request line to learn which config was asked for
+                let mut buf = vec![0u8; 4096];
+                let read = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]);
+                let body = if request.starts_with("GET /image.json") {
+                    &image
+                } else {
+                    &pipeline
+                };
+                // reply with that config and close the connection
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+                     connection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// A description.md carried by an entry whose config is fetched from a URL replaces the
+    /// fetched config's own description, for images and pipelines
+    #[tokio::test]
+    async fn description_md_overrides_a_fetched_config_description() {
+        // a toolbox whose image and pipeline configs are URLs and whose entries carry description.md
+        let base = serve_described_configs().await;
+        let mut manifest: ToolboxManifest = serde_json::from_value(serde_json::json!({
+            "name": "test",
+            "images": {"scan": {"1": {
+                "config_from": format!("{base}/image.json"), "description": "from md"
+            }}},
+            "pipelines": {"scan": {"1": {
+                "config_from": format!("{base}/pipeline.json"), "description": "from md"
+            }}},
+        }))
+        .unwrap();
+        // fetch the configs
+        let bar = Bar::new_or_quiet("test", "test", BarKind::UnboundIO, true);
+        resolve_manifest_configs(&mut manifest, &bar).await.unwrap();
+        // both fetched configs take the carried description.md
+        let image = manifest.images["scan"].versions["1"]
+            .config
+            .as_ref()
+            .unwrap();
+        assert_eq!(image.description.as_deref(), Some("from md"));
+        let pipeline = manifest.pipelines["scan"].versions["1"]
+            .config
+            .as_ref()
+            .unwrap();
+        assert_eq!(pipeline.description.as_deref(), Some("from md"));
+    }
+
+    /// A carried description fills a missing, null, or empty description, replaces a differing one
+    /// with a warning, and leaves the description alone when nothing is carried
     #[test]
-    fn fill_description_only_fills_a_missing_description() {
-        // a description the config has stays
+    fn carried_description_overrides_the_fetched_description() {
+        // a differing description the fetched config has is replaced and warned about
         let mut own = Some("own".to_owned());
-        fill_description(&mut own, "carried");
-        assert_eq!(own.as_deref(), Some("own"));
-        // none and empty take the carried one
+        assert!(apply_carried_description("tool", &mut own, "carried"));
+        assert_eq!(own.as_deref(), Some("carried"));
+        // a matching description is kept without a warning
+        let mut same = Some("carried".to_owned());
+        assert!(!apply_carried_description("tool", &mut same, "carried"));
+        assert_eq!(same.as_deref(), Some("carried"));
+        // none and empty take the carried one without a warning
         for start in [None, Some(String::new())] {
             let mut description = start;
-            fill_description(&mut description, "carried");
+            assert!(!apply_carried_description(
+                "tool",
+                &mut description,
+                "carried"
+            ));
             assert_eq!(description.as_deref(), Some("carried"));
         }
         // nothing carried leaves the description as it is
+        let mut kept = Some("own".to_owned());
+        assert!(!apply_carried_description("tool", &mut kept, ""));
+        assert_eq!(kept.as_deref(), Some("own"));
         let mut none = None;
-        fill_description(&mut none, "");
+        assert!(!apply_carried_description("tool", &mut none, ""));
         assert_eq!(none, None);
         let mut empty = Some(String::new());
-        fill_description(&mut empty, "");
+        assert!(!apply_carried_description("tool", &mut empty, ""));
         assert_eq!(empty.as_deref(), Some(""));
     }
 }

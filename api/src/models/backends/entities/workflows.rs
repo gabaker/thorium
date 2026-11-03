@@ -1574,8 +1574,10 @@ pub(crate) async fn create_instance(
     mut form: EntityForm,
     shared: &Shared,
 ) -> Result<EntityResponse, ApiError> {
-    // parse the submitted instance, whose own tags can't use the keys Thorium sets on it
-    let instance = WorkflowInstanceEntityRequest::parse_form(&mut form.metadata)?;
+    // parse the submitted instance within the instances limit, whose own tags can't use the
+    // keys Thorium sets on it
+    let max_bytes = shared.config.thorium.limits.body.instances.as_u64();
+    let instance = WorkflowInstanceEntityRequest::parse_form(&mut form.metadata, max_bytes)?;
     Entity::refuse_intrinsic_tag_keys(EntityKinds::WorkflowInstance, form.tags.keys())?;
     // find the workflow
     let mut workflow = read_workflow(user, instance.workflow, shared).await?;
@@ -2054,6 +2056,7 @@ mod tests {
         intrinsic_tags, snapshot_edges, update_meta, validate_snapshot_groups,
     };
     use crate::models::backends::groups::tests::user;
+    use crate::models::entities::thread_timer::ThreadTimer;
     use crate::models::entities::workflows::resolve::test_graph::{Graph, MINERVA, agentic};
     use crate::models::{
         AgentConfig, AssociationKind, CrawlLimits, Entity, EntityKinds, EntityMetadata,
@@ -2372,9 +2375,9 @@ mod tests {
             );
         }
         // the whole snapshot is checked quickly
-        let start = std::time::Instant::now();
+        let timer = ThreadTimer::start();
         validate_snapshot_groups(&member(), &nodes, &edges).unwrap();
-        let elapsed = start.elapsed();
+        let elapsed = timer.elapsed();
         assert!(elapsed < std::time::Duration::from_secs(1), "{elapsed:?}");
     }
 
@@ -2425,9 +2428,9 @@ mod tests {
         }
         instance.tools = tools;
         // every reference is checked quickly, leaving out the toolset digests built above
-        let start = std::time::Instant::now();
+        let timer = ThreadTimer::start();
         check_references(&instance).unwrap();
-        let elapsed = start.elapsed();
+        let elapsed = timer.elapsed();
         assert!(
             elapsed < std::time::Duration::from_millis(500),
             "{elapsed:?}"

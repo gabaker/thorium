@@ -9,4 +9,5 @@ pub mod nodes;
 pub mod operate;
 pub mod secrets;
 pub mod services;
+pub mod uninstall;
 mod watchers;

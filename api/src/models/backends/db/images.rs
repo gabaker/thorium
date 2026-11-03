@@ -645,12 +645,12 @@ pub async fn update_runtimes(group: &Group, shared: &Shared) -> Result<(), ApiEr
                 .invoke_async(conn!(shared))
                 .await?;
         }
-        // check if our cursor has been exhausted
-        if images.cursor.is_none() {
+        // stop once our cursor has been exhausted, otherwise move on to the next page
+        let Some(next) = images.cursor else {
             break;
-        }
+        };
         // update cursor
-        cursor = images.cursor.unwrap();
+        cursor = next;
     }
     Ok(())
 }

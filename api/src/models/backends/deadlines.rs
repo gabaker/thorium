@@ -92,9 +92,8 @@ impl TryFrom<StreamObj> for Deadline {
             }
         };
         // convert to DateTime
-        let datetime = match DateTime::from_timestamp(obj.timestamp, 0) {
-            Some(deadline) => deadline,
-            None => return internal_err!(format!("{} is not a valid timestamp", obj.timestamp)),
+        let Some(datetime) = DateTime::from_timestamp(obj.timestamp, 0) else {
+            return internal_err!(format!("{} is not a valid timestamp", obj.timestamp));
         };
         // cast to deadline
         let deadline = Deadline {

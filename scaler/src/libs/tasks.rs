@@ -206,7 +206,10 @@ impl ZombieChecker {
         // track the jobs we want to reset
         for job in running {
             // check if this worker is still active
-            if !spawned.contains(&job.worker) {
+            if spawned.contains(&job.worker) {
+                // this job has a spawned worker so make sure its not in our maybe set
+                self.maybe_jobs.remove(&job.job_id);
+            } else {
                 // add this worker to our maybe zombie set
                 if self.maybe_jobs.insert(job.job_id, true).is_some() {
                     // this worker was already in our maybe set
@@ -214,9 +217,6 @@ impl ZombieChecker {
                     self.maybe_jobs.remove(&job.job_id);
                     self.confirmed_jobs.push(job.job_id);
                 }
-            } else {
-                // this job has a spawned worker so make sure its not in our maybe set
-                self.maybe_jobs.remove(&job.job_id);
             }
         }
         // remove any old zombie jobs

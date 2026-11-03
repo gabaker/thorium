@@ -139,7 +139,6 @@ fn build_app(
     axum::Router,
     Option<opentelemetry_sdk::trace::SdkTracerProvider>,
 ) {
-    use axum::extract::DefaultBodyLimit;
     use axum::http::header::{HeaderName, HeaderValue};
     use axum::{http::Request, response::Response};
     use routes::{
@@ -164,7 +163,7 @@ fn build_app(
     api_router = associations::mount(api_router);
     api_router = basic::mount(api_router);
     api_router = binaries::mount(api_router, conf);
-    api_router = entities::mount(api_router);
+    api_router = entities::mount(api_router, conf);
     api_router = docs::mount(api_router, conf);
     api_router = events::mount(api_router);
     api_router = files::mount(api_router);
@@ -210,9 +209,10 @@ fn build_app(
             .expect("Failed to parse CORS domains");
         cors.allow_origin(origins)
     };
+    // hold every request body to the default limit unless its route sets its own
+    app = utils::body_limits::enforce_default(app, &conf.thorium.limits.body);
     // add middleware to our app
     app = app
-        .layer(DefaultBodyLimit::disable())
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new().level(Level::INFO))

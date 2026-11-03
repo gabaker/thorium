@@ -21,7 +21,7 @@ pub const LAYOUT_VERSION: u32 = 2;
 /// * `user` - The username of the user this cursor is scoped to
 /// * `id` - The id of the cursor this key is for
 /// * `shared` - Shared Thorium objects
-pub fn data(kind: CursorKind, user: &str, id: &Uuid, shared: &Shared) -> String {
+pub fn data(kind: &CursorKind, user: &str, id: &Uuid, shared: &Shared) -> String {
     // scope this cursor to its creating user by nesting the id under the username
     format!(
         "{ns}:cursors:{kind}:v{LAYOUT_VERSION}:{user}:{id}",

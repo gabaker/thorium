@@ -352,10 +352,9 @@ impl Associations {
 /// * `opts` - The options to use when listing associations
 fn list_query(opts: &AssociationListOpts) -> Vec<(String, String)> {
     // get the correct page size if our limit is smaller then our page_size
-    let page_size = opts.limit.map_or_else(
-        || opts.page_size,
-        |limit| std::cmp::min(opts.page_size, limit),
-    );
+    let page_size = opts
+        .limit
+        .map_or(opts.page_size, |limit| std::cmp::min(opts.page_size, limit));
     // build our query params
     let mut query = vec![("limit".to_owned(), page_size.to_string())];
     add_query_list!(query, "groups[]".to_owned(), opts.groups);

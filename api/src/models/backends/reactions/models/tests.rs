@@ -1712,3 +1712,127 @@ fn harness_model_entry_capabilities() {
         serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
     assert!(back.capabilities.strict_tools);
 }
+
+/// A credential past its expiry is skipped at resolution like a banned one, so a lower-priority
+/// candidate wins, whether it's a group credential, the runner's own, or the access key an
+/// assumed role uses; a credential that expires later still resolves
+#[test]
+fn expired_credentials_are_skipped() {
+    // model one through an expiring group credential, then model two through a clean one
+    let mut world = World::new(vec![agent("triage", vec![matcher("one"), matcher("two")])]);
+    let first = world.keyed_endpoint("corn-one", openai(), &["one"]);
+    world.keyed_endpoint("corn-two", anthropic("2023-06-01"), &["two"]);
+    let cred = world.endpoints[first].meta.credential.unwrap();
+    // a credential that expires later still wins
+    world.credentials.get_mut(&cred).unwrap().expires =
+        Some(Utc::now() + chrono::Duration::days(1));
+    assert_eq!(world.binding().model_id, "one");
+    // once it has expired, the lower-priority model wins
+    world.credentials.get_mut(&cred).unwrap().expires =
+        Some(Utc::now() - chrono::Duration::days(1));
+    let binding = world.binding();
+    assert_eq!(binding.model_id, "two");
+    assert_eq!(binding.priority, Some(1));
+    // the runner's own credential is skipped the same way when it has expired
+    let id = world.endpoints[first].id;
+    world.user_key(id);
+    world.user.credentials.get_mut(&id).unwrap().expires =
+        Some(Utc::now() - chrono::Duration::minutes(1));
+    assert_eq!(world.binding().model_id, "two");
+    // with every candidate expired, the rejections name the expiry
+    let second = world.endpoints[1].meta.credential.unwrap();
+    world.credentials.get_mut(&second).unwrap().expires =
+        Some(Utc::now() - chrono::Duration::days(1));
+    let error = world.mismatch();
+    let expired = reasons(&error)
+        .into_iter()
+        .filter(|reason| *reason == ModelRejectReason::Banned(ModelBanKind::CredentialExpired))
+        .count();
+    assert_eq!(expired, 3);
+    // an assumed role whose access key has expired is skipped too
+    let mut world = World::new(vec![agent("triage", vec![matcher("claude")])]);
+    let source = world.add_credential(credential(CredentialKind::AwsAccessKey {
+        access_key_id: "AKIA".to_owned(),
+    }));
+    let role = world.add_credential(credential(CredentialKind::AwsAssumeRole {
+        role_arn: "arn:aws:iam::1:role/r".to_owned(),
+        external_id: None,
+        session_name: None,
+        duration_seconds: None,
+        source: AwsRoleSource::AccessKey(source),
+    }));
+    world.endpoints.push(endpoint(
+        "bedrock",
+        bedrock(BedrockEndpointKind::Runtime),
+        Some(role),
+        &["claude"],
+    ));
+    assert_eq!(
+        world.binding().credential,
+        Some(ModelConfigRef::Group(role))
+    );
+    world.credentials.get_mut(&source).unwrap().expires =
+        Some(Utc::now() - chrono::Duration::days(1));
+    assert!(
+        reasons(&world.mismatch())
+            .contains(&ModelRejectReason::Banned(ModelBanKind::CredentialExpired))
+    );
+}
+
+/// A credential that has expired since its run was created can't be delivered, whether it's a
+/// group credential, the runner's own, or the access key an assumed role uses, while one that
+/// expires later still is
+#[test]
+fn run_models_refuse_expired_credentials() {
+    // a run bound to a group endpoint's credential
+    let mut world = World::new(vec![agent("triage", vec![matcher("one")])]);
+    let index = world.keyed_endpoint("corn-one", openai(), &["one"]);
+    let whitelist = allowing([&world.endpoints[index].meta.provider]);
+    let bindings = world.resolve().unwrap();
+    let cred = world.endpoints[index].meta.credential.unwrap();
+    // a credential that expires later is delivered
+    world.credentials.get_mut(&cred).unwrap().expires =
+        Some(Utc::now() + chrono::Duration::days(1));
+    assert!(deliver(&world, &whitelist, &bindings).is_ok());
+    // one that expired while the run was queued is refused
+    world.credentials.get_mut(&cred).unwrap().expires =
+        Some(Utc::now() - chrono::Duration::days(1));
+    assert_eq!(
+        deliver(&world, &whitelist, &bindings).unwrap_err(),
+        format!("model credential {cred} has expired")
+    );
+    // the runner's own credential is refused the same way
+    world.credentials.get_mut(&cred).unwrap().expires = None;
+    let id = world.endpoints[index].id;
+    let user_cred = world.user_key(id);
+    let mut user_bindings = bindings.clone();
+    user_bindings[0].level = ModelAuthLevel::User;
+    user_bindings[0].credential = Some(ModelConfigRef::User(user_cred));
+    assert!(deliver(&world, &whitelist, &user_bindings).is_ok());
+    world.user.credentials.get_mut(&id).unwrap().expires =
+        Some(Utc::now() - chrono::Duration::minutes(1));
+    assert_eq!(
+        deliver(&world, &whitelist, &user_bindings).unwrap_err(),
+        format!("model credential {user_cred} has expired")
+    );
+    // an assumed role whose access key expired is refused for the key
+    let source = world.add_credential(credential(CredentialKind::AwsAccessKey {
+        access_key_id: "AKIA".to_owned(),
+    }));
+    let role = world.add_credential(credential(CredentialKind::AwsAssumeRole {
+        role_arn: "arn:aws:iam::1:role/r".to_owned(),
+        external_id: None,
+        session_name: None,
+        duration_seconds: None,
+        source: AwsRoleSource::AccessKey(source),
+    }));
+    let mut role_bindings = bindings.clone();
+    role_bindings[0].credential = Some(ModelConfigRef::Group(role));
+    assert!(deliver(&world, &whitelist, &role_bindings).is_ok());
+    world.credentials.get_mut(&source).unwrap().expires =
+        Some(Utc::now() - chrono::Duration::days(1));
+    assert_eq!(
+        deliver(&world, &whitelist, &role_bindings).unwrap_err(),
+        format!("model credential {source} has expired")
+    );
+}

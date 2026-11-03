@@ -13,8 +13,8 @@ use thorium::test_utilities::generators;
 use uuid::Uuid;
 
 use super::WorkflowInstancer;
-use crate::libs::workers::ai::fake::{FakeApi, entity, event};
-use crate::libs::workers::ai::{AiWorkerStats, retry_after};
+use crate::libs::workers::workflows::fake::{FakeApi, entity, event};
+use crate::libs::workers::workflows::{WorkflowsWorkerStats, retry_after};
 
 /// Add a workflow catalog to a graph
 ///
@@ -787,7 +787,7 @@ async fn stats_count_each_occurrence() {
     let outcome = instancer(&api).process(&events).await;
     // one invalid instance created, one dedupe skip, a sent and a failed manual notice, and an
     // invalid notice for the fresh build
-    let expected = AiWorkerStats {
+    let expected = WorkflowsWorkerStats {
         events_processed: 4,
         instances_created: 1,
         skipped: 1,
@@ -820,7 +820,7 @@ async fn stats_count_each_occurrence() {
     assert!(invalid.1.msg.contains("#r1"), "{}", invalid.1.msg);
     assert!(invalid.1.msg.contains("has no agents"), "{}", invalid.1.msg);
     // stats add up across batches
-    let mut total = AiWorkerStats::default();
+    let mut total = WorkflowsWorkerStats::default();
     total += outcome.stats.clone();
     total += outcome.stats;
     assert_eq!(total.events_processed, 8);
@@ -987,4 +987,56 @@ async fn mapping_and_crawl_cost() {
     assert_eq!(api.graph.node_reads(sub), 1);
     assert_eq!(outcome.stats.tag_lookups, 2);
     assert!(outcome.stats.graph_reads >= 5, "{:?}", outcome.stats);
+}
+
+/// A build the API refuses as too large finishes its event and tells its requester, instead of
+/// being retried on every pass
+#[tokio::test]
+async fn oversized_build_is_finished_and_reported() {
+    // a workflow whose every instance is over the API's instances limit
+    let mut api = FakeApi::default();
+    let groups = ["minerva-big"];
+    let workflow = catalog(&mut api.graph, "big", &groups, true);
+    api.max_instance_bytes = Some(1);
+    let ev = event(
+        "io-big",
+        &groups,
+        WorkflowGraphChange::WorkflowUpdated { workflow },
+    );
+    let outcome = instancer(&api).process(std::slice::from_ref(&ev)).await;
+    // the event is finished and nothing was created
+    assert!(outcome.in_flight.is_empty(), "{:?}", outcome.in_flight);
+    assert_eq!(outcome.cleared, vec![ev.id]);
+    assert_eq!(api.created().len(), 0);
+    // the requester is told the build failed and which setting refused it
+    let notes = api.notes();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert_eq!(notes[0].0, "io-big");
+    assert_eq!(notes[0].1.level, NotificationLevel::Error);
+    assert!(
+        notes[0].1.msg.contains("thorium.limits.body.instances"),
+        "{}",
+        notes[0].1.msg
+    );
+}
+
+/// Only a 413 or the instance limit's 400 counts as a size refusal
+#[test]
+fn size_refusals() {
+    // build an API error with a status and message
+    let error = |code, msg: &str| thorium::Error::Thorium {
+        code,
+        msg: Some(msg.to_owned()),
+    };
+    let too_large = error(reqwest::StatusCode::PAYLOAD_TOO_LARGE, "{}");
+    let instance = error(
+        reqwest::StatusCode::BAD_REQUEST,
+        "workflow_instance is 9 bytes, over the 8 bytes thorium.limits.body.instances allows",
+    );
+    let other = error(reqwest::StatusCode::BAD_REQUEST, "an agent is missing");
+    let failed = error(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "scylla is down");
+    assert!(super::refused_for_size(&too_large));
+    assert!(super::refused_for_size(&instance));
+    assert!(!super::refused_for_size(&other));
+    assert!(!super::refused_for_size(&failed));
 }

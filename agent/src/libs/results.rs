@@ -435,7 +435,7 @@ impl RawResults {
         // store the tool version these results came from
         req.tool_version.clone_from(&tool.version);
         // add our any entities from this job
-        req.entities = self.entities.clone();
+        req.entities.clone_from(&self.entities);
         Ok(req)
     }
 
@@ -465,7 +465,7 @@ impl RawResults {
         // store the tool version these results came from
         req.tool_version.clone_from(&tool.version);
         // add our any entities from this job
-        req.entities = self.entities.clone();
+        req.entities.clone_from(&self.entities);
         Ok(req)
     }
 }

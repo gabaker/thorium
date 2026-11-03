@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use super::shared::{self, graphics};
 use super::{OpenApiParameterExamples, OpenApiSecurity};
+use crate::Conf;
 use crate::models::AuthedUser;
 use crate::models::backends::entities::{is_definition_kind, models, toolsets, workflows};
 use crate::models::backends::{self, GraphicSupport, TagSupport};
@@ -25,7 +26,7 @@ use crate::models::{
     NotificationRequest, RedactSecrets, TagDeleteRequest, TagRequest, ToolInstanceSummary,
     TruncationReason, YaraHitWriteRequest, YaraHitWriteResponse,
 };
-use crate::utils::{ApiError, AppState};
+use crate::utils::{ApiError, AppState, body_limits};
 use crate::{bad, is_admin, not_found};
 
 /// A notification for an entity as the documents describe it
@@ -983,7 +984,12 @@ async fn grep(
     // combine our query params and pattern into the full grep params
     let params = params.into_params(request);
     // grep a page of entities
-    let matches = backends::grep::grep_many::<Entity>(&user, params, &state.shared).await?;
+    let matches = Box::pin(backends::grep::grep_many::<Entity>(
+        &user,
+        params,
+        &state.shared,
+    ))
+    .await?;
     Ok(Json(matches))
 }
 
@@ -1542,15 +1548,30 @@ pub struct EntityApiDocs;
 /// # Arguments
 ///
 /// * `router` - The router to add routes too
-pub fn mount(router: Router<AppState>) -> Router<AppState> {
+/// * `conf` - The Thorium config, whose entities body limit caps creates and updates, hunt
+///   creates and checkpoints, and YARA hit writes
+pub fn mount(router: Router<AppState>, conf: &Conf) -> Router<AppState> {
+    // creates and updates, hunt creates and checkpoints, and YARA hit writes are held to the
+    // entities body limit
+    let max = conf.thorium.limits.body.entities;
+    let setting = "thorium.limits.body.entities";
     router
-        .route("/entities/", post(create))
+        .route("/entities/", body_limits::limit(post(create), max, setting))
         .route("/entities/grep/", post(grep))
         .route("/entities/grep/{id}", post(grep_entity))
-        .route("/entities/yara/hit/", post(create_yara_hit))
-        .route("/entities/hunt/", post(create_hunt))
+        .route(
+            "/entities/yara/hit/",
+            body_limits::limit(post(create_yara_hit), max, setting),
+        )
+        .route(
+            "/entities/hunt/",
+            body_limits::limit(post(create_hunt), max, setting),
+        )
         .route("/entities/hunt/{id}/cancel", post(cancel_hunt))
-        .route("/entities/hunt/{id}/checkpoint", post(checkpoint_hunt))
+        .route(
+            "/entities/hunt/{id}/checkpoint",
+            body_limits::limit(post(checkpoint_hunt), max, setting),
+        )
         .route(
             "/entities/hunt/{id}/rules",
             axum::routing::get(list_hunt_rules),
@@ -1568,7 +1589,9 @@ pub fn mount(router: Router<AppState>) -> Router<AppState> {
         .route("/entities/by-name/", axum::routing::get(get_by_name))
         .route(
             "/entities/{id}",
-            axum::routing::get(get).patch(update).delete(delete),
+            body_limits::limit(axum::routing::patch(update), max, setting)
+                .get(get)
+                .delete(delete),
         )
         .route("/entities/{id}/image", axum::routing::get(get_image))
         .route(

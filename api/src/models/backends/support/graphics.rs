@@ -102,9 +102,8 @@ pub(crate) trait GraphicSupport {
             None => return bad!("A content type must be set!".to_owned()),
         };
         // convert our path a string and return an error if its not castable
-        let s3_path_str = match s3_path.into_os_string().into_string() {
-            Ok(s3_path_str) => s3_path_str,
-            Err(_) => return bad!("Graphics name must be valid utf-8".to_owned()),
+        let Ok(s3_path_str) = s3_path.into_os_string().into_string() else {
+            return bad!("Graphics name must be valid utf-8".to_owned());
         };
         // upload the graphic to S3
         shared

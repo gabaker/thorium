@@ -221,24 +221,12 @@ impl Repo {
         // get the groups this repo is in that we can see
         let repo_groups = self.groups();
         // if groups were specified then validate this repo is in them
-        if !groups.is_empty() {
-            // validate our repo is in the specified groups
-            if !groups.iter().all(|group| repo_groups.contains(group)) {
-                return unauthorized!(format!("{} is not in all specified groups", self.url));
-            }
-            // make sure we actually have access to all requested groups
-            let info = Group::authorize_all(user, groups, shared).await?;
-            // if we want to edit these repos then check for edit permissions
-            if editable {
-                // make sure we have modification privleges in these groups
-                can_create_all!(info, user, shared);
-            }
-        } else {
+        if groups.is_empty() {
             // this user specified no groups so default to the ones we can edit
             // cast our repo groups to a vec
             let repo_groups = repo_groups
                 .into_iter()
-                .map(|group| group.to_owned())
+                .map(ToOwned::to_owned)
                 .collect::<Vec<String>>();
             // make sure we actually have access to all requested groups
             let info = Group::authorize_all(user, &repo_groups, shared).await?;
@@ -256,6 +244,18 @@ impl Repo {
                 let iter = info.into_iter().map(|group| group.name);
                 // add all viewable group names
                 groups.extend(iter);
+            }
+        } else {
+            // validate our repo is in the specified groups
+            if !groups.iter().all(|group| repo_groups.contains(group)) {
+                return unauthorized!(format!("{} is not in all specified groups", self.url));
+            }
+            // make sure we actually have access to all requested groups
+            let info = Group::authorize_all(user, groups, shared).await?;
+            // if we want to edit these repos then check for edit permissions
+            if editable {
+                // make sure we have modification privleges in these groups
+                can_create_all!(info, user, shared);
             }
         }
         // all groups are valid
@@ -287,7 +287,23 @@ impl Repo {
         // get the groups this repo is in that we can see
         let repo_groups = self.groups();
         // if groups were specified then validate this repo is in them
-        if !groups.is_empty() {
+        if groups.is_empty() {
+            // this user specified no groups so default to the ones we can edit
+            // cast our repo groups to a vec
+            let repo_groups = repo_groups
+                .into_iter()
+                .map(ToOwned::to_owned)
+                .collect::<Vec<String>>();
+            // make sure we actually have access to all requested groups
+            let info = Group::authorize_all(user, &repo_groups, shared).await?;
+            // only add ones that we can make changes too
+            let iter = info
+                .into_iter()
+                .filter(|group| group.editable(user).is_ok())
+                .filter(|group| group.allowable(action).is_ok())
+                .map(|group| group.name);
+            groups.extend(iter);
+        } else {
             // validate our repo is in the specified groups
             if !groups.iter().all(|group| repo_groups.contains(group)) {
                 return unauthorized!(format!("{} is not in all specified groups", self.url));
@@ -302,22 +318,6 @@ impl Repo {
                 shared,
             )
             .await?;
-        } else {
-            // this user specified no groups so default to the ones we can edit
-            // cast our repo groups to a vec
-            let repo_groups = repo_groups
-                .into_iter()
-                .map(|group| group.to_owned())
-                .collect::<Vec<String>>();
-            // make sure we actually have access to all requested groups
-            let info = Group::authorize_all(user, &repo_groups, shared).await?;
-            // only add ones that we can make changes too
-            let iter = info
-                .into_iter()
-                .filter(|group| group.editable(user).is_ok())
-                .filter(|group| group.allowable(action).is_ok())
-                .map(|group| group.name);
-            groups.extend(iter);
         }
         // make sure at least some groups valid
         if groups.is_empty() {
@@ -376,9 +376,8 @@ impl Repo {
             }
         }
         // return an error if we didn't get any data to hash
-        let sha256 = match sha256_opt {
-            Some(sha256) => sha256,
-            None => return bad!("Data entry must be set!".to_string()),
+        let Some(sha256) = sha256_opt else {
+            return bad!("Data entry must be set!".to_string());
         };
         // make sure we actually have edit access in all requested groups
         let _ = Group::authorize_check_allow_all(
@@ -398,11 +397,11 @@ impl Repo {
         match db::repos::upload(&self.url, &sha256, shared).await {
             Ok(()) => {
                 // add our new object if it doesn't already exist
-                if !exists {
+                if exists {
+                    shared.s3.repos.delete(&s3_id.to_string()).await?;
+                } else {
                     // this is a new object so add this id
                     db::s3::insert_s3_id(S3Objects::Repo, s3_id, &path, shared).await?;
-                } else {
-                    shared.s3.repos.delete(&s3_id.to_string()).await?;
                 }
                 Ok(sha256)
             }

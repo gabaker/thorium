@@ -323,7 +323,8 @@ A new image pushed under the same tag doesn't roll anything out; restart the com
 
 | Log line or symptom | Cause and fix |
 |---------------------|---------------|
-| `Waiting for the Thorium API (N/90)...` or `Waiting for the admin user ... to log in` | Normal while the API starts and the operator creates the admin. The Job gives up after about 15 minutes for the API and 5 for the login; check the API pod and the `thorium-admin` Secret |
+| `Waiting for the Thorium API and the admin user ... (N/120): <thorctl error>` | Normal while the API starts and the operator creates the admin. The Job gives up after about 20 minutes; the last `thorctl` error says which is missing. Check the API pod and the `thorium-admin` Secret |
+| `Group X: not created, an existing one is left as is (...)` or `Network policy X: not created, ...` | Normal on a repeat run, since the group or policy already exists. Otherwise the message in brackets is the API's reason; the import then reports anything it still can't find |
 | `tool NAME@LABEL: only an admin can publish a workload with a non-default security context` | The import logs in as the `operator.cluster.bootstrap.admin.secret` user. A non-default `security_context` (the repository's tools run as root) needs that user to be an admin |
 | `group X doesn't exist; use --create-groups to create it` | Add the group to `operator.toolbox.groups`, or set `operator.toolbox.createGroups: true` |
 | `you can't create tools, toolsets, agents, workflows, or pipelines in group X` | The admin's role or the group's settings don't allow writes there; fix the group or use `groupOverride` |

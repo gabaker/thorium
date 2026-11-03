@@ -23,7 +23,8 @@ use tracing::{Level, event, instrument};
 use uuid::Uuid;
 
 use super::{
-    Affected, AiWorkerStats, BuildCause, InstanceApi, PhaseOutcome, Reach, notify_all, tagged_roots,
+    Affected, BuildCause, InstanceApi, PhaseOutcome, Reach, WorkflowsWorkerStats, notify_all,
+    tagged_roots,
 };
 
 #[cfg(test)]
@@ -201,6 +202,48 @@ fn built_note(
     }
 }
 
+/// Whether the API refused a create for its size, which no retry of the same build can fix
+///
+/// That is a 413 from a route's body limit, or the 400 the instance create gives for an
+/// instance over the `thorium.limits.body.instances` setting.
+///
+/// # Arguments
+///
+/// * `error` - The error the create failed with
+fn refused_for_size(error: &Error) -> bool {
+    // match the route limit's 413 or the instance limit's 400, which names its setting
+    match error.status() {
+        Some(reqwest::StatusCode::PAYLOAD_TOO_LARGE) => true,
+        Some(reqwest::StatusCode::BAD_REQUEST) => error
+            .msg()
+            .is_some_and(|msg| msg.contains("thorium.limits.body.instances")),
+        _ => false,
+    }
+}
+
+/// Build the notification for an instance the API refused as too large, logging the refusal
+///
+/// # Arguments
+///
+/// * `name` - The workflow catalog's name
+/// * `revision` - The revision the refused instance would have had
+/// * `error` - The error the create failed with
+fn refused_note(name: &str, revision: u64, error: &Error) -> NotificationRequest<User> {
+    // log the refusal, since nothing retries the build
+    event!(
+        Level::ERROR,
+        msg = "The API refused a workflow instance as too large",
+        workflow = name,
+        error = error.to_string()
+    );
+    // name the catalog and the revision, and pass on the API's message, which names the setting
+    let reason = error.msg().unwrap_or_else(|| error.to_string());
+    NotificationRequest::new(
+        format!("workflow `{name}` #r{revision} could not be created: {reason}"),
+        NotificationLevel::Error,
+    )
+}
+
 /// The key of one tag lookup: the tag, its value, and the sorted groups searched
 type LookupKey = (LookupTag, Uuid, Vec<String>);
 
@@ -209,7 +252,7 @@ type LookupKey = (LookupTag, Uuid, Vec<String>);
 type LookupResult = (LookupKey, Result<Vec<(Uuid, Uuid)>, Error>, (usize, usize));
 
 /// An affected workflow and the stats of its build
-type BuildResult<'b> = (&'b AffectedWorkflow, Result<AiWorkerStats, Error>);
+type BuildResult<'b> = (&'b AffectedWorkflow, Result<WorkflowsWorkerStats, Error>);
 
 /// Builds the workflow instances a batch of workflow graph events calls for
 pub struct WorkflowInstancer<'a, A: InstanceApi + ?Sized> {
@@ -402,7 +445,7 @@ impl<'a, A: InstanceApi + ?Sized> WorkflowInstancer<'a, A> {
         &self,
         affected: &AffectedWorkflow,
         catalog: &WorkflowCatalogEntity,
-        stats: &mut AiWorkerStats,
+        stats: &mut WorkflowsWorkerStats,
     ) -> Result<Option<BuildCause<WorkflowInstanceTrigger>>, Error> {
         // read the newest instance's tags only when a looked up event missed it
         let newest = catalog.newest_instance;
@@ -424,9 +467,10 @@ impl<'a, A: InstanceApi + ?Sized> WorkflowInstancer<'a, A> {
     /// Build one affected workflow's next instance, or find that its newest one is current
     ///
     /// Only a read or write that failed is an error, which leaves the workflow's events in
-    /// flight. A deleted workflow and one no event qualifies for (automatic instances off and no
-    /// manual request, or lookups that only matched older revisions) build nothing and finish
-    /// their events.
+    /// flight. A create the API refuses for its size would be refused again on every retry, so
+    /// it finishes the events and tells the users who caused the build instead. A deleted
+    /// workflow and one no event qualifies for (automatic instances off and no manual request,
+    /// or lookups that only matched older revisions) build nothing and finish their events.
     ///
     /// # Arguments
     ///
@@ -437,11 +481,11 @@ impl<'a, A: InstanceApi + ?Sized> WorkflowInstancer<'a, A> {
         fields(workflow = affected.root.to_string()),
         err(Debug)
     )]
-    async fn build(&self, affected: &AffectedWorkflow) -> Result<AiWorkerStats, Error> {
+    async fn build(&self, affected: &AffectedWorkflow) -> Result<WorkflowsWorkerStats, Error> {
         // read the workflow catalog, which is gone when it was deleted after its events queued
-        let mut stats = AiWorkerStats {
+        let mut stats = WorkflowsWorkerStats {
             graph_reads: 1,
-            ..AiWorkerStats::default()
+            ..WorkflowsWorkerStats::default()
         };
         let reader = self.api.reader();
         let Some(node) = reader.node(affected.root, &[], Directionality::To).await? else {
@@ -528,6 +572,14 @@ impl<'a, A: InstanceApi + ?Sized> WorkflowInstancer<'a, A> {
                                 workflow = affected.root.to_string(),
                                 error = error.to_string()
                             );
+                        }
+                        // the instance is too large for the API, so tell the users who caused it
+                        Err(error) if refused_for_size(&error) => {
+                            let name = &resolved.workflow.name;
+                            let revision = resolved.instance.revision;
+                            let refused = refused_note(name, revision, &error);
+                            notify_all(self.api, &cause.recipients, &refused, &mut stats).await;
+                            return Ok(stats);
                         }
                         Err(error) => return Err(error),
                     }

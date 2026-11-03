@@ -12,8 +12,8 @@ use tracing::{Level, event, instrument};
 use crate::libs::workers::EventWorkerKinds;
 
 use super::workers::{
-    AiWorker, EventWorkerSupportCore, ReactionTriggerWorker, SigmaRuleWorker, YaraHuntWorker,
-    YaraScannerWorker,
+    EventWorkerSupportCore, ReactionTriggerWorker, SigmaRuleWorker, WorkflowsWorker,
+    YaraHuntWorker, YaraScannerWorker,
 };
 
 /// The different channels for for each event worker
@@ -38,10 +38,10 @@ pub struct EventWorkerStatChannels {
         AsyncSender<<YaraHuntWorker as EventWorkerSupportCore>::Stats>,
         AsyncReceiver<<YaraHuntWorker as EventWorkerSupportCore>::Stats>,
     ),
-    /// The channel for the AI worker
-    pub ai: (
-        AsyncSender<<AiWorker as EventWorkerSupportCore>::Stats>,
-        AsyncReceiver<<AiWorker as EventWorkerSupportCore>::Stats>,
+    /// The channel for the workflows worker
+    pub workflows: (
+        AsyncSender<<WorkflowsWorker as EventWorkerSupportCore>::Stats>,
+        AsyncReceiver<<WorkflowsWorker as EventWorkerSupportCore>::Stats>,
     ),
 }
 
@@ -107,10 +107,14 @@ impl EventWorkerStatChannels {
                 // spawn this stats worker
                 tokio::task::spawn(stats_worker.start())
             }
-            EventWorkerKinds::Ai => {
-                // build the AI worker's stats reporter
-                let stats_worker =
-                    EventWorkerStats::<AiWorker>::new(&self.ai.1, thorium, worker, conf);
+            EventWorkerKinds::Workflows => {
+                // build the workflows worker's stats reporter
+                let stats_worker = EventWorkerStats::<WorkflowsWorker>::new(
+                    &self.workflows.1,
+                    thorium,
+                    worker,
+                    conf,
+                );
                 // spawn this stats worker
                 tokio::task::spawn(stats_worker.start())
             }
@@ -126,7 +130,7 @@ impl Default for EventWorkerStatChannels {
             sigma_rules: kanal::unbounded_async(),
             yara_scans: kanal::unbounded_async(),
             yara_hunts: kanal::unbounded_async(),
-            ai: kanal::unbounded_async(),
+            workflows: kanal::unbounded_async(),
         }
     }
 }

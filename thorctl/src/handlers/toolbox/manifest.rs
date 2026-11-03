@@ -101,8 +101,8 @@ pub struct ImageVersion {
     #[serde(default)]
     pub config: Option<ImageRequest>,
     /// The description from the image's `description.md`, carried when the config is a
-    /// `config_from` URL that build can't inject it into; it fills in the fetched config's
-    /// description when that has none
+    /// `config_from` URL that build can't inject it into; it replaces the fetched config's
+    /// description
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// URLs to fetch network policy definitions from (resolved into

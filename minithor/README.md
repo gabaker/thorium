@@ -75,6 +75,40 @@ minithor deploy --chart deploy/charts/thorium --local-image thorium:dev
 
 Repeat the flag on every redeploy, since each deploy renders its values from its own options.
 
+`--local-image` checks that every node holds the image after loading it and that the image (on the
+host and on each node) is built for the node's architecture, since `minikube image load` either
+refuses an image for another architecture or loads one the node then can't run; either way `deploy`
+names both architectures and stops. On an Apple-silicon Mac the nodes are arm64: an amd64 image that
+Docker runs through Rosetta or QEMU emulation still won't start on them, so pass `--image` with a
+registry image that has an arm64 variant (or build with `--platform linux/arm64`).
+
+## Redeploying over an older deployment
+
+Each `deploy` renders its values from its own options (Helm `--reset-values`), so a newer minithor
+or chart can render other backing-service sizes than a deployment was installed with. Before
+upgrading, `deploy` compares the running Redis PVC size, Scylla rack storage, CPU and memory
+requests and limits, and developer mode, and Elasticsearch node count, storage, heap, CPU and memory
+limits, and config with what its values render, and keeps the running ones: it prints each
+difference and writes them to `~/.cache/minithor/values-live.yaml` (`values-live-<profile>.yaml`
+for another profile), layered under your `--values` and `--set`. Pass `--reset-infra` to apply the
+rendered values instead (storage can only grow, and Scylla refuses any change to its rack storage),
+or set a key such as `infra.redis.storage` with `--set` to change one setting on purpose.
+
+The Scylla CPU limit can only stay or grow: Scylla runs one shard per CPU of the limit, and a node
+restarted with fewer shards than its data was written with fails to start (`tablet with invalid
+replica shard`). `deploy` refuses, before changing anything, when `--reset-infra`, `--values`, or
+`--set` would lower or remove it, or add one to a Scylla running without a limit (whose shard count
+doesn't come from one); remove the deployment with `cleanup --confirm` to start Scylla on fewer
+CPUs or with a limit. While a `ScyllaCluster` runs, `deploy` also refuses when it can't make the
+comparison (a failed chart render, for example).
+
+With Helm 4, which applies charts server-side, an upgrade can fail with `Apply failed with ...
+conflict` when another field manager (an operator, or `before-first-apply` for fields a Helm 3
+install set) owns a field the chart changes. `deploy` names the fields and prints the same command
+with `--force-conflicts`, which has Helm take them over. `deploy` passes Helm `--skip-crds` when
+the cluster already has the `ThoriumCluster` CRD, which Helm 4 would otherwise apply over the
+fields the operator owns.
+
 ## Existing minithor deployments
 
 A deployment made by a minithor from before the Helm charts must be converted with

@@ -26,7 +26,7 @@ pub struct ScrubWorker<S: Scrub> {
 }
 
 impl<S: Scrub> ScrubWorker<S> {
-    /// Create a new ScrubWorker
+    /// Create a new `ScrubWorker`
     ///
     /// # Arguments
     ///

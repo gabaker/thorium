@@ -9,11 +9,10 @@
 
 use scylla::client::session::Session;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::time::{Duration, Instant};
 
 use super::apply::{ApplyError, read_texts, wait_for_drop, wait_for_views};
-use super::probe::{ProbeError, SchemaRows, view_differences};
+use super::probe::{SchemaRows, view_differences};
 use super::{ObjectDef, SchemaDefinition, SchemaObject, ViewDef};
 use crate::Conf;
 
@@ -121,64 +120,21 @@ pub struct StaleView {
     pub differences: Vec<String>,
 }
 
-/// A declared view whose live definition can't be read, which `schema apply` leaves as it is
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct UnreadableView {
-    /// The view's name
-    pub(super) name: String,
-    /// Why its live definition can't be read
-    pub(super) reason: String,
-}
-
-/// How the live definitions of a list of declared views compare with this build's
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct ViewComparison {
+/// What comparing the declared views with their live definitions found
+#[derive(Debug, Default)]
+pub(super) struct StaleViews {
     /// The views whose live definitions differ, which `schema apply` drops and creates again
     pub(super) stale: Vec<StaleView>,
-    /// The views whose live definitions can't be read, which `schema apply` reports and leaves
-    pub(super) unreadable: Vec<UnreadableView>,
+    /// A warning for each declared view whose live definition can't be read, which is left as it
+    /// is: what it holds can't be judged, so it is never dropped
+    pub(super) unreadable: Vec<String>,
 }
 
-impl ViewComparison {
-    /// Sort one declared view into the comparison by its live definition: listed as stale when
-    /// it differs from the declared form, as unreadable when it can't be read, and not at all
-    /// when it matches
-    ///
-    /// A definition that can't be read is never taken as stale: a gap in reading what a newer
-    /// Scylla stores is likelier than an out-of-date view, and recreating it on every apply would
-    /// rebuild it from its whole base table each time.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - The view's name
-    /// * `want` - The view's declared canonical form
-    /// * `live` - The view's live canonical form, or why it can't be read
-    pub(super) fn add(&mut self, name: &str, want: &Value, live: Result<Value, ProbeError>) {
-        match live {
-            // a live definition that reads is compared with the declared one
-            Ok(live) => {
-                let differences = view_differences(want, &live);
-                if !differences.is_empty() {
-                    self.stale.push(StaleView {
-                        name: name.to_owned(),
-                        differences,
-                    });
-                }
-            }
-            // one that can't be read is set aside with the reason
-            Err(err) => self.unreadable.push(UnreadableView {
-                name: name.to_owned(),
-                reason: err.to_string(),
-            }),
-        }
-    }
-}
-
-/// Compare the live definitions of a list of views with what this build declares
+/// Find the views of a list whose live definitions differ from what this build declares
 ///
 /// Only declared views that exist as views are compared: a declared view the keyspace lacks is
 /// created instead, and a view this build doesn't declare is never listed. A live view whose
-/// definition can't be read is listed apart, so the apply leaves it alone.
+/// definition can't be read is reported instead of listed, so it is never dropped.
 ///
 /// # Arguments
 ///
@@ -189,22 +145,50 @@ pub(super) async fn stale_views(
     session: &Session,
     keyspace: &str,
     views: &[ViewDef],
-) -> Result<ViewComparison, ApplyError> {
-    // read the keyspace's schema rows once for every view
+) -> Result<StaleViews, ApplyError> {
+    // read the keyspace's schema rows once for every view, then compare them
     let rows = SchemaRows::read(session, keyspace)
         .await
         .map_err(|err| ApplyError::query("read the live view definitions", err))?;
+    Ok(judge_views(&rows, views))
+}
+
+/// Compare the views of a list with their live definitions in a keyspace's schema rows
+///
+/// # Arguments
+///
+/// * `rows` - The keyspace's `system_schema` rows
+/// * `views` - The views to compare
+fn judge_views(rows: &SchemaRows, views: &[ViewDef]) -> StaleViews {
     // compare each declared view that exists with its declared form
     let declared = declared_views();
-    let mut compared = ViewComparison::default();
+    let mut found = StaleViews::default();
     for view in views.iter().filter(|view| declared.contains(view)) {
         let Some(live) = rows.view_form(view.name) else {
             continue;
         };
+        // a definition that can't be read is reported and left in place
+        let live = match live {
+            Ok(live) => live,
+            Err(err) => {
+                found.unreadable.push(format!(
+                    "view `{}`'s live definition can't be read ({err}), so it was left as it is; \
+                     `thoradm schema apply --recreate-view {}` replaces it if it is out of date",
+                    view.name, view.name
+                ));
+                continue;
+            }
+        };
         let want = SchemaDefinition::Scylla(ObjectDef::View(*view)).canonical();
-        compared.add(view.name, &want, live);
+        let differences = view_differences(&want, &live);
+        if !differences.is_empty() {
+            found.stale.push(StaleView {
+                name: view.name.to_owned(),
+                differences,
+            });
+        }
     }
-    Ok(compared)
+    found
 }
 
 /// Get every materialized view this build declares, in declaration order
@@ -388,42 +372,85 @@ pub async fn recreate_views(
 
 #[cfg(test)]
 mod tests {
-    use super::{ProbeError, UnreadableView, ViewComparison, declared_views};
-    use crate::models::schema::{ObjectDef, SchemaDefinition};
+    use super::{SchemaRows, judge_views, resolve_views};
+    use crate::models::schema::probe::{ColumnRow, ViewRow};
 
-    /// A live view that matches is left out, one that differs is stale, and one whose definition
-    /// can't be read is set aside as unreadable instead of being taken as stale
+    /// One column row of a view
+    ///
+    /// # Arguments
+    ///
+    /// * `view` - The view the column belongs to
+    /// * `name` - The column's name
+    /// * `cql_type` - The column's CQL type as Scylla renders it
+    fn column(view: &str, name: &str, cql_type: &str) -> ColumnRow {
+        // a regular column outside the key
+        ColumnRow {
+            table_name: view.to_owned(),
+            column_name: name.to_owned(),
+            kind: "regular".to_owned(),
+            position: -1,
+            clustering_order: "NONE".to_owned(),
+            cql_type: cql_type.to_owned(),
+        }
+    }
+
+    /// One view row selecting from a base table
+    ///
+    /// # Arguments
+    ///
+    /// * `view` - The view's name
+    /// * `base` - Its base table
+    fn view_row(view: &str, base: &str) -> ViewRow {
+        // a view with no filter beyond its keys
+        ViewRow {
+            view_name: view.to_owned(),
+            base_table_name: base.to_owned(),
+            where_clause: String::new(),
+            include_all_columns: false,
+        }
+    }
+
+    /// A declared view on another base is listed as stale with how it differs, a declared view
+    /// whose definition can't be read is reported and never listed for a drop, and a declared view
+    /// the keyspace lacks is neither
     #[test]
-    fn an_unreadable_live_view_is_set_aside_not_recreated() {
-        // the declared samples view's form, and a live form on another base table
-        let samples = declared_views()
-            .into_iter()
-            .find(|view| view.name == "samples")
-            .expect("samples is declared");
-        let want = SchemaDefinition::Scylla(ObjectDef::View(samples)).canonical();
-        let mut old = want.clone();
-        old["base"] = serde_json::json!("samples_old");
-        let mut compared = ViewComparison::default();
-        // a matching live view is neither stale nor unreadable
-        compared.add("samples", &want, Ok(want.clone()));
-        assert_eq!(compared, ViewComparison::default());
-        // a live view on another base table is stale, with how it differs
-        compared.add("samples", &want, Ok(old));
-        assert_eq!(compared.stale.len(), 1);
-        assert_eq!(
-            compared.stale[0].differences,
-            ["base: samples_old -> samples_list"]
-        );
-        // a live view the probe can't read is reported, never listed as stale
-        let unreadable = ProbeError::Unreadable {
-            object: "tags_by_item".to_owned(),
-            reason: "unterminated quote in the filter".to_owned(),
+    fn unreadable_views_are_reported_and_never_dropped() {
+        // committed_repo_data on the old base, samples with a column type that can't be parsed
+        let rows = SchemaRows {
+            columns: vec![
+                column("committed_repo_data", "hash", "text"),
+                column("samples", "sha256", "map<text"),
+            ],
+            views: vec![
+                view_row("committed_repo_data", "commits_list"),
+                view_row("samples", "samples_list"),
+            ],
+            ..SchemaRows::default()
         };
-        compared.add("tags_by_item", &want, Err(unreadable));
-        assert_eq!(compared.stale.len(), 1);
-        assert_eq!(compared.unreadable.len(), 1);
-        let UnreadableView { name, reason } = &compared.unreadable[0];
-        assert_eq!(name, "tags_by_item");
-        assert!(reason.contains("unterminated quote"), "{reason}");
+        let views = resolve_views(&["committed_repo_data", "samples", "tags_by_item"])
+            .expect("declared views");
+        let found = judge_views(&rows, &views);
+        // only the readable stale view is dropped and created again
+        let names = found
+            .stale
+            .iter()
+            .map(|stale| stale.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["committed_repo_data"]);
+        assert!(
+            found.stale[0]
+                .differences
+                .iter()
+                .any(|line| line == "base: commits_list -> commitish_list"),
+            "{:?}",
+            found.stale[0].differences
+        );
+        // the unreadable one is named in a warning and left alone
+        assert_eq!(found.unreadable.len(), 1, "{:?}", found.unreadable);
+        assert!(
+            found.unreadable[0].contains("view `samples`"),
+            "{:?}",
+            found.unreadable
+        );
     }
 }

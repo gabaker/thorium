@@ -842,7 +842,7 @@ dependencies = [
  "aws-runtime",
  "aws-sdk-sts",
  "aws-smithy-async",
- "aws-smithy-http 0.64.1",
+ "aws-smithy-http",
  "aws-smithy-json",
  "aws-smithy-runtime",
  "aws-smithy-runtime-api",
@@ -902,8 +902,8 @@ dependencies = [
  "aws-credential-types",
  "aws-sigv4",
  "aws-smithy-async",
- "aws-smithy-eventstream 0.61.4",
- "aws-smithy-http 0.64.1",
+ "aws-smithy-eventstream",
+ "aws-smithy-http",
  "aws-smithy-runtime",
  "aws-smithy-runtime-api",
  "aws-smithy-types",
@@ -930,8 +930,8 @@ dependencies = [
  "aws-runtime",
  "aws-sigv4",
  "aws-smithy-async",
- "aws-smithy-eventstream 0.61.4",
- "aws-smithy-http 0.64.1",
+ "aws-smithy-eventstream",
+ "aws-smithy-http",
  "aws-smithy-json",
  "aws-smithy-observability",
  "aws-smithy-runtime",
@@ -959,8 +959,8 @@ dependencies = [
  "aws-sigv4",
  "aws-smithy-async",
  "aws-smithy-checksums",
- "aws-smithy-eventstream 0.61.4",
- "aws-smithy-http 0.64.1",
+ "aws-smithy-eventstream",
+ "aws-smithy-http",
  "aws-smithy-json",
  "aws-smithy-observability",
  "aws-smithy-runtime",
@@ -993,7 +993,7 @@ dependencies = [
  "aws-credential-types",
  "aws-runtime",
  "aws-smithy-async",
- "aws-smithy-http 0.64.1",
+ "aws-smithy-http",
  "aws-smithy-json",
  "aws-smithy-observability",
  "aws-smithy-query",
@@ -1016,8 +1016,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2312577f088c9fbf4206dfdb884cf1de9407b43e1a923cbed5237775116fc24b"
 dependencies = [
  "aws-credential-types",
- "aws-smithy-eventstream 0.61.4",
- "aws-smithy-http 0.64.1",
+ "aws-smithy-eventstream",
+ "aws-smithy-http",
  "aws-smithy-runtime-api",
  "aws-smithy-types",
  "bytes",
@@ -1052,7 +1052,7 @@ version = "0.65.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b67ecd999972b58e67cab052f5129906c08c25883bd0788ceefc55ef97d61307"
 dependencies = [
- "aws-smithy-http 0.64.1",
+ "aws-smithy-http",
  "aws-smithy-types",
  "bytes",
  "crc-fast",
@@ -1069,17 +1069,6 @@ dependencies = [
 
 [[package]]
 name = "aws-smithy-eventstream"
-version = "0.60.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78d8391e65fcea47c586a22e1a41f173b38615b112b2c6b7a44e80cec3e6b706"
-dependencies = [
- "aws-smithy-types",
- "bytes",
- "crc32fast",
-]
-
-[[package]]
-name = "aws-smithy-eventstream"
 version = "0.61.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "80c2051c2f1016fb8e6548dd07b8bc2ac9c3fe583721444b92f515e856d31609"
@@ -1091,33 +1080,11 @@ dependencies = [
 
 [[package]]
 name = "aws-smithy-http"
-version = "0.62.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "826141069295752372f8203c17f28e30c464d22899a43a0c9fd9c458d469c88b"
-dependencies = [
- "aws-smithy-eventstream 0.60.21",
- "aws-smithy-runtime-api",
- "aws-smithy-types",
- "bytes",
- "bytes-utils",
- "futures-core",
- "futures-util",
- "http 0.2.12",
- "http 1.5.0",
- "http-body 0.4.6",
- "percent-encoding",
- "pin-project-lite",
- "pin-utils",
- "tracing",
-]
-
-[[package]]
-name = "aws-smithy-http"
 version = "0.64.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "639b4d8f8555f24a9be649811c3eb0b4d4616f4d61daf0c32e28873bc1ea9af1"
 dependencies = [
- "aws-smithy-eventstream 0.61.4",
+ "aws-smithy-eventstream",
  "aws-smithy-runtime-api",
  "aws-smithy-types",
  "bytes",
@@ -1203,7 +1170,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6e302ac1d88b99652489df31abdec6ac42a2ab2ac3982ad0ac49f64dfaf28ba"
 dependencies = [
  "aws-smithy-async",
- "aws-smithy-http 0.64.1",
+ "aws-smithy-http",
  "aws-smithy-http-client",
  "aws-smithy-observability",
  "aws-smithy-runtime-api",
@@ -1376,7 +1343,7 @@ dependencies = [
  "axum-core",
  "bytes",
  "futures-util",
- "headers 0.4.2",
+ "headers",
  "http 1.5.0",
  "http-body 1.1.0",
  "http-body-util",
@@ -2418,12 +2385,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
-name = "controlgroup"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f949b2ff627553c6757514c885435fbe28ba1c44db5029683ef5d19f684a055f"
-
-[[package]]
 name = "convert_case"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3118,7 +3079,7 @@ dependencies = [
  "datafusion-physical-plan",
  "datafusion-session",
  "datafusion-sql",
- "futures 0.3.34",
+ "futures",
  "itertools 0.14.0",
  "log",
  "object_store",
@@ -3149,7 +3110,7 @@ dependencies = [
  "datafusion-physical-expr",
  "datafusion-physical-plan",
  "datafusion-session",
- "futures 0.3.34",
+ "futures",
  "itertools 0.14.0",
  "log",
  "object_store",
@@ -3174,7 +3135,7 @@ dependencies = [
  "datafusion-physical-expr-adapter",
  "datafusion-physical-expr-common",
  "datafusion-physical-plan",
- "futures 0.3.34",
+ "futures",
  "itertools 0.14.0",
  "log",
  "object_store",
@@ -3209,7 +3170,7 @@ version = "53.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "89f4afaed29670ec4fd6053643adc749fe3f4bc9d1ce1b8c5679b22c67d12def"
 dependencies = [
- "futures 0.3.34",
+ "futures",
  "log",
  "tokio",
 ]
@@ -3233,7 +3194,7 @@ dependencies = [
  "datafusion-physical-expr-common",
  "datafusion-physical-plan",
  "datafusion-session",
- "futures 0.3.34",
+ "futures",
  "glob",
  "itertools 0.14.0",
  "log",
@@ -3261,7 +3222,7 @@ dependencies = [
  "datafusion-physical-expr-common",
  "datafusion-physical-plan",
  "datafusion-session",
- "futures 0.3.34",
+ "futures",
  "itertools 0.14.0",
  "object_store",
  "tokio",
@@ -3284,7 +3245,7 @@ dependencies = [
  "datafusion-physical-expr-common",
  "datafusion-physical-plan",
  "datafusion-session",
- "futures 0.3.34",
+ "futures",
  "object_store",
  "regex",
  "tokio",
@@ -3307,7 +3268,7 @@ dependencies = [
  "datafusion-physical-expr-common",
  "datafusion-physical-plan",
  "datafusion-session",
- "futures 0.3.34",
+ "futures",
  "object_store",
  "serde_json",
  "tokio",
@@ -3334,7 +3295,7 @@ dependencies = [
  "datafusion-common",
  "datafusion-expr",
  "datafusion-physical-expr-common",
- "futures 0.3.34",
+ "futures",
  "log",
  "object_store",
  "parking_lot",
@@ -3637,7 +3598,7 @@ dependencies = [
  "datafusion-functions-window-common",
  "datafusion-physical-expr",
  "datafusion-physical-expr-common",
- "futures 0.3.34",
+ "futures",
  "half",
  "hashbrown 0.16.1",
  "indexmap 2.14.2",
@@ -4615,12 +4576,6 @@ checksum = "e6d5a32815ae3f33302d95fdcb2ce17862f8c65363dcfd29360480ba1001fc9c"
 
 [[package]]
 name = "futures"
-version = "0.1.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a471a38ef8ed83cd6e40aa59c1ffe17db6855c18e3604d9c4ed8c08ebc28678"
-
-[[package]]
-name = "futures"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a31d2a3fbaaeb2af2368bbdd904aa8e812d3c04a1ee10d3171f52d556e5d0a3"
@@ -4649,16 +4604,6 @@ name = "futures-core"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
-
-[[package]]
-name = "futures-cpupool"
-version = "0.1.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab90cde24b3319636588d0c35fe03b1333857621051837ed769faefb4c2162e4"
-dependencies = [
- "futures 0.1.31",
- "num_cpus",
-]
 
 [[package]]
 name = "futures-executor"
@@ -6112,41 +6057,17 @@ dependencies = [
 
 [[package]]
 name = "headers"
-version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06683b93020a07e3dbcf5f8c0f6d40080d725bea7936fc01ad345c01b97dc270"
-dependencies = [
- "base64 0.21.7",
- "bytes",
- "headers-core 0.2.0",
- "http 0.2.12",
- "httpdate",
- "mime",
- "sha1 0.10.7",
-]
-
-[[package]]
-name = "headers"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc2700e3fe555c3310aa7286cac6167449f2c87e0eb58769c9208a1c58a1d106"
 dependencies = [
  "base64 0.22.1",
  "bytes",
- "headers-core 0.3.0",
+ "headers-core",
  "http 1.5.0",
  "httpdate",
  "mime",
  "sha1 0.10.7",
-]
-
-[[package]]
-name = "headers-core"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7f66481bfee273957b1f20485a4ff3362987f85b2c236580d81b4eb7a326429"
-dependencies = [
- "http 0.2.12",
 ]
 
 [[package]]
@@ -6797,12 +6718,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8eca9188c1b20836bb561bc09bb2f54e9ca99b271031b5f3ff183a00c08c98c8"
 
 [[package]]
-name = "integer-encoding"
-version = "3.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bb03732005da905c88227371639bf1ad885cc712789c011c31c5fb3ab3ccf02"
-
-[[package]]
 name = "interpolate_name"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7284,7 +7199,7 @@ dependencies = [
  "bytes",
  "chrono",
  "either",
- "futures 0.3.34",
+ "futures",
  "home",
  "http 1.5.0",
  "http-body 1.1.0",
@@ -7351,7 +7266,7 @@ dependencies = [
  "async-stream",
  "backon",
  "educe",
- "futures 0.3.34",
+ "futures",
  "hashbrown 0.16.1",
  "hostname",
  "json-patch",
@@ -7407,7 +7322,7 @@ dependencies = [
  "datafusion-physical-plan",
  "deepsize",
  "either",
- "futures 0.3.34",
+ "futures",
  "half",
  "humantime",
  "itertools 0.13.0",
@@ -7459,7 +7374,7 @@ dependencies = [
  "arrow-schema",
  "arrow-select",
  "bytes",
- "futures 0.3.34",
+ "futures",
  "getrandom 0.2.17",
  "half",
  "jsonb",
@@ -7493,7 +7408,7 @@ dependencies = [
  "datafusion-common",
  "datafusion-sql",
  "deepsize",
- "futures 0.3.34",
+ "futures",
  "itertools 0.13.0",
  "lance-arrow",
  "libc",
@@ -7534,7 +7449,7 @@ dependencies = [
  "datafusion-common",
  "datafusion-functions",
  "datafusion-physical-expr",
- "futures 0.3.34",
+ "futures",
  "jsonb",
  "lance-arrow",
  "lance-core",
@@ -7558,7 +7473,7 @@ dependencies = [
  "arrow-cast",
  "arrow-schema",
  "chrono",
- "futures 0.3.34",
+ "futures",
  "half",
  "hex",
  "rand 0.9.5",
@@ -7584,7 +7499,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "fsst",
- "futures 0.3.34",
+ "futures",
  "hex",
  "hyperloglogplus",
  "itertools 0.13.0",
@@ -7622,7 +7537,7 @@ dependencies = [
  "bytes",
  "datafusion-common",
  "deepsize",
- "futures 0.3.34",
+ "futures",
  "lance-arrow",
  "lance-core",
  "lance-encoding",
@@ -7665,7 +7580,7 @@ dependencies = [
  "deepsize",
  "dirs 6.0.0",
  "fst",
- "futures 0.3.34",
+ "futures",
  "half",
  "itertools 0.13.0",
  "jieba-rs",
@@ -7723,7 +7638,7 @@ dependencies = [
  "bytes",
  "chrono",
  "deepsize",
- "futures 0.3.34",
+ "futures",
  "http 1.5.0",
  "io-uring",
  "lance-arrow",
@@ -7786,7 +7701,7 @@ dependencies = [
  "arrow-schema",
  "async-trait",
  "bytes",
- "futures 0.3.34",
+ "futures",
  "lance",
  "lance-core",
  "lance-index",
@@ -7832,7 +7747,7 @@ dependencies = [
  "bytes",
  "chrono",
  "deepsize",
- "futures 0.3.34",
+ "futures",
  "lance-arrow",
  "lance-core",
  "lance-file",
@@ -7908,7 +7823,7 @@ dependencies = [
  "datafusion-physical-expr",
  "datafusion-physical-plan",
  "datafusion-sql",
- "futures 0.3.34",
+ "futures",
  "half",
  "lance",
  "lance-arrow",
@@ -7970,7 +7885,7 @@ checksum = "166199a8207874a275144c8a94ff6eed5fcbf5c52303e4d9b4d53a0c7ac76554"
 dependencies = [
  "async-trait",
  "bytes",
- "futures 0.3.34",
+ "futures",
  "futures-util",
  "lazy_static",
  "lber",
@@ -9288,20 +9203,6 @@ dependencies = [
 
 [[package]]
 name = "opentelemetry"
-version = "0.23.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b69a91d4893e713e06f724597ad630f1fa76057a5e1026c0ca67054a9032a76"
-dependencies = [
- "futures-core",
- "futures-sink",
- "js-sys",
- "once_cell",
- "pin-project-lite",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "opentelemetry"
 version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aaf416e4cb72756655126f7dd7bb0af49c674f4c1b9903e80c009e0c37e552e6"
@@ -9316,20 +9217,6 @@ dependencies = [
 
 [[package]]
 name = "opentelemetry-http"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0ba633e55c5ea6f431875ba55e71664f2fa5d3a90bd34ec9302eecc41c865dd"
-dependencies = [
- "async-trait",
- "bytes",
- "http 0.2.12",
- "hyper 0.14.32",
- "opentelemetry 0.23.0",
- "tokio",
-]
-
-[[package]]
-name = "opentelemetry-http"
 version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "50f6639e842a97dbea8886e3439710ae463120091e2e064518ba8e716e6ac36d"
@@ -9337,27 +9224,8 @@ dependencies = [
  "async-trait",
  "bytes",
  "http 1.5.0",
- "opentelemetry 0.30.0",
+ "opentelemetry",
  "reqwest 0.12.28",
-]
-
-[[package]]
-name = "opentelemetry-jaeger"
-version = "0.22.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "501b471b67b746d9a07d4c29f8be00f952d1a2eca356922ede0098cbaddff19f"
-dependencies = [
- "async-trait",
- "futures-core",
- "futures-util",
- "headers 0.3.9",
- "http 0.2.12",
- "hyper 0.14.32",
- "opentelemetry 0.23.0",
- "opentelemetry-http 0.12.0",
- "opentelemetry-semantic-conventions 0.15.0",
- "opentelemetry_sdk 0.23.0",
- "thrift",
 ]
 
 [[package]]
@@ -9367,10 +9235,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dbee664a43e07615731afc539ca60c6d9f1a9425e25ca09c57bc36c87c55852b"
 dependencies = [
  "http 1.5.0",
- "opentelemetry 0.30.0",
- "opentelemetry-http 0.30.0",
+ "opentelemetry",
+ "opentelemetry-http",
  "opentelemetry-proto",
- "opentelemetry_sdk 0.30.0",
+ "opentelemetry_sdk",
  "prost 0.13.5",
  "reqwest 0.12.28",
  "thiserror 2.0.21",
@@ -9385,41 +9253,10 @@ version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e046fd7660710fe5a05e8748e70d9058dc15c94ba914e7c4faa7c728f0e8ddc"
 dependencies = [
- "opentelemetry 0.30.0",
- "opentelemetry_sdk 0.30.0",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "prost 0.13.5",
  "tonic",
-]
-
-[[package]]
-name = "opentelemetry-semantic-conventions"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1869fb4bb9b35c5ba8a1e40c9b128a7b4c010d07091e864a29da19e4fe2ca4d7"
-
-[[package]]
-name = "opentelemetry-semantic-conventions"
-version = "0.30.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83d059a296a47436748557a353c5e6c5705b9470ef6c95cfc52c21a8814ddac2"
-
-[[package]]
-name = "opentelemetry_sdk"
-version = "0.23.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae312d58eaa90a82d2e627fd86e075cf5230b3f11794e2ed74199ebbe572d4fd"
-dependencies = [
- "async-trait",
- "futures-channel",
- "futures-executor",
- "futures-util",
- "lazy_static",
- "once_cell",
- "opentelemetry 0.23.0",
- "ordered-float 4.6.0",
- "percent-encoding",
- "rand 0.8.8",
- "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -9431,7 +9268,7 @@ dependencies = [
  "futures-channel",
  "futures-executor",
  "futures-util",
- "opentelemetry 0.30.0",
+ "opentelemetry",
  "percent-encoding",
  "rand 0.9.5",
  "serde_json",
@@ -10172,7 +10009,7 @@ version = "9.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f95f6259ebd0640685b7cd26d635861f39208df0f89b2b61ff5cf76310fa54f6"
 dependencies = [
- "futures 0.3.34",
+ "futures",
  "indexmap 2.14.2",
  "nix 0.31.3",
  "tokio",
@@ -11451,7 +11288,7 @@ source = "git+https://github.com/mjcarson/rig.git?branch=ThoriumSupport#2a8f4b05
 dependencies = [
  "async-stream",
  "fastrand",
- "futures 0.3.34",
+ "futures",
  "http 1.5.0",
  "indexmap 2.14.2",
  "rig-core",
@@ -11480,7 +11317,7 @@ dependencies = [
  "aws-smithy-types",
  "base64 0.22.1",
  "bytes",
- "futures 0.3.34",
+ "futures",
  "http 1.5.0",
  "reqwest 0.13.5",
  "rig-core",
@@ -11505,7 +11342,7 @@ dependencies = [
  "bytes",
  "eventsource-stream",
  "fastrand",
- "futures 0.3.34",
+ "futures",
  "futures-timer",
  "glob",
  "http 1.5.0",
@@ -11571,7 +11408,7 @@ version = "0.42.0"
 source = "git+https://github.com/mjcarson/rig.git?branch=ThoriumSupport#2a8f4b0513e940372ef1e4fde23ff895eabeef68"
 dependencies = [
  "arrow-array",
- "futures 0.3.34",
+ "futures",
  "lancedb",
  "rig-core",
  "serde",
@@ -11687,7 +11524,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
- "futures 0.3.34",
+ "futures",
  "http 1.5.0",
  "pastey 0.2.3",
  "pin-project-lite",
@@ -11715,7 +11552,7 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "chrono",
- "futures 0.3.34",
+ "futures",
  "http 1.5.0",
  "http-body 1.1.0",
  "http-body-util",
@@ -12247,7 +12084,7 @@ dependencies = [
  "bytes",
  "chrono",
  "dashmap",
- "futures 0.3.34",
+ "futures",
  "hashbrown 0.17.1",
  "itertools 0.15.0",
  "rand 0.9.5",
@@ -13573,7 +13410,6 @@ dependencies = [
  "async-walkdir",
  "aws-credential-types",
  "aws-sdk-s3",
- "aws-smithy-http 0.62.6",
  "aws-types",
  "axum",
  "bb8-redis",
@@ -13586,7 +13422,7 @@ dependencies = [
  "dialoguer",
  "dirs 6.0.0",
  "elasticsearch",
- "futures 0.3.34",
+ "futures",
  "indicatif",
  "itertools 0.14.0",
  "kanal",
@@ -13639,7 +13475,7 @@ dependencies = [
  "dirs 6.0.0",
  "elasticsearch",
  "flate2",
- "futures 0.3.34",
+ "futures",
  "generic-array",
  "ghidra-cli",
  "git2",
@@ -13690,21 +13526,19 @@ version = "1.8.1"
 dependencies = [
  "async-trait",
  "async-walkdir",
- "bincode 2.0.1",
  "cgroups-rs",
  "chrono",
  "clap",
  "config",
- "controlgroup",
  "crossbeam",
  "dirs 6.0.0",
- "futures 0.3.34",
+ "futures",
  "gethostname",
  "infer",
  "itertools 0.14.0",
  "openssl",
  "openssl-src",
- "opentelemetry 0.30.0",
+ "opentelemetry",
  "path-clean",
  "regex",
  "reqwest 0.12.28",
@@ -13712,7 +13546,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_norway",
- "sysinfo",
  "thorium-api",
  "tokio",
  "tracing",
@@ -13730,7 +13563,6 @@ dependencies = [
  "async-walkdir",
  "aws-credential-types",
  "aws-sdk-s3",
- "aws-smithy-http 0.62.6",
  "aws-types",
  "axum",
  "axum-extra",
@@ -13746,7 +13578,6 @@ dependencies = [
  "chrono",
  "cidr",
  "clap",
- "colored",
  "config",
  "constant_time_eq 0.3.1",
  "crossbeam",
@@ -13754,8 +13585,7 @@ dependencies = [
  "data-encoding",
  "dialoguer",
  "elasticsearch",
- "futures 0.3.34",
- "futures-cpupool",
+ "futures",
  "futures-util",
  "generic-array",
  "git2",
@@ -13763,7 +13593,7 @@ dependencies = [
  "gix-date",
  "grep",
  "gxhash",
- "headers 0.4.2",
+ "headers",
  "hex",
  "http 1.5.0",
  "http-body 1.1.0",
@@ -13786,12 +13616,9 @@ dependencies = [
  "once_cell",
  "openidconnect",
  "openssl",
- "opentelemetry 0.30.0",
- "opentelemetry-jaeger",
+ "opentelemetry",
  "opentelemetry-otlp",
- "opentelemetry-semantic-conventions 0.30.0",
- "opentelemetry_sdk 0.30.0",
- "owo-colors",
+ "opentelemetry_sdk",
  "percent-encoding",
  "pyo3",
  "rand 0.9.5",
@@ -13861,7 +13688,7 @@ dependencies = [
  "chrono",
  "clap",
  "data-encoding",
- "futures 0.3.34",
+ "futures",
  "futures-locks",
  "gethostname",
  "gxhash",
@@ -13894,7 +13721,7 @@ dependencies = [
  "chrono",
  "clap",
  "elasticsearch",
- "futures 0.3.34",
+ "futures",
  "generic-array",
  "http 1.5.0",
  "json-patch",
@@ -13933,7 +13760,7 @@ dependencies = [
  "http 1.5.0",
  "kanal",
  "openssl",
- "opentelemetry 0.30.0",
+ "opentelemetry",
  "quick_cache",
  "rand 0.9.5",
  "rustix 1.1.5",
@@ -13956,18 +13783,15 @@ dependencies = [
 name = "thorium-scaler"
 version = "1.8.1"
 dependencies = [
- "async-recursion",
  "async-trait",
  "base64 0.22.1",
- "bincode 2.0.1",
  "chrono",
  "clap",
  "config",
  "dirs 6.0.0",
- "futures 0.3.34",
+ "futures",
  "hashbrown 0.15.5",
  "http 1.5.0",
- "itertools 0.14.0",
  "k8s-openapi",
  "kube",
  "openssl",
@@ -13995,11 +13819,11 @@ dependencies = [
  "chrono",
  "clap",
  "elasticsearch",
- "futures 0.3.34",
+ "futures",
  "itertools 0.14.0",
  "kanal",
  "openssl",
- "opentelemetry 0.30.0",
+ "opentelemetry",
  "rand 0.9.5",
  "redis 0.23.5",
  "scylla",
@@ -14027,7 +13851,7 @@ dependencies = [
  "crc32fast",
  "dirs 6.0.0",
  "flate2",
- "futures 0.3.34",
+ "futures",
  "ghidra-cli",
  "http 1.5.0",
  "inventory",
@@ -14089,28 +13913,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ad99c4c6d32803332c548b1af0540b357b3f5fc0be8f6c6bfe8b2e6ae784070"
 dependencies = [
  "cfg-if",
-]
-
-[[package]]
-name = "threadpool"
-version = "1.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d050e60b33d41c19108b32cea32164033a9013fe3b46cbd4457559bfbf77afaa"
-dependencies = [
- "num_cpus",
-]
-
-[[package]]
-name = "thrift"
-version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e54bc85fc7faa8bc175c4bab5b92ba8d9a3ce893d0e9f42cc455c8ab16a9e09"
-dependencies = [
- "byteorder",
- "integer-encoding",
- "log",
- "ordered-float 2.10.1",
- "threadpool",
 ]
 
 [[package]]
@@ -14587,7 +14389,7 @@ version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97d095ae15e245a057c8e8451bab9b3ee1e1f68e9ba2b4fbc18d0ac5237835f2"
 dependencies = [
- "futures 0.3.34",
+ "futures",
  "futures-task",
  "pin-project",
  "tracing",
@@ -14612,8 +14414,8 @@ checksum = "ddcf5959f39507d0d04d6413119c04f33b623f4f951ebcbdddddfad2d0623a9c"
 dependencies = [
  "js-sys",
  "once_cell",
- "opentelemetry 0.30.0",
- "opentelemetry_sdk 0.30.0",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "smallvec",
  "tracing",
  "tracing-core",

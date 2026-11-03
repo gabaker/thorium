@@ -124,9 +124,8 @@ impl Nodes {
         config: &BurstableNodeResources,
     ) -> Result<Option<NodeAllocatableUpdate>, Error> {
         // get this nodes name
-        let name = match node.metadata.name.clone() {
-            Some(name) => name,
-            None => return Err(Error::new("node does not have a name")),
+        let Some(name) = node.metadata.name.clone() else {
+            return Err(Error::new("node does not have a name"));
         };
         // check the nodes taints and see if this node can be scheduled on
         if let Some(spec) = &node.spec

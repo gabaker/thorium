@@ -1,6 +1,7 @@
 //! Wrappers for interacting with comments
 
 use std::collections::HashSet;
+use std::hash::BuildHasher;
 
 use aws_sdk_s3::primitives::ByteStream;
 use axum::extract::Multipart;
@@ -76,10 +77,10 @@ pub trait CommentSupport {
     skip(user, req, form, shared),
     err(Debug)
 )]
-pub async fn create_comment_helper(
+pub async fn create_comment_helper<S: BuildHasher>(
     user: &User,
     key: &str,
-    groups: &HashSet<&str>,
+    groups: &HashSet<&str, S>,
     mut req: Multipart,
     form: &mut CommentForm,
     shared: &Shared,
@@ -97,9 +98,9 @@ pub async fn create_comment_helper(
             // generate a random uuid for this comment attachment
             let s3_id = Uuid::new_v4();
             // try to get the name for this file
-            let file_name = data_field.file_name().map(|name| name.to_owned());
+            let file_name = data_field.file_name().map(ToOwned::to_owned);
             // build the path to save this attachment at in s3
-            let s3_path = format!("{}/{}/{}", key, comment_id, s3_id);
+            let s3_path = format!("{key}/{comment_id}/{s3_id}");
             // cart and stream this file into s3
             shared.s3.attachments.stream(&s3_path, data_field).await?;
             // add this file name to our form

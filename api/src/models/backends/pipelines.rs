@@ -18,7 +18,7 @@ use crate::{
 };
 
 impl PipelineRequest {
-    /// Casts a PipelineRequest to a Pipeline
+    /// Casts a `PipelineRequest` to a Pipeline
     ///
     /// Every stage in the order must have a tool in the request's stage tools, and each stage tool
     /// must back a stage in the order and be able to run its workload.
@@ -26,7 +26,7 @@ impl PipelineRequest {
     /// # Arguments
     ///
     /// * `user` - The user that is creating this pipeline
-    /// * `group` - The group this PipelineRequest is for
+    /// * `group` - The group this `PipelineRequest` is for
     /// * `shared` - Shared objects in Thorium
     #[instrument(name = "PipelineRequest::cast", skip(user, group, shared), err(Debug))]
     pub async fn cast(
@@ -37,8 +37,13 @@ impl PipelineRequest {
     ) -> Result<Pipeline, ApiError> {
         // if no sla is given assume 1 week
         let sla = self.sla.unwrap_or(DEFAULT_PIPELINE_SLA);
-        // bounds check sla
-        bounder::number(sla as i64, "sla", 1, 3.154e+9 as i64)?;
+        // bounds check sla, saturating one too large for an i64 so the check rejects it
+        bounder::number(
+            i64::try_from(sla).unwrap_or(i64::MAX),
+            "sla",
+            1,
+            3_154_000_000,
+        )?;
         // bounds check our pipeline order
         let order = bounder::pipeline_order(&self.order)?;
         // every stage must be backed by a tool
@@ -384,7 +389,7 @@ impl Pipeline {
         let remove = old.difference(&new).cloned().collect::<Vec<String>>();
         // priority
         if let Some(sla) = update.sla {
-            self.sla = bounder::unsigned(sla, "sla", 0, 3.154e+9 as u64)?;
+            self.sla = bounder::unsigned(sla, "sla", 0, 3_154_000_000)?;
         }
         // add in any new triggers
         self.triggers.extend(update.triggers);
@@ -406,7 +411,7 @@ impl Pipeline {
             .bans
             .extract_if(|_, ban| match &ban.ban_kind {
                 PipelineBanKind::BannedImage(ban_kind) => remove.contains(&ban_kind.image),
-                _ => false,
+                PipelineBanKind::Generic(_) => false,
             })
             .map(|(id, _)| id)
             .collect::<Vec<Uuid>>();
@@ -455,11 +460,11 @@ impl Pipeline {
 impl TryFrom<HashMap<String, String>> for Pipeline {
     type Error = ApiError;
 
-    /// Try to cast a HashMap of strings into a Pipeline
+    /// Try to cast a `HashMap` of strings into a Pipeline
     ///
     /// # Arguments
     ///
-    /// * `raw` - The HashMap to cast into a Pipeline
+    /// * `raw` - The `HashMap` to cast into a Pipeline
     fn try_from(mut raw: HashMap<String, String>) -> Result<Self, Self::Error> {
         // check if any data was returned
         if raw.is_empty() {

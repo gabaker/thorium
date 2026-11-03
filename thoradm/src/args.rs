@@ -186,6 +186,7 @@ pub struct SettingsOpts {
 
 impl UpdateSettings {
     /// Create a [`SystemSettingsUpdate`] from `self`
+    #[must_use]
     pub fn to_settings_update(&self) -> SystemSettingsUpdate {
         // create the host path whitelist update
         let host_path_whitelist_update = HostPathWhitelistUpdate::default()

@@ -99,50 +99,17 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          # the script only writes its auth header and responses here, so the root filesystem
-          # can stay read-only
-          volumeMounts:
-            - name: tmp
-              mountPath: /tmp
-          env:
-            - name: HOME
-              value: /tmp
-            - name: CLUSTER_URL
-              value: {{ printf "https://kubernetes.default.svc/apis/sandia.gov/v1/namespaces/%s/thoriumclusters/%s" $ns $name | quote }}
-            - name: TIMEOUT
-              value: {{ .Values.uninstallHook.timeoutSeconds | quote }}
+          # the operator binary deletes the ThoriumCluster with the account's token and waits for
+          # it to go, printing the cluster's last status if the operator doesn't finish in time
           command:
-            - /bin/sh
-            - -c
-            - |
-              set -eu
-              sa=/var/run/secrets/kubernetes.io/serviceaccount
-              # the token goes to curl from a file so it never appears in the process list
-              printf 'Authorization: Bearer %s\n' "$(cat "$sa/token")" > /tmp/auth
-              api() { curl -sS --noproxy '*' --cacert "$sa/ca.crt" -H @/tmp/auth -o /tmp/body -w '%{http_code}' "$@"; }
-              code=$(api -X DELETE "$CLUSTER_URL")
-              case "$code" in
-                200|202) echo "Deleting the ThoriumCluster; waiting for the operator to clean up" ;;
-                404) echo "The ThoriumCluster is already gone"; exit 0 ;;
-                *) echo "Failed to delete the ThoriumCluster ($code): $(cat /tmp/body)"; exit 1 ;;
-              esac
-              waited=0
-              while [ "$waited" -lt "$TIMEOUT" ]; do
-                code=$(api "$CLUSTER_URL")
-                if [ "$code" = 404 ]; then
-                  echo "The ThoriumCluster has been cleaned up"
-                  exit 0
-                fi
-                sleep 5
-                waited=$((waited + 5))
-              done
-              echo "Timed out after ${TIMEOUT}s waiting for the operator to clean up the ThoriumCluster"
-              echo "Last status: $(jq -c '.status // {}' /tmp/body 2>/dev/null || cat /tmp/body)"
-              exit 1
-      volumes:
-        - name: tmp
-          emptyDir:
-            sizeLimit: 16Mi
+            - /app/thorium-operator
+            - uninstall
+            - --namespace
+            - {{ $ns | quote }}
+            - --name
+            - {{ $name | quote }}
+            - --timeout
+            - {{ .Values.uninstallHook.timeoutSeconds | quote }}
       {{- /* run where the operator runs, e.g. on nodes reserved for infrastructure */}}
       {{- with .Values.controller.nodeSelector }}
       nodeSelector:

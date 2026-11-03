@@ -20,7 +20,7 @@ use thorium::{Error, Thorium};
 use tracing::{Level, event};
 use uuid::Uuid;
 
-use super::AiWorkerStats;
+use super::WorkflowsWorkerStats;
 use super::providers::{AuthHosts, Lister, ListingCredential, ListingLimits};
 
 /// How many refreshes of a batch run at once
@@ -179,7 +179,7 @@ impl UserClients {
         &mut self,
         admin: &Thorium,
         username: &str,
-        stats: &mut AiWorkerStats,
+        stats: &mut WorkflowsWorkerStats,
     ) -> Result<Option<Thorium>, Error> {
         // a known disabled user is skipped
         if self.disabled.contains(username) && !self.stale.contains(username) {
@@ -261,7 +261,11 @@ fn holds(bans: &HashMap<Uuid, ModelBan>, kind: &ModelBanKind) -> bool {
 /// * `target` - What the report is merged into
 /// * `report` - The report
 /// * `stats` - The stats to count in
-fn count_changes(target: &MergeTarget<'_>, report: &ModelRefreshReport, stats: &mut AiWorkerStats) {
+fn count_changes(
+    target: &MergeTarget<'_>,
+    report: &ModelRefreshReport,
+    stats: &mut WorkflowsWorkerStats,
+) {
     // a failure adds its ban unless one of its kind is already there
     if let Some(failure) = &report.failure {
         stats.listing_failures += 1;
@@ -363,7 +367,7 @@ pub struct RefreshOutcome {
     /// The events left in flight to be retried
     pub in_flight: Vec<Uuid>,
     /// The stats for the batch
-    pub stats: AiWorkerStats,
+    pub stats: WorkflowsWorkerStats,
 }
 
 /// Refreshes model catalogs for a batch of model refresh events
@@ -565,11 +569,11 @@ impl<'a> ModelRefresher<'a> {
         &self,
         work: Vec<(Event, ModelRefreshEvent, Thorium)>,
         models: &ModelsConf,
-    ) -> Vec<(Uuid, String, Result<(), RetryLater>, AiWorkerStats)> {
+    ) -> Vec<(Uuid, String, Result<(), RetryLater>, WorkflowsWorkerStats)> {
         // start each refresh with its own stats
         let mut running = stream::iter(work)
             .map(|(event, refresh, client)| async move {
-                let mut stats = AiWorkerStats::default();
+                let mut stats = WorkflowsWorkerStats::default();
                 let result = self
                     .refresh(&event, &refresh, &client, models, &mut stats)
                     .await;
@@ -610,7 +614,7 @@ impl<'a> ModelRefresher<'a> {
         refresh: &ModelRefreshEvent,
         client: &Thorium,
         models: &ModelsConf,
-        stats: &mut AiWorkerStats,
+        stats: &mut WorkflowsWorkerStats,
     ) -> Result<(), RetryLater> {
         // each target refreshes differently
         match &refresh.target {
@@ -852,7 +856,7 @@ impl<'a> ModelRefresher<'a> {
         user: &str,
         id: Uuid,
         models: &ModelsConf,
-        stats: &mut AiWorkerStats,
+        stats: &mut WorkflowsWorkerStats,
     ) -> Result<(), RetryLater> {
         // read the endpoint as the user, so a hidden or deleted one is refreshed by no one
         let entity = match client.entities.get(id).await {
@@ -925,7 +929,7 @@ impl<'a> ModelRefresher<'a> {
         settings: &UserModelSettings,
         id: Uuid,
         models: &ModelsConf,
-        stats: &mut AiWorkerStats,
+        stats: &mut WorkflowsWorkerStats,
     ) -> Result<(), RetryLater> {
         // find the endpoint among the user's own, or as a group endpoint they can see
         let own = settings.endpoints.get(&id);

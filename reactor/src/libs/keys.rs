@@ -140,10 +140,9 @@ pub async fn exists(path: &PathBuf, token: &str) -> Result<bool, thorium::Error>
         // check this users token is in our key file
         if data.contains(token) {
             return Ok(true);
-        } else {
-            // a keys file exists but its wrong so delete it
-            tokio::fs::remove_file(path).await?;
         }
+        // a keys file exists but its wrong so delete it
+        tokio::fs::remove_file(path).await?;
     }
     // this file doesn't currently exist
     Ok(false)

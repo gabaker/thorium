@@ -82,7 +82,7 @@ const MAX_ZIP_DOWNLOAD_SIZE: i64 = 512 << 20;
 /// Reject a zip download whose object is too large to safely buffer entirely in memory
 ///
 /// [`S3Client::download_as_zip`] buffers the entire uncarted object plus the resulting zip in RAM,
-/// so an arbitrarily large object turns a single authenticated request into an out-of-memory DoS.
+/// so an arbitrarily large object turns a single authenticated request into an out-of-memory `DoS`.
 /// This gate rejects objects over [`MAX_ZIP_DOWNLOAD_SIZE`] before any buffer is
 /// allocated. A missing/negative content length is treated as unknown and rejected, since the whole
 /// point is to avoid buffering an object of unbounded size.
@@ -1643,7 +1643,7 @@ impl S3Client {
 
     /// download a file from s3 and convert it to an encrypted zip
     ///
-    /// This is not near as efficient as using CaRT and should not be used for large files.
+    /// This is not near as efficient as using `CaRT` and should not be used for large files.
     ///
     /// # Arguments
     ///
@@ -1687,7 +1687,7 @@ impl S3Client {
             // zip this file
             match writer.write_all(&uncarted) {
                 // get our zipped data
-                Ok(_) => match writer.finish() {
+                Ok(()) => match writer.finish() {
                     Ok(zipped) => Ok(zipped.into_inner()),
                     Err(err) => Err(ApiError::from(err)),
                 },

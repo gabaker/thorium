@@ -66,7 +66,7 @@ where
 /// The visitor for deserializing cpu values
 struct MillicpuVisitor;
 
-impl<'de> Visitor<'de> for MillicpuVisitor {
+impl Visitor<'_> for MillicpuVisitor {
     /// The final type to store cpu values in millicpu as
     type Value = u64;
 

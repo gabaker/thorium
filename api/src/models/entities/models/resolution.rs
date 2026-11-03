@@ -71,7 +71,8 @@ pub enum ModelRejectReason {
     LevelNotAllowed,
     /// No endpoint at this level serves the model
     NoEndpoint,
-    /// The endpoint, catalog model, profile, or credential is banned
+    /// The endpoint, catalog model, profile, or credential is banned (a credential past its
+    /// `expires` time is reported as `CredentialExpired`)
     Banned(ModelBanKind),
     /// The endpoint needs a credential and has no usable one at this level
     NoCredential,

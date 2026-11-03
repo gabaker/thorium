@@ -16,7 +16,7 @@ use super::config_record::{self, ConfigAccept};
 use super::queries::migrations::SchemaMigrationsQueries;
 use super::record::{self, RecordError};
 use super::scylla::{SchemaMigrationsTable, SchemaMigrationsTableRef};
-use super::views::{StaleView, ViewComparison, recreate_statements, stale_views};
+use super::views::{StaleView, StaleViews, recreate_statements, stale_views};
 use super::{
     DriftReport, Fingerprint, MigrationRecordKind, ObjectDef, ObservedSchema, RevisionSnapshot,
     SchemaDefinition, SchemaObject, ScyllaObject, SnapshotObject, probe_scylla,
@@ -1977,6 +1977,8 @@ fn tables_held_by_views(live: &LiveSchema, objects: &[ObjectDef]) -> Vec<String>
 /// * `objects` - The objects to converge to
 /// * `run` - Whether to execute, what to accept, and the trigger key
 /// * `progress` - Receives a line for each progress report
+// one step after another reads as the order an apply runs in
+#[allow(clippy::too_many_lines)]
 async fn converge(
     session: &Session,
     conf: &Conf,
@@ -2001,7 +2003,7 @@ async fn converge(
     )
     .await?;
     // find the declared views whose live definitions differ from this build's
-    let compared = if live.keyspace {
+    let found = if live.keyspace {
         let views = scylla
             .iter()
             .filter_map(|def| match def {
@@ -2011,20 +2013,13 @@ async fn converge(
             .collect::<Vec<_>>();
         stale_views(session, &keyspace, &views).await?
     } else {
-        ViewComparison::default()
+        StaleViews::default()
     };
-    let changes = plan(conf, &live, &scylla, &compared.stale);
-    // a view whose live definition can't be read is left as it is and reported
-    let mut warnings = config.warnings.clone();
-    for view in &compared.unreadable {
-        let warning = format!(
-            "view `{}`'s live definition can't be read ({}), so it was left as it is; \
-             `thoradm schema apply --recreate-view {}` replaces it if it is out of date",
-            view.name, view.reason, view.name
-        );
-        progress(&warning);
-        warnings.push(warning);
+    // say which declared views were left alone because their definitions can't be read
+    for warning in &found.unreadable {
+        progress(warning);
     }
+    let changes = plan(conf, &live, &scylla, &found.stale);
     let mut report = ApplyReport {
         statements: changes
             .iter()
@@ -2038,7 +2033,12 @@ async fn converge(
         trigger_key: trigger_key.clone(),
         views_built: Vec::new(),
         views_recreated: Vec::new(),
-        warnings,
+        warnings: config
+            .warnings
+            .iter()
+            .chain(&found.unreadable)
+            .cloned()
+            .collect(),
         dry_run,
     };
     for change in &changes {

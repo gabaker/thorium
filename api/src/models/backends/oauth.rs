@@ -36,7 +36,7 @@ pub struct OAuthRegistrationSession {
     /// "no verified email" during registration.
     #[serde(default)]
     pub email: String,
-    /// Whether the user must supply their own email at registration because the IdP returned none
+    /// Whether the user must supply their own email at registration because the `IdP` returned none
     ///
     /// Defaulted so registration sessions written before this field existed still deserialize as
     /// `false` (the IdP-email path).
@@ -62,7 +62,7 @@ impl OAuthRegistrationSession {
 
     /// Create a new [`OAuthRegistrationSession`] that requires a user-supplied email
     ///
-    /// This is used when the IdP returned no email claim but the provider is configured to accept a
+    /// This is used when the `IdP` returned no email claim but the provider is configured to accept a
     /// user-supplied email (via a non-empty `approved_emails` regex list). The email is left empty
     /// and provided by the user during registration.
     ///
@@ -81,14 +81,14 @@ impl OAuthRegistrationSession {
 
 /// The outcome of deriving an email for a new user from an OIDC provider's claims
 ///
-/// This decides how a new-user registration session is created based on what the IdP returned and
+/// This decides how a new-user registration session is created based on what the `IdP` returned and
 /// how the provider is configured.
 pub enum RegistrationEmail<'a> {
-    /// The IdP provided an email that is trusted and permitted for this provider
+    /// The `IdP` provided an email that is trusted and permitted for this provider
     Provided(&'a str),
-    /// The IdP provided no email but this provider accepts a user-supplied email at registration
+    /// The `IdP` provided no email but this provider accepts a user-supplied email at registration
     UserRequired,
-    /// The IdP provided no email and this provider does not accept a user-supplied email
+    /// The `IdP` provided no email and this provider does not accept a user-supplied email
     Missing,
 }
 
@@ -353,7 +353,7 @@ fn validate_oauth_username(username: &str) -> Result<(), ApiError> {
 /// trust the email when the provider asserts it is verified (`email_verified == true`) so a new user
 /// cannot register (or trigger a link email) with an unverified or attacker-controlled address. When
 /// a provider is explicitly configured as trusted via `trust_unverified_email`, we also accept an
-/// email whose `email_verified` claim is *absent* (some IdPs never emit it), but we never accept an
+/// email whose `email_verified` claim is *absent* (some `IdPs` never emit it), but we never accept an
 /// email the provider actively marks unverified (`email_verified == false`).
 ///
 /// # Arguments
@@ -412,14 +412,12 @@ impl OAuthUserCreate {
         shared: &Shared,
     ) -> Result<(), ApiError> {
         // get our oauth config or return an error
-        let oauth = match &shared.config.thorium.auth.oauth {
-            Some(oauth) => oauth,
-            None => return unavailable!("OAuth is not configured!".to_owned()),
+        let Some(oauth) = &shared.config.thorium.auth.oauth else {
+            return unavailable!("OAuth is not configured!".to_owned());
         };
         // get an email client
-        let client = match &shared.email {
-            Some(client) => client,
-            None => return unavailable!("Email is not configured!".to_owned()),
+        let Some(client) = &shared.email else {
+            return unavailable!("Email is not configured!".to_owned());
         };
         // build a oauth link token
         let link_token = token!();
@@ -463,10 +461,9 @@ impl OAuthUserCreate {
             return unauthorized!();
         }
         // get the provider's client so we can enforce its approved email regexes
-        let client = match shared.oauth.get(provider) {
-            Some(client) => client,
+        let Some(client) = shared.oauth.get(provider) else {
             // return unauthorized as this is not a valid OAuth provider
-            None => return unauthorized!(),
+            return unauthorized!();
         };
         // get the session for this registration
         let session =
@@ -481,11 +478,10 @@ impl OAuthUserCreate {
         // resolve the final email for this account based on how the session was created
         let email = if email_required {
             // the IdP returned no email so this session requires a user-supplied email
-            let email = match self.email {
-                // the user supplied an email so we can continue validating it
-                Some(email) => email,
+            // get the user-supplied email so we can continue validating it
+            let Some(email) = self.email else {
                 // fail closed as this provider requires a user-supplied email but none was given
-                None => return bad!("This OAuth provider requires an email address".to_owned()),
+                return bad!("This OAuth provider requires an email address".to_owned());
             };
             // reject a user-supplied email that is not permitted by this provider's approved regexes
             if !client.email_allowed(&email) {

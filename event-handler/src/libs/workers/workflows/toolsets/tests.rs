@@ -16,8 +16,8 @@ use thorium::test_utilities::generators;
 use uuid::Uuid;
 
 use super::ToolSetInstancer;
-use crate::libs::workers::ai::fake::{Created, FakeApi, entity, event};
-use crate::libs::workers::ai::{AiWorkerStats, process_batch};
+use crate::libs::workers::workflows::fake::{Created, FakeApi, entity, event};
+use crate::libs::workers::workflows::{WorkflowsWorkerStats, process_batch};
 
 /// Add an agentic tool and its first instance, which is its latest
 ///
@@ -730,7 +730,7 @@ async fn tool_set_stats_count_each_occurrence() {
     let outcome = instancer(&api).process(&events).await;
     // two instances created, one of them invalid, one dedupe skip, three notices sent and one
     // failed
-    let expected = AiWorkerStats {
+    let expected = WorkflowsWorkerStats {
         events_processed: 5,
         tool_set_instances_created: 2,
         tool_set_skipped: 1,

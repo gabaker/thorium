@@ -509,7 +509,7 @@ pub struct UserModelSettingsUpdate {
     #[serde(default)]
     pub credential_bans: BTreeMap<Uuid, ModelBanUpdate>,
     /// Listing results to merge into this user's endpoint catalogs and credentials, by endpoint
-    /// id (sent by the AI worker as the user)
+    /// id (sent by the workflows worker as the user)
     #[serde(default)]
     pub refresh_reports: BTreeMap<Uuid, ModelRefreshReport>,
     /// Model ids to add to the `disabled_models` of this user's own endpoints, by endpoint id

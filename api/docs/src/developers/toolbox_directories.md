@@ -69,16 +69,22 @@ whatever the inline config, the document, or the manifest held; if the replaced 
 differed from the file, the build prints a warning so the override is visible. If `description.md` is
 absent (or present but empty), the item keeps the description it would otherwise have: the manifest's
 for a tool, the manifest's and then the document's for a toolset, agent, or workflow, and the
-config's for a pipeline or legacy image. A config that is resolved from a URL at import time (`config_from` pointing at a URL) can't be
-edited during build, so the description travels with the entry in `toolbox.json` and import fills it
-into the fetched config when that has no description of its own.
+config's for a pipeline or legacy image. A config that is resolved from a URL at import time (`config_from`
+pointing at a URL) can't be edited during build, so the description travels with the entry in
+`toolbox.json` and import applies it to the fetched config the same way: it replaces the fetched config's
+own description, with a warning when that was non-empty and differed. A pipeline entry carries its
+`description.md`, or the manifest's `description` when it has none; without either, the fetched config
+keeps its own description.
 
-`toolbox export` writes each item's description into the manifest (tools), the config (pipelines), or
-the document (toolsets, agents, workflows), and leaves a `description.md` beside it as it is (so it
-still wins when the exported directory is built again). `toolbox init` scaffolds a stub `description.md`.
-Descriptions surface in the Thorium UI and `thorctl images get`, so they're how users — and AI agents —
-decide which tool to run. Import and diff ignore differences in trailing whitespace, so the trimming
-never shows up as a change.
+`toolbox export` writes no `description.md`: a tool's description goes into its `manifest.toml` as
+`description` (a multi-line TOML string when it spans lines, and left out when the tool has none),
+a toolset's, agent's, or workflow's into its YAML document, and a pipeline's into its JSON config.
+A `description.md` already beside an exported item is left as it is, so it still wins when the
+exported directory is built again, and moving a tool's description into a `description.md` beside
+its manifest afterwards is safe, since the file wins over the manifest. `toolbox init` scaffolds a
+stub `description.md`. Descriptions surface in the Thorium UI and `thorctl images get`, so they're
+how users — and AI agents — decide which tool to run. Import and diff ignore differences in
+trailing whitespace, so the trimming never shows up as a change.
 
 #### Toolbox config (`config.toml`)
 
@@ -306,7 +312,9 @@ When `toolbox build` assembles `toolbox.json`, each image's container url (its `
    scaler isn't K8s (`BareMetal`, `Windows`, `Kvm`, `External`) runs without a container, so it
    gets `image_tags = []` and no url is invented for it.
 4. **Derived url** — for a buildable image (`build = true`), and as the fallback for any other
-   unpinned `build = false` image, the tag is derived per registry as:
+   unpinned legacy `build = false` image, the tag is derived per registry as (a `type = "tool"`
+   manifest with `build_image = false` derives nothing: it keeps its spec's image or
+   `exported_image_path`, and `toolbox build` fails when it has neither):
 
    ```text
    <registry>/[<image_path_prefix>/]<leaf>:<version>[<tag_suffix>]

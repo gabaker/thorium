@@ -7,7 +7,9 @@ use uuid::Uuid;
 
 use crate::models::schema::ScyllaProjection;
 use crate::models::schema::scylla::AssociationsTable;
-use crate::models::{Association, AssociationKind, AssociationTarget, Directionality};
+#[cfg(feature = "api")]
+use crate::models::{Association, AssociationTarget};
+use crate::models::{AssociationKind, Directionality};
 
 #[derive(Debug, Clone, Serialize, Deserialize, ScyllaStoreJson, Eq, PartialEq, Hash)]
 pub enum AssociationTargetColumn {
@@ -21,6 +23,7 @@ pub enum AssociationTargetColumn {
 
 impl AssociationTargetColumn {
     /// Generate a tree node hash for this item
+    #[must_use]
     pub fn tree_hash(&self) -> u64 {
         // build a hasher
         let mut hasher = gxhash::GxHasher::with_seed(1234);

@@ -274,7 +274,7 @@ async fn update(
     // get image
     let (group, image) = Image::get(&user, &group, &image, &state.shared).await?;
     // update the image in the backend
-    image.update(update, &user, &group, &state.shared).await?;
+    Box::pin(image.update(update, &user, &group, &state.shared)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

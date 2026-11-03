@@ -22,7 +22,7 @@ use crate::models::{
     RepoDependency, RepoDependencyRequest, RunInputs, RunModels, ScopedToken, StageLogLine,
     StageLogs, StageLogsAdd, StatusUpdate, SystemComponents, ToolRunRequest, WorkflowRunRequest,
 };
-use crate::utils::{ApiError, AppState};
+use crate::utils::{ApiError, AppState, body_limits};
 use crate::{bad, unauthorized};
 
 /// Refuse a user authenticated with a run token
@@ -125,7 +125,7 @@ async fn create_bulk(
     // a run token runs only its run's own tools, never a pipeline
     refuse_run_token(&user)?;
     // create reactions in bulk
-    let response = Reaction::create_bulk(&user, reqs, &state.shared).await?;
+    let response = Box::pin(Reaction::create_bulk(&user, reqs, &state.shared)).await?;
     Ok(Json(response))
 }
 
@@ -165,7 +165,7 @@ async fn create_bulk_by_user(
     // require a fully authed user since scoped tokens cannot create reactions as other users
     let user = user.require_full()?;
     // create reactions in bulk
-    let response = Reaction::create_bulk_by_user(&user, reqs, &state.shared).await?;
+    let response = Box::pin(Reaction::create_bulk_by_user(&user, reqs, &state.shared)).await?;
     Ok(Json(response))
 }
 
@@ -271,7 +271,7 @@ async fn run_token(
         (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
         (status = 401, description = "This user is not an admin authenticated with their full token"),
         (status = 404, description = "The reaction has no live run token (it never had one, the token stored under its name is not scoped to this run, or the run's creator can no longer edit in the group) or is not a workflow run with model bindings"),
-        (status = 409, description = "A credential or endpoint the run is bound to was deleted, a credential it is bound to is banned, or an endpoint it is bound to is banned `NotAllowedByDeployment` or no longer on the deployment's allowed endpoint list"),
+        (status = 409, description = "A credential or endpoint the run is bound to was deleted, a credential it is bound to is banned or past its expiry, or an endpoint it is bound to is banned `NotAllowedByDeployment` or no longer on the deployment's allowed endpoint list"),
         (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
         (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
@@ -736,7 +736,7 @@ async fn logs(
 /// * `user` - The user that is adding new stage logs
 /// * `group` - The group this reaction is in
 /// * `id` - The uuid of the reaction to add stage logs
-/// * `stage` - The stage these logs are for
+/// * `stage_name` - The stage these logs are for
 /// * `state` - Shared Thorium objects
 /// * `logs` - The stdout/stderr logs to add
 #[utoipa::path(
@@ -765,7 +765,7 @@ async fn logs(
 #[instrument(name = "routes::reactions::add_stage_logs", skip_all, err(Debug))]
 async fn add_stage_logs(
     user: AuthedUser,
-    Path((group, id, stage)): Path<(String, Uuid, String)>,
+    Path((group, id, stage_name)): Path<(String, Uuid, String)>,
     State(state): State<AppState>,
     Json(logs): Json<StageLogsAdd>,
 ) -> Result<StatusCode, ApiError> {
@@ -773,7 +773,7 @@ async fn add_stage_logs(
     let (_, reaction) = Reaction::get(&user, &group, &id, &state.shared).await?;
     // append stage logs
     reaction
-        .add_stage_logs(&stage, logs, user.run_reaction(), &state.shared)
+        .add_stage_logs(&stage_name, logs, user.run_reaction(), &state.shared)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1828,9 +1828,10 @@ pub fn mount(router: Router<AppState>) -> Router<AppState> {
             "/reactions/{group}/{id}/cache",
             get(get_cache).patch(update_cache),
         )
+        // cache file uploads have no body limit
         .route(
             "/reactions/{group}/{id}/cache/files/",
-            patch(update_cache_files),
+            body_limits::unlimited(patch(update_cache_files)),
         )
         .route(
             "/reactions/{group}/{id}/cache/files/{*path}",

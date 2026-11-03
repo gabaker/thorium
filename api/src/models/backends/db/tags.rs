@@ -6,6 +6,7 @@
 
 use chrono::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::hash::BuildHasher;
 use tracing::{Level, event, instrument};
 
 use super::keys::tags;
@@ -33,11 +34,11 @@ use crate::{bad, conn, log_scylla_err};
     fields(kind = T::tag_kind().as_str()),
     err(Debug)
 )]
-pub async fn create<T: TagSupport>(
+pub async fn create<T: TagSupport, S: BuildHasher>(
     user: &User,
     key: String,
     req: TagRequest<T>,
-    earliest: &HashMap<&String, DateTime<Utc>>,
+    earliest: &HashMap<&String, DateTime<Utc>, S>,
     shared: &Shared,
 ) -> Result<(), ApiError> {
     // get the type of tag we are creating
@@ -131,11 +132,11 @@ pub async fn create<T: TagSupport>(
     fields(kind = T::tag_kind().as_str()),
     err(Debug)
 )]
-pub async fn create_owned<T: TagSupport>(
+pub async fn create_owned<T: TagSupport, S: BuildHasher>(
     user: &User,
     key: String,
     req: TagRequest<T>,
-    earliest: &HashMap<String, DateTime<Utc>>,
+    earliest: &HashMap<String, DateTime<Utc>, S>,
     shared: &Shared,
 ) -> Result<(), ApiError> {
     // get the type of tag we are creating

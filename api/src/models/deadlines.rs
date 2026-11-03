@@ -44,19 +44,19 @@ impl Deadline {
 }
 
 impl From<&RawJob> for Deadline {
-    /// Cast a reference to a RawJob into deadline
+    /// Cast a reference to a `RawJob` into deadline
     ///
     /// # Arguments
     ///
-    /// * `job` - A refernce to a RawJob
+    /// * `job` - A refernce to a `RawJob`
     fn from(job: &RawJob) -> Self {
         Deadline {
-            group: job.group.to_owned(),
-            pipeline: job.pipeline.to_owned(),
-            stage: job.stage.to_owned(),
-            creator: job.creator.to_owned(),
-            job_id: job.id.to_owned(),
-            reaction: job.reaction.to_owned(),
+            group: job.group.clone(),
+            pipeline: job.pipeline.clone(),
+            stage: job.stage.clone(),
+            creator: job.creator.clone(),
+            job_id: job.id,
+            reaction: job.reaction,
             deadline: job.deadline,
             tool_instance: job.tool_instance,
             run: job.run,
@@ -65,11 +65,11 @@ impl From<&RawJob> for Deadline {
 }
 
 impl From<RawJob> for Deadline {
-    /// Cast a RawJob into deadline
+    /// Cast a `RawJob` into deadline
     ///
     /// # Arguments
     ///
-    /// * `job` - A RawJob
+    /// * `job` - A `RawJob`
     fn from(job: RawJob) -> Self {
         Deadline {
             group: job.group,
@@ -85,7 +85,7 @@ impl From<RawJob> for Deadline {
     }
 }
 
-/// A partial deadline fragment to help with casting from StreamObjs to deadlines
+/// A partial deadline fragment to help with casting from `StreamObjs` to deadlines
 #[derive(Deserialize)]
 #[allow(dead_code)]
 pub(super) struct DeadlineFragment {

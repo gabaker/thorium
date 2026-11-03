@@ -87,7 +87,12 @@ impl EmailClient {
     /// # Arguments
     ///
     /// * `conf` - A Thorium config
-    pub async fn new(conf: &Conf) -> Option<Self> {
+    ///
+    /// # Panics
+    ///
+    /// Panics if the SMTP relay, the from address, or the approved email regexes are invalid.
+    #[must_use]
+    pub fn new(conf: &Conf) -> Option<Self> {
         // get our email config
         match &conf.thorium.auth.email {
             Some(email_conf) => {
@@ -104,12 +109,12 @@ impl EmailClient {
                     panic!("Failed to parse email address: {}", email_conf.addr)
                 });
                 // compile our approved email regex if we have any approved emails
-                let approved = if !email_conf.approved_emails.is_empty() {
+                let approved = if email_conf.approved_emails.is_empty() {
+                    None
+                } else {
                     // compile our approved emails regex set
                     let approved = RegexSet::new(&email_conf.approved_emails).unwrap();
                     Some(approved)
-                } else {
-                    None
                 };
                 // build our email client
                 Some(EmailClient {
@@ -190,7 +195,7 @@ pub struct OAuthClient {
     /// The compiled regexes restricting which emails may register through this provider
     ///
     /// `None` means this provider has no email restrictions and does not accept a user-supplied
-    /// email; `Some` means both IdP- and user-supplied emails must match one of these regexes.
+    /// email; `Some` means both `IdP`- and user-supplied emails must match one of these regexes.
     pub approved_emails: Option<RegexSet>,
     /// The http client to use to drive this client
     pub http_client: reqwest::Client,
@@ -237,6 +242,11 @@ impl OAuthClient {
     /// * `name` - The name of the provider to build a client for
     /// * `redirect_base` - The base sheme + domain to redirect too
     /// * `conf` - The config for this OAuth provider
+    ///
+    /// # Panics
+    ///
+    /// Panics if the HTTP client cannot be built or the provider's issuer metadata cannot be
+    /// discovered.
     pub async fn new(
         name: &str,
         redirect_base: &str,
@@ -292,6 +302,7 @@ impl OAuthClient {
     /// # Arguments
     ///
     /// * `email` - The email to check against this provider's approved email regexes
+    #[must_use]
     pub fn email_allowed(&self, email: &str) -> bool {
         // an email is allowed if there are no restrictions or it matches one of them
         match &self.approved_emails {
@@ -302,9 +313,10 @@ impl OAuthClient {
         }
     }
 
-    /// Check whether this provider accepts a user-supplied email when the IdP returns none
+    /// Check whether this provider accepts a user-supplied email when the `IdP` returns none
     ///
     /// Only providers with a configured approved email regex set opt into a user-supplied email.
+    #[must_use]
     pub fn accepts_user_email(&self) -> bool {
         // a user-supplied email is only accepted when this provider restricts emails
         self.approved_emails.is_some()
@@ -432,7 +444,7 @@ impl Shared {
         // setup the elastic client
         let elastic = retry!(setup::elastic(&config), 60, "Elastic setup", &config);
         // build an email client if its configured
-        let email = EmailClient::new(&config).await;
+        let email = EmailClient::new(&config);
         // setup s3 clients; a cart password that cannot be a key is unusable config, and this
         // whole startup path already aborts rather than limping along on config it cannot use
         let s3 = S3::new(&config).expect("Failed to build s3 clients from the Thorium config");

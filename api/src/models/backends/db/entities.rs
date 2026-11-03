@@ -155,7 +155,7 @@ pub async fn insert(
         // move our tags to the request
         req.tags = tags;
         // create the earliest map; in this case it's just the created timestamp for all groups
-        let earliest = entity
+        let earliest: HashMap<String, DateTime<Utc>> = entity
             .groups
             .iter()
             .map(|group| (group.clone(), now))

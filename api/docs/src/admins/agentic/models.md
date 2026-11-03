@@ -67,10 +67,12 @@ an endpoint) and `thorctl models bans clear <ENTITY> <BAN>`. Only admins add ban
 kinds. Every model ban writes a notification for the people it affects, and clearing it deletes the
 notification.
 
-A run resolves its models when it is created and skips banned items. Bans added later don't change
-the models a run was given, with two exceptions that are checked again when the run's harness pod is
-spawned: a ban on a credential the run uses, and an endpoint the deployment no longer allows (a
-`NotAllowedByDeployment` ban, or an endpoint no longer on the allowed list). Either one makes the
+A run resolves its models when it is created and skips banned items and credentials past their
+`expires` time (reported as `CredentialExpired`, whether or not a refresh has banned them yet). Bans
+added later don't change the models a run was given, with two exceptions that are checked again
+when the run's harness pod is spawned: a credential the run uses that is banned or past its
+`expires` time, and an endpoint the deployment no longer allows (a `NotAllowedByDeployment` ban, or
+an endpoint no longer on the allowed list). Either one makes the
 scaler fail the run once with a stage log naming the reason instead of spawning its harness (see
 [Scheduling Tools and Runs](./scheduling.md)). Other bans on the run's endpoint, catalog model, or
 profile don't stop it. A harness that is already running keeps its models.
@@ -84,7 +86,7 @@ These routes return secrets and refuse any caller that is not an admin using the
 | ----- | ------- |
 | `GET /api/entities/models/credentials/{id}/secret` | A group credential with its secret |
 | `GET /api/users/user/{username}/model-credentials/{endpoint}` | A user's credential for an endpoint |
-| `GET /api/reactions/{group}/{id}/run-models` | A run's resolved models with their credentials' secrets; `404` when the run has no live run token scoped to that run, its creator can't edit in the run group, or it has no model bindings, `409` when a bound credential or endpoint was deleted, a bound credential is banned, or a bound endpoint is banned `NotAllowedByDeployment` or no longer on the allowed endpoint list |
+| `GET /api/reactions/{group}/{id}/run-models` | A run's resolved models with their credentials' secrets; `404` when the run has no live run token scoped to that run, its creator can't edit in the run group, or it has no model bindings, `409` when a bound credential or endpoint was deleted, a bound credential is banned or past its `expires` time, or a bound endpoint is banned `NotAllowedByDeployment` or no longer on the allowed endpoint list |
 | `GET /api/reactions/{group}/{id}/run-token` | A run's run-scoped token; `404` when the run has no live token, the token stored under the run's token name isn't scoped to that run, or the run's creator can't edit in the run group |
 
 The event handler uses the first two to refresh catalogs, and the scaler uses the last two to start

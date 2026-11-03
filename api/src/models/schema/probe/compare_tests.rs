@@ -567,9 +567,10 @@ fn declared_view(name: &str) -> Value {
     SnapshotObject::declared()
         .iter()
         .find(|object| object.backend == SchemaBackend::Scylla && object.name == name)
-        .unwrap_or_else(|| panic!("{name} is declared"))
-        .canonical
-        .clone()
+        .map_or_else(
+            || panic!("{name} is declared"),
+            |object| object.canonical.clone(),
+        )
 }
 
 /// A live view with the declared definition differs in nothing, even when Scylla renders its

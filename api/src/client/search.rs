@@ -95,10 +95,9 @@ impl Search {
         // build the url for searching data in Thorium
         let url = format!("{}/api/search/", self.host);
         // get the correct page size if our limit is smaller then our page_size
-        let page_size = opts.limit.map_or_else(
-            || opts.page_size,
-            |limit| std::cmp::min(opts.page_size, limit),
-        );
+        let page_size = opts
+            .limit
+            .map_or(opts.page_size, |limit| std::cmp::min(opts.page_size, limit));
         // build our query params
         let mut query = vec![
             ("query", opts.query.clone()),

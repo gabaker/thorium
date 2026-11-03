@@ -238,6 +238,55 @@ operator:
 `max_scan_time` is also the longest a grep request holds a connection open: a reverse proxy in front
 of the API needs a read timeout above it (see [Traefik](./install-traefik.md)).
 
+## Request body limits
+
+The `thorium.limits.body` settings bound how large a request body the API reads. The keys are
+optional; each takes its default when unset. Like the grep settings, each can be overridden with
+an environment variable such as `THORIUM__THORIUM__LIMITS__BODY__ENTITIES`, and on a Helm
+deployment they are set under `operator.cluster.config.thorium.limits.body`:
+
+```yaml
+operator:
+  cluster:
+    config:
+      thorium:
+        limits:
+          body:
+            default: 16 MiB
+            entities: 14 MiB
+            instances: 12 MiB
+```
+
+| Key | Default | Unit | Meaning |
+| --- | ------- | ---- | ------- |
+| `thorium.limits.body.default` | `16 MiB` | bytes (`KB`, `KiB`, `MB`, `MiB`, `GB`, and `GiB` suffixes accepted) | The largest body a route without its own limit reads. Scylla refuses a single write over 16 MB by default, so a larger JSON body couldn't be stored in one row anyway |
+| `thorium.limits.body.entities` | `14 MiB` | bytes (suffixes accepted) | The largest entity create or update form, including an entity's image, and the largest hunt create, hunt checkpoint, or YARA hit write. Keep it larger than `instances`, with room for the form's other fields, since toolset and workflow instances are submitted as entity creates |
+| `thorium.limits.body.instances` | `12 MiB` | bytes (suffixes accepted) | The largest toolset or workflow instance a create submits, checked before the instance is parsed and before a revision is reserved. A larger instance is refused with `400`. This limit also bounds the size of the warnings and names an instance stores; lower it to store less |
+
+The `instances` default leaves room for the largest workflow instance the event handler builds at
+the default crawl limits with each tool in up to 11 groups. Raising the crawl limits
+(`thorium.events.max_agents_per_workflow` and `thorium.events.max_tools_per_agent`), or putting
+tools in many groups, needs `instances` (and `entities`) raised to match. When the API refuses an instance the event handler
+built as too large, the build is not retried; the users who caused it get an error notification
+naming the setting.
+
+A body over its route's limit is answered with `413 Payload Too Large` and a JSON body that names
+the limit and the setting that controls it, which thorctl and the other clients show:
+
+```json
+{"error": "The request body is larger than the 14 MiB (14680064 bytes) this route accepts; an admin can raise thorium.limits.body.entities", "limit": 14680064, "setting": "thorium.limits.body.entities"}
+```
+
+File, result, repo, comment attachment, reaction cache, and serialized YARA ruleset uploads and
+system restores have no limit. A profile picture upload has its own fixed 10 MiB limit. The API
+reads and discards the rest of an oversized body, up to 64 MiB past its limit, before it answers, so
+a client that is still sending reads the `413` rather than a connection reset. A body that declares
+a length more than 64 MiB past its limit is answered without being read. A reverse proxy in front of
+the API with its own body limit (such as nginx's `client_max_body_size`) needs a limit at least as
+large as the uploads users make.
+
+The unrelated `thorium.request_size_limits` keys are not enforced.
+
 ## External services
 
 Every backing service can run outside the chart, such as a cloud service or one you already
@@ -554,7 +603,7 @@ when the two cases disagree the upper-case value wins, since Thorium's HTTP clie
 | Pods | Defaults | Values |
 |------|----------|--------|
 | Operator and its pre-upgrade CRD hook Job | Restricted: the Thorium image's `thorium` user (uid and gid 10001) with `runAsNonRoot`, `RuntimeDefault` seccomp, no privilege escalation, every capability dropped | `operator.controller.securityContext`, `operator.controller.podSecurityContext` (and `operator.crdHook.resources`) |
-| Uninstall hook and toolbox import Jobs | Restricted: user and group 65534, `RuntimeDefault` seccomp, no privilege escalation, every capability dropped, read-only root filesystem with an `emptyDir` at `/tmp` | `operator.uninstallHook.*`, `operator.toolbox.*` (`podSecurityContext`, `securityContext`, `resources`) |
+| Uninstall hook and toolbox import Jobs | Restricted: user and group 65534, `RuntimeDefault` seccomp, no privilege escalation, every capability dropped, read-only root filesystem (the toolbox import Job adds an `emptyDir` at `/tmp`) | `operator.uninstallHook.*`, `operator.toolbox.*` (`podSecurityContext`, `securityContext`, `resources`) |
 | Redis, SeaweedFS, Jaeger, the registry, and the setup jobs | Restricted: each runs as its image's own non-root user, with a read-only root filesystem, no privilege escalation, and every capability dropped | `infra.<service>.podSecurityContext`, `infra.<service>.securityContext`, `infra.jobs.*` |
 | Scylla, Elasticsearch, Kibana, Postgres | Set by their operators | Scylla's core dump `hostPath` (`infra.scylla.coredumps`, default on) isn't allowed by the `baseline` or `restricted` levels; `infra.elastic.setMaxMapCount` adds a privileged init container |
 | Thorium components (API, scalers, event handler, search streamer) | Restricted, set by the Thorium operator: user and group 10001 with `runAsNonRoot`, `RuntimeDefault` seccomp, no privilege escalation, every capability dropped. The API pod sets the namespaced sysctl `net.ipv4.ip_unprivileged_port_start=0` (allowed at every level) so it can listen on port 80 | |

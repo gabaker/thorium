@@ -163,8 +163,8 @@ Both files hold credentials: store them as securely as the backups themselves.
 helm uninstall thorium -n thorium
 ```
 
-A `pre-delete` hook (`operator.uninstallHook`) deletes the `ThoriumCluster` first and waits for
-the still-running operator to clean up: node labels, node provision pods, the component
+A `pre-delete` hook (`operator.uninstallHook`, a Job running `thorium-operator uninstall` from the
+Thorium image) deletes the `ThoriumCluster` first and waits for the still-running operator to clean up: node labels, node provision pods, the component
 Deployments, the `thorium-api` and `thorium-mcp` Services, and the Secrets and ConfigMaps it
 created. Helm waits up to `--timeout` (5 minutes by default) for the hook, so keep
 `operator.uninstallHook.timeoutSeconds` (default 240) below it or pass a larger `--timeout`.

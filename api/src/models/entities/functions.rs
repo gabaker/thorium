@@ -164,20 +164,14 @@ impl DecompiledFunction {
     #[cfg(feature = "api")]
     pub fn from_form(form: super::EntityMetadataForm) -> Result<Self, crate::utils::ApiError> {
         // if we don't have the address set then return an error
-        let address = match form.function_address {
-            Some(address) => address,
-            None => {
-                return crate::bad!("Decompiled function entities must have a address!".to_owned());
-            }
+        let Some(address) = form.function_address else {
+            return crate::bad!("Decompiled function entities must have a address!".to_owned());
         };
         // if we don't have any decompilation content set then return an error
-        let content = match form.decompilation_content {
-            Some(content) => content,
-            None => {
-                return crate::bad!(
-                    "Decompiled function entities must have decompilation content!".to_owned()
-                );
-            }
+        let Some(content) = form.decompilation_content else {
+            return crate::bad!(
+                "Decompiled function entities must have decompilation content!".to_owned()
+            );
         };
         // record each tool instance once in the order it was sent
         let mut tools = Vec::with_capacity(form.tool_ids.len());

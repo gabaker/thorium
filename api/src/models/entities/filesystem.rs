@@ -76,9 +76,8 @@ impl FileSystemEntity {
     #[cfg(feature = "api")]
     pub fn from_form(form: super::EntityMetadataForm) -> Result<Self, crate::utils::ApiError> {
         // if we don't have the sha256 field then return an error
-        let sha256 = match form.sha256 {
-            Some(sha256) => sha256,
-            None => return crate::bad!("File system entities must have a sha256!".to_owned()),
+        let Some(sha256) = form.sha256 else {
+            return crate::bad!("File system entities must have a sha256!".to_owned());
         };
         // record each tool instance once in the order it was sent
         let mut tools = Vec::with_capacity(form.tool_ids.len());

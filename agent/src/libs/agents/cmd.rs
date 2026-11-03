@@ -556,14 +556,12 @@ impl CmdBuilder {
                     }
                 }
             } else {
-                // if wipe is false then add this other arg
-                if !wipe && (in_kwarg || !self.opts.override_positionals)
-                    // if we are overriding positionals then only allow one positional from entrypoint and cmd each
-                    // never keep a wiped kwarg's old value as a positional
-                    || (!wipe
-                        && !in_kwarg
-                        && self.opts.override_positionals
-                        && self.allowable_positionals > 0)
+                // never keep a wiped kwarg's old value; otherwise keep kwarg values and, when
+                // overriding positionals, only allow one positional from entrypoint and cmd each
+                if !wipe
+                    && (in_kwarg
+                        || !self.opts.override_positionals
+                        || self.allowable_positionals > 0)
                 {
                     // add this non kwarg argument
                     built.push(arg);

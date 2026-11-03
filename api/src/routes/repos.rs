@@ -22,7 +22,7 @@ use crate::models::{
     RepoDownloadOpts, RepoListLine, RepoListParams, RepoRequest, RepoScheme, RepoSubmissionChunk,
     ResultFileDownloadParams, ResultGetParams, TagDeleteRequest, TagRequest, TruncationReason,
 };
-use crate::utils::{ApiError, AppState, bounder};
+use crate::utils::{ApiError, AppState, body_limits, bounder};
 
 /// Allow users to add a repo to Thorium
 ///
@@ -813,7 +813,11 @@ pub fn mount(router: Router<AppState>) -> Router<AppState> {
         .route("/repos/details/", get(list_details))
         .route("/repos/grep/", post(grep))
         .route("/repos/grep/{*repo_path}", post(grep_repo))
-        .route("/repos/data/{*repo_path}", get(get_repo).post(upload))
+        // uploads have no body limit
+        .route(
+            "/repos/data/{*repo_path}",
+            body_limits::unlimited(post(upload)).get(get_repo),
+        )
         .route(
             "/repos/commitishes/{data}/{*repo_path}",
             get(commitishes).post(update_commitishes),
@@ -827,7 +831,7 @@ pub fn mount(router: Router<AppState>) -> Router<AppState> {
         .route("/repos/associations/{*repo_path}", get(list_associations))
         .route(
             "/repos/results/{*repo_path}",
-            get(get_results).post(upload_results),
+            body_limits::unlimited(post(upload_results)).get(get_results),
         )
         .route(
             "/repos/result-files/{*repo_path}",

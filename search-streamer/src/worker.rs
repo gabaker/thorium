@@ -271,6 +271,9 @@ mod tests {
         let event_ids = vec!["sha256-corn".to_owned()];
         let bundle_ids = vec!["sha256-corn".to_owned()];
         // nothing should be deleted
-        assert!(stale_modified_store_ids(&event_ids, &bundle_ids).is_empty());
+        assert_eq!(
+            stale_modified_store_ids(&event_ids, &bundle_ids),
+            [] as [String; 0]
+        );
     }
 }
