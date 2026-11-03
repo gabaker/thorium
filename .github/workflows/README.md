@@ -23,6 +23,9 @@ Each workflow file's header comment holds the details; this page is the map.
    thorctl and thoradm for both macOS targets on one runner, so a run asks for a single one of the
    scarce macOS runners; each binary builds for each target in its own cargo run, one after the
    other, so thorctl builds thorium-api with its client features only.
+   It runs on `macos-latest` unless the `MACOS_RUNNER` repository variable names another macOS
+   runner image (Settings → Secrets and variables → Actions → Variables), which switches the image
+   for every branch's next run without a commit.
 3. **Build · core container image** from the build artifacts, once for linux/amd64 and once for
    linux/arm64, each checked by `.github/scripts/check_image_arch.sh` (the image's platform and
    its binaries' ELF architecture). Every Dockerfile RUN step runs on the runner's architecture,
