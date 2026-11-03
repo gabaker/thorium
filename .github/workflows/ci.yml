@@ -620,10 +620,12 @@ jobs:
   # it starts with the other builds. The image serves both binaries for each macOS target. Cargo
   # runs directly, as actions-rust-cross does on macOS, since that action takes a single target.
   # The four release builds run in turn, so the job takes the longest timeout GitHub allows a job
-  # (360 minutes), twice the 180 minutes each of the other release builds gets
+  # (360 minutes), twice the 180 minutes each of the other release builds gets. Its runner image
+  # is the MACOS_RUNNER repository variable when set (macos-15, say, while macos-latest's runners
+  # are scarce), else macos-latest
   build-macos-binaries:
     name: Build · macOS binaries
-    runs-on: macOS-latest
+    runs-on: ${{ vars.MACOS_RUNNER || 'macos-latest' }}
     timeout-minutes: 360
     permissions:
       contents: read
