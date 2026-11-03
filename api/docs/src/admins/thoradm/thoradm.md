@@ -131,6 +131,7 @@ A backup doesn't hold runtime state, which is invalid after a restore, or data a
 | The `job_result` rows of the `schema_migrations` Scylla table | The results of upgrade Jobs, which expire after seven days; a restore would make them permanent |
 | Run-scoped tokens | Each belongs to a run whose reaction and jobs aren't backed up, and expires with the run; a backup leaves them out, and a restore skips any that a backup holds |
 | The Redis keys of reactions, jobs, workers, and services: `reactions:*`, `reactions_group:*`, `reaction_data:*`, `reaction_jobs:*`, `reaction_tags:*`, `reaction_cache:*`, `sub_reactions:*`, `generators:*`, `stage_logs:*`, `logs:*`, `job_queue:*`, `job_data:*`, `workers:*`, `worker_data:*`, `streams:*`, `event-handler:*`, `search-streamer:*`, `cursors:*`, `schema-writer`, `rebucket:*`, `image_ttc:*`, `run_queue:*`, `workload_queue:*`, `workload_ttc:*`, `workloads:*`, and `entities:instance_lock:*` | Runtime state, invalid after a restore |
+| The hunt keys `hunts:*` | Lane checkpoint sequences, which a checkpoint reseeds from the restored hunt entity, and persist locks, which expire |
 | The OAuth keys `oauth:context:*`, `oauth:registration_sessions:*`, and `oauth:link_token:*` | Login contexts, registration sessions, and account-link tokens, which expire |
 | `netpol_used_by:*` | Rebuilt by the Redis restore from the restored images' network policies |
 | `census:*` | Counts rebuilt from the Scylla tables by the census that restore runs |
@@ -607,7 +608,12 @@ restore replaces the bootstrapped admin with the backup's users, whose logins wo
    summary's `not_done` says so): delete the `thorium-upgrade-state` ConfigMap and restart the
    operator, as [Resetting the Recorded State](#resetting-the-recorded-state) shows. Until it reads
    the record it reports the old revision and doesn't run the steps after the restored one.
-5. **Resume the writers and users.** Nodes restored from the backup check in again on their own.
+5. **Cancel and recreate the hunts that were running.** A hunt that was `Created` or `Running`
+   when the backup was taken comes back with that status and its lane checkpoints, but its
+   queued chunk events are runtime state the backup doesn't hold, so it makes no progress and
+   counts against the active-hunt quotas until it is cancelled (`HuntStatus=Running` and
+   `HuntStatus=Created` tags list them). Recreate it to scan its window again.
+6. **Resume the writers and users.** Nodes restored from the backup check in again on their own.
 
 `verify --cluster` writes its report like `verify` and checks:
 

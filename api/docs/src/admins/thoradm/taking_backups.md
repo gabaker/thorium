@@ -555,6 +555,7 @@ lists what today's backup or restore doesn't carry yet. The Thoradm guide's
 | Redis | `workload_ttc:*` | Excluded | runtime state of reactions, jobs, workers, or services, invalid after a restore | EPHEMERAL |  |
 | Redis | `workloads:*` | Excluded | runtime state of reactions, jobs, workers, or services, invalid after a restore | EPHEMERAL |  |
 | Redis | `entities:instance_lock:*` | Excluded | runtime state of reactions, jobs, workers, or services, invalid after a restore | EPHEMERAL |  |
+| Redis | `hunts:*` | Excluded | hunt lane checkpoint sequences, reseeded from the hunt entity, and hunt persist locks, which expire | EPHEMERAL |  |
 | Redis | `oauth:context:*` | Excluded | OAuth login contexts, which expire | EPHEMERAL |  |
 | Redis | `oauth:registration_sessions:*` | Excluded | OAuth registration sessions, which expire | EPHEMERAL |  |
 | Redis | `oauth:link_token:*` | Excluded | OAuth account-link tokens, which expire | EPHEMERAL |  |

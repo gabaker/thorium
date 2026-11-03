@@ -12,9 +12,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 use thorium::models::{
-    EntityListOpts, FileListOpts, ImageScaler, NodeHealth, NodeListParams, NodeUpdate,
-    RepoListOpts, Resources,
+    EntityListOpts, EntityMetadata, EntityRequest, Event, EventData, EventType, FileListOpts,
+    HuntCheckpoint, HuntCounters, HuntCreateRequest, HuntEngine, HuntSelector, HuntStatus,
+    ImageScaler, NodeHealth, NodeListParams, NodeUpdate, RepoListOpts, Resources,
 };
+use thorium::test_utilities::generators;
 
 /// Empties the target and initializes the system again, as a fresh install has it
 ///
@@ -661,4 +663,120 @@ async fn a_partial_backup_with_redis_leaves_every_census_rebuilt() {
     );
     let verified = verify_cluster(harness, &out);
     assert_eq!(verified.status.code(), Some(0), "{}", describe(&verified));
+}
+
+/// Returns the lane and sequence of every queued chunk event of one hunt
+///
+/// # Arguments
+///
+/// * `harness` - The harness naming the namespace
+/// * `hunt` - The hunt
+async fn queued_chunks(harness: &Harness, hunt: uuid::Uuid) -> Vec<(u32, u64)> {
+    // read the yara hunt chunk queue
+    let ns = &harness.conf.thorium.namespace;
+    let key = format!("{ns}:event-handler:queue:{}", EventType::YaraHuntChunk);
+    let pool = redis_pool(&harness.conf).await.unwrap();
+    let mut conn = pool.get().await.unwrap();
+    let members: Vec<String> = redis::cmd("ZRANGE")
+        .arg(&key)
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut *conn)
+        .await
+        .unwrap();
+    // keep this hunt's chunks
+    members
+        .iter()
+        .filter_map(
+            |member| match serde_json::from_str::<Event>(member).unwrap().data {
+                EventData::YaraHuntChunk(chunk) if chunk.hunt == hunt => {
+                    Some((chunk.lane, chunk.seq))
+                }
+                _ => None,
+            },
+        )
+        .collect()
+}
+
+/// A hunt running when the backup was taken comes back running with its lane checkpoints, but
+/// with no lane sequence key and no queued chunk event, so it stays stranded until it is
+/// cancelled; a chunk that does checkpoint reseeds its lane from the restored entity
+#[tokio::test]
+async fn a_running_hunt_comes_back_stranded_and_cancellable() {
+    // a hunt over one yara rule whose lane 0 checkpointed once
+    let harness = Harness::get().await;
+    let _guard = harness.restore_guard().await;
+    empty_target(harness).await;
+    let client = harness.client().await;
+    let group = common::names::Names::new().group("vesta");
+    common::seed::group(&client, &group).await;
+    let rule = client
+        .entities
+        .create(EntityRequest::new(
+            format!("{group}-rule"),
+            generators::gen_yara_meta(),
+            vec![group.clone()],
+        ))
+        .await
+        .unwrap()
+        .id;
+    let request = HuntCreateRequest {
+        name: format!("{group}-hunt"),
+        groups: vec![group.clone()],
+        engine: HuntEngine::Yara,
+        selector: HuntSelector::Rules(vec![rule]),
+        corpus: None,
+        description: None,
+    };
+    let hunt = client.entities.create_hunt(&request).await.unwrap();
+    let EntityMetadata::Hunt(meta) = &hunt.metadata else {
+        panic!("not a hunt: {:?}", hunt.metadata);
+    };
+    let lane_start = meta.lanes[0].start;
+    let checkpoint = |seq: u64, minutes: i64| HuntCheckpoint {
+        lane: 0,
+        seq,
+        current: lane_start - chrono::Duration::minutes(minutes),
+        cursor: None,
+        exhausted: false,
+        failed: None,
+        counters: HuntCounters::default(),
+    };
+    client
+        .entities
+        .checkpoint_hunt(hunt.id, &checkpoint(0, 5))
+        .await
+        .unwrap();
+    let hunt_prefix = format!("hunts:{}:", hunt.id);
+    assert_ne!(keys(harness, &hunt_prefix).await, Vec::<String>::new());
+    assert_ne!(queued_chunks(harness, hunt.id).await, Vec::new());
+    // back up everything, restore it into an emptied target
+    let out = backup(harness, "hunt", "all");
+    empty_target(harness).await;
+    let (restored, _) = restore(harness, &out);
+    assert_eq!(restored.status.code(), Some(0), "{}", describe(&restored));
+    // the hunt is running with its lane checkpoint, but nothing is queued to drive it
+    let client = harness.client().await;
+    let after = client.entities.get(hunt.id).await.unwrap();
+    let EntityMetadata::Hunt(meta) = &after.metadata else {
+        panic!("not a hunt: {:?}", after.metadata);
+    };
+    assert_eq!(meta.status, HuntStatus::Running);
+    assert_eq!(meta.lanes[0].seq, 1);
+    assert_eq!(keys(harness, &hunt_prefix).await, Vec::<String>::new());
+    assert_eq!(queued_chunks(harness, hunt.id).await, Vec::new());
+    // a chunk that checkpoints reseeds its lane's sequence from the entity
+    let resumed = client
+        .entities
+        .checkpoint_hunt(hunt.id, &checkpoint(1, 10))
+        .await
+        .unwrap();
+    assert!(resumed.emitted);
+    // cancelling frees the hunt, as for a hunt stranded at creation
+    client.entities.cancel_hunt(hunt.id).await.unwrap();
+    let cancelled = client.entities.get(hunt.id).await.unwrap();
+    let EntityMetadata::Hunt(meta) = &cancelled.metadata else {
+        panic!("not a hunt: {:?}", cancelled.metadata);
+    };
+    assert_eq!(meta.status, HuntStatus::Cancelled);
 }

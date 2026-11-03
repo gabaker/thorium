@@ -60,6 +60,10 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "entities:instance_lock:*",
         "held only while an entity instance is being written",
     ),
+    (
+        "hunts:*",
+        "only a hunt's creation and checkpoints write it, and the fixture holds no hunt",
+    ),
 ];
 
 /// Key templates that no code writes, so they need no registry entry, with the reason

@@ -371,6 +371,7 @@ const EXPECTED_CLASSES: &[(Store, &str, DataClass)] = &[
     (Store::Redis, "workload_ttc:*", DataClass::Runtime),
     (Store::Redis, "workloads:*", DataClass::Runtime),
     (Store::Redis, "entities:instance_lock:*", DataClass::Runtime),
+    (Store::Redis, "hunts:*", DataClass::Expiring),
     (Store::Redis, "oauth:context:*", DataClass::Expiring),
     (
         Store::Redis,

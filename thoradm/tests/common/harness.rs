@@ -54,9 +54,18 @@ pub const BUCKET_ROLES: &[&str] = &[
     "graphics",
     "ephemeral",
     "reaction_cache",
+    "yara_rulesets",
 ];
 
-/// Returns every bucket role a Thorium config has: each section of `thorium` with a `bucket`
+/// The config bucket fields whose role isn't the name of their section, as (section, field, role)
+const NAMED_BUCKET_FIELDS: &[(&str, &str, &str)] = &[("yara", "cache_bucket", "yara_rulesets")];
+
+/// Returns every bucket role a Thorium config has: each string field of a `thorium` section that
+/// is named `bucket` or ends in `_bucket`
+///
+/// A `bucket` field's role is its section's name and a `*_bucket` field's role is the one
+/// [`NAMED_BUCKET_FIELDS`] gives it, or `<section>.<field>` when it gives none, which no registry
+/// entry matches, so a new bucket field fails the coverage tests until it is listed.
 ///
 /// # Arguments
 ///
@@ -69,17 +78,32 @@ pub const BUCKET_ROLES: &[&str] = &[
 pub fn config_bucket_roles(conf: &Conf) -> Vec<String> {
     // walk the serialized config rather than a list, so a new bucket can't be missed
     let thorium = serde_json::to_value(&conf.thorium).expect("configs serialize");
-    let mut roles: Vec<String> = thorium.as_object().map_or_else(Vec::new, |sections| {
-        sections
-            .iter()
-            .filter(|(_, section)| {
-                section
-                    .get("bucket")
-                    .is_some_and(serde_json::Value::is_string)
-            })
-            .map(|(name, _)| name.clone())
-            .collect()
-    });
+    let mut roles = Vec::new();
+    for (section, value) in thorium.as_object().into_iter().flatten() {
+        // only a section's own string fields can name a bucket
+        let Some(fields) = value.as_object() else {
+            continue;
+        };
+        for (field, value) in fields {
+            // skip the fields that don't name a bucket
+            if !value.is_string() || (field != "bucket" && !field.ends_with("_bucket")) {
+                continue;
+            }
+            // name the role after the section, or after the listed name of the field
+            let role = if field == "bucket" {
+                section.clone()
+            } else {
+                NAMED_BUCKET_FIELDS
+                    .iter()
+                    .find(|(named, named_field, _)| named == section && named_field == field)
+                    .map_or_else(
+                        || format!("{section}.{field}"),
+                        |(_, _, role)| (*role).to_owned(),
+                    )
+            };
+            roles.push(role);
+        }
+    }
     roles.sort();
     roles
 }
@@ -120,6 +144,7 @@ pub fn bucket_for(conf: &Conf, role: &str) -> String {
         "graphics" => conf.thorium.graphics.bucket.clone(),
         "ephemeral" => conf.thorium.ephemeral.bucket.clone(),
         "reaction_cache" => conf.thorium.reaction_cache.bucket.clone(),
+        "yara_rulesets" => conf.thorium.yara.cache_bucket.clone(),
         other => panic!("unknown bucket role {other}"),
     }
 }
@@ -141,6 +166,7 @@ fn set_bucket(conf: &mut Conf, role: &str, bucket: String) {
         "graphics" => conf.thorium.graphics.bucket = bucket,
         "ephemeral" => conf.thorium.ephemeral.bucket = bucket,
         "reaction_cache" => conf.thorium.reaction_cache.bucket = bucket,
+        "yara_rulesets" => conf.thorium.yara.cache_bucket = bucket,
         other => panic!("unknown bucket role {other}"),
     }
 }

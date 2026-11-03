@@ -712,6 +712,14 @@ pub const CLASSES: &[ClassEntry] = &[
     ),
     excluded(
         Store::Redis,
+        "hunts:*",
+        DataClass::Expiring,
+        "hunt lane checkpoint sequences, reseeded from the hunt entity, and hunt persist locks, \
+         which expire",
+        None,
+    ),
+    excluded(
+        Store::Redis,
         "oauth:context:*",
         DataClass::Expiring,
         "OAuth login contexts, which expire",

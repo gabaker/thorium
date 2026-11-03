@@ -206,7 +206,8 @@ All of the routes below require admin credentials; the event-handler's service a
    `in_flight_backstop_secs` (3600 seconds). Both produce bounded duplicate processing: hit writes converge, but
    duplicate reactions are possible.
 6. **A hunt is stranded in `Created`.** If a hunt sits in `Created` with no queue activity, its first chunk events
-   failed to emit. Cancel it and recreate it — there is no kick or resume route.
+   failed to emit. Cancel it and recreate it — there is no kick or resume route. A restore strands every hunt that
+   was `Created` or `Running` when its backup was taken the same way, since a backup holds no queued chunk events.
 7. **Deleted hunts leave dangling references.** Deleting a hunt does not sweep the `HuntId` entity tags and
    `HuntHit` associations on its hits. This is a known gap; an association reaper is deferred.
 8. **Coverage questions.** `YaraScanSkipped=oversize:<CAP>` means a sample was deliberately skipped and why.
