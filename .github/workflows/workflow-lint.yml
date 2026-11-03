@@ -1,43 +1,51 @@
-# Audits this repo's GitHub Actions workflows for security problems and stale pins
+# Audits this repo's GitHub Actions workflows for security problems, stale pins,
+# and mistakes
 #
-# - zizmor runs from a container image pinned by sha256 digest, with a
-#   read-only repo mount, no capabilities, and a token that can only read
-#   repository contents. Its online audits (impostor-commit,
-#   known-vulnerable-actions, ref-version-mismatch, stale-action-refs) need
-#   that token to query GitHub.
+# - One job runs the three workflow lints with a token that can only read
+#   repository contents, and a second job uploads their SARIF to code scanning:
+#   - zizmor audits the workflows for security problems. It runs from a
+#     container image pinned by sha256 digest, with a read-only repo mount and
+#     no capabilities. Its online audits (impostor-commit,
+#     known-vulnerable-actions, ref-version-mismatch, stale-action-refs) use the
+#     token to query GitHub. Only high-severity findings fail the job.
+#   - The action pin check is an in-repo, standard-library-only Python script
+#     that reports any `uses:` not pinned to a SHA, and any SHA pin behind the
+#     action's latest release; unpinned references fail the job. Its
+#     `action-pins.json` artifact lists every pin with its latest release,
+#     counting only releases at least 7 days old, the soak period Dependabot's
+#     cooldown also waits out. Dependabot opens the matching update PRs.
+#   - actionlint checks workflow syntax, expressions and their types, action
+#     and reusable workflow inputs, and, with the ShellCheck and pyflakes its
+#     image carries, the `run:` scripts. It runs from an image pinned by sha256
+#     digest with no network, no token, a read-only repo mount, and no
+#     capabilities. Its own findings are errors and fail the job, since each is
+#     a workflow that misbehaves or fails when it runs; ShellCheck findings keep
+#     ShellCheck's severity (info and style as notes) and fail it only at error.
+# - Each lint step continues when it fails, so every tool reports, and the last
+#   step fails the job if any tool failed to run or met its fail level.
 # - SARIF upload happens in a separate job that runs no scanner code, so the
-#   `security-events: write` token is never exposed to the scanner container.
+#   `security-events: write` token is never exposed to the scanners. Each tool
+#   uploads under its own code scanning category: zizmor, action-pins, and
+#   actionlint.
 # - Every finding, at every severity, is also written to the job log, inline
-#   annotations, the job summary, and the `zizmor-report` artifact by
+#   annotations, the job summary, and a `<tool>-report` artifact by
 #   .github/scripts/lint_report.py, so reviewers see findings without opening
-#   code scanning. Only high-severity findings fail the job. Findings matching
-#   .github/lint-ignore.toml (read from the base branch on pull requests, and
-#   from the pushed commit on push runs) are left out everywhere, including
-#   code scanning.
-# - The action pin check is an in-repo, standard-library-only Python script
-#   that reports any `uses:` not pinned to a SHA, and any SHA pin behind the
-#   action's latest release, through the same reporter; unpinned references
-#   fail the job. Its `action-pins.json` artifact lists every pin with its
-#   latest release, counting only releases at least 7 days old, the soak
-#   period Dependabot's cooldown also waits out. Dependabot opens the matching
-#   update PRs.
-# - Pushes and pull requests run this only when they change something under
-#   .github/; the weekly schedule audits the unchanged workflows and pins too.
+#   code scanning. Findings matching .github/lint-ignore.toml (read from the
+#   base branch on pull requests, and from the pushed commit on push runs) are
+#   left out everywhere, including code scanning.
+# - ci.yml calls this workflow on every push and pull request, after its builds
+#   and image publish, whatever they concluded, and no build or publish job
+#   waits for it. It also runs weekly and on demand on its own, to surface newly
+#   disclosed action vulnerabilities and new releases for the unchanged
+#   workflows and pins.
 #
-# To bump zizmor, resolve the new tag's multi-arch index digest from ghcr.io
-# and update both the tag comment and the digest.
+# To bump zizmor or actionlint, resolve the new tag's multi-arch index digest
+# from its registry and update both the tag comment and the digest.
 name: Workflow Lint
 
 on:
-  # Dependabot branches are checked by their pull requests instead, so each
-  # update runs once
-  push:
-    branches: ['**', '!dependabot/**']
-    paths:
-      - '.github/**'
-  pull_request:
-    paths:
-      - '.github/**'
+  # called by ci.yml for pushes and pull requests
+  workflow_call:
   schedule:
     # weekly, to surface newly disclosed action vulnerabilities and new releases
     - cron: '17 7 * * 1'
@@ -45,26 +53,30 @@ on:
 
 permissions: {}
 
-# superseded runs are cancelled, except on main
+# superseded runs are cancelled, except on main. A called run's github.workflow
+# is the caller's name, so the suffix keeps this group apart from the caller's own
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-workflow-lint-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   # zizmor 1.31.1
   ZIZMOR_IMAGE: ghcr.io/zizmorcore/zizmor@sha256:42d409dbb851d4c5d35a058cf042b828bea1e3f2884378c526eb0974780e18d9
+  # actionlint 1.7.12, with ShellCheck 0.11.0 and pyflakes for `run:` scripts.
+  # actionlint checks workflow correctness (syntax, expressions, the needs
+  # graph, action and reusable workflow inputs, run: scripts), so a broken
+  # workflow is caught before GitHub refuses to run it; it complements zizmor
+  # (security) and the action pin check (pinned, current actions)
+  ACTIONLINT_IMAGE: docker.io/rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
 
 jobs:
-  zizmor:
-    name: zizmor
+  # lints the GitHub workflows with zizmor, the action pin check, and actionlint
+  lint:
+    name: Lint · workflows (zizmor, action pins, actionlint)
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions:
       contents: read
-    # whether zizmor ran, so the upload job is skipped instead of failing on a
-    # missing SARIF file when it did not
-    outputs:
-      ran: ${{ steps.zizmor.outputs.exit-code == '0' }}
     steps:
       # depth 2 includes a pull request's base commit, for the changed-file
       # breakdown and for reading the base branch's ignore file
@@ -74,47 +86,105 @@ jobs:
           persist-credentials: false
           fetch-depth: 2
 
-      - name: Pull zizmor image
-        run: docker pull "$ZIZMOR_IMAGE"
-
       # The token is passed by name (-e GH_TOKEN) so it never appears on the
       # docker command line. --no-config stops a pull request from adding a
       # zizmor config that disables audits; inline ignore comments still apply
       # because they are visible in review, as do merged entries in
-      # .github/lint-ignore.toml. The auditor persona reports every
-      # finding zizmor can produce, including the pedantic stale-action-refs
-      # audit and low-confidence findings; only high severity fails the job.
+      # .github/lint-ignore.toml. The auditor persona reports every finding
+      # zizmor can produce, including the pedantic stale-action-refs audit and
+      # low-confidence findings. In SARIF mode zizmor exits non-zero only on
+      # internal errors, so this step fails only when zizmor failed to run.
       - name: Run zizmor
         id: zizmor
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p "${RUNNER_TEMP}/zizmor"
-          set +e
+          docker pull "$ZIZMOR_IMAGE"
           docker run --rm --read-only --cap-drop ALL \
             --security-opt no-new-privileges --user "$(id -u):$(id -g)" \
             --tmpfs /tmp:rw,size=256m -e HOME=/tmp -e GH_TOKEN \
             -v "${GITHUB_WORKSPACE}:/workspace:ro" -w /workspace \
             "$ZIZMOR_IMAGE" --no-config --persona=auditor --format=sarif . \
             > "${RUNNER_TEMP}/zizmor/zizmor.sarif"
-          echo "exit-code=$?" >> "$GITHUB_OUTPUT"
 
-      # In SARIF mode zizmor exits non-zero only on internal errors, so findings
-      # are gated by reading the report: high-severity findings are emitted with
-      # SARIF level "error", and suppressed results are excluded.
+      # high-severity findings are emitted with SARIF level "error", and
+      # suppressed results are excluded
       - name: Report zizmor findings
-        env:
-          ZIZMOR_EXIT: ${{ steps.zizmor.outputs.exit-code }}
+        id: zizmor-report
+        if: steps.zizmor.outcome == 'success'
+        continue-on-error: true
         run: |
-          if [ "$ZIZMOR_EXIT" != "0" ]; then
-            echo "zizmor failed to run (exit code ${ZIZMOR_EXIT})"
-            exit 1
-          fi
           python3 .github/scripts/lint_report.py --tool zizmor --format sarif \
             --input "${RUNNER_TEMP}/zizmor/zizmor.sarif" \
             --sarif-output "${RUNNER_TEMP}/zizmor/zizmor-filtered.sarif" \
             --ignore-file .github/lint-ignore.toml \
             --output-dir "${RUNNER_TEMP}/zizmor" --fail-level error
+
+      # the token only raises the GitHub API rate limit for the release lookups
+      - name: Check action pins
+        id: action-pins
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/action-pins"
+          python3 .github/scripts/check_action_pins.py --min-age-days 7 \
+            --json "${RUNNER_TEMP}/action-pins/action-pins.json" \
+            --sarif "${RUNNER_TEMP}/action-pins/action-pins.sarif"
+
+      # outdated pins are warnings; only unpinned references fail
+      - name: Report action pin findings
+        id: action-pins-report
+        if: steps.action-pins.outcome == 'success'
+        continue-on-error: true
+        run: |
+          python3 .github/scripts/lint_report.py --tool action-pins --format sarif \
+            --input "${RUNNER_TEMP}/action-pins/action-pins.sarif" \
+            --sarif-output "${RUNNER_TEMP}/action-pins/action-pins-filtered.sarif" \
+            --ignore-file .github/lint-ignore.toml \
+            --output-dir "${RUNNER_TEMP}/action-pins" --fail-level error
+
+      # actionlint checks workflow correctness (syntax, expressions, the needs
+      # graph, action and reusable workflow inputs, run: scripts), so a broken
+      # workflow is caught before GitHub refuses to run it; zizmor covers
+      # security and the action pin check pinned, current actions.
+      # -config-file /dev/null stops a pull request from adding an actionlint
+      # config that ignores checks, as --no-config does for zizmor; ignores go in
+      # .github/lint-ignore.toml. actionlint runs ShellCheck with --norc, so a
+      # .shellcheckrc is not read either. It exits 1 when it finds problems, so
+      # only a higher exit code means it failed to run.
+      - name: Run actionlint
+        id: actionlint
+        continue-on-error: true
+        run: |
+          mkdir -p "${RUNNER_TEMP}/actionlint"
+          docker pull "$ACTIONLINT_IMAGE"
+          set +e
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --user "$(id -u):$(id -g)" \
+            -v "${GITHUB_WORKSPACE}:/workspace:ro" -w /workspace \
+            "$ACTIONLINT_IMAGE" -no-color -config-file /dev/null -format '{{json .}}' \
+            > "${RUNNER_TEMP}/actionlint/actionlint.json"
+          code=$?
+          if [ "$code" -gt 1 ]; then
+            echo "actionlint failed to run (exit code ${code})"
+            exit 1
+          fi
+
+      # actionlint's own findings are errors and fail; ShellCheck findings fail
+      # only at ShellCheck's error severity
+      - name: Report actionlint findings
+        id: actionlint-report
+        if: steps.actionlint.outcome == 'success'
+        continue-on-error: true
+        run: |
+          python3 .github/scripts/lint_report.py --tool actionlint --format actionlint \
+            --input "${RUNNER_TEMP}/actionlint/actionlint.json" \
+            --sarif-output "${RUNNER_TEMP}/actionlint/actionlint-filtered.sarif" \
+            --ignore-file .github/lint-ignore.toml \
+            --output-dir "${RUNNER_TEMP}/actionlint" --fail-level error
 
       - name: Store zizmor report
         if: ${{ !cancelled() }}
@@ -124,63 +194,6 @@ jobs:
           path: ${{ runner.temp }}/zizmor/
           retention-days: 7
 
-  upload-zizmor:
-    name: Upload zizmor results
-    needs: zizmor
-    # fork pull requests get a read-only token, so only upload for pushes,
-    # schedules, manual runs, and same-repo pull requests
-    if: ${{ !cancelled() && needs.zizmor.outputs.ran == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      security-events: write # upload SARIF results to code scanning
-    steps:
-      - name: Download zizmor SARIF
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: zizmor-report
-          path: ${{ runner.temp }}/zizmor
-
-      # the filtered SARIF leaves out findings ignored by .github/lint-ignore.toml
-      - name: Upload zizmor SARIF
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
-        with:
-          sarif_file: ${{ runner.temp }}/zizmor/zizmor-filtered.sarif
-          category: zizmor
-
-  action-pins:
-    name: Action pin freshness
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    steps:
-      # depth 2 includes a pull request's base commit, for the changed-file
-      # breakdown and for reading the base branch's ignore file
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          fetch-depth: 2
-
-      - name: Check action pins
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p "${RUNNER_TEMP}/action-pins"
-          python3 .github/scripts/check_action_pins.py --min-age-days 7 \
-            --json "${RUNNER_TEMP}/action-pins/action-pins.json" \
-            --sarif "${RUNNER_TEMP}/action-pins/action-pins.sarif"
-
-      # outdated pins are warnings; only unpinned references fail the job
-      - name: Report action pin findings
-        run: |
-          python3 .github/scripts/lint_report.py --tool action-pins --format sarif \
-            --input "${RUNNER_TEMP}/action-pins/action-pins.sarif" \
-            --ignore-file .github/lint-ignore.toml \
-            --output-dir "${RUNNER_TEMP}/action-pins" --fail-level error
-
       - name: Store action pin report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -188,3 +201,82 @@ jobs:
           name: action-pins-report
           path: ${{ runner.temp }}/action-pins/
           retention-days: 7
+
+      - name: Store actionlint report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: actionlint-report
+          path: ${{ runner.temp }}/actionlint/
+          retention-days: 7
+
+      # fails the job when any tool failed to run or met its fail level; a
+      # report step is skipped only when its tool's run already failed
+      - name: Set the lint result
+        if: ${{ !cancelled() }}
+        env:
+          OUTCOMES: >-
+            zizmor=${{ steps.zizmor.outcome }}
+            zizmor-report=${{ steps.zizmor-report.outcome }}
+            action-pins=${{ steps.action-pins.outcome }}
+            action-pins-report=${{ steps.action-pins-report.outcome }}
+            actionlint=${{ steps.actionlint.outcome }}
+            actionlint-report=${{ steps.actionlint-report.outcome }}
+        run: |
+          failed=0
+          for outcome in $OUTCOMES; do
+            if [ "${outcome#*=}" = "failure" ]; then
+              echo "::error title=Workflow lint::${outcome%=*} failed; see its step"
+              failed=1
+            fi
+          done
+          exit "$failed"
+
+  # uploads each lint's SARIF to code scanning in a job that runs no scanner
+  upload:
+    # a static name, since a skipped matrix job shows its name unexpanded;
+    # GitHub appends the tool to it when the job runs
+    name: Lint · upload workflow lint results
+    needs: lint
+    # Fork pull requests get a read-only token, so only upload for pushes,
+    # schedules, manual runs, and same-repo pull requests. Each tool uploads
+    # only when it wrote a filtered SARIF, so a tool that failed to run is not
+    # buried under a missing-file error.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        tool: [zizmor, action-pins, actionlint]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      security-events: write # upload SARIF results to code scanning
+    steps:
+      - name: Download SARIF
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ matrix.tool }}-report
+          path: ${{ runner.temp }}/report
+
+      - name: Check for filtered SARIF
+        id: sarif
+        if: steps.download.outcome == 'success'
+        env:
+          TOOL: ${{ matrix.tool }}
+        run: |
+          if [ -f "${RUNNER_TEMP}/report/${TOOL}-filtered.sarif" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No filtered SARIF for ${TOOL}; nothing to upload"
+          fi
+
+      # the filtered SARIF leaves out findings ignored by .github/lint-ignore.toml
+      - name: Upload SARIF
+        if: steps.sarif.outputs.found == 'true'
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: ${{ runner.temp }}/report/${{ matrix.tool }}-filtered.sarif
+          category: ${{ matrix.tool }}

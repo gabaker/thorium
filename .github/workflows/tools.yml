@@ -17,8 +17,9 @@ concurrency:
 permissions: {}
 
 jobs:
+  # lists the tool images to build from tools/toolbox.json
   generate-tool-builds:
-    name: Generate Tool Build Matrix
+    name: Build · tool image plan
     # tool images are pushed to their published tags, so they are only built from main
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
@@ -40,8 +41,9 @@ jobs:
           MATRIX=$(python3 tools/scripts/build-actions-matrix.py --registry-prefix "$REGISTRY_PREFIX" tools/toolbox.json)
           echo "matrix=$(echo "$MATRIX" | jq -c .)" >> "$GITHUB_OUTPUT"
 
+  # builds, tags, and pushes one tool image per matrix entry
   build-tools:
-    name: Build Thorium Tool Image - ${{ matrix.tool.name }}:${{ matrix.tool.version }}
+    name: Build · tool image ${{ matrix.tool.name }}:${{ matrix.tool.version }}
     needs: generate-tool-builds
     runs-on: ubuntu-24.04
     timeout-minutes: 120
