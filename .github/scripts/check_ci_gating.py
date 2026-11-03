@@ -59,11 +59,12 @@ the workflows under .github/workflows and fails when any of these rules is broke
   pinned, and each server-<arch> stage copies every server binary (`SERVER_BINARIES`) from that
   architecture's build; ci.yml's core image job needs that build, stages its artifact, and
   builds, checks (check_image_arch.sh), and saves each architecture's image
-* each of ci.yml's macOS builds (`MACOS_JOBS`) needs no other job, so it runs in parallel with
-  the other builds, builds only its own binary, once per macOS target in its own cargo run with
-  every variable of `MACOS_BUILD_ENV` set, and uploads one artifact per target; the core image
-  build needs it and downloads its artifacts, and the Dockerfile copies each of those binaries
-  into the image
+* ci.yml's macOS build (`MACOS_JOB`) is one job, so a run asks for one macOS runner; it needs
+  no other job, so it runs in parallel with the other builds, builds each binary of
+  `MACOS_BINARIES` once per macOS target, each binary and target in its own cargo run (one `-p`,
+  one `--target`) with every variable of `MACOS_BUILD_ENV` set, builds nothing else, and uploads
+  one artifact per binary and target; the core image build needs it and downloads its artifacts,
+  and the Dockerfile copies each of those binaries into the image
 * each of ci.yml's static Linux (musl) builds (`MUSL_JOBS`) is a plain job with a fixed name (no
   matrix) that needs no other job, builds every binary in `MUSL_BINARIES` for its target in one
   actions-rust-cross run through cross (`force-use-cross` where the runner could build the target
@@ -125,8 +126,7 @@ CATEGORIES = {
         "build-arm64-cross-binaries": "build",
         "build-arm64-glibc-binaries": "build",
         "build-windows-cross-binaries": "build",
-        "build-macos-thorctl": "build",
-        "build-macos-thoradm": "build",
+        "build-macos-binaries": "build",
         "build-core-container": "build",
         "publish-core-container": "build",
         "helm-package": "build",
@@ -246,10 +246,11 @@ SCAN_EXEMPTIONS = {
 }
 # a Trivy image or filesystem scan, run from the pinned image or a trivy binary
 TRIVY_SCAN = re.compile(r'(?:\$\{?TRIVY_IMAGE\}?"?|\btrivy)\s+(?:image|fs|filesystem|rootfs)\b')
-# ci.yml's jobs that build the macOS binaries, as job id -> the one binary it builds (each in its
-# own job, so thorctl compiles thorium-api without thoradm's server features), and the job that
-# builds the core image from them
-MACOS_JOBS = {"build-macos-thorctl": "thorctl", "build-macos-thoradm": "thoradm"}
+# ci.yml's one job that builds the macOS binaries, the binaries it builds (each in its own cargo
+# run, so thorctl compiles thorium-api without thoradm's server features), and the job that builds
+# the core image from them
+MACOS_JOB = "build-macos-binaries"
+MACOS_BINARIES = ["thorctl", "thoradm"]
 CORE_IMAGE_JOB = "build-core-container"
 # the macOS targets the core image serves each macOS binary for
 MACOS_TARGETS = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
@@ -691,7 +692,7 @@ def check_other_gates(checker, workflows):
 
 
 def check_macos_binaries(checker, workflows):
-    """Check each macOS build runs beside the other builds and its binaries reach the core image.
+    """Check the one macOS build runs beside the other builds and its binaries reach the core image.
 
     # Arguments
 
@@ -709,56 +710,70 @@ def check_macos_binaries(checker, workflows):
     dockerfile = checker.root / "Dockerfile"
     copies = dockerfile.read_text(encoding="utf-8") if dockerfile.is_file() else ""
     checker.expect(bool(copies), "no Dockerfile at the repository root")
-    for job_id, binary in MACOS_JOBS.items():
-        job = jobs.get(job_id)
-        checker.expect(job is not None, f"ci.yml: has no {job_id} job")
-        if job is None:
-            continue
-        # any need would hold the scarce macOS runner request back until that job finishes
+    # a second job on macOS would ask for another of the scarce macOS runners in the same run
+    others = [
+        job_id
+        for job_id, job in jobs.items()
+        if job_id != MACOS_JOB and "macos" in str((job or {}).get("runs-on", "")).lower()
+    ]
+    checker.expect(not others, f"ci.yml: {others} run on macOS; {MACOS_JOB} must be the only macOS job")
+    job = jobs.get(MACOS_JOB)
+    checker.expect(job is not None, f"ci.yml: has no {MACOS_JOB} job")
+    if job is None:
+        return
+    # any need would hold the scarce macOS runner request back until that job finishes
+    checker.expect(
+        not as_list(job.get("needs")),
+        f"ci.yml: {MACOS_JOB} needs {as_list(job.get('needs'))}; it must start with the other builds",
+    )
+    steps = job.get("steps") or []
+    build_steps = [step for step in steps if "cargo" in str(step.get("run", "")) and " build" in str(step.get("run", ""))]
+    # one cargo run per binary and target, so each binary resolves its own features and the runner
+    # compiles one target at a time
+    built = []
+    for step in build_steps:
+        build = " ".join(str(step.get("run", "")).replace("\\\n", " ").split())
+        runs = len(re.findall(r"\bcargo\b", build))
         checker.expect(
-            not as_list(job.get("needs")),
-            f"ci.yml: {job_id} needs {as_list(job.get('needs'))}; it must start with the other builds",
+            runs == 1,
+            f"ci.yml: {MACOS_JOB} ({step.get('name')}) runs cargo {runs} times; each binary and target needs its own step",
         )
-        steps = job.get("steps") or []
-        build_steps = [step for step in steps if "cargo" in str(step.get("run", "")) and " build" in str(step.get("run", ""))]
-        # one cargo run per target, so the runner compiles one target at a time
-        built = []
-        for step in build_steps:
-            build = " ".join(str(step.get("run", "")).replace("\\\n", " ").split())
-            packages = re.findall(r"(?:^|\s)-p (\S+)", build)
-            targets = re.findall(r"--target[ =](\S+)", build)
-            checker.expect(
-                packages == [binary],
-                f"ci.yml: {job_id} ({step.get('name')}) builds {packages}; it must build only {binary} (-p {binary})",
-            )
-            checker.expect(
-                len(targets) == 1,
-                f"ci.yml: {job_id} ({step.get('name')}) builds {len(targets)} targets in one cargo run; it needs one",
-            )
-            built += targets
-            build_env = {**(job.get("env") or {}), **(step.get("env") or {})}
-            for name, value in MACOS_BUILD_ENV.items():
-                checker.expect(
-                    str(build_env.get(name)) == value,
-                    f"ci.yml: {job_id}'s cargo build ({step.get('name')}) does not set {name}={value}",
-                )
+        packages = re.findall(r"(?:^|\s)(?:-p|--package)[ =](\S+)", build)
+        targets = re.findall(r"--target[ =](\S+)", build)
         checker.expect(
-            sorted(built) == sorted(MACOS_TARGETS),
-            f"ci.yml: {job_id} builds {sorted(built)}; it must build each of {MACOS_TARGETS} once",
+            len(packages) == 1 and packages[0] in MACOS_BINARIES,
+            f"ci.yml: {MACOS_JOB} ({step.get('name')}) builds {packages}; each cargo run must build one of {MACOS_BINARIES}",
         )
-        uploads = {
-            str((step.get("with") or {}).get("name")): str((step.get("with") or {}).get("path", ""))
-            for step in steps
-            if str(step.get("uses", "")).startswith("actions/upload-artifact@")
-        }
-        checker.expect(job_id in as_list(core.get("needs")), f"ci.yml: {CORE_IMAGE_JOB} does not need {job_id}")
+        checker.expect(
+            len(targets) == 1,
+            f"ci.yml: {MACOS_JOB} ({step.get('name')}) builds {len(targets)} targets in one cargo run; it needs one",
+        )
+        built += [(package, target) for package in packages for target in targets]
+        build_env = {**(job.get("env") or {}), **(step.get("env") or {})}
+        for name, value in MACOS_BUILD_ENV.items():
+            checker.expect(
+                str(build_env.get(name)) == value,
+                f"ci.yml: {MACOS_JOB}'s cargo build ({step.get('name')}) does not set {name}={value}",
+            )
+    expected = sorted((binary, target) for binary in MACOS_BINARIES for target in MACOS_TARGETS)
+    checker.expect(
+        sorted(built) == expected,
+        f"ci.yml: {MACOS_JOB} builds {sorted(built)}; it must build each of {MACOS_BINARIES} for each of {MACOS_TARGETS} once",
+    )
+    uploads = {
+        str((step.get("with") or {}).get("name")): str((step.get("with") or {}).get("path", ""))
+        for step in steps
+        if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+    }
+    checker.expect(MACOS_JOB in as_list(core.get("needs")), f"ci.yml: {CORE_IMAGE_JOB} does not need {MACOS_JOB}")
+    for binary in MACOS_BINARIES:
         for target in MACOS_TARGETS:
             artifact = f"{target}-{binary}"
             built_path = f"target/{target}/release/{binary}"
-            checker.expect(artifact in uploads, f"ci.yml: {job_id} uploads no {artifact} artifact")
+            checker.expect(artifact in uploads, f"ci.yml: {MACOS_JOB} uploads no {artifact} artifact")
             checker.expect(
                 built_path in uploads.get(artifact, "").split(),
-                f"ci.yml: {job_id}'s {artifact} artifact does not hold {built_path}",
+                f"ci.yml: {MACOS_JOB}'s {artifact} artifact does not hold {built_path}",
             )
             # a pattern download needs merge-multiple, or each artifact lands in its own directory
             # and the staging step's move into target/<triple>/release misses the binaries

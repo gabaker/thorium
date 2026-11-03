@@ -2,7 +2,7 @@
 #
 # - GitHub cancels a job that no hosted runner picks up within about 15
 #   minutes, annotated "The job was not acquired by Runner of type hosted even
-#   after multiple attempts"; the macOS jobs are the most exposed. GitHub
+#   after multiple attempts"; the macOS build is the most exposed. GitHub
 #   Actions has no job-level retry, so this workflow runs whenever a Thorium Build
 #   run completes. The jobs of the workflows ci.yml calls are part of its run,
 #   so they are covered too.
