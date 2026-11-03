@@ -37,7 +37,10 @@
 #   others) and attributes each finding to its lockfile. The image scans write
 #   a CycloneDX SBOM of each image they scan, and are uploaded to code scanning
 #   as `trivy-image-build` (a build's image) and `trivy-image-published` (the
-#   published images).
+#   published images). A build's arm64 image is scanned too, into its own
+#   report beside the amd64 one; only the amd64 scan goes to code scanning,
+#   since the arm64 image holds the same packages less the amd64 image's
+#   debugging utilities.
 #
 # To bump Trivy, resolve the new tag's multi-arch index digest from ghcr.io and
 # update both the tag comment and the digest here and in dockerfile-lint.yml
@@ -351,7 +354,7 @@ jobs:
           docker run --rm --read-only --cap-drop ALL \
             --security-opt no-new-privileges --user "$(id -u):$(id -g)" \
             --tmpfs /tmp:rw,size=512m -e HOME=/tmp -e TMPDIR=/cache/tmp -w /tmp \
-            -v "${RUNNER_TEMP}/image/thorium-image.tar:/in/thorium-image.tar:ro" \
+            -v "${RUNNER_TEMP}/image/thorium-image-amd64.tar:/in/thorium-image.tar:ro" \
             -v "${RUNNER_TEMP}/trivy-cache:/cache" \
             -v "${RUNNER_TEMP}/trivy-image:/out" \
             "$TRIVY_IMAGE" image --input /in/thorium-image.tar --scanners vuln --list-all-pkgs \
@@ -389,8 +392,40 @@ jobs:
             --ignore-file .github/lint-ignore.toml \
             --output-dir "${RUNNER_TEMP}/trivy-image" --fail-level none
 
+      # the arm64 image, with the database the amd64 scan downloaded, into its own report
+      # directory, which the code scanning upload never reads
+      - name: Scan Thorium arm64 Container Image
+        id: scan-arm64
+        continue-on-error: true
+        timeout-minutes: 15
+        run: |
+          mkdir -p "${RUNNER_TEMP}/trivy-image/arm64" "${RUNNER_TEMP}/trivy-cache/tmp"
+          docker run --rm --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --user "$(id -u):$(id -g)" \
+            --tmpfs /tmp:rw,size=512m -e HOME=/tmp -e TMPDIR=/cache/tmp -w /tmp \
+            -v "${RUNNER_TEMP}/image/thorium-image-arm64.tar:/in/thorium-image.tar:ro" \
+            -v "${RUNNER_TEMP}/trivy-cache:/cache" \
+            -v "${RUNNER_TEMP}/trivy-image/arm64:/out" \
+            "$TRIVY_IMAGE" image --input /in/thorium-image.tar --scanners vuln --list-all-pkgs \
+            --skip-version-check --timeout 10m --cache-dir /cache --format json --output /out/thorium.json
+
+      # ranks the arm64 image's findings the same way; vulnerabilities never fail the job
+      - name: Report Thorium arm64 Container Image Vulnerabilities
+        if: steps.scan-arm64.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 15
+        env:
+          IMAGE: ${{ inputs.core-image }}
+        run: |
+          python3 .github/scripts/vuln_report.py --input "${RUNNER_TEMP}/trivy-image/arm64/thorium.json" \
+            --image-name "${IMAGE} (arm64)" --dockerfile Dockerfile \
+            --sarif "${RUNNER_TEMP}/trivy-image/arm64/trivy-image.sarif" \
+            --json "${RUNNER_TEMP}/trivy-image/arm64/vulnerabilities.json" \
+            --markdown "${RUNNER_TEMP}/trivy-image/arm64/vulnerabilities.md"
+          cat "${RUNNER_TEMP}/trivy-image/arm64/vulnerabilities.md" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Store Thorium Container Image Scan
-        if: ${{ !cancelled() && steps.scan.outcome == 'success' }}
+        if: ${{ !cancelled() && (steps.scan.outcome == 'success' || steps.scan-arm64.outcome == 'success') }}
         continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

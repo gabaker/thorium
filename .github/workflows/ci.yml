@@ -9,10 +9,14 @@
 #   0. Check · changed paths: `git diff` against the pull request's base or the branch's previous
 #      push decides which lints and tests this run needs, and whether the image publishes (see
 #      its step for the rules).
-#   1. Builds, in parallel: the mdBook docs, the UI bundle, the Helm chart package, and the glibc,
-#      musl (x86_64 and arm64), Windows, and macOS binaries. The macOS thorctl and thoradm build in
+#   1. Builds, in parallel: the mdBook docs, the UI bundle, the Helm chart package, and the glibc
+#      (x86_64 and arm64), musl (x86_64 and arm64), Windows, and macOS binaries. The macOS thorctl and thoradm build in
 #      two jobs, so the run asks for two of the scarce macOS runners.
-#   2. Build · core container image: the image is built from the build artifacts. Once it is built,
+#   2. Build · core container image: the image is built from the build artifacts, once for
+#      linux/amd64 and once for linux/arm64 (the publish joins the two into one multi-arch
+#      image under the tag, each architecture also pushed under the tag plus `-amd64` or `-arm64`
+#      from release_refs.py). Every RUN step of the Dockerfile runs on the runner's own
+#      architecture, so the arm64 build needs no emulation. Once it is built,
 #      the security scans (security-scan.yml) start: the scan of this image and the repository
 #      scans, beside the publish rather than before it, so they never delay or block it.
 #   3. Publish, once the image is built and the charts packaged: the core image is published on
@@ -500,6 +504,66 @@ jobs:
             target/aarch64-unknown-linux-musl/release/thorium-operator
           if-no-files-found: error
 
+  # builds the Linux arm64 (aarch64 glibc) server binaries the arm64 core image runs. As with the
+  # musl builds, actions-rust-cross builds this target through cross, whose image carries the
+  # aarch64 glibc toolchain, so the build runs on the same x86_64 runners as the other builds
+  build-arm64-glibc-binaries:
+    name: Build · Linux arm64 server binaries (glibc)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # the same server binaries the glibc build makes for x86_64. gxhash needs AES and NEON;
+      # aarch64 enables NEON by default but needs AES named. cargo strips the binaries, since the
+      # action strips only binaries it builds without cross, and LZMA_API_STATIC makes
+      # liblzma-sys build its bundled liblzma, so the build needs no arm64 liblzma in the cross image
+      - name: Build binaries
+        uses: houseabsolute/actions-rust-cross@21b0f18dc621b25bfae556ff2791fca4173121e8 # v1.0.8
+        env:
+          RUSTFLAGS: "-C target-feature=+aes,+neon"
+          CARGO_PROFILE_RELEASE_STRIP: symbols
+          LZMA_API_STATIC: "1"
+          CROSS_BUILD_ENV_PASSTHROUGH: LZMA_API_STATIC
+        with:
+          command: build
+          target: aarch64-unknown-linux-gnu
+          toolchain: nightly
+          args: "--features vendored-openssl --release -p thorium-api -p thorium-operator -p thoradm -p thorium-scaler -p thorium-search-streamer -p thorium-event-handler"
+          strip: true
+          # these binaries are published, so never restore caches another workflow run could have written
+          use-rust-cache: false
+          cache-cross-binary: false
+      # as for the musl builds, a server binary cargo did not produce fails here rather than as a
+      # COPY error in the image build
+      - name: Check aarch64-unknown-linux-gnu binaries exist
+        env:
+          TARGET: aarch64-unknown-linux-gnu
+        run: |
+          missing=0
+          for bin in thorium-api thorium-operator thoradm thorium-scaler thorium-search-streamer thorium-event-handler; do
+            if [ ! -f "target/${TARGET}/release/${bin}" ]; then
+              echo "::error::target/${TARGET}/release/${bin} was not built"
+              missing=1
+            fi
+          done
+          exit "$missing"
+      - name: Upload aarch64-unknown-linux-gnu binary artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: aarch64-unknown-linux-gnu-binaries
+          path: |
+            target/aarch64-unknown-linux-gnu/release/thorium-api
+            target/aarch64-unknown-linux-gnu/release/thorium-operator
+            target/aarch64-unknown-linux-gnu/release/thoradm
+            target/aarch64-unknown-linux-gnu/release/thorium-scaler
+            target/aarch64-unknown-linux-gnu/release/thorium-search-streamer
+            target/aarch64-unknown-linux-gnu/release/thorium-event-handler
+          if-no-files-found: error
+
   # The three Windows binaries build in one job. actions-rust-cross builds this target through
   # cross, whose image carries the MinGW toolchain, so the runner installs no packages
   build-windows-cross-binaries:
@@ -723,6 +787,7 @@ jobs:
       - build-glibc-binaries
       - build-cross-binaries
       - build-arm64-cross-binaries
+      - build-arm64-glibc-binaries
       - build-macos-thorctl
       - build-macos-thoradm
       - build-windows-cross-binaries
@@ -732,6 +797,8 @@ jobs:
       contents: read
     outputs:
       image: ${{ steps.image.outputs.image }}
+      image-amd64: ${{ steps.image.outputs.image-amd64 }}
+      image-arm64: ${{ steps.image.outputs.image-arm64 }}
       latest-image: ${{ steps.image.outputs.latest-image }}
       latest-source: ${{ steps.image.outputs.latest-source }}
       publish: ${{ steps.image.outputs.publish }}
@@ -773,6 +840,11 @@ jobs:
         with:
           name: aarch64-unknown-linux-musl-binaries
           path: aarch64
+      - name: Download Thorium Linux arm64 glibc Binary Artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: aarch64-unknown-linux-gnu-binaries
+          path: aarch64-gnu
       - name: Download Thorium Windows Agent Artifact
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -813,11 +885,13 @@ jobs:
           mkdir -p target/x86_64-apple-darwin/release
           mkdir -p target/aarch64-apple-darwin/release
           mkdir -p target/aarch64-unknown-linux-musl/release
+          mkdir -p target/aarch64-unknown-linux-gnu/release
           mv user_docs/* api/docs/book
           mv dev_docs/* target/doc/.
           mv glibc/* target/release/.
           mv musl/* target/x86_64-unknown-linux-musl/release/.
           mv aarch64/* target/aarch64-unknown-linux-musl/release/.
+          mv aarch64-gnu/* target/aarch64-unknown-linux-gnu/release/.
           mv windows/agent/thorium-agent.exe target/x86_64-pc-windows-gnu/release/
           mv windows/thorctl/thorctl.exe target/x86_64-pc-windows-gnu/release/
           mv windows/reactor/thorium-reactor.exe target/x86_64-pc-windows-gnu/release/
@@ -831,20 +905,37 @@ jobs:
           IS_FORK: ${{ github.event.repository.fork }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: python3 .github/scripts/release_refs.py image
-      - name: Build Thorium Container Image
+      # one single-platform image per architecture, under the tag plus the architecture; the
+      # publish joins them under the tag itself
+      - name: Build Thorium Container Images
         env:
-          IMAGE: ${{ steps.image.outputs.image }}
-        run: docker build --file ./Dockerfile --tag "$IMAGE" --label "runnumber=${GITHUB_RUN_ID}" .
-      # the image is saved for security-scan.yml's image scan, and handed to the publish job so
+          IMAGE_AMD64: ${{ steps.image.outputs.image-amd64 }}
+          IMAGE_ARM64: ${{ steps.image.outputs.image-arm64 }}
+        run: |
+          docker build --platform linux/amd64 --file ./Dockerfile --tag "$IMAGE_AMD64" --label "runnumber=${GITHUB_RUN_ID}" .
+          docker build --platform linux/arm64 --file ./Dockerfile --tag "$IMAGE_ARM64" --label "runnumber=${GITHUB_RUN_ID}" .
+      # each image's platform, and the architecture of the binaries it runs, match its tag, so a
+      # misplaced artifact never publishes as the other architecture
+      - name: Check Thorium Container Image Architectures
+        env:
+          IMAGE_AMD64: ${{ steps.image.outputs.image-amd64 }}
+          IMAGE_ARM64: ${{ steps.image.outputs.image-arm64 }}
+        run: |
+          sh .github/scripts/check_image_arch.sh "$IMAGE_AMD64" amd64
+          sh .github/scripts/check_image_arch.sh "$IMAGE_ARM64" arm64
+      # the images are saved for security-scan.yml's image scan, and handed to the publish job so
       # the registry token never shares a job with the build
-      - name: Save Thorium Container Image
+      - name: Save Thorium Container Images
         id: save
-        # a build that is not published only needs the tar for the scan, so failing to save it,
+        # a build that is not published only needs the tars for the scan, so failing to save them,
         # such as running out of disk, does not fail the build
         continue-on-error: ${{ steps.image.outputs.publish != 'true' }}
         env:
-          IMAGE: ${{ steps.image.outputs.image }}
-        run: docker save --output "${RUNNER_TEMP}/thorium-image.tar" "$IMAGE"
+          IMAGE_AMD64: ${{ steps.image.outputs.image-amd64 }}
+          IMAGE_ARM64: ${{ steps.image.outputs.image-arm64 }}
+        run: |
+          docker save --output "${RUNNER_TEMP}/thorium-image-amd64.tar" "$IMAGE_AMD64"
+          docker save --output "${RUNNER_TEMP}/thorium-image-arm64.tar" "$IMAGE_ARM64"
       # handed to the publish job and to security-scan.yml's image scan, which runs beside the
       # publish, so the scan never delays or blocks publishing
       - name: Upload Thorium Container Image
@@ -855,7 +946,9 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: thorium-core-image
-          path: ${{ runner.temp }}/thorium-image.tar
+          path: |
+            ${{ runner.temp }}/thorium-image-amd64.tar
+            ${{ runner.temp }}/thorium-image-arm64.tar
           retention-days: 1
 
   # pushes the core container image when release_refs.py says this ref publishes and the changes
@@ -878,17 +971,31 @@ jobs:
         with:
           name: thorium-core-image
           path: ${{ runner.temp }}/image
-      - name: Load Thorium Container Image
-        run: docker load --input "${RUNNER_TEMP}/image/thorium-image.tar"
+      - name: Load Thorium Container Images
+        run: |
+          docker load --input "${RUNNER_TEMP}/image/thorium-image-amd64.tar"
+          docker load --input "${RUNNER_TEMP}/image/thorium-image-arm64.tar"
       - name: Login to Container Registry
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-      - name: Push Thorium Container Image
+      - name: Push Thorium amd64 Container Image
+        env:
+          IMAGE_AMD64: ${{ needs.build-core-container.outputs.image-amd64 }}
+        run: docker push "$IMAGE_AMD64"
+      - name: Push Thorium arm64 Container Image
+        env:
+          IMAGE_ARM64: ${{ needs.build-core-container.outputs.image-arm64 }}
+        run: docker push "$IMAGE_ARM64"
+      # the tag itself becomes one image index over both architectures' images, so a pull picks
+      # the puller's architecture; the tag is only written once both architectures are pushed
+      - name: Join the Thorium Container Images Under the Tag
         env:
           IMAGE: ${{ needs.build-core-container.outputs.image }}
-        run: docker push "$IMAGE"
-      # copies the release's manifest in the registry, so the release image is never rebuilt.
+          IMAGE_AMD64: ${{ needs.build-core-container.outputs.image-amd64 }}
+          IMAGE_ARM64: ${{ needs.build-core-container.outputs.image-arm64 }}
+        run: docker buildx imagetools create --tag "$IMAGE" "$IMAGE_AMD64" "$IMAGE_ARM64"
+      # copies the release's image index in the registry, so the release image is never rebuilt.
       # release_refs.py sets latest-source on default-branch runs only, and the ref type check
       # keeps a release tag's run from ever moving latest
       - name: Point latest at the Highest Release

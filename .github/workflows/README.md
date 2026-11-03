@@ -18,18 +18,25 @@ Each workflow file's header comment holds the details; this page is the map.
 2. **Builds**, in parallel: the mdBook docs, the UI bundle, **Build · Helm charts** (the chart
    package), and the Linux, Windows, and macOS binaries. **Build · Linux binaries (musl)** and
    **Build · Linux arm64 binaries (musl)** build the static x86_64 and arm64 binaries the image
-   serves, both through cross. **Build · macOS thorctl** and **Build · macOS thoradm** each build
+   serves, both through cross, and **Build · Linux arm64 server binaries (glibc)** builds the
+   server binaries the arm64 image runs, also through cross. **Build · macOS thorctl** and **Build · macOS thoradm** each build
    one binary for both macOS targets, one target after the other, so a run asks for two of the
    scarce macOS runners and thorctl builds thorium-api with its client features only.
-3. **Build · core container image** from the build artifacts. Once it is built, the **Security
-   scans** (`security-scan.yml`) start: the scan of this image and the repository scans for
+3. **Build · core container image** from the build artifacts, once for linux/amd64 and once for
+   linux/arm64, each checked by `.github/scripts/check_image_arch.sh` (the image's platform and
+   its binaries' ELF architecture). Every Dockerfile RUN step runs on the runner's architecture,
+   and the arm64 image's own stages only copy files, so its build needs no emulation; only the
+   amd64 image adds the `curl`, `jq`, and `lsof` debugging utilities. Once it is built, the
+   **Security scans** (`security-scan.yml`) start: the scan of both images and the repository scans for
    secrets, Helm and Ansible config, and dependencies. They run beside the publish, and nothing
    waits for them.
 4. **Publish · core container image**, once the image is built and the charts packaged, on the
    default branch, release tags, and fork branches (never on pull requests). A branch push
    publishes the image only when a path it is built from changed (the UI, the docs, the
    Dockerfile, Rust or any unlisted path, or this workflow and its scripts), or when there is no
-   previous commit to compare. **Publish · Helm charts** follows the image the charts deploy.
+   previous commit to compare. It pushes each architecture's image under the tag plus `-amd64` or
+   `-arm64`, then joins the two under the tag itself with `docker buildx imagetools create`, so
+   the tag is one multi-arch image. **Publish · Helm charts** follows the image the charts deploy.
    A release tag, `1.2.3` or `v1.2.3`, publishes the image as `<registry>/thorium:<tag>` only, the
    tag as pushed, and the charts with the tag less a leading `v` as their version, deploying that
    image. A tag that is not SemVer builds and is scanned but publishes nothing; the build job
@@ -78,12 +85,14 @@ tool images from `main` only and checks the toolbox on pull requests that change
 and tests do, checks every scan sits in `security-scan.yml` and no publish waits for a scan or
 check, and runs the change detection step against scratch git repositories. It also checks the
 workflow lint job and the code scanning uploads below, that the macOS and static Linux builds'
-binaries reach the core image, and that every step compiling Rust builds each target with the
+binaries reach the core image, that each architecture's image builds from its own server
+binaries without running steps on a foreign architecture and is pushed, then joined under the
+tag, and that every step compiling Rust builds each target with the
 target features gxhash needs on its architecture: `+aes,+sse2` on every x86_64 target (macOS
 included) and `+aes,+neon` on aarch64 Linux, with AES and no SSE2 on aarch64 macOS. A target or
 flags set by an expression fail the check, aarch64 never takes a workflow-wide `RUSTFLAGS`, the
-Linux musl and macOS builds set `LZMA_API_STATIC=1`, and `ci.yml` must build every target the
-check lists (Linux glibc, musl and arm64 musl, Windows, both macOS targets).
+Linux musl, arm64 glibc, and macOS builds set `LZMA_API_STATIC=1`, and `ci.yml` must build every
+target the check lists (Linux glibc, arm64 glibc, musl and arm64 musl, Windows, both macOS targets).
 
 ## Code scanning
 

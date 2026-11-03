@@ -24,6 +24,10 @@ Two subcommands write `key=value` lines to `$GITHUB_OUTPUT` (and to stdout for t
   - `image`: `ghcr.io/<owner>/<repo>/infrastructure/thorium:<tag>`, where the tag is the release
     tag as pushed (a leading `v` kept), `pr-<number>`, or the branch or other tag name made into
     a valid Docker tag
+  - `image-amd64` and `image-arm64`: the same repository's tag for each architecture's
+    single-platform image, which the publish pushes before joining them under `image`: the tag
+    plus `-amd64` or `-arm64`, the tag shortened first when the two would pass Docker's 128
+    characters
   - `latest-image`: the same repository's `latest` tag
   - `latest-source`: the highest `X.Y.Z` or `vX.Y.Z` release reachable from the default branch,
     set on default-branch runs only, otherwise empty: a release tag publishes its image under the
@@ -71,6 +75,8 @@ CHART_VERSION_RE = re.compile(r"^version:\s*[\"']?([^\"'\s#]+)", re.MULTILINE)
 MAX_IMAGE_TAG = 128
 # the number of sha256 hex digits appended to a branch name that had to be changed
 NAME_HASH_LENGTH = 8
+# the architectures the Thorium image is built for, as Docker names them (`--platform linux/<arch>`)
+ARCHITECTURES = ("amd64", "arm64")
 # the longest branch identifier kept in a chart prerelease version, so the version stays well under
 # the 128 character OCI tag limit
 MAX_CHART_BRANCH = 64
@@ -271,6 +277,22 @@ def image_tag(run):
     return branch_image_tag(run.ref_name)
 
 
+def arch_image_tag(tag, arch):
+    """Return the tag one architecture's single-platform image is pushed under.
+
+    The tag is shortened before the architecture is added so the result fits Docker's limit; the
+    image index under the tag itself is what users pull, so the shortened name only has to tell
+    the run's two architecture images apart.
+
+    # Arguments
+
+    * `tag` - The tag the run's multi-arch image is published under
+    * `arch` - The architecture, one of ARCHITECTURES
+    """
+    # keep room for the separator and the architecture
+    return f"{tag[: MAX_IMAGE_TAG - len(arch) - 1]}-{arch}"
+
+
 def final_release_version(tag):
     """Return the final release version a tag names (`X.Y.Z` or `vX.Y.Z`), or None.
 
@@ -398,10 +420,13 @@ def image_outputs(run):
 
     * `run` - The workflow run
     """
-    # build the image reference and the latest pointer from one repository
+    # build the image reference, its architecture images, and the latest pointer from one repository
     repository = image_repository(run)
+    tag = image_tag(run)
+    arch_images = {f"image-{arch}": f"{repository}:{arch_image_tag(tag, arch)}" for arch in ARCHITECTURES}
     return {
-        "image": f"{repository}:{image_tag(run)}",
+        "image": f"{repository}:{tag}",
+        **arch_images,
         "latest-image": f"{repository}:latest",
         "latest-source": latest_source(run, repository),
         "publish": str(should_publish(run)).lower(),
