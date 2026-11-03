@@ -48,9 +48,17 @@ the workflows under .github/workflows and fails when any of these rules is broke
   the tag as pushed, and the chart version `<tag>` less a leading `v`, publishes it, and sets no
   `latest-source`, which only default-branch runs set (and never a branch's tag); a tag that is
   not SemVer (`NON_RELEASE_TAGS`) publishes neither image nor charts, is never built as a
-  release, `latest`, or `main`, and gets a reason to log; in ci.yml the image publish pushes only
-  the build job's `image` output, the step moving `latest` runs on branch runs only, and the
-  chart package passes the chart version and image tag release_refs.py picks
+  release, `latest`, or `main`, and gets a reason to log; in ci.yml the image publish writes only
+  the build job's `image` output (and its architecture images), the step moving `latest` runs on branch runs only, and the
+  chart package passes the chart version and image tag release_refs.py picks. Each release tag's
+  architecture images (`IMAGE_ARCHES`) push as `<tag>-<arch>`; the publish pushes only the build
+  job's image-<arch> outputs and, once both are pushed, joins them under its `image` output
+* the core image builds for every architecture of `IMAGE_ARCHES` without emulation: in the
+  Dockerfile only build-platform stages and the native final stages (`NATIVE_IMAGE_ARCHES`) run
+  steps, TARGETARCH picks the server and final stages, each architecture's crane checksum is
+  pinned, and each server-<arch> stage copies every server binary (`SERVER_BINARIES`) from that
+  architecture's build; ci.yml's core image job needs that build, stages its artifact, and
+  builds, checks (check_image_arch.sh), and saves each architecture's image
 * each of ci.yml's macOS builds (`MACOS_JOBS`) needs no other job, so it runs in parallel with
   the other builds, builds only its own binary, once per macOS target in its own cargo run with
   every variable of `MACOS_BUILD_ENV` set, and uploads one artifact per target; the core image
@@ -115,6 +123,7 @@ CATEGORIES = {
         "build-glibc-binaries": "build",
         "build-cross-binaries": "build",
         "build-arm64-cross-binaries": "build",
+        "build-arm64-glibc-binaries": "build",
         "build-windows-cross-binaries": "build",
         "build-macos-thorctl": "build",
         "build-macos-thoradm": "build",
@@ -288,18 +297,46 @@ RUSTFLAGS_BY_ARCH = {
 # the target features a target enables by default, which its flags need not name
 DEFAULT_TARGET_FEATURES = {"aarch64-apple-darwin": {"aes", "neon"}}
 # the targets ci.yml's release builds must each build in some step, so every architecture's flags
-# are checked: the Linux glibc and musl, Linux arm64 musl, Windows, and both macOS targets
+# are checked: the Linux glibc and musl, Linux arm64 glibc and musl, Windows, and both macOS targets
 RUSTFLAGS_TARGETS = [
     "x86_64-unknown-linux-gnu",
     "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-gnu",
     "aarch64-unknown-linux-musl",
     "x86_64-pc-windows-gnu",
     "x86_64-apple-darwin",
     "aarch64-apple-darwin",
 ]
 # the targets whose builds link liblzma statically (LZMA_API_STATIC=1): the binaries the image
-# serves for Linux musl and macOS, whose hosts may have no liblzma the build found
-STATIC_LZMA_TARGETS = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl", "aarch64-apple-darwin", "x86_64-apple-darwin"]
+# serves for Linux musl and macOS, whose hosts may have no liblzma the build found, and the arm64
+# server binaries, whose cross image has no arm64 liblzma
+STATIC_LZMA_TARGETS = [
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+]
+# the architectures the core image is built for, as release_refs.py's image-<arch> outputs, the
+# Dockerfile's server-<arch> and final-<arch> stages, and `docker build --platform linux/<arch>`
+# name them, with the directory the Dockerfile copies the arch's server binaries from, the job
+# that builds them, and the artifact it uploads them in
+IMAGE_ARCHES = {
+    "amd64": ("target/release", "build-glibc-binaries", "thorium-glibc-binaries"),
+    "arm64": ("target/aarch64-unknown-linux-gnu/release", "build-arm64-glibc-binaries", "aarch64-unknown-linux-gnu-binaries"),
+}
+# the server binaries the core image runs, which each architecture's server stage copies
+SERVER_BINARIES = [
+    "thorium-api",
+    "thorium-operator",
+    "thoradm",
+    "thorium-scaler",
+    "thorium-search-streamer",
+    "thorium-event-handler",
+]
+# the architectures whose final image stage may run steps: the build runners are x86_64, so any
+# other architecture's RUN would need emulation
+NATIVE_IMAGE_ARCHES = {"amd64"}
 # a shell command that compiles the workspace, and so builds gxhash
 RUST_COMPILE_RE = re.compile(r"\b(?:cargo(?:\s+\+\S+)?\s+(?:build|check|clippy|test|run|doc|nextest)|maturin\s+(?:build|develop))\b")
 # the release tags check_tag_publish runs release_refs.py for, with the chart version each must
@@ -822,6 +859,104 @@ def check_musl_binaries(checker, workflows):
             )
 
 
+def dockerfile_stages(text):
+    """Return a Dockerfile's stages as (FROM flags and image, alias, instruction keywords) tuples.
+
+    # Arguments
+
+    * `text` - The Dockerfile's contents
+    """
+    stages = []
+    # join continued lines, then read one instruction per line, skipping comments
+    for line in re.sub(r"\\\n", " ", text).splitlines():
+        words = line.split()
+        if not words or words[0].startswith("#"):
+            continue
+        keyword = words[0].upper()
+        if keyword == "FROM":
+            alias = words[-1] if len(words) >= 3 and words[-2].upper() == "AS" else None
+            stages.append((" ".join(words[1:-2] if alias else words[1:]), alias, []))
+        elif stages:
+            stages[-1][2].append(keyword)
+    return stages
+
+
+def check_multiarch_image(checker, workflows):
+    """Check the core image builds for every architecture of IMAGE_ARCHES without emulation, from
+    that architecture's server binaries, and is checked before it is saved.
+
+    In the Dockerfile, only stages on the build platform (`--platform=$BUILDPLATFORM`) and the
+    final stage of a native architecture (`NATIVE_IMAGE_ARCHES`) run steps; the server and final
+    stages are picked by TARGETARCH; each architecture's crane checksum is pinned; and each
+    server-<arch> stage copies every server binary from the architecture's directory. In ci.yml,
+    the job building those binaries uploads them, and the core image job needs it, stages the
+    artifact in that directory, builds and checks each architecture's image under its
+    image-<arch> output, and saves each.
+
+    # Arguments
+
+    * `checker` - The checker to record failures on
+    * `workflows` - The parsed workflows by file name
+    """
+    dockerfile = checker.root / "Dockerfile"
+    text = dockerfile.read_text(encoding="utf-8") if dockerfile.is_file() else ""
+    stages = dockerfile_stages(text)
+    for image, alias, keywords in stages:
+        native = alias in {f"final-{arch}" for arch in NATIVE_IMAGE_ARCHES}
+        checker.expect(
+            "RUN" not in keywords or "--platform=$BUILDPLATFORM" in image or native,
+            f"Dockerfile: stage {alias or image} runs steps on the target platform, which needs emulation for a foreign architecture",
+        )
+    targets = {image: alias for image, alias, _ in stages}
+    checker.expect("server-${TARGETARCH}" in targets, "Dockerfile: no stage is FROM server-${TARGETARCH}")
+    checker.expect(bool(stages) and stages[-1][0] == "final-${TARGETARCH}", "Dockerfile: the last stage is not FROM final-${TARGETARCH}")
+    aliases = {alias for _, alias, _ in stages}
+    jobs = (workflows.get("ci.yml") or {}).get("jobs") or {}
+    core = jobs.get(CORE_IMAGE_JOB) or {}
+    core_steps = core.get("steps") or []
+    downloads = {
+        str((step.get("with") or {}).get("name")): str((step.get("with") or {}).get("path", ""))
+        for step in core_steps
+        if str(step.get("uses", "")).startswith("actions/download-artifact@")
+    }
+    core_runs = [(step.get("env") or {}, str(step.get("run", ""))) for step in core_steps]
+    all_runs = "\n".join(run for _, run in core_runs)
+    for arch, (directory, job_id, artifact) in IMAGE_ARCHES.items():
+        for stage in (f"server-{arch}", f"final-{arch}"):
+            checker.expect(stage in aliases, f"Dockerfile: has no {stage} stage")
+        checker.expect(
+            re.search(rf"^ARG CRANE_SHA256_{arch.upper()}=[0-9a-f]{{64}}$", text, re.M) is not None,
+            f"Dockerfile: CRANE_SHA256_{arch.upper()} is not pinned to a sha256",
+        )
+        for binary in SERVER_BINARIES:
+            checker.expect(
+                re.search(rf"^COPY \./{re.escape(directory)}/{re.escape(binary)} /{re.escape(binary)}$", text, re.M) is not None,
+                f"Dockerfile: server-{arch} does not copy {directory}/{binary}",
+            )
+        job = jobs.get(job_id) or {}
+        uploads = "\n".join(
+            str((step.get("with") or {}).get("name"))
+            for step in job.get("steps") or []
+            if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+        )
+        checker.expect(artifact in uploads.split(), f"ci.yml: {job_id} uploads no {artifact} artifact")
+        checker.expect(job_id in as_list(core.get("needs")), f"ci.yml: {CORE_IMAGE_JOB} does not need {job_id}")
+        checker.expect(
+            re.search(rf"^\s*mv {re.escape(downloads.get(artifact, '-'))}/\* {re.escape(directory)}/\.?$", all_runs, re.M) is not None,
+            f"ci.yml: {CORE_IMAGE_JOB} does not move {artifact} into {directory}",
+        )
+        variable = f"IMAGE_{arch.upper()}"
+        output = f"${{{{ steps.image.outputs.image-{arch} }}}}"
+        built = [run for env, run in core_runs if env.get(variable) == output and re.search(rf"docker build --platform linux/{arch} .*--tag \"\${variable}\"", run)]
+        checker.expect(bool(built), f"ci.yml: {CORE_IMAGE_JOB} does not build linux/{arch} under its image-{arch} output")
+        checked = [run for env, run in core_runs if env.get(variable) == output and f'check_image_arch.sh "${variable}" {arch}' in run]
+        checker.expect(bool(checked), f"ci.yml: {CORE_IMAGE_JOB} does not check the {arch} image's architecture with check_image_arch.sh")
+        checker.expect(
+            f'thorium-image-{arch}.tar" "${variable}"' in all_runs,
+            f"ci.yml: {CORE_IMAGE_JOB} does not save the {arch} image as thorium-image-{arch}.tar",
+        )
+
+
 def runner_target(runs_on):
     """Return the Rust target of a GitHub-hosted runner, which a build without --target builds for.
 
@@ -1116,6 +1251,11 @@ def check_tag_publish(checker, workflows):
                         checker.expect(False, f"release_refs.py: tag {tag} in {where} is refused: {error}")
                         continue
                     checker.expect(image["image"] == f"{repository}:{tag}", f"release_refs.py: tag {tag} in {where} publishes {image['image']}, not {repository}:{tag}")
+                    for arch in IMAGE_ARCHES:
+                        checker.expect(
+                            image.get(f"image-{arch}") == f"{repository}:{tag}-{arch}",
+                            f"release_refs.py: tag {tag} in {where} pushes its {arch} image as {image.get(f'image-{arch}')}, not {repository}:{tag}-{arch}",
+                        )
                     checker.expect(image["publish"] == "true", f"release_refs.py: tag {tag} in {where} does not publish its image")
                     checker.expect(image["latest-source"] == "", f"release_refs.py: tag {tag} in {where} moves latest to {image['latest-source']}")
                     checker.expect(charts["version"] == chart_version, f"release_refs.py: tag {tag} in {where} packages the charts as {charts['version']}, not {chart_version}")
@@ -1154,15 +1294,33 @@ def check_tag_publish(checker, workflows):
         checker.expect(pattern in tag_filters, f"ci.yml: push does not run on release tags matching '{pattern}'")
     jobs = ci.get("jobs") or {}
     steps = (jobs.get(IMAGE_PUBLISH_JOB) or {}).get("steps") or []
+    # each architecture's image is pushed under its own output, and only the build job's image
+    # output is written as their index
+    arch_env = {f"IMAGE_{arch.upper()}": f"${{{{ needs.build-core-container.outputs.image-{arch} }}}}" for arch in IMAGE_ARCHES}
     pushes = [step for step in steps if "docker push" in str(step.get("run", ""))]
-    checker.expect(bool(pushes), f"ci.yml: {IMAGE_PUBLISH_JOB} has no docker push step")
+    pushed = set()
     for step in pushes:
         env = step.get("env") or {}
+        run = str(step.get("run", "")).strip()
+        arch = next((arch for arch in IMAGE_ARCHES if env == {f"IMAGE_{arch.upper()}": arch_env[f"IMAGE_{arch.upper()}"]} and run == f'docker push "$IMAGE_{arch.upper()}"'), None)
+        checker.expect(arch is not None, f"ci.yml: {IMAGE_PUBLISH_JOB} step '{step.get('name')}' pushes more than one of the build job's image-<arch> outputs")
+        pushed.add(arch)
+    for arch in IMAGE_ARCHES:
+        checker.expect(arch in pushed, f"ci.yml: {IMAGE_PUBLISH_JOB} has no step pushing the build job's image-{arch} output")
+    joins = [step for step in steps if "imagetools create" in str(step.get("run", "")) and "latest" not in str(step.get("env") or "")]
+    checker.expect(len(joins) == 1, f"ci.yml: {IMAGE_PUBLISH_JOB} has {len(joins)} steps joining the architecture images; it needs exactly one")
+    sources = " ".join(f'"$IMAGE_{arch.upper()}"' for arch in IMAGE_ARCHES)
+    for step in joins:
         checker.expect(
-            env == {"IMAGE": "${{ needs.build-core-container.outputs.image }}"} and str(step.get("run", "")).strip() == 'docker push "$IMAGE"',
-            f"ci.yml: {IMAGE_PUBLISH_JOB} step '{step.get('name')}' pushes more than the build job's image output",
+            step.get("env") == {"IMAGE": "${{ needs.build-core-container.outputs.image }}", **arch_env}
+            and str(step.get("run", "")).strip() == f'docker buildx imagetools create --tag "$IMAGE" {sources}',
+            f"ci.yml: {IMAGE_PUBLISH_JOB} step '{step.get('name')}' writes more than the build job's image output from its image-<arch> outputs",
         )
-    movers = [step for step in steps if "latest" in str(step.get("env") or "") or "imagetools create" in str(step.get("run", ""))]
+        checker.expect(
+            all(steps.index(push) < steps.index(step) for push in pushes),
+            f"ci.yml: {IMAGE_PUBLISH_JOB} step '{step.get('name')}' joins the architecture images before both are pushed",
+        )
+    movers = [step for step in steps if "latest" in str(step.get("env") or "")]
     for step in movers:
         checker.expect(
             "github.ref_type == 'branch'" in str(step.get("if", "")),
@@ -1740,6 +1898,7 @@ def main():
     check_other_gates(checker, workflows)
     check_macos_binaries(checker, workflows)
     check_musl_binaries(checker, workflows)
+    check_multiarch_image(checker, workflows)
     check_rustflags(checker, workflows)
     check_scans_grouped(checker, workflows)
     check_publish_independent(checker, workflows)

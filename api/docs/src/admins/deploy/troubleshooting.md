@@ -26,6 +26,15 @@ kubectl -n thorium get pods
 `metadata.generation` hasn't caught up with your latest change yet. See [Operating a
 Deployment](./operate.md#status) and the [status reference](./thoriumcluster.md#status).
 
+The Thorium image is published for linux/amd64 and linux/arm64 under one tag, and each node pulls
+its own architecture. Only the amd64 image includes `curl`, `jq`, and `lsof`. To use them in a
+pod on an arm64 node, attach a debug container that has them:
+
+```bash
+# a shell sharing the pod's namespaces, in an image that has the tools you need
+kubectl -n thorium debug -it <pod> --image=<debug image> --target=<container>
+```
+
 ## The operator refuses or holds the cluster
 
 ### "has not been converted"
