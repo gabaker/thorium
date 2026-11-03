@@ -829,6 +829,9 @@ pub struct BackupController {
     graphic_keys: Vec<(String, String)>,
     /// Whether the API drops the user and group references that stay dangling
     prune_dangling: bool,
+    /// Whether the API keeps the group members and user memberships that stay dangling, which
+    /// the run records as broken links; pruning takes precedence
+    accept_dangling: bool,
     /// The manifest entry of `pruned.jsonl`, once the API dropped references and it was written
     pruned: Option<PrunedEntry>,
     /// The number of chunks to split our token range into
@@ -928,6 +931,7 @@ impl BackupController {
             redis: None,
             graphic_keys: Vec::new(),
             prune_dangling: false,
+            accept_dangling: false,
             pruned: None,
             chunks: workers as u64 * multiplier,
             samples_list: TableBackup::new(Components::SamplesList, ns, scylla, count, &sinks, r),
@@ -994,15 +998,18 @@ impl BackupController {
         }
     }
 
-    /// Makes the run record an S3 object a row names that the bucket lacks as a broken link and
-    /// go on, rather than fail the object
+    /// Makes the run record an S3 object a row names that the bucket lacks, and a dangling group
+    /// member or user membership of the Redis state, as a broken link and go on, rather than fail
+    /// the object or the `redis` component
     ///
     /// # Arguments
     ///
     /// * `accept` - Whether the run accepts broken links
-    pub fn accept_broken_links(&self, accept: bool) {
+    pub fn accept_broken_links(&mut self, accept: bool) {
         // every S3 component's workers read the one setting
         self.s3.accept_broken_links(accept);
+        // and the Redis fetch asks the API to keep what stays dangling
+        self.accept_dangling = accept;
     }
 
     /// Backup this clusters redis data to disk
@@ -1014,7 +1021,9 @@ impl BackupController {
     /// `redis.json` is written, so the state is never kept without that record; an API that
     /// can't skip them fails the fetch with each recorded as failed instead. When the API dropped
     /// dangling references, they are listed in `pruned.jsonl`, written before `redis.json` so
-    /// a state with references dropped is never kept without its list.
+    /// a state with references dropped is never kept without its list. When the API kept
+    /// dangling references the run accepts, each is recorded as a broken link once `redis.json`
+    /// is written.
     ///
     /// # Arguments
     ///
@@ -1041,6 +1050,7 @@ impl BackupController {
         // fetch the Redis state through the API, retrying what may pass
         let params = BackupParams {
             prune_dangling: self.prune_dangling,
+            accept_dangling: self.accept_dangling,
             skip_unreadable: true,
         };
         let fetched = self
@@ -1084,8 +1094,9 @@ impl BackupController {
             log,
         )
         .await?;
-        // what the API dropped is listed beside the state, never in it
+        // what the API dropped is listed beside the state, never in it, as is what it kept
         let pruned = std::mem::take(&mut backup.pruned);
+        let accepted = std::mem::take(&mut backup.accepted);
         if !pruned.is_empty() && !self.write_pruned(&path, &pruned, log).await? {
             log.summarize(&component);
             return Ok(());
@@ -1104,6 +1115,12 @@ impl BackupController {
         {
             Ok(()) => {
                 log.handled(&component, 1);
+                // each dangling reference the written state keeps is an accepted broken link
+                for reference in &accepted {
+                    let record = FailureRecord::dangling_link(&component, reference)
+                        .attempts(fetched.attempts);
+                    log.record(&record).await?;
+                }
                 // the icon each user of the written state names is a graphic to back up
                 self.graphic_keys = backup
                     .users

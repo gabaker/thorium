@@ -424,9 +424,12 @@ async fn reset_cache(
 /// image, or pipeline whose Redis record doesn't parse fails the backup, listing every such
 /// record's key, as do records that don't fit together. With `skip_unreadable`, the records that
 /// don't parse are left out instead and listed in the backup's `unreadable`, and so are the
-/// images and pipelines that depend on them (a skipped group's, and the pipelines running a
-/// skipped image). With `prune_dangling`, the user and group references that stay dangling are
-/// dropped instead and listed in the backup's `pruned`.
+/// images and pipelines that depend on them (a skipped group's, and the pipelines with a stage no
+/// tool backs running a skipped image). With
+/// `prune_dangling`, the user and group references that stay dangling are dropped instead and
+/// listed in the backup's `pruned`; with `accept_dangling` (and no `prune_dangling`), the group
+/// members and user memberships that stay dangling are kept and listed in the backup's
+/// `accepted`.
 ///
 /// # Arguments
 ///
@@ -468,9 +471,11 @@ async fn backup(
 /// Restores a backup
 ///
 /// The backup is validated first, and refused with every problem listed when its records don't
-/// fit together. Then every Redis key of this API's namespace is deleted, so no orphaned data
-/// from a past instance is left, and the backup is written. With `flush_db`, the API's whole
-/// Redis database is flushed with `FLUSHDB ASYNC` instead, other namespaces' keys included.
+/// fit together; a dangling group member or user membership the backup's `accepted` lists is
+/// accepted and written as it is. Then every Redis key of this API's namespace is deleted, so no
+/// orphaned data from a past instance is left, and the backup is written. With `flush_db`, the
+/// API's whole Redis database is flushed with `FLUSHDB ASYNC` instead, other namespaces' keys
+/// included.
 ///
 /// # Arguments
 ///
@@ -888,7 +893,7 @@ async fn delete_workers(
 #[derive(OpenApi)]
 #[openapi(
     paths(init, info, stats, settings, settings_update, consistency_scan, settings_reset, cleanup, reset_cache, backup, restore, register_node, list_nodes, list_node_details, get_node, update_node, register_worker, delete_workers, get_worker, update_worker),
-    components(schemas(ActiveJob, ApiCursor<NodeListLine>, ArgStrategy, AutoTag, AutoTagLogic, Backup, BackupParams, BackupProblem, BackupProblems, BannedImageBan, ChildFilters, ChildFiltersUpdate, ChildrenDependencySettings, Cleanup, ConfigMap, Dependencies, DependencyPassStrategy, EphemeralDependencySettings, EventTrigger, FileSystemDependencySettings, FilesHandler, GenericBan, Group, GroupAllowed, GroupStats, GroupUsers, HostPath, HostPathTypes, HostPathWhitelistUpdate, Image, ImageArgs, ImageBan, ImageBanKind, ImageBanUpdate, ImageLifetime, ImageScaler, ToolVersion, InvalidHostPathBan, InvalidUrlBan, Kvm, KwargDependency, NetworkPolicySet, NFS, Node, NodeGetParams, NodeHealth, NodeListLine, NodeListParams, NodeRegistration, NodeUpdate, OutputCollection, OutputDisplayType, OutputHandler, Pipeline, PipelineBan, PipelineBanKind, PipelineBanUpdate, PipelineStats, Pools, PruneAction, PrunedReference, PrunedReferent, RepoDependencySettings, Resources, RestoreParams, ResultDependencySettings, SampleDependencySettings, ScalerStats, ScopedToken, ScopedTokenRole, Secret, SecurityContext, SpawnLimits, StageStats, SystemInfo, SystemInfoParams, SystemSettings, SystemSettingsUpdate, SystemSettingsResetParams, SystemSettingsUpdateParams, SystemStats, TagDependencySettings, TagType, Theme, UnixInfo, User, UserRole, UserSettings, Volume, VolumeTypes, Worker, WorkerDeleteMap, WorkerDelete, WorkerRegistration, WorkerRegistrationList, WorkerStatus, WorkerUpdate)),
+    components(schemas(ActiveJob, ApiCursor<NodeListLine>, ArgStrategy, AutoTag, AutoTagLogic, Backup, BackupParams, BackupProblem, BackupProblems, BannedImageBan, ChildFilters, ChildFiltersUpdate, ChildrenDependencySettings, Cleanup, ConfigMap, crate::models::DanglingReference, Dependencies, DependencyPassStrategy, EphemeralDependencySettings, EventTrigger, FileSystemDependencySettings, FilesHandler, GenericBan, Group, GroupAllowed, GroupStats, GroupUsers, HostPath, HostPathTypes, HostPathWhitelistUpdate, Image, ImageArgs, ImageBan, ImageBanKind, ImageBanUpdate, ImageLifetime, ImageScaler, ToolVersion, InvalidHostPathBan, InvalidUrlBan, Kvm, KwargDependency, NetworkPolicySet, NFS, Node, NodeGetParams, NodeHealth, NodeListLine, NodeListParams, NodeRegistration, NodeUpdate, OutputCollection, OutputDisplayType, OutputHandler, Pipeline, PipelineBan, PipelineBanKind, PipelineBanUpdate, PipelineStats, Pools, PruneAction, PrunedReference, PrunedReferent, RepoDependencySettings, Resources, RestoreParams, ResultDependencySettings, SampleDependencySettings, ScalerStats, ScopedToken, ScopedTokenRole, Secret, SecurityContext, SpawnLimits, StageStats, SystemInfo, SystemInfoParams, SystemSettings, SystemSettingsUpdate, SystemSettingsResetParams, SystemSettingsUpdateParams, SystemStats, TagDependencySettings, TagType, Theme, UnixInfo, User, UserRole, UserSettings, Volume, VolumeTypes, Worker, WorkerDeleteMap, WorkerDelete, WorkerRegistration, WorkerRegistrationList, WorkerStatus, WorkerUpdate)),
     modifiers(&OpenApiSecurity, &OpenApiParameterExamples),
 )]
 pub struct SystemApiDocs;

@@ -1218,7 +1218,7 @@ async fn skip_unreadable_lists_records_that_dont_parse() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     let ns = test_utilities::CONF.thorium.namespace.clone();
-    // a group with images and a pipeline
+    // a group with images and a pipeline whose stages tools back, so no stage needs an image
     let (groups, images, pipes) = generators::gen_all(1, &client).await?;
     let group = &groups[0].name;
     let image_key = format!("{ns}:image_data:{group}:{}", images[0].name);
@@ -1274,9 +1274,9 @@ async fn skip_unreadable_lists_records_that_dont_parse() -> Result<(), Error> {
 }
 
 /// A reference to a record a backup left out because it doesn't parse is dangling: a group member
-/// naming a skipped user fails the backup without a flag and is dropped with `prune_dangling`; a
-/// pipeline running a skipped image is skipped with it, listed with the image it depends on, while
-/// a backup without `skip_unreadable` still fails
+/// naming a skipped user fails the backup without a flag, is dropped with `prune_dangling`, and is
+/// kept with `accept_dangling`; a pipeline running a skipped image is skipped with it, listed with
+/// the image it depends on, while a backup without `skip_unreadable` still fails
 #[serial_test::serial]
 #[tokio::test]
 async fn references_to_skipped_records_follow_the_dangling_rules() -> Result<(), Error> {
@@ -1286,7 +1286,7 @@ async fn references_to_skipped_records_follow_the_dangling_rules() -> Result<(),
     let (groups, images, pipes) = generators::gen_all(1, &client).await?;
     let group = &groups[0].name;
     // a listed user whose hash holds too little to parse, made a member of the group
-    let ghost = format!("io-{}", generators::gen_string(6));
+    let ghost = format!("io-{}", generators::name_suffix());
     let ghost_key = format!("{ns}:user_data:{ghost}");
     redis_run(&["SADD", &format!("{ns}:users"), &ghost]).await?;
     redis_run(&["HSET", &ghost_key, "username", &ghost]).await?;
@@ -1315,13 +1315,23 @@ async fn references_to_skipped_records_follow_the_dangling_rules() -> Result<(),
             .any(|problem| problem.key == ghost_key),
         true
     );
+    // with accept_dangling, it is kept and listed as accepted
+    let accepted = client.system.backup_with(&skip.accept_dangling()).await?;
+    is!(
+        accepted
+            .accepted
+            .iter()
+            .any(|reference| reference.record == format!("groups/{group}")
+                && reference.name == ghost),
+        true
+    );
     // remove the user again
     for set in ["groups_direct", "groups_combined"] {
         redis_run(&["SREM", &format!("{ns}:{set}:{group}:users"), &ghost]).await?;
     }
     redis_run(&["SREM", &format!("{ns}:users"), &ghost]).await?;
     redis_run(&["DEL", &ghost_key]).await?;
-    // a pipeline running an image without its group field
+    // a pipeline whose stages no tool backs, running an image without its group field
     let stage = pipes[0].order[0]
         .as_str()
         .ok_or_else(|| Error::new(format!("unexpected order {}", pipes[0].order)))?
@@ -1329,6 +1339,7 @@ async fn references_to_skipped_records_follow_the_dangling_rules() -> Result<(),
     is!(images.iter().any(|image| image.name == stage), true);
     let pipe_key = format!("{ns}:pipeline_data:{group}:{}", pipes[0].name);
     let image_key = format!("{ns}:image_data:{group}:{stage}");
+    let tools = swap_field(&pipe_key, "stage_tools", "{}").await?;
     redis_run(&["HDEL", &image_key, "group"]).await?;
     // without skip_unreadable the backup fails, naming the image
     let problems = listed_problems(client.system.backup().await)?;
@@ -1355,7 +1366,8 @@ async fn references_to_skipped_records_follow_the_dangling_rules() -> Result<(),
         backup.pipelines.iter().any(|p| p.name == pipes[0].name),
         false
     );
-    // repair the image
+    // repair both records
+    swap_field(&pipe_key, "stage_tools", &tools).await?;
     redis_run(&["HSET", &image_key, "group", group]).await?;
     client.system.backup().await?;
     Ok(())
@@ -1363,7 +1375,7 @@ async fn references_to_skipped_records_follow_the_dangling_rules() -> Result<(),
 
 /// A backup taken with `skip_unreadable` of a group that doesn't parse skips the group's images and
 /// pipelines with it, each listed with the group it depends on; the members' memberships of the
-/// group are dangling, so the backup needs `prune_dangling` too
+/// group are dangling, so the backup needs `prune_dangling` or `accept_dangling` too
 #[serial_test::serial]
 #[tokio::test]
 async fn a_skipped_group_skips_its_images_and_pipelines() -> Result<(), Error> {

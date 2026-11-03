@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use thorium::models::{DanglingReference, PrunedReferent};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -99,6 +100,14 @@ pub struct FailureRecord {
     /// link
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub referrer: Option<String>,
+    /// The field of the referrer that names a missing user or group (a group role, or `groups`),
+    /// set on a broken link of the Redis state
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    /// The missing user or group, as `user:<name>` or `group:<name>`, set on a broken link of the
+    /// Redis state
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
     /// The operation that failed
     pub operation: Operation,
     /// How many attempts were made, including the first
@@ -132,6 +141,8 @@ impl FailureRecord {
             key: None,
             object: None,
             referrer: None,
+            field: None,
+            target: None,
             operation,
             attempts: 1,
             error: error.to_string(),
@@ -164,6 +175,59 @@ impl FailureRecord {
         let mut record = Self::failed(component, Operation::Download, error);
         record.kind = FailureKind::BrokenLink;
         record
+    }
+
+    /// Starts a record of a broken link of the Redis state: a group member or user membership
+    /// naming a user or group the cluster doesn't hold, which a backup accepts and keeps as it is
+    ///
+    /// # Arguments
+    ///
+    /// * `component` - The component of the Redis state
+    /// * `reference` - The dangling reference the API kept
+    pub fn dangling_link<C: Into<String>>(component: C, reference: &DanglingReference) -> Self {
+        // the referrer is named as a collection and a name, and the target as a kind and a name
+        let (kind, missing) = match reference.referent {
+            PrunedReferent::User => ("user", "a user that doesn't exist"),
+            PrunedReferent::Group => ("group", "a group that doesn't exist"),
+        };
+        let referrer = reference.record.replacen('/', ":", 1);
+        let error = format!(
+            "{referrer} names {} in its {}, {missing}",
+            reference.name, reference.field
+        );
+        // a broken link of the Redis state comes from the Redis fetch, not a download
+        let mut record = Self::failed(component, Operation::Redis, error).referrer(referrer);
+        record.kind = FailureKind::BrokenLink;
+        record.field = Some(reference.field.clone());
+        record.target = Some(format!("{kind}:{}", reference.name));
+        record
+    }
+
+    /// Gets the dangling reference a broken link of the Redis state names, or `None` for any
+    /// other record
+    #[must_use]
+    pub fn as_dangling(&self) -> Option<DanglingReference> {
+        // only a broken link naming a referrer, a field, and a target is one
+        if self.kind != FailureKind::BrokenLink {
+            return None;
+        }
+        // split the referrer into its collection and the name of the record that holds the link
+        let (collection, id) = self.referrer.as_deref()?.split_once(':')?;
+        // split the target into its kind and the name of the missing user or group
+        let (kind, name) = self.target.as_deref()?.split_once(':')?;
+        // map the target's kind to the kind of referent it names
+        let referent = match kind {
+            "user" => PrunedReferent::User,
+            "group" => PrunedReferent::Group,
+            _ => return None,
+        };
+        // build the reference as the API's Redis state names it, keyed by `<collection>/<name>`
+        Some(DanglingReference {
+            record: format!("{collection}/{id}"),
+            field: self.field.clone()?,
+            name: name.to_owned(),
+            referent,
+        })
     }
 
     /// Names the record that names a missing object
@@ -776,7 +840,61 @@ pub fn read_records(path: &Path) -> Result<Vec<FailureRecord>, Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::Operation;
+    use super::{FailureKind, FailureRecord, Operation};
+    use thorium::models::{DanglingReference, PrunedReferent};
+
+    /// A dangling reference recorded as a broken link names its referrer, field, and target, and
+    /// reads back from the record as the same reference; a record of an S3 broken link isn't one,
+    /// and a record without either field reads and writes back unchanged
+    #[test]
+    fn a_dangling_reference_round_trips_through_its_record() {
+        // a group owner naming a user that is gone
+        let reference = DanglingReference {
+            record: "groups/analysts".to_owned(),
+            field: "owners".to_owned(),
+            name: "old-admin".to_owned(),
+            referent: PrunedReferent::User,
+        };
+        let record = FailureRecord::dangling_link("redis", &reference);
+        assert_eq!(record.kind, FailureKind::BrokenLink);
+        assert_eq!(record.operation, Operation::Redis);
+        assert_eq!(record.referrer.as_deref(), Some("groups:analysts"));
+        assert_eq!(record.field.as_deref(), Some("owners"));
+        assert_eq!(record.target.as_deref(), Some("user:old-admin"));
+        assert!(record.error.contains("old-admin"), "{}", record.error);
+        // it survives a trip through its JSON line
+        let line = serde_json::to_string(&record).expect("serializes");
+        let read: FailureRecord = serde_json::from_str(&line).expect("parses");
+        assert_eq!(read.as_dangling(), Some(reference));
+        // a user's membership in a group that is gone names the group
+        let membership = DanglingReference {
+            record: "users/alice".to_owned(),
+            field: "groups".to_owned(),
+            name: "vesta".to_owned(),
+            referent: PrunedReferent::Group,
+        };
+        let record = FailureRecord::dangling_link("redis", &membership);
+        assert_eq!(record.target.as_deref(), Some("group:vesta"));
+        assert_eq!(record.as_dangling(), Some(membership));
+        // an S3 broken link names no field or target, so it isn't a dangling reference
+        let graphic = FailureRecord::broken_link("graphics", "missing").referrer("users:alice");
+        assert_eq!(graphic.as_dangling(), None);
+        assert!(
+            serde_json::to_value(&graphic)
+                .unwrap()
+                .get("target")
+                .is_none()
+        );
+        // a record written before field and target existed parses and writes back unchanged
+        let older = serde_json::to_value(&graphic).unwrap();
+        assert!(older.get("field").is_none(), "{older}");
+        let parsed: FailureRecord = serde_json::from_value(older.clone()).unwrap();
+        assert_eq!(
+            (parsed.field.as_deref(), parsed.target.as_deref()),
+            (None, None)
+        );
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), older);
+    }
 
     /// The step before any row is restored round-trips as `pre-restore`, and an operation this
     /// reader doesn't know still parses as unknown

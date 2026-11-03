@@ -555,7 +555,7 @@ async fn unparsable_records_are_skipped_and_recorded_one_per_key() {
     let harness = Harness::get().await;
     let _guard = harness.restore_guard().await;
     let ns = &harness.conf.thorium.namespace;
-    // a group with images and a pipeline running one of them
+    // a group with images and a pipeline whose stages tools back, so no stage needs an image
     let client = harness.client().await;
     let (groups, images, pipes) = generators::gen_all(1, &client).await.unwrap();
     let group = &groups[0].name;
@@ -648,15 +648,15 @@ async fn unparsable_records_are_skipped_and_recorded_one_per_key() {
     restores_without_skipped(harness, &out, kept, skipped).await;
 }
 
-/// A pipeline running an image the API can't parse is skipped with the image: both are recorded
-/// as skipped, `redis.json` is written, and a restore with `--accept-failures` leaves a state
-/// `verify --cluster` finds matches the backup
+/// A pipeline whose stage no tool backs and runs an image the API can't parse is skipped with the
+/// image: both are recorded as skipped, `redis.json` is written, and a restore with
+/// `--accept-failures` leaves a state `verify --cluster` finds matches the backup
 #[tokio::test]
 async fn a_pipeline_running_a_skipped_image_is_skipped_too() {
     let harness = Harness::get().await;
     let _guard = harness.restore_guard().await;
     let ns = &harness.conf.thorium.namespace;
-    // a group with images and a pipeline running one of them
+    // a group with images and a pipeline running one of them with no tool behind its stage
     let client = harness.client().await;
     let (groups, images, pipes) = generators::gen_all(1, &client).await.unwrap();
     let group = &groups[0].name;
@@ -668,6 +668,7 @@ async fn a_pipeline_running_a_skipped_image_is_skipped_too() {
         .name;
     let image_key = format!("{ns}:image_data:{group}:{stage}");
     let pipe_key = format!("{ns}:pipeline_data:{group}:{}", pipes[0].name);
+    swap_field(harness, &pipe_key, "stage_tools", "{}").await;
     // the image it runs loses its group field
     let mut conn = redis_pool(&harness.conf)
         .await

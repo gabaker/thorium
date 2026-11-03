@@ -158,8 +158,8 @@ always did.
 | `--s3-concurrency` | `64` | The most S3 downloads in flight at once, across every S3 component of the run (1 to 65,536) |
 | `--abort-on-failure` | off | Stop at the first object that fails: record it, exit 1, and leave the backup to be resumed. Without it the backup carries on past every failure |
 | `--allow-version-mismatch` | off | Back up the `redis` component even when the API reports a Thorium version other than thoradm's, or none; the mismatch is logged at WARN and recorded in the manifest. Without it such a backup is refused (exit 1) before anything is written (see [Run thoradm at the API's version](#run-thoradm-at-the-apis-version)) |
-| `--prune-dangling` | off | Drop the user and group references of the `redis` component that stay dangling, instead of failing the component; each change is listed in `pruned.jsonl`, the run exits 2, and a restore of the backup needs `--accept-failures` (see [Pruning dangling references](#pruning-dangling-references)) |
-| `--accept-broken-links` | off | Go on past a broken link, a row that names an S3 object the cluster lacks, instead of failing the object: the link is kept as it is, recorded in `failures.jsonl` as a `broken-link` record, and counted apart in the manifest. The run exits 2, and a restore of a backup whose only records are accepted broken links needs no `--accept-failures` (see [Accepting broken links](#accepting-broken-links)) |
+| `--prune-dangling` | off | Drop the user and group references of the `redis` component that stay dangling, instead of failing the component; each change is listed in `pruned.jsonl`, the run exits 2, and a restore of the backup needs `--accept-failures` (see [Pruning dangling references](#pruning-dangling-references)). With `--accept-broken-links` too, the references are pruned, not kept |
+| `--accept-broken-links` | off | Go on past a broken link, a row that names an S3 object the cluster lacks or a group member or user membership of the `redis` component that names a user or group the cluster lacks, instead of failing the object or the component: the link is kept as it is, recorded in `failures.jsonl` as a `broken-link` record, and counted apart in the manifest. The run exits 2, and a restore of a backup whose only records are accepted broken links needs no `--accept-failures` (see [Accepting broken links](#accepting-broken-links)) |
 | `--cluster-conf`, `-c` | `./thorium.yml` | A global flag: the cluster config |
 | `--ctl-conf` | `~/.thorium/config.yml` | A global flag: the Thorctl config |
 
@@ -228,7 +228,8 @@ like a reference to a deleted one, and the rules below apply to it the same way.
 The API reads the records up to three times (200 ms, then 400 ms apart) before it fails, so a change
 made while it reads (a user deleted mid-backup) doesn't fail the backup. A reference that stays
 dangling, left behind by an earlier failure, fails every backup until it is repaired. To take a
-backup anyway, pass `--prune-dangling`:
+backup anyway, pass `--prune-dangling`, which drops the references, or `--accept-broken-links`,
+which keeps them as Redis holds them (see [Accepting broken links](#accepting-broken-links)):
 
 ```bash
 thoradm backup new --prune-dangling -o /mnt/backups/thorium-2026-10-17
@@ -308,9 +309,12 @@ cluster held, and a restore of it needs `--accept-failures`. When nothing was pr
 A broken link is a row or record that names an S3 object the cluster itself lacks: an entity's
 image or a user's icon whose object was deleted from the graphics bucket, a sample or repo whose
 object is gone from its bucket, a result whose file or entity blob is gone, or a comment whose
-attachment is gone. By default the backup fails that object (a `failed` record, exit 2) and a
+attachment is gone. In the Redis state, a group whose owners, managers, users, or monitors name a
+user that is gone, or a user whose groups name a group that is gone, is a broken link too. By
+default the backup fails that object, or the `redis` component (a `failed` record, exit 2), and a
 restore of the backup needs `--accept-failures`. When such links are known and harmless, pass
-`--accept-broken-links` to go on without the problem being fatal to the restore:
+`--accept-broken-links` to go on without the problem being fatal to the restore (a kept Redis
+reference can come to name a user or group created later under its name; see below):
 
 ```bash
 thoradm backup new --accept-broken-links -o /mnt/backups/thorium-2026-10-17
@@ -334,21 +338,63 @@ a missing bucket is still a failure):
 Everything else is as without the flag. A failed object that is not a missing object (a timeout that
 exhausted its retries, a key that can't be kept as a path, a row that can't be read) is still a
 `failed` or `skipped` record. `--abort-on-failure` still stops the run at the first failed or skipped
-object, but not at an accepted broken link. The flag doesn't cover the Redis state: a user or group
-reference that names a user or group that is gone still fails the `redis` component, or is dropped
-with `--prune-dangling`, since a restore refuses it.
+object, but not at an accepted broken link.
+
+In the Redis state, a group member or user membership that stays dangling on all three of the API's
+reads, and whose user or group the API then confirms doesn't exist (the same rule
+`--prune-dangling` follows), is:
+
+- kept in `redis.json` as Redis holds it: the group still names the user in that role, and the user
+  still names the group;
+- recorded as a `broken-link` record in `failures.jsonl` with `component` `redis`, `operation`
+  `redis`, the record that holds it in `referrer` (`groups:<group>` or `users:<user>`), the field
+  in `field` (`owners`, `managers`, `users`, `monitors`, or `groups`), and the missing user or group
+  in `target` (`user:<name>` or `group:<name>`), and no `bucket` or `key`:
+
+  ```json
+  {"kind":"broken-link","component":"redis","referrer":"groups:analysts","field":"owners","target":"user:old-admin","operation":"redis","attempts":1,"error":"groups:analysts names old-admin in its owners, a user that doesn't exist","at":"2026-10-17T23:55:38.111880138Z"}
+  ```
+
+- counted in the manifest's `broken_links` with the S3 ones.
+
+A reference is kept and recorded only when it is dangling on all three reads and the API then
+confirms, by looking the user or group up in Redis, that it doesn't exist. One that resolves on a
+later read is backed up as Redis holds it and isn't recorded, and one whose user or group exists by
+the time it is looked up, or that is still dangling without that confirmation, fails the `redis`
+component as without the flag. A scoped token's groups that are gone are backed up as
+they are with or without the flag, and aren't recorded. The flag accepts nothing else the
+`redis` component fails on (an image or pipeline naming a group that is gone, shared tokens,
+duplicate or invalid names): see [Pruning dangling
+references](#pruning-dangling-references) for the full list. With both `--prune-dangling` and
+`--accept-broken-links`, the dangling Redis references are pruned and listed in `pruned.jsonl`, not
+kept, and S3 broken links are still accepted.
+
+A kept Redis reference names a user or group that doesn't exist, on the cluster and on any cluster
+restored from the backup. A user or group created later under that name (a user can register with
+the `User` role without the secret key) is then the one the reference names: the new user is listed
+in the group's role, or the new group in the user's groups. Before such a name can be reused, review
+the references `failures.jsonl` records and repair them on the cluster, or take the backup with
+`--prune-dangling` instead, which drops them.
 
 What reads a backup with accepted broken links:
 
 - `backup restore` needs no `--accept-failures` when the backup's only records are accepted broken
   links: it logs them as known, lists them in its confirmation and in the summary's `broken_links`,
   and writes the rows and the Redis state as the backup holds them, so the restored cluster has the
-  same broken links the source had. A backup that also has failed or skipped objects, or pruned
-  references, still needs `--accept-failures` for those, and the restore's summary lists the
-  missing objects (`missing_from_backup`) apart from the links (`broken_links`).
+  same broken links the source had. The API, which validates the whole Redis state before it writes
+  any of it, accepts exactly the dangling group members and user memberships the backup's
+  `failures.jsonl` records; a dangling reference it doesn't record still refuses the restore, and a
+  `failures.jsonl` that lost a record no longer matches the manifest, which `backup verify` refuses.
+  The restored API serves such a group and user as the source did: the group lists the missing user
+  in its role, the user lists the missing group, and the user still logs in. A backup that also
+  has failed or skipped objects, or pruned references, still needs `--accept-failures` for those,
+  and the restore's summary lists the missing objects (`missing_from_backup`) apart from the links
+  (`broken_links`).
 - `backup verify` accepts them: each is a passing `broken-link` check and a WARN line, not a failed
   check, so a backup with only accepted broken links verifies with exit 0. It still fails a backup
-  whose manifest count differs from the file.
+  whose manifest count differs from the file. `backup verify --cluster` reads the cluster's Redis
+  state with its dangling group members and user memberships kept, so a cluster restored from such
+  a backup compares cleanly.
 - `backup scrub` reads only the table archives and is unaffected.
 - A run that resumes an interrupted backup keeps accepting broken links when the interrupted run did
   (the marker's `accept_broken_links`) or when the resuming command passes the flag; objects the
@@ -382,14 +428,16 @@ logged on stderr as it happens. An empty file means nothing failed.
 
 | Field | Present | What it holds |
 |---|---|---|
-| `kind` | Always | `failed` (the object exhausted its retries or hit a permanent error), `skipped` (a row that couldn't be read into its archive struct, or a Redis record the API couldn't parse or that depends on one, left out of `redis.json`), or `broken-link` (a reference to an S3 object the cluster lacks, accepted with `--accept-broken-links`) |
+| `kind` | Always | `failed` (the object exhausted its retries or hit a permanent error), `skipped` (a row that couldn't be read into its archive struct, or a Redis record the API couldn't parse or that depends on one, left out of `redis.json`), or `broken-link` (a reference to an S3 object, user, or group the cluster lacks, accepted with `--accept-broken-links`) |
 | `component` | Always | The component, as named on the command line (`redis`, `samples-list`, `result-files`, ...) |
 | `table` | Rows, ranges, archives | The Scylla table |
 | `bucket` | S3 objects | The S3 bucket |
 | `token_range` | Ranges and rows | The token range `[start, end]` being read |
 | `key` | When known | The partition key, S3 key, Redis file, or archive path, as far as it could be read |
 | `object` | When known | A short name for the object (a sha256, an id, a partition) |
-| `referrer` | Broken links | The record that names the missing object, as `<table or collection>:<id>`: `entities:<entity id>`, `users:<user name>`, `s3_ids:<id>`, `results:<result id>`, or `comments:<sha256>/<comment id>` |
+| `referrer` | Broken links | The record that names the missing object, as `<table or collection>:<id>`: `entities:<entity id>`, `users:<user name>`, `groups:<group name>`, `s3_ids:<id>`, `results:<result id>`, or `comments:<sha256>/<comment id>` |
+| `field` | Redis broken links | The field of the referrer that names the missing user or group: a group role (`owners`, `managers`, `users`, `monitors`) or a user's `groups` |
+| `target` | Redis broken links | The missing user or group, as `user:<name>` or `group:<name>` |
 | `operation` | Always | What failed: `read-range`, `deserialize-row`, `write-archive`, `read-archive`, `download`, `redis`, `verify` for a failed check of scrub or verify, and others for restore, such as `pre-restore` for the schema apply before any row is restored and `post-restore` for the steps after the load |
 | `attempts` | Always | The attempts made, including the first |
 | `error` | Always | The last error, on one line |
@@ -405,7 +453,8 @@ Records that don't fit together (for example a group member that isn't a user, a
 that doesn't exist, or two users sharing a token) fail the `redis` component with one record per
 Redis key, naming the problem but never a stored value, and no `redis.json` is written; repair the
 records and back up again into a new directory, or, for dangling user and group references, back
-up with `--prune-dangling` (see [Pruning dangling references](#pruning-dangling-references)).
+up with `--prune-dangling` (see [Pruning dangling references](#pruning-dangling-references)) or
+`--accept-broken-links` (see [Accepting broken links](#accepting-broken-links)).
 
 #### Records that don't parse
 
@@ -425,11 +474,11 @@ without it. The run exits 2, and `graphics` checks the icons of the users `redis
 usual. A skipped user's scoped tokens and a skipped group's network-policy set are left out with
 it, and so are the records a skipped record leaves unusable, each recorded the same way with the
 record it depends on in `error`: the images and pipelines of a skipped group (`its group <group>
-was skipped`), and a pipeline that runs a skipped image (`its image <group>/<image> was
-skipped`). Since the backup doesn't hold a skipped record, any other reference
+was skipped`), and a pipeline with a stage no tool backs that runs a skipped image (`its image
+<group>/<image> was skipped`). Since the backup doesn't hold a skipped record, any other reference
 to it is a reference to a record that is gone: a group member naming a skipped user, or a user in a
-skipped group, fails the component unless `--prune-dangling` handles it (see [Pruning dangling
-references](#pruning-dangling-references)). `backup verify` passes the
+skipped group, fails the component unless `--prune-dangling` or `--accept-broken-links` handles it
+(see [Pruning dangling references](#pruning-dangling-references)). `backup verify` passes the
 backup's coverage and lists each skipped record as an object the backup doesn't hold (exit 2),
 and `backup restore` needs `--accept-failures`, then restores every record but the skipped ones.
 To keep a skipped record, repair it on the cluster and take a new backup. A thoradm older than

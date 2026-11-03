@@ -398,7 +398,7 @@ impl System {
     /// Get a backup of data in Thorium
     ///
     /// The API fails the backup with a 422 listing every record that doesn't parse or doesn't fit
-    /// together; see [`System::backup_with`] to skip records that don't parse, or to drop
+    /// together; see [`System::backup_with`] to skip records that don't parse, or to drop or keep
     /// dangling references, instead.
     ///
     /// # Examples
@@ -425,7 +425,7 @@ impl System {
     }
 
     /// Get a backup of data in Thorium with params, such as skipping records that don't parse, or
-    /// pruning dangling references
+    /// pruning or keeping dangling references
     ///
     /// # Arguments
     ///
@@ -455,10 +455,13 @@ impl System {
     pub async fn backup_with(&self, params: &BackupParams) -> Result<Backup, Error> {
         // build url for backing up
         let url = format!("{}/api/system/backup", self.host);
-        // send the prune param only when it is set, so a default backup asks what it always has
+        // send each param only when it is set, so a default backup asks what it always has
         let mut query = Vec::new();
         if params.prune_dangling {
             query.push(("prune_dangling", "true"));
+        }
+        if params.accept_dangling {
+            query.push(("accept_dangling", "true"));
         }
         if params.skip_unreadable {
             query.push(("skip_unreadable", "true"));

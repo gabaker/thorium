@@ -15,13 +15,14 @@ use super::{entities, users};
 use crate::models::backends::NotificationSupport;
 use crate::models::schema::queries::{NodesListCursor, NodesListDetailsCursor};
 use crate::models::{
-    AllowedEndpoint, ApiCursor, Backup, BackupParams, BackupProblem, BackupProblems, Group,
-    GroupRequest, GroupUsers, GroupUsersRequest, HostPath, HostPathWhitelistUpdate, Image,
-    ImageBan, ImageBanKind, ImageBanUpdate, ImageKey, ImageScaler, ModelsConfUpdate, Node,
-    NodeGetParams, NodeListLine, NodeListParams, NodeRegistration, NodeRow, NodeUpdate, Pipeline,
-    PipelineBan, PipelineBanKind, PipelineBanUpdate, PipelineKey, PruneAction, PrunedReference,
-    PrunedReferent, RestoreParams, SystemInfo, SystemSettings, SystemSettingsUpdate, SystemStats,
-    User, VolumeTypes, Worker, WorkerDeleteMap, WorkerRegistrationList, WorkerUpdate, conversions,
+    AllowedEndpoint, ApiCursor, Backup, BackupParams, BackupProblem, BackupProblems,
+    DanglingReference, Group, GroupRequest, GroupUsers, GroupUsersRequest, HostPath,
+    HostPathWhitelistUpdate, Image, ImageBan, ImageBanKind, ImageBanUpdate, ImageKey, ImageScaler,
+    ModelsConfUpdate, Node, NodeGetParams, NodeListLine, NodeListParams, NodeRegistration, NodeRow,
+    NodeUpdate, Pipeline, PipelineBan, PipelineBanKind, PipelineBanUpdate, PipelineKey,
+    PruneAction, PrunedReference, PrunedReferent, RestoreParams, SystemInfo, SystemSettings,
+    SystemSettingsUpdate, SystemStats, User, VolumeTypes, Worker, WorkerDeleteMap,
+    WorkerRegistrationList, WorkerUpdate, conversions,
 };
 use crate::utils::{ApiError, Shared};
 use crate::{
@@ -588,23 +589,25 @@ impl Backup {
     /// read again a few times before the backup fails. With `skip_unreadable`, the records that
     /// still don't parse on the last read are left out instead and listed in the backup's
     /// `unreadable`, and so are the images and pipelines of a skipped group and the pipelines
-    /// running a skipped image; the backup holds them no more than a deleted record, so any other
-    /// reference to one follows the rules below, and a backup that fails on such a reference
-    /// lists them with its problems. The backup must also pass the checks a restore makes; since
-    /// a change made while the records are read can leave a reference dangling, the records are
-    /// read again a few times before the backup fails with 422, listing every problem, rather
-    /// than returning a backup no restore accepts.
+    /// with a stage no tool backs running a skipped image; the backup holds them no more than a
+    /// deleted record, so any other reference to one follows the rules below, and a backup that
+    /// fails on such a reference lists them with its problems. The backup must also pass the
+    /// checks a restore makes; since a change made while the records are read can leave a
+    /// reference dangling, the records are read again a few times before the backup fails with
+    /// 422, listing every problem, rather than returning a backup no restore accepts.
     ///
     /// With `prune_dangling`, a user or group reference that every read finds dangling, and whose
     /// user or group a direct check of Redis confirms is gone, is dropped instead and listed in
-    /// the backup's `pruned`; every other problem still fails the backup.
+    /// the backup's `pruned`. With `accept_dangling` and no `prune_dangling`, such a group member
+    /// or user membership is kept as Redis holds it and listed in the backup's `accepted`, which a
+    /// restore accepts. Every other problem still fails the backup.
     ///
     /// # Arguments
     ///
     /// * `user` - The user that is getting a system backup
     /// * `params` - The backup params
     /// * `shared` - Shared Thorium objects
-    #[instrument(name = "Backup::new", skip_all, fields(prune_dangling = params.prune_dangling, skip_unreadable = params.skip_unreadable), err(Debug))]
+    #[instrument(name = "Backup::new", skip_all, fields(prune_dangling = params.prune_dangling, accept_dangling = params.accept_dangling, skip_unreadable = params.skip_unreadable), err(Debug))]
     pub async fn new(
         user: &User,
         params: &BackupParams,
@@ -626,8 +629,16 @@ impl Backup {
                 backup.drop_skipped_users(shared);
             }
             let problems = backup.problems();
+            // a prune drops every kind of dangling reference, while accepting keeps only the
+            // kinds a restore would refuse, since the rest are backed up as they are anyway
             let dangling = if params.prune_dangling {
                 backup.dangling()
+            } else if params.accept_dangling {
+                backup
+                    .dangling()
+                    .into_iter()
+                    .filter(|reference| !matches!(reference, Dangling::TokenGroup { .. }))
+                    .collect()
             } else {
                 BTreeSet::new()
             };
@@ -644,7 +655,8 @@ impl Backup {
                 Some(before) => before.intersection(&dangling).cloned().collect(),
                 None => dangling,
             };
-            // once every read is done, prune what is confirmed gone and fail on what is left
+            // once every read is done, prune or accept what is confirmed gone and fail on what
+            // is left
             if read == BACKUP_READS {
                 // records that still don't parse fail the backup unless it skips them
                 if unreadable && !params.skip_unreadable {
@@ -654,16 +666,27 @@ impl Backup {
                     problems
                 } else {
                     let gone = Self::confirm_gone(still, &backup.unreadable, shared).await?;
-                    backup.pruned = backup.apply_prune(&gone);
+                    if params.prune_dangling {
+                        backup.pruned = backup.apply_prune(&gone);
+                    } else {
+                        backup.accepted = Self::accepted_of(&gone);
+                    }
                     backup.problems()
                 };
                 if problems.is_empty() {
-                    // say what the backup dropped, which it lists in full
+                    // say what the backup dropped or kept, which it lists in full
                     if !backup.pruned.is_empty() {
                         event!(
                             Level::WARN,
                             msg = "A backup dropped dangling user and group references",
                             pruned = backup.pruned.len()
+                        );
+                    }
+                    if !backup.accepted.is_empty() {
+                        event!(
+                            Level::WARN,
+                            msg = "A backup kept dangling user and group references",
+                            accepted = backup.accepted.len()
                         );
                     }
                     if unreadable {
@@ -706,7 +729,8 @@ impl Backup {
     }
 
     /// Leaves out, and lists in `unreadable`, the records a skipped record leaves unusable: the
-    /// images and pipelines of a skipped group, and a pipeline that runs a skipped image
+    /// images and pipelines of a skipped group, and a pipeline with a stage no tool backs that
+    /// runs a skipped image
     ///
     /// # Arguments
     ///
@@ -744,9 +768,8 @@ impl Backup {
                 Some(format!("its group {group} was skipped"))
             } else {
                 pipeline
-                    .order
-                    .iter()
-                    .flatten()
+                    .unconverted_stages()
+                    .into_iter()
                     .find(|stage| skipped.contains(&ImageKeys::data(group, stage, shared)))
                     .map(|stage| format!("its image {group}/{stage} was skipped"))
             };
@@ -808,6 +831,33 @@ impl Backup {
                 problems,
             },
         }
+    }
+
+    /// Lists the dangling group members and user memberships a backup keeps, in a stable order;
+    /// a scoped token's group isn't listed, since a restore doesn't refuse it
+    ///
+    /// # Arguments
+    ///
+    /// * `gone` - The references confirmed gone
+    fn accepted_of(gone: &BTreeSet<Dangling>) -> Vec<DanglingReference> {
+        // each member or membership, named as a restore checks it
+        gone.iter()
+            .filter_map(|reference| match reference {
+                Dangling::Member { group, role, user } => Some(DanglingReference {
+                    record: format!("groups/{group}"),
+                    field: (*role).to_owned(),
+                    name: user.clone(),
+                    referent: PrunedReferent::User,
+                }),
+                Dangling::Membership { user, group } => Some(DanglingReference {
+                    record: format!("users/{user}"),
+                    field: "groups".to_owned(),
+                    name: group.clone(),
+                    referent: PrunedReferent::Group,
+                }),
+                Dangling::TokenGroup { .. } => None,
+            })
+            .collect()
     }
 
     /// Keeps the dangling references whose user or group a direct check of Redis says is gone,
@@ -905,6 +955,7 @@ impl Backup {
             network_policy_sets,
             workload_runtimes,
             pruned: Vec::new(),
+            accepted: Vec::new(),
             unreadable: problems,
         };
         Ok(backup)
@@ -918,7 +969,8 @@ impl Backup {
     /// backs must be an image of the pipeline's group in the backup; every user must hold a
     /// primary token no other user holds; every scoped token must belong to a user in the backup
     /// and hold a value no primary or other scoped token holds; and every network-policy set must
-    /// name a group in the backup.
+    /// name a group in the backup. A group member or user membership the backup's `accepted`
+    /// lists may name a user or group the backup doesn't hold.
     #[must_use]
     pub fn problems(&self) -> Vec<BackupProblem> {
         let mut problems = Vec::new();
@@ -933,6 +985,9 @@ impl Backup {
     }
 
     /// Records the problems of the backup's users and groups, returning their names
+    ///
+    /// A dangling group member or user membership that the backup's `accepted` lists is skipped
+    /// rather than recorded as a problem.
     ///
     /// # Arguments
     ///
@@ -950,6 +1005,17 @@ impl Backup {
                 ));
             }
         }
+        // the dangling references the backup accepted, which aren't problems
+        let accepted: HashSet<&DanglingReference> = self.accepted.iter().collect();
+        let is_accepted = |record: &str, field: &str, name: &str, referent| {
+            !accepted.is_empty()
+                && accepted.contains(&DanglingReference {
+                    record: record.to_owned(),
+                    field: field.to_owned(),
+                    name: name.to_owned(),
+                    referent,
+                })
+        };
         // each group appears once under a valid name, and its members are users in the backup
         let mut groups = HashSet::with_capacity(self.groups.len());
         for group in &self.groups {
@@ -966,7 +1032,9 @@ impl Backup {
                 let names: BTreeSet<&String> =
                     members.direct.iter().chain(&members.combined).collect();
                 for name in names {
-                    if !users.contains(name.as_str()) {
+                    if !users.contains(name.as_str())
+                        && !is_accepted(&key, role, name, PrunedReferent::User)
+                    {
                         problems.push(BackupProblem::new(
                             &key,
                             format!("its {role} include {name}, a user the backup doesn't hold"),
@@ -977,11 +1045,14 @@ impl Backup {
         }
         // each user's groups are groups in the backup
         for user in &self.users {
+            let key = format!("users/{}", user.username);
             let names: BTreeSet<&String> = user.groups.iter().collect();
             for name in names {
-                if !groups.contains(name.as_str()) {
+                if !groups.contains(name.as_str())
+                    && !is_accepted(&key, "groups", name, PrunedReferent::Group)
+                {
                     problems.push(BackupProblem::new(
-                        format!("users/{}", user.username),
+                        &key,
                         format!("its groups include {name}, a group the backup doesn't hold"),
                     ));
                 }
@@ -1429,8 +1500,9 @@ impl Backup {
     /// Validates a backup, then replaces this namespace's Redis state with it
     ///
     /// A backup with problems, or with a user whose password hash Thorium won't verify, is
-    /// refused before any key is deleted. Only the keys of this API's
-    /// namespace are deleted, unless `params` asks to flush the API's whole Redis database.
+    /// refused before any key is deleted; a dangling group member or user membership the
+    /// backup's `accepted` lists isn't a problem, and is written as it is. Only the keys of this
+    /// API's namespace are deleted, unless `params` asks to flush the API's whole Redis database.
     ///
     /// # Arguments
     ///
@@ -2224,6 +2296,7 @@ mod tests {
             network_policy_sets: Vec::new(),
             workload_runtimes: BTreeMap::new(),
             pruned: Vec::new(),
+            accepted: Vec::new(),
             unreadable: Vec::new(),
         }
     }
@@ -2261,6 +2334,98 @@ mod tests {
             held.problems()
         );
         assert_eq!(held.problems().len(), 1, "{:?}", held.problems());
+    }
+
+    /// The dangling group members and user memberships a backup accepted aren't problems, while
+    /// one it didn't accept, or accepted under another role, still is; a scoped token's group is
+    /// never listed, since it is no problem to begin with
+    #[test]
+    fn accepted_dangling_references_are_not_problems() {
+        // alice is in a group that is gone, and the group names an owner and a user that are gone
+        let mut held = backup(
+            vec![
+                user(BOOTSTRAP_ADMIN, &["vesta"]),
+                user("alice", &["vesta", "ghost"]),
+            ],
+            vec![group(
+                "vesta",
+                &[BOOTSTRAP_ADMIN, "carme"],
+                &["alice", "leda"],
+            )],
+        );
+        assert_eq!(held.problems().len(), 3, "{:?}", held.problems());
+        // accepting every dangling reference leaves no problem
+        held.accepted = Backup::accepted_of(&held.dangling());
+        assert!(held.problems().is_empty(), "{:?}", held.problems());
+        // each is listed by record, field, name, and referent
+        let reference = |record: &str, field: &str, name: &str, referent| DanglingReference {
+            record: record.to_owned(),
+            field: field.to_owned(),
+            name: name.to_owned(),
+            referent,
+        };
+        assert_eq!(
+            held.accepted,
+            vec![
+                reference("groups/vesta", "owners", "carme", PrunedReferent::User),
+                reference("groups/vesta", "users", "leda", PrunedReferent::User),
+                reference("users/alice", "groups", "ghost", PrunedReferent::Group),
+            ]
+        );
+        // a reference left off the list is a problem again, alone
+        held.accepted.retain(|accepted| accepted.name != "leda");
+        assert_eq!(held.problems().len(), 1, "{:?}", held.problems());
+        assert!(has_problem(&held, "groups/vesta", "leda"));
+        // a reference accepted under another role doesn't cover this one
+        held.accepted.push(reference(
+            "groups/vesta",
+            "managers",
+            "leda",
+            PrunedReferent::User,
+        ));
+        assert!(has_problem(&held, "groups/vesta", "leda"));
+        // a scoped token's dangling group is never accepted, since a restore doesn't refuse it
+        let token = Dangling::TokenGroup {
+            owner: "alice".to_owned(),
+            name: "ci".to_owned(),
+            group: "ghost".to_owned(),
+        };
+        assert_eq!(
+            Backup::accepted_of(&[token].into()),
+            Vec::<DanglingReference>::new()
+        );
+    }
+
+    /// A backup body without `accepted` parses with an empty list, and a backup with an empty
+    /// list serializes exactly as a body without the field, so older archives and clients are
+    /// unchanged
+    #[test]
+    fn an_empty_accepted_list_leaves_the_backup_body_unchanged() {
+        // a backup whose serialized body drops the empty accepted list
+        let held = backup(
+            vec![user(BOOTSTRAP_ADMIN, &["vesta"])],
+            vec![group("vesta", &[BOOTSTRAP_ADMIN], &[])],
+        );
+        assert_eq!(held.accepted, Vec::<DanglingReference>::new());
+        let body = serde_json::to_value(&held).unwrap();
+        assert!(body.get("accepted").is_none(), "{body}");
+        // the body parses back with an empty list and serializes to the same bytes
+        let parsed: Backup = serde_json::from_value(body.clone()).unwrap();
+        assert_eq!(parsed.accepted, Vec::<DanglingReference>::new());
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), body);
+        // a non-empty list is written under `accepted` and read back as it was
+        let mut with = parsed;
+        with.accepted = Backup::accepted_of(&with.dangling());
+        with.accepted.push(DanglingReference {
+            record: "groups/vesta".to_owned(),
+            field: "users".to_owned(),
+            name: "leda".to_owned(),
+            referent: PrunedReferent::User,
+        });
+        let written = serde_json::to_value(&with).unwrap();
+        assert_eq!(written["accepted"].as_array().map(Vec::len), Some(1));
+        let read: Backup = serde_json::from_value(written).unwrap();
+        assert_eq!(read.accepted, with.accepted);
     }
 
     /// Pruning the last direct owner of a group without owner metagroups adds the bootstrap admin

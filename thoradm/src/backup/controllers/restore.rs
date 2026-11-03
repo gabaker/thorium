@@ -15,9 +15,9 @@ use std::sync::Arc;
 use thorium::Conf;
 use thorium::CtlConf;
 use thorium::Thorium;
-use thorium::models::RestoreParams;
 use thorium::models::schema::scylla::SchemaMigrationsTable;
 use thorium::models::upgrades::{Catalog, RevisionId};
+use thorium::models::{Backup, DanglingReference, RestoreParams};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
@@ -782,6 +782,9 @@ pub struct RestoreController {
     redis_flush_all: bool,
     /// The operator users the target held before the restore, which the Redis restore keeps
     kept_users: KeptUsers,
+    /// The dangling group members and user memberships the backup recorded as accepted broken
+    /// links, which the Redis restore asks the API to accept
+    accepted: Vec<DanglingReference>,
     /// What every S3 upload of the restore shares: the client, the retries, and the bound
     s3: S3RestoreShared,
     /// The samples list table
@@ -874,6 +877,7 @@ impl RestoreController {
             format: FORMAT_VERSION,
             redis_flush_all: false,
             kept_users: KeptUsers::default(),
+            accepted: Vec::new(),
             s3: S3RestoreShared::new(config, RetryPolicy::new(DEFAULT_ATTEMPTS), DEFAULT_UPLOADS),
             samples_list,
             s3_ids,
@@ -951,6 +955,9 @@ impl RestoreController {
     /// Reads a `redis.json` file and restores it through the API, keeping the target's operator
     /// users in place of the backup's, and returns the names of the users kept
     ///
+    /// The API accepts only the dangling references the backup recorded as broken links, so a
+    /// dangling reference the backup didn't record still refuses the restore.
+    ///
     /// # Arguments
     ///
     /// * `path` - The path of `redis.json`
@@ -967,7 +974,9 @@ impl RestoreController {
         // load our backup from disk
         let backup_str = tokio::fs::read_to_string(path).await?;
         // deserialize our backup
-        let mut backup = serde_json::from_str(&backup_str)?;
+        let mut backup: Backup = serde_json::from_str(&backup_str)?;
+        // the API accepts exactly the dangling references the backup recorded
+        backup.accepted.clone_from(&self.accepted);
         // the target's operator users replace the backup's, so its operator can still log in
         let kept = self.kept_users.keep(&mut backup);
         // restore this backup, flushing the API's whole database first when asked
@@ -1013,6 +1022,19 @@ impl RestoreController {
     pub fn with_redis_flush_all(mut self, flush: bool) -> Self {
         // the Redis restore asks the API for a flush with this
         self.redis_flush_all = flush;
+        self
+    }
+
+    /// Takes the dangling references the backup recorded as accepted broken links, which the
+    /// Redis restore asks the API to accept
+    ///
+    /// # Arguments
+    ///
+    /// * `accepted` - The recorded dangling references
+    #[must_use]
+    pub fn with_accepted_dangling(mut self, accepted: Vec<DanglingReference>) -> Self {
+        // the Redis restore sends these with the backup
+        self.accepted = accepted;
         self
     }
 
@@ -1675,7 +1697,11 @@ impl RestoreSummary {
                     "restore summary: broken link {} {} {} named by {}",
                     record.component,
                     record.bucket.as_deref().unwrap_or("-"),
-                    record.key.as_deref().unwrap_or("-"),
+                    record
+                        .key
+                        .as_deref()
+                        .or(record.target.as_deref())
+                        .unwrap_or("-"),
                     record.referrer.as_deref().unwrap_or("-")
                 );
             }
@@ -1877,7 +1903,15 @@ pub async fn run(
         .with_transfers(restore_args.retries, concurrency)
         .with_format(format)
         .with_redis_flush_all(restore_args.redis_flush_all)
-        .with_kept_users(kept_users.clone());
+        .with_kept_users(kept_users.clone())
+        .with_accepted_dangling(
+            cleared
+                .broken_links
+                .iter()
+                .filter(|record| record.component == BackupComponents::Redis.to_string())
+                .filter_map(FailureRecord::as_dangling)
+                .collect(),
+        );
     // retore this cluster from disk
     let done = controller.restore(&restore_args.backup, &log).await?;
     // a recorded baseline or a moved revision leaves the operator a record to follow

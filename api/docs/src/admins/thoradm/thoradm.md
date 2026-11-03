@@ -165,9 +165,10 @@ instead, lists each change in `pruned.jsonl`, and exits 2, and a restore of such
 references](./taking_backups.md#pruning-dangling-references)). A backup whose rows name S3 objects
 the cluster itself lacks (a broken link, such as an entity image deleted from the graphics bucket)
 fails those objects by default; `backup new --accept-broken-links` (off by default) goes on past
-each one, records it as a broken link in `failures.jsonl`, keeps it as the cluster holds it, and
-exits 2, and a restore of a backup whose only records are accepted broken links needs no
-`--accept-failures` (see [Accepting broken
+each one, and past each dangling group member or user membership of the Redis state, records it as
+a broken link in `failures.jsonl`, keeps it as the cluster holds it, and exits 2 (with
+`--prune-dangling` too, the Redis references are pruned instead), and a restore of a backup whose
+only records are accepted broken links needs no `--accept-failures` (see [Accepting broken
 links](./taking_backups.md#accepting-broken-links)).
 
 ### Checking a Backup
@@ -239,8 +240,9 @@ and the flag that overrides it.
   references are in `pruned.jsonl`, and the restore writes the Redis state without them). The
   restore's own exit code follows only its own failures. A backup whose only records are broken links
   accepted with `backup new --accept-broken-links` needs no flag: the restore logs them as known and
-  its summary lists them as `broken_links`, and the restored rows keep the links as the backup held
-  them.
+  its summary lists them as `broken_links`, and the restored rows and Redis state keep the links as
+  the backup held them. The API accepts only the dangling group members and user memberships the
+  backup recorded; any other dangling reference still refuses the Redis restore.
 - **A thoradm that reads the backup's format.** A thoradm reads every archive format up to its own,
   so restore with a thoradm at least as new as the one that took the backup ([Archive
   formats](./taking_backups.md#archive-formats)). A format-2 backup must only be restored with a
@@ -623,7 +625,7 @@ restore replaces the bootstrapped admin with the backup's users, whose logins wo
 |---|---|
 | Rows | A backed-up table holds another number of rows in a token range than the backup read from it (the ranges and counts come from the manifest) |
 | Objects | An object the backup's indexes list is missing from its bucket, or has another size |
-| Redis | A user, scoped token, group, network-policy set, image, or pipeline the API serves differs from `redis.json`, or is in only one of them, or the settings differ; the record names the fields that differ, never their values. Sets (group members, an image's network policies and child filters, a group's network policies, the host path whitelist) compare in any order |
+| Redis | A user, scoped token, group, network-policy set, image, or pipeline the API serves differs from `redis.json`, or is in only one of them, or the settings differ; the record names the fields that differ, never their values. The API's state is read with its dangling group members and user memberships kept, so a restore of accepted broken links compares cleanly. Sets (group members, an image's network policies and child filters, a group's network policies, the host path whitelist) compare in any order |
 | Kept by design | Never fails: an operator user that differs from `redis.json`, and a token range of `nodes` whose count differs from the backup's, are what a restore keeps of the target (see [What a Restore Keeps of the Target](#what-a-restore-keeps-of-the-target)), so they are logged and counted under the `kept-by-design` check instead of `redis-diff` or the row count |
 | Views | A view the registry lists for a backed-up table doesn't exist or hasn't finished building |
 | Census | A census stream lacks a bucket that a table with a census holds: every table the backup holds, and, when the backup holds `redis.json`, every such table in the target, since the Redis restore deletes every census stream |
