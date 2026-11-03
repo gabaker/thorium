@@ -1,14 +1,13 @@
 //! Setup Scylla for Thorium
 
-use chrono::Duration;
-use chrono::prelude::*;
-use futures::{poll, task::Poll};
 use scylla::client::session::Session;
 use std::time::Duration as StdDuration;
 
 use crate::models::schema::queries::ScyllaQueries;
 use crate::models::schema::statements::prepare_all;
-use crate::models::schema::{ApplyOptions, ApplyTarget, apply, check_startup, connect};
+use crate::models::schema::{
+    ApplyOptions, ApplyTarget, DEFAULT_VIEW_WAIT_SECS, apply, check_startup, connect,
+};
 use crate::models::schema::{RevisionSnapshot, SchemaCheckError, SchemaCheckPass, SnapshotError};
 use crate::models::upgrades::Catalog;
 use crate::utils::{ApiError, StartupOpts};
@@ -91,6 +90,9 @@ impl Scylla {
     /// Connect to Scylla, judge the applied schema against a catalog, and prepare every
     /// statement
     ///
+    /// Each of the four attempts gets the configured setup time. An attempt that runs out of time
+    /// is aborted before the next one starts, so attempts never apply the schema at the same time.
+    ///
     /// # Arguments
     ///
     /// * `config` - The Thorium config
@@ -107,45 +109,36 @@ impl Scylla {
         catalog: Catalog,
         snapshots: SnapshotLoader,
     ) -> Result<(Self, SchemaCheckPass), SchemaCheckError> {
+        // give each attempt the configured setup time
+        let limit = StdDuration::from_secs(u64::from(config.scylla.setup_time));
         // loop and try to complete this future
         for _ in 0..4 {
-            // get the correct timeout for scylla
-            let timeout = Utc::now() + Duration::seconds(i64::from(config.scylla.setup_time));
             // get a clone of our config and log
             let config_clone = config.clone();
-            // build the future for our setup
-            let mut future = tokio::spawn(async move {
+            // run the setup on its own task so a timed-out attempt can be aborted
+            let mut setup_task = tokio::spawn(async move {
                 Box::pin(build(config_clone, opts, catalog, snapshots)).await
             });
-            // timeout appears to just hang so were going to check it manually
-            loop {
-                // check if this future has completed yet
-                if let Poll::Ready(join_result) = poll!(&mut future) {
-                    // if this future has errored out then panic with that error
-                    match join_result {
-                        // a refusal is final, but a failed read of the record is retried
-                        Ok(Err(err)) if err.is_transient() => {
-                            setup!(
-                                config.thorium.tracing.local.level,
-                                format!("Scylla setup error {err}")
-                            );
-                            break;
-                        }
-                        Ok(started) => return started,
-                        // there was an error so print it and try again
-                        Err(err) => {
-                            // print our error and try again
-                            setup!(
-                                config.thorium.tracing.local.level,
-                                format!("Scylla setup error {:#?}", err)
-                            );
-                            // try to connect to scylla again
-                            break;
-                        }
-                    }
+            // wait for the setup to finish or run out of time
+            match tokio::time::timeout(limit, &mut setup_task).await {
+                // a refusal is final, but a failed read of the record is retried
+                Ok(Ok(Err(err))) if err.is_transient() => {
+                    setup!(
+                        config.thorium.tracing.local.level,
+                        format!("Scylla setup error {err}")
+                    );
                 }
-                // check if we are past our timeout yet
-                if Utc::now() > timeout {
+                // a started API or a final refusal is returned as is
+                Ok(Ok(started)) => return started,
+                // the setup task panicked, so print its error and try again
+                Ok(Err(err)) => {
+                    setup!(
+                        config.thorium.tracing.local.level,
+                        format!("Scylla setup error {err:#?}")
+                    );
+                }
+                // the attempt ran out of time, so log it and try again
+                Err(_) => {
                     setup!(
                         config.thorium.tracing.local.level,
                         format!(
@@ -153,10 +146,11 @@ impl Scylla {
                             config.scylla.setup_time
                         )
                     );
-                    break;
+                    // abort the attempt and wait for it to stop, so the next attempt never
+                    // applies DDL beside it; whatever the stopped attempt returns is discarded
+                    setup_task.abort();
+                    let _ = setup_task.await;
                 }
-                // sleep for 3 seconds
-                tokio::time::sleep(StdDuration::from_millis(100)).await;
             }
         }
         // panic if we fail to connect
@@ -195,10 +189,12 @@ pub async fn new_session(config: &Conf) -> Session {
 /// * `session` - The scylla session to apply with
 /// * `config` - The Thorium config
 async fn apply_declared_schema(session: &Session, config: &Conf) -> Result<(), SchemaCheckError> {
-    // converge to the declared schema and record it, the way `thoradm schema apply` does
+    // converge to the declared schema and record it, the way `thoradm schema apply` does, with
+    // its default limit on the wait for views to build
     let options = ApplyOptions {
         target: ApplyTarget::Declared,
         dry_run: false,
+        view_wait: Some(StdDuration::from_secs(DEFAULT_VIEW_WAIT_SECS)),
     };
     let progress = |line: &str| {
         setup!(config.thorium.tracing.local.level, line.to_owned());

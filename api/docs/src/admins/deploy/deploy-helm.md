@@ -124,11 +124,14 @@ helm upgrade thorium oci://ghcr.io/cisagov/thorium/charts/thorium --version $VER
 The toolbox can be in either format: the repository's `tools/toolbox.json` (format 2, built from the
 tool manifests in `tools/`), a legacy image toolbox (which `thorctl` converts to tools as it reads it),
 or a converted or hand-written format 2 toolbox. The
-import Job waits for the API and for the admin login, then logs in as the admin from
+import Job only runs `thorctl` from the Thorium image. It logs in as the admin from
 `operator.cluster.bootstrap.admin.secret` (importing the repository's toolbox needs an admin, because
-its tools run as root), creates the groups and network policies the toolbox references first
-(`operator.toolbox.groups` and `operator.toolbox.networkPolicies`), and runs
-`thorctl toolbox import` with these flags, in this order:
+its tools run as root) and waits until the API answers and that admin can log in. It then creates
+the groups and network policies the toolbox references (`operator.toolbox.groups` with
+`thorctl groups create`, `operator.toolbox.networkPolicies` with `thorctl network-policies create`,
+each policy's `ingress` and `egress` passed as its rules file). One that already exists is
+reported as not created and left as is. Finally it runs `thorctl toolbox import` with these flags,
+in this order:
 
 ```text
 thorctl toolbox import "$TOOLBOX" --<mode> [--create-groups] [--strict] [--group-override <group>]

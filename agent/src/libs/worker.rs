@@ -239,8 +239,9 @@ impl Worker {
                             self.agent_intialized = true;
                         }
                         // try to spawn this worker
-                        let handle =
-                            tokio::spawn(async move { agents::execute(agent, log_path).await });
+                        let handle = tokio::spawn(async move {
+                            Box::pin(agents::execute(agent, log_path)).await;
+                        });
                         ClaimJobStatus::ActiveJob { job_id, handle }
                     }
                     // we ran into a problem building our agent

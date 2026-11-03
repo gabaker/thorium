@@ -46,5 +46,5 @@ fn only_existing_unbuilt_views_are_left_building() {
         ["samples", "comments_by_id"]
     );
     // a keyspace holding no views leaves nothing to wait for
-    assert!(left_building(&unbuilt, &[], &[]).is_empty());
+    assert_eq!(left_building(&unbuilt, &[], &[]), [] as [&str; 0]);
 }

@@ -58,7 +58,7 @@ impl Containers {
         Ok(btree)
     }
 
-    /// converts a resource limit request to a BTreeMap
+    /// converts a resource limit request to a `BTreeMap`
     ///
     /// This will ignore any value that is None
     ///
@@ -227,7 +227,7 @@ impl Containers {
     /// Injects a security context into the raw container json
     ///
     /// The k8s [`Container`] struct deserializes its security context from the
-    /// camelCase key `securityContext`; a snake_case `security_context` key is
+    /// camelCase key `securityContext`; a `snake_case` `security_context` key is
     /// silently ignored, which would drop `allowPrivilegeEscalation=false` and
     /// every other hardening flag. This helper centralizes the key so the
     /// production path and its regression test can never drift apart.

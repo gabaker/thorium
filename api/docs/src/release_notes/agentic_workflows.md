@@ -96,6 +96,9 @@ and known gaps before upgrading.
   under `workloads`.
 - Workers, jobs, and deadlines carry `tool_instance` and `run`, and `thorctl clusters` output
   changes.
+- A job claim's status update (`JobRunning`) names the claimed job (`job`) and its stage (`stage`)
+  beside the worker, since workers are named after their tool. Claims logged before the upgrade name
+  only the worker.
 - Pods are labelled `thorium-tool`, `thorium-tool-instance`, and `thorium-run` instead of
   `pipeline`. A network policy `allowed_tools` entry selects a tool or tool instance by id, or the
   tools in the policy's group with exactly that name; a name entry follows whatever tool holds that
@@ -159,7 +162,8 @@ See [Scheduling Tools and Runs](../admins/agentic/scheduling.md).
 - User responses return the legacy `ai` endpoint `api_key` empty.
 - An empty allowed endpoint list allows no model endpoints.
 - A workflow run whose agents can't all resolve a model is refused with `400`.
-- A workflow run whose bound credential is banned or deleted, or whose bound endpoint the
+- Model credentials past their `expires` time are skipped when a workflow run picks its models.
+- A workflow run whose bound credential is banned, deleted, or expired, or whose bound endpoint the
   deployment no longer allows, before its harness starts is failed with the stage logs
   `run models can't be delivered` and the reason.
 - `thorctl models profiles create --spec` and `profiles update --parameters` refuse unknown
@@ -180,6 +184,16 @@ See [Scheduling Tools and Runs](../admins/agentic/scheduling.md).
 - Directories and files that `thorctl reactions logs --output`, `thorctl results get`, and
   `thorctl run` name after a pipeline, stage, or tool replace `< > : " / \ | ? *` and control
   characters with `_` and drop trailing dots and spaces. Ordinary names are unchanged.
+
+#### Request body limits
+
+- **Request bodies are limited per route.** Most routes read at most 16 MiB, entity creates and
+  updates at most 14 MiB, and a submitted toolset or workflow instance at most 12 MiB. A larger body
+  is answered with `413 Payload Too Large` and a JSON body naming the limit and the setting that
+  raises it, and an oversized instance with `400` before any revision is reserved. File, result,
+  repo, comment attachment, reaction cache, and serialized YARA ruleset uploads and system restores
+  stay unlimited. The limits are the `thorium.limits.body` settings; see
+  [Request body limits](../admins/deploy/helm-configuration.md#request-body-limits).
 
 #### Backups
 
@@ -303,6 +317,12 @@ See [Scheduling Tools and Runs](../admins/agentic/scheduling.md).
 
 ### Upgrading
 ---
+
+Every Scylla node must be up: a schema apply that creates views, and the data migrations after
+it, can't proceed while a node is down. The schema apply waits for every node to build each new
+view and fails at its deadline (five hours, `thoradm schema apply --view-wait-secs`) naming the
+views and the nodes that haven't built them; bring the node back, or remove it from the cluster,
+first. A node that was removed or replaced no longer holds an apply back.
 
 1. Take a backup, let running reactions finish, and set the target revision `2026-10-v04` with an
    approval for each conversion step. The upgrade converts every image to a tool, sets the tool of

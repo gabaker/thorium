@@ -1,6 +1,6 @@
 //! Handles changing the tags of a reaction
 
-use thorium::models::ReactionUpdate;
+use thorium::models::{Reaction, ReactionUpdate};
 use thorium::{Error, Thorium};
 
 use crate::args::reactions::UpdateReaction;
@@ -31,17 +31,29 @@ pub async fn retag(thorium: &Thorium, cmd: &UpdateReaction) -> Result<(), Error>
         remove_tags: cmd.remove_tag.clone(),
         ..ReactionUpdate::default()
     };
-    thorium
+    let updated = thorium
         .reactions
         .update(&reaction.group, &reaction.id, &change)
         .await?;
-    // say what changed; the API lists a reaction under its tags without rewriting the tags it
-    // stores, so the tags a read returns are not a reliable record of this change
-    println!(
-        "Updated reaction {}: added tags [{}], removed tags [{}]",
-        reaction.id,
-        cmd.add_tag.join(", "),
-        cmd.remove_tag.join(", ")
-    );
+    // say what changed and which tags the reaction now has
+    println!("{}", retag_message(&updated, cmd));
     Ok(())
+}
+
+/// Describe a finished retag: the requested tag changes and the tags the reaction now has
+///
+/// # Arguments
+///
+/// * `updated` - The reaction the API returned after the update
+/// * `cmd` - The update command that was executed
+#[must_use]
+pub fn retag_message(updated: &Reaction, cmd: &UpdateReaction) -> String {
+    // list the requested changes, then the tags the API stored
+    format!(
+        "Updated reaction {}: added tags [{}], removed tags [{}]; tags are now [{}]",
+        updated.id,
+        cmd.add_tag.join(", "),
+        cmd.remove_tag.join(", "),
+        updated.tags.join(", ")
+    )
 }

@@ -358,7 +358,7 @@ pub async fn handle(cmd: &MigrateSubCommands, args: &Args) -> Result<RunOutcome,
         MigrateSubCommands::Verify(target) => verify::handle(target, args).await,
         MigrateSubCommands::Issues(issues_cmd) => issues::handle(issues_cmd, args).await,
         MigrateSubCommands::Report(report_cmd) => report::handle(report_cmd, args).await,
-        MigrateSubCommands::Revert(revert_cmd) => revert::handle(revert_cmd, args).await,
+        MigrateSubCommands::Revert(revert_cmd) => Box::pin(revert::handle(revert_cmd, args)).await,
         MigrateSubCommands::ResetState(reset_cmd) => reset_state::handle(reset_cmd, args).await,
     }
 }

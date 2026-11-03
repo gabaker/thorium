@@ -24,8 +24,8 @@ const LEGACY_EVENTS: &str = "CREATE TABLE IF NOT EXISTS {ns}.events (event_type 
     data TEXT, PRIMARY KEY ((event_type, year, bucket), timestamp, id)) \
     WITH default_time_to_live = 2592000";
 
-/// The `entities_by_name` view an older release's setup created, which the registry doesn't
-/// declare
+/// The `entities_by_name` view an older release's setup created, which the registry declares again
+/// from `2026-10-v05` on
 const LEGACY_ENTITIES_BY_NAME: &str = "CREATE MATERIALIZED VIEW IF NOT EXISTS \
     {ns}.entities_by_name AS SELECT name, group, kind, created, year, bucket, id, submitter, \
     kind_data, description, image FROM {ns}.entities WHERE name IS NOT NULL AND group IS NOT NULL \
@@ -75,6 +75,7 @@ async fn apply_declared(session: &Session, conf: &Conf) -> Result<(), Error> {
     let options = ApplyOptions {
         target: ApplyTarget::Declared,
         dry_run: false,
+        view_wait: None,
     };
     apply(session, conf, &options, "probe-test", &|_| ())
         .await
@@ -114,15 +115,15 @@ async fn create_legacy(session: &Session, keyspace: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// Whether an object is one of the two registered legacy objects
+/// Whether an object is the registered legacy `events` table
 ///
 /// # Arguments
 ///
 /// * `backend` - The object's backend
 /// * `name` - The object's name
 fn legacy(backend: SchemaBackend, name: &str) -> bool {
-    // the `events` table and the `entities_by_name` view
-    backend == SchemaBackend::Scylla && matches!(name, "events" | "entities_by_name")
+    // the `entities_by_name` view the older setup also created is declared from 2026-10-v05 on
+    backend == SchemaBackend::Scylla && name == "events"
 }
 
 /// Probe a keyspace's Scylla objects and recorded layouts
@@ -203,8 +204,9 @@ async fn a_keyspace_this_release_creates_probes_with_no_drift() -> Result<(), Er
 
 /// A keyspace an older release created, holding the `events` table and the `entities_by_name`
 /// view, probes after `schema apply` with no `missing` or `changed` object and no `unexpected`
-/// object but those two, which the legacy registry acknowledges; without the registry they are
-/// drift, and against the `2026-10-v02` snapshot, which lists them, they match
+/// object but the `events` table, which the legacy registry acknowledges (the view is declared
+/// from `2026-10-v05` on); without the registry the table is drift, and against the `2026-10-v02`
+/// snapshot, which lists both, they match
 #[tokio::test]
 async fn a_keyspace_an_older_release_created_drifts_only_by_its_legacy_objects() -> Result<(), Error>
 {
@@ -223,29 +225,23 @@ async fn a_keyspace_an_older_release_created_drifts_only_by_its_legacy_objects()
             "{backend:?}: {drift:?}"
         );
     }
-    // only the two legacy objects are reported, both acknowledged
+    // only the legacy table is reported, acknowledged
     let scylla = &report.backends[&SchemaBackend::Scylla].objects;
     let found = scylla
         .iter()
         .map(|object| (object.object.as_str(), object.kind, object.acknowledged))
         .collect::<Vec<_>>();
-    assert_eq!(
-        found,
-        [
-            ("entities_by_name", DriftKind::Unexpected, true),
-            ("events", DriftKind::Unexpected, true),
-        ]
-    );
+    assert_eq!(found, [("events", DriftKind::Unexpected, true)]);
     assert!(scylla.iter().all(|object| object.fingerprint.is_some()));
     for backend in [SchemaBackend::Redis, SchemaBackend::S3] {
         assert!(report.backends[&backend].objects.is_empty(), "{backend:?}");
     }
-    // without the legacy registry the same two objects are drift
+    // without the legacy registry the same table is drift
     let unregistered = DriftReport::compare(&current(), &observed, &|_, _: &str| false);
     let scylla = &unregistered.backends[&SchemaBackend::Scylla];
     assert_eq!(scylla.status, BackendSchemaStatus::Drift);
     assert!(scylla.objects.iter().all(|object| !object.acknowledged));
-    assert_eq!(scylla.objects.len(), 2);
+    assert_eq!(scylla.objects.len(), 1);
     // against the 2026-10-v02 snapshot, which lists both, they match
     let v02 = RevisionSnapshot::committed("2026-10-v02")
         .expect("2026-10-v02 has a snapshot")

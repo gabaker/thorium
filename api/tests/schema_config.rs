@@ -91,6 +91,7 @@ async fn apply_declared(session: &Session, conf: &Conf) -> Result<ApplyReport, E
     let options = ApplyOptions {
         target: ApplyTarget::Declared,
         dry_run: false,
+        view_wait: None,
     };
     apply(session, conf, &options, "key-config", &|_| ())
         .await
@@ -320,6 +321,7 @@ async fn apply_refused(
     let options = ApplyOptions {
         target: ApplyTarget::Declared,
         dry_run: false,
+        view_wait: None,
     };
     match apply_accepting(session, conf, &options, accept, "key-config", &|_| ()).await {
         Ok(report) => Err(Error::new(format!(
@@ -345,6 +347,7 @@ async fn apply_accepted(
     let options = ApplyOptions {
         target: ApplyTarget::Declared,
         dry_run: false,
+        view_wait: None,
     };
     apply_accepting(session, conf, &options, accept, "key-config", &|_| ())
         .await
@@ -539,6 +542,7 @@ async fn a_changed_setting_is_refused_while_its_data_exists() -> Result<(), Erro
     let options = ApplyOptions {
         target: ApplyTarget::Declared,
         dry_run: true,
+        view_wait: None,
     };
     let accept = ConfigAccept::default();
     let dry = apply_accepting(&session, &changed, &options, &accept, "key-config", &|_| ()).await;
@@ -669,7 +673,7 @@ async fn a_changed_files_password_is_refused_while_files_exist() -> Result<(), E
         config_rows(&session, &keyspace).await?.get(FILES_PASSWORD)
     );
     // with nothing stored, the new password's identity is recorded
-    let mut unused = fresh(&session, "config_password_unused").await?;
+    let mut unused = fresh(&session, "config_password_new").await?;
     unused.thorium.files.password = first.to_owned();
     apply_declared(&session, &unused).await?;
     unused.thorium.files.password = second.to_owned();
@@ -970,6 +974,7 @@ async fn apply_watched(
     let options = ApplyOptions {
         target: ApplyTarget::Declared,
         dry_run,
+        view_wait: None,
     };
     // converge and record, turning a refusal into a test error
     let report = apply(session, conf, &options, "key-config", &progress)

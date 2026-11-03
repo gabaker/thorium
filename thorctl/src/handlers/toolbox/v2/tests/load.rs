@@ -376,10 +376,10 @@ async fn missing_manifest_file_is_an_error() {
 }
 
 /// A pipeline whose config is read from a source takes the description its version carries
-/// (the `description.md` or manifest description) when the config has none, and keeps a
-/// description of its own
+/// (the `description.md` or manifest description) over the config's own, and keeps the config's
+/// description when the version carries none
 #[tokio::test]
-async fn read_pipeline_config_takes_the_carried_description_when_it_has_none() {
+async fn read_pipeline_config_takes_the_carried_description() {
     // three pipeline configs: a null description, a missing one, and one of its own
     let scratch = Scratch::new();
     for (file, description) in [
@@ -409,6 +409,7 @@ async fn read_pipeline_config_takes_the_carried_description_when_it_has_none() {
             "missing": version("missing.json", "from md"),
             "own": version("own.json", "from md"),
             "bare": version("null.json", ""),
+            "bare-own": version("own.json", ""),
         },
     });
     let mut loaded = load(&document).await.expect("parse");
@@ -423,6 +424,7 @@ async fn read_pipeline_config_takes_the_carried_description_when_it_has_none() {
     };
     assert_eq!(described("null").as_deref(), Some("from md"));
     assert_eq!(described("missing").as_deref(), Some("from md"));
-    assert_eq!(described("own").as_deref(), Some("its own"));
+    assert_eq!(described("own").as_deref(), Some("from md"));
     assert_eq!(described("bare"), None);
+    assert_eq!(described("bare-own").as_deref(), Some("its own"));
 }

@@ -294,7 +294,7 @@ async fn update() -> Result<(), thorium::Error> {
 /// `Group::update` only invokes the owner/manager (`modifiable`) check when the update touches role
 /// membership; `removes_only_user` ignores `description`, `clear_description`, and the entire
 /// `allowed` update. So an update with zero role changes skips the privilege check and any member —
-/// even a monitor, the explicitly read-only role — can flip group-wide `allowed` flags (a DoS) or
+/// even a monitor, the explicitly read-only role — can flip group-wide `allowed` flags (a `DoS`) or
 /// deface the description. The secure behavior is that a monitor's settings-only update fails with
 /// `401`.
 #[tokio::test]

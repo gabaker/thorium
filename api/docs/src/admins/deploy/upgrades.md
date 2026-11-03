@@ -54,6 +54,15 @@ If the phase is `Ready`, the upgrade is done. If it is `UpgradeRequired`, contin
   thoradm --cluster-conf thorium.yml schema diff
   ```
 
+- Make sure every Scylla node is up (`nodetool status` shows each one `UN`). A schema apply that
+  creates views can't finish while a Scylla node is down: the schema-apply Job waits for every
+  node to build each new view, then fails after five hours naming the views and the nodes that
+  haven't built them, and no data step runs before it succeeds. Bring the node back, or remove it
+  from the cluster (`nodetool removenode`), then set the
+  `thorium.sandia.gov/retry-schema-apply` annotation to a new value. A node that was removed or
+  replaced doesn't hold the apply back (see [The Declared
+  Schema](../thoradm/thoradm.md#the-declared-schema)).
+
 ## Where a deployment starts
 
 The revision and the full history of applied steps are recorded in Scylla, in the
@@ -78,6 +87,13 @@ latest revision), and set the target as usual:
 helm upgrade thorium oci://ghcr.io/cisagov/thorium/charts/thorium --version $VERSION \
   -n thorium -f site.yaml --set operator.cluster.upgrade.startingRevision=2026-10-v02
 ```
+
+The chart's `ScyllaCluster` rack spec has changed since the first Helm release: the rack no longer
+names a `scyllaAgentConfig` Secret (and the coredump volume can be turned off with
+`scylla.coredumps.enabled`). So upgrading from that release makes the Scylla operator recreate the
+Scylla pods (the cluster's members) once, whatever revision the operator starts from. Writes fail
+while the pods restart (for example the first pods of the toolbox import Job report
+`ScyllaExecution ConnectionRefused` and are retried), so upgrade at a quiet time.
 
 The operator records the starting revision (`thoradm schema apply --seed-revision`) only after the
 live schema matches that revision's schema, and refuses otherwise, naming the differences; once a

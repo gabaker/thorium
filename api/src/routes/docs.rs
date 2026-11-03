@@ -1931,7 +1931,7 @@ mod tests {
 
     /// No operation holds a member whose value is null, such as `"parameters": null`
     ///
-    /// OpenAPI members are absent when empty, and a null parameter list is not a list.
+    /// `OpenAPI` members are absent when empty, and a null parameter list is not a list.
     #[test]
     fn operations_hold_no_null_members() {
         // the problems found across all documents

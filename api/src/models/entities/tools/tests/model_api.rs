@@ -4,11 +4,13 @@ use serde_json::{Value, json};
 
 use super::{mcp_tool, schema};
 use crate::models::entities::digests::ThorDigest;
+use crate::models::entities::thread_timer::ThreadTimer;
 use crate::models::entities::tools::{
-    AgenticTool, DEFAULT_MAX_TOOL_SCHEMA_BYTES, ToolCapabilities, ToolEffect, ToolIcon,
-    ToolIconTheme, ToolLoading, ToolPortabilityReport, ToolResultFormat, ToolSpec, ToolStrictness,
-    tool_portability_json,
+    AgenticTool, DEFAULT_MAX_TOOL_SCHEMA_BYTES, ToolIcon, ToolIconTheme, ToolLoading,
+    ToolPortabilityReport, ToolResultFormat, ToolSpec, ToolStrictness, tool_portability_json,
 };
+#[cfg(feature = "api")]
+use crate::models::entities::tools::{ToolCapabilities, ToolEffect};
 
 /// An MCP-backed agentic tool as it was stored before the model-API tool fields existed
 const STORED_MCP_TOOL: &str = r#"{"function_name":"get_sample","title":"Get a sample","model_description":"Get a sample's details","input_schema":{"properties":{"sha256":{"type":"string"}},"type":"object"},"output_schema":null,"capabilities":{"effects":[],"idempotent":false,"file_inputs":false,"file_outputs":false},"backing":{"ThoriumMcp":{"tool":"get_sample"}},"result_format":"Json","requires_approval":false,"timeout":60}"#;
@@ -607,11 +609,11 @@ fn reference_chains_are_fast() {
     let chain = ref_chain(1600, &json!({"type": "string"}));
     assert!(serde_json::to_vec(&chain).unwrap().len() < DEFAULT_MAX_TOOL_SCHEMA_BYTES);
     let tool = with_schema(&chain);
-    // validating and reporting on it take well under a second
-    let start = std::time::Instant::now();
+    // validating and reporting on it take well under a second of the thread's processor time
+    let timer = ThreadTimer::start();
     assert!(check(&tool).is_ok());
     let report = tool.portability();
-    let elapsed = start.elapsed();
+    let elapsed = timer.elapsed();
     assert!(report.strict_compatible, "{report:?}");
     assert!(
         elapsed < std::time::Duration::from_secs(1),
@@ -619,9 +621,9 @@ fn reference_chains_are_fast() {
     );
     // closing the chain back to its start makes every reference in it recursive
     let looped = with_schema(&ref_chain(1600, &json!({"$ref": "#/properties/p0"})));
-    let start = std::time::Instant::now();
+    let timer = ThreadTimer::start();
     let report = looped.portability();
-    let elapsed = start.elapsed();
+    let elapsed = timer.elapsed();
     assert_eq!(
         report.strict_issues.len(),
         1600,
@@ -644,7 +646,8 @@ fn reference_chains_are_fast() {
 /// Patterns that are slow to compile, or too many patterns, are refused quickly
 #[test]
 fn pattern_compile_cost_is_bounded() {
-    // 60 distinct patterns with large compiled forms are refused within a couple of seconds
+    // 60 distinct patterns with large compiled forms are refused within a couple of seconds of
+    // the thread's processor time
     let properties = (0..60)
         .map(|index| {
             (
@@ -654,9 +657,9 @@ fn pattern_compile_cost_is_bounded() {
         })
         .collect::<serde_json::Map<String, Value>>();
     let large = json!({"type": "object", "properties": properties});
-    let start = std::time::Instant::now();
+    let timer = ThreadTimer::start();
     let err = check(&with_schema(&large)).unwrap_err();
-    let elapsed = start.elapsed();
+    let elapsed = timer.elapsed();
     assert!(err.contains("pattern"), "{err}");
     assert!(err.contains("1048576 byte limit"), "{err}");
     assert!(

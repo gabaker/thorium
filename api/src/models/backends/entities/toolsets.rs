@@ -982,8 +982,10 @@ pub(crate) async fn create_instance(
     mut form: EntityForm,
     shared: &Shared,
 ) -> Result<EntityResponse, ApiError> {
-    // parse the submitted instance, whose own tags can't use the keys Thorium sets on it
-    let instance = ToolSetInstanceEntityRequest::parse_form(&mut form.metadata)?;
+    // parse the submitted instance within the instances limit, whose own tags can't use the
+    // keys Thorium sets on it
+    let max_bytes = shared.config.thorium.limits.body.instances.as_u64();
+    let instance = ToolSetInstanceEntityRequest::parse_form(&mut form.metadata, max_bytes)?;
     Entity::refuse_intrinsic_tag_keys(EntityKinds::ToolSetInstance, form.tags.keys())?;
     // find the toolset
     let mut tool_set = read_tool_set(user, instance.tool_set, shared).await?;

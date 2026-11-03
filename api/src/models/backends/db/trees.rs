@@ -25,7 +25,7 @@ pub async fn save(user: &User, tree: &mut Tree, shared: &Shared) -> Result<(), A
     // serialize this tree
     let serialized = serialize!(&tree);
     // build the key to save this cursor data too scoped to the creating user
-    let key = cursors::data(CursorKind::Tree, &user.username, &tree.id, shared);
+    let key = cursors::data(&CursorKind::Tree, &user.username, &tree.id, shared);
     // save this cursors data to redis and expire it after 3 days
     let _: () = query!(
         cmd("set").arg(key).arg(serialized).arg("EX").arg(259_200),
@@ -49,7 +49,7 @@ pub async fn save(user: &User, tree: &mut Tree, shared: &Shared) -> Result<(), A
 /// * `shared` - Shared Thorium objects
 pub async fn load(user: &User, id: Uuid, shared: &Shared) -> Result<Tree, ApiError> {
     // build the key to load this cursor data from scoped to the creating user
-    let key = cursors::data(CursorKind::Tree, &user.username, &id, shared);
+    let key = cursors::data(&CursorKind::Tree, &user.username, &id, shared);
     // get this cursors data from redis
     let serialized: Option<String> = query!(cmd("get").arg(key), shared).await?;
     // check if we got any tree data for this user

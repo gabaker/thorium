@@ -110,8 +110,8 @@ impl Args {
                 match gethostname::gethostname().into_string() {
                     Ok(hostname) => Ok(hostname),
                     Err(err) => Err(Error::new(format!(
-                        "Failed to get hostname with {:#?}",
-                        err
+                        "Failed to get hostname with {}",
+                        err.display()
                     ))),
                 }
             }

@@ -176,10 +176,10 @@ impl<S: Scrub> TableScrub<S> {
         path.push("maps");
         // crawl all of our maps for this table
         let mut walker = WalkDir::new(path.clone()).filter(|entry| async move {
-            if !entry.file_name().to_string_lossy().ends_with(".thoriummap") {
-                Filtering::Ignore
-            } else {
+            if entry.file_name().to_string_lossy().ends_with(".thoriummap") {
                 Filtering::Continue
+            } else {
+                Filtering::Ignore
             }
         });
         while let Some(entry) = walker.next().await {
@@ -328,6 +328,7 @@ impl ScrubController {
     /// # Arguments
     ///
     /// * `worker_count` - The number of workers per table
+    #[must_use]
     pub fn new(worker_count: usize) -> Self {
         ScrubController {
             samples_list: TableScrub::new(BackupComponents::SamplesList, worker_count),

@@ -50,14 +50,16 @@ fn safe_join(base: &Path, component: impl AsRef<Path>) -> Result<PathBuf, Error>
                 // reject the segment if it smuggles a Windows path separator
                 if segment.to_string_lossy().contains('\\') {
                     return Err(Error::new(format!(
-                        "refusing to join path component with a backslash: {component:?}"
+                        "refusing to join path component with a backslash: {}",
+                        component.display()
                     )));
                 }
             }
             // anything else (`..`, root `/`, a `C:` drive prefix, `.`) can walk out of the base
             _ => {
                 return Err(Error::new(format!(
-                    "refusing to join unsafe path component: {component:?}"
+                    "refusing to join unsafe path component: {}",
+                    component.display()
                 )));
             }
         }
@@ -281,9 +283,9 @@ pub async fn download_cache<P: AsRef<Path>>(
 /// # Arguments
 ///
 /// * `url` - The full repo URL for the repo dependency
-fn repo_results_query_key(url: &str) -> Option<&str> {
+fn repo_results_query_key(url: &str) -> &str {
     // query by the full repo path that repos are stored under
-    Some(url)
+    url
 }
 
 /// Build the on-disk target for a sample named after its most recent submission file name
@@ -986,45 +988,44 @@ pub async fn download_children<P: Into<PathBuf>>(
     // download children for all repos we depended on
     for repo_dep in &job.repos {
         // get the key to query this repo's results by
-        if let Some(repo) = repo_results_query_key(&repo_dep.url) {
-            // get the results for this repo
-            let results = thorium.repos.get_results(repo, &result_params).await?;
-            // keep naming this repo's directory after the last segment of its url
-            let repo_dir = repo.split('/').next_back().unwrap_or(repo);
-            // add this repos name
-            target.push(repo_dir);
-            // step over our results and build a list of children
-            for (tool, outputs) in results.results {
-                // get the children from the last result
-                if let Some(output) = outputs.first() {
-                    // check if this results has any children
-                    if !output.children.is_empty() {
-                        // log that repo and tool we are downloading results from
-                        log!(logs, "Downloading children from {} - {}", repo, tool);
-                        // add this tools name
-                        target.push(tool);
-                        // create all of our parent dirs
-                        tokio::fs::create_dir_all(&target).await?;
-                        // download these children
-                        for child in output.children.keys() {
-                            // add this childs sha256
-                            target.push(child);
-                            log!(logs, "Downloading child: {}", child);
-                            // download this child
-                            thorium.files.download(child, &target, &mut opts).await?;
-                            // add this path to our downloaded children
-                            downloaded.push(target.clone());
-                            // remove our childs sha256
-                            target.pop();
-                        }
-                        // remove our tool name
+        let repo = repo_results_query_key(&repo_dep.url);
+        // get the results for this repo
+        let results = thorium.repos.get_results(repo, &result_params).await?;
+        // keep naming this repo's directory after the last segment of its url
+        let repo_dir = repo.split('/').next_back().unwrap_or(repo);
+        // add this repos name
+        target.push(repo_dir);
+        // step over our results and build a list of children
+        for (tool, outputs) in results.results {
+            // get the children from the last result
+            if let Some(output) = outputs.first() {
+                // check if this results has any children
+                if !output.children.is_empty() {
+                    // log that repo and tool we are downloading results from
+                    log!(logs, "Downloading children from {} - {}", repo, tool);
+                    // add this tools name
+                    target.push(tool);
+                    // create all of our parent dirs
+                    tokio::fs::create_dir_all(&target).await?;
+                    // download these children
+                    for child in output.children.keys() {
+                        // add this childs sha256
+                        target.push(child);
+                        log!(logs, "Downloading child: {}", child);
+                        // download this child
+                        thorium.files.download(child, &target, &mut opts).await?;
+                        // add this path to our downloaded children
+                        downloaded.push(target.clone());
+                        // remove our childs sha256
                         target.pop();
                     }
+                    // remove our tool name
+                    target.pop();
                 }
             }
-            // remove our repos name
-            target.pop();
         }
+        // remove our repos name
+        target.pop();
     }
     Ok(downloaded)
 }
@@ -1356,16 +1357,13 @@ async fn reconstruct_filesystem(
         _ => None,
     });
     // get our root node hash or give up on this filesystem if its missing from the tree
-    let fs_root_hash = match fs_root_hash {
-        Some(hash) => hash,
-        None => {
-            log!(
-                logs,
-                "Could not find the root of filesystem {} in its tree",
-                fs_name
-            );
-            return Ok(());
-        }
+    let Some(fs_root_hash) = fs_root_hash else {
+        log!(
+            logs,
+            "Could not find the root of filesystem {} in its tree",
+            fs_name
+        );
+        return Ok(());
     };
     // build the base path all files in this filesystem will be reconstructed under
     let base = root.join(sha256).join(fs_name);
@@ -1378,14 +1376,12 @@ async fn reconstruct_filesystem(
     queue.push_back(fs_root_hash);
     while let Some(node_hash) = queue.pop_front() {
         // get the reconstructed path for this folder node
-        let parent_path = match folder_paths.get(&node_hash) {
-            Some(path) => path.clone(),
-            None => continue,
+        let Some(parent_path) = folder_paths.get(&node_hash).cloned() else {
+            continue;
         };
         // get the branches leaving this node if it has any
-        let branches = match tree.branches.get(&node_hash) {
-            Some(branches) => branches,
-            None => continue,
+        let Some(branches) = tree.branches.get(&node_hash) else {
+            continue;
         };
         // step over every branch leaving this node
         for branch in branches {
@@ -1394,9 +1390,8 @@ async fn reconstruct_filesystem(
                 continue;
             }
             // only follow filesystem association branches
-            let association = match &branch.relationship {
-                TreeRelationships::Association(association) => association,
-                _ => continue,
+            let TreeRelationships::Association(association) = &branch.relationship else {
+                continue;
             };
             // handle this branch based on the kind of thing it points too
             match association.kind {
@@ -1426,10 +1421,9 @@ async fn reconstruct_filesystem(
                 // this branch points to a file in this folder
                 AssociationKind::FileIn => {
                     // get the sha256 of the file to download
-                    let file_sha256 = match &association.other {
-                        AssociationTarget::File(file_sha256) => file_sha256,
-                        // this file in association doesn't point at a file so skip it
-                        _ => continue,
+                    // this file in association doesn't point at a file so skip it
+                    let AssociationTarget::File(file_sha256) = &association.other else {
+                        continue;
                     };
                     // resolve this files original name from the submission it was linked with,
                     // falling back to its sha256 for older filesystems that lack a submission link
@@ -1570,7 +1564,7 @@ mod tests {
         // the results query key must be the full repo path, matching how repos are stored
         assert_eq!(
             repo_results_query_key(url),
-            Some(url),
+            url,
             "repo results must be queried by the full URL, not just the last path segment"
         );
     }
@@ -1579,7 +1573,7 @@ mod tests {
     #[test]
     fn single_segment_repo_query_key_is_unchanged() {
         // a repo whose url has a single segment
-        assert_eq!(repo_results_query_key("curl"), Some("curl"));
+        assert_eq!(repo_results_query_key("curl"), "curl");
     }
 
     /// Resolve the `MostRecent` on-disk target for a sample with the given name and sha256

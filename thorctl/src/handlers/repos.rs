@@ -682,7 +682,7 @@ async fn tag_contributors(
     contributors: &HashMap<String, u64>,
 ) -> Result<(), Error> {
     // build a vec of all the contributors names
-    let names = contributors.keys().map(|name| name.to_owned()).collect();
+    let names = contributors.keys().map(ToOwned::to_owned).collect();
     // build our tag request
     let tag_req = TagRequest::default().add_values("Contributor", names);
     // add our contributor tags to our repo

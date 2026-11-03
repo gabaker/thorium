@@ -6,6 +6,7 @@
 //! without one. The run exits like `schema apply` and writes the same termination summary.
 
 use std::io::IsTerminal;
+use std::time::Duration;
 use thorium::models::schema::{self, ApplyError, ApplyReport, ViewDef, ViewError};
 use tracing::{info, warn};
 
@@ -127,7 +128,8 @@ pub(super) async fn run(cmd: &ApplySchema, args: &Args) -> Result<ApplyReport, F
     let session = crate::shared::scylla::get_client(&conf)
         .await
         .map_err(|err| Error::Transient(format!("Scylla can't be reached: {err}")))?;
-    let recreated = schema::recreate_views(&session, &conf, &views, cmd.dry_run, &|line| {
+    let wait = Some(Duration::from_secs(cmd.view_wait_secs));
+    let recreated = schema::recreate_views(&session, &conf, &views, cmd.dry_run, wait, &|line| {
         info!("{line}");
     })
     .await

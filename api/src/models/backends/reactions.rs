@@ -242,8 +242,10 @@ impl ReactionRequest {
     ) -> Result<(Reaction, ReactionCache), ApiError> {
         // if no sla is given use the default
         let sla_seconds = self.sla.unwrap_or(default_sla);
+        // saturate an sla too large for an i64 so the bounds check rejects it
+        let sla_seconds = i64::try_from(sla_seconds).unwrap_or(i64::MAX);
         // bounds check sla
-        bounder::number(sla_seconds as i64, "sla", 1, 3.154e+9 as i64)?;
+        bounder::number(sla_seconds, "sla", 1, 3_154_000_000)?;
         // build the repo dedendency objects
         let mut repos = Vec::with_capacity(self.repos.len());
         for req in self.repos {
@@ -281,7 +283,7 @@ impl ReactionRequest {
             current_stage_progress: 0,
             current_stage_length: plan.step(0).map_or(0, <[PlannedStage]>::len) as u64,
             args: self.args,
-            sla: Utc::now() + chrono::Duration::seconds(sla_seconds as i64),
+            sla: Utc::now() + chrono::Duration::seconds(sla_seconds),
             jobs: Vec::default(),
             tags: self.tags,
             parent: self.parent,
@@ -561,7 +563,7 @@ impl Reaction {
             // keep how many requests this user made in case their bulk request is refused
             let req_count = reqs.len();
             // create this users reactions
-            let user_resp = match Self::create_bulk(&other_user, reqs, shared).await {
+            let user_resp = match Box::pin(Self::create_bulk(&other_user, reqs, shared)).await {
                 Ok(user_resp) => user_resp,
                 // a refused bulk request creates nothing, so report it for this user alone
                 Err(error) if error.status().is_client_error() => {
@@ -1027,6 +1029,7 @@ impl Reaction {
     ///
     /// Replacing an ephemeral file the reaction already lists needs the Developer role for the
     /// scaler of every stage whose options override its command, positionals, or kwargs.
+    /// A tag the reaction already has is not added again.
     ///
     /// # Arguments
     ///
@@ -1089,8 +1092,13 @@ impl Reaction {
         }
         // update our reaction
         self.tags.retain(|tag| !update.remove_tags.contains(tag));
-        // add new tags
-        self.tags.extend(update.add_tags.clone());
+        // add each new tag this reaction doesn't already have, so a tag added again (or twice in
+        // one update) is stored once
+        for tag in &update.add_tags {
+            if !self.tags.contains(tag) {
+                self.tags.push(tag.clone());
+            }
+        }
         // a run's generated files are written only when the run is created, so a harness never
         // reads files someone else wrote under its run's name
         let generated = [

@@ -777,14 +777,24 @@ cfg_if::cfg_if! {
         impl ToolSetInstanceEntityRequest {
             /// Parse the submitted toolset instance of an entity form
             ///
+            /// An instance over the size limit is refused before it is parsed.
+            ///
             /// # Arguments
             ///
             /// * `form` - The submitted metadata form
-            pub fn parse_form(form: &mut EntityMetadataForm) -> Result<ToolSetInstanceEntity, ApiError> {
+            /// * `max_bytes` - The most bytes the raw instance may have
+            pub fn parse_form(form: &mut EntityMetadataForm, max_bytes: u64) -> Result<ToolSetInstanceEntity, ApiError> {
                 // the instance is required
                 let Some(raw) = form.toolset_instance.take() else {
                     return bad!("a toolset instance needs a toolset_instance".to_owned());
                 };
+                // it can't be larger than the instances limit
+                let len = raw.len() as u64;
+                if len > max_bytes {
+                    return bad!(format!(
+                        "toolset_instance is {len} bytes, over the {max_bytes} bytes thorium.limits.body.instances allows"
+                    ));
+                }
                 // it must be a whole toolset instance
                 match serde_json::from_str(&raw) {
                     Ok(instance) => Ok(instance),

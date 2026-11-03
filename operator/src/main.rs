@@ -7,6 +7,7 @@ mod upgrades;
 use clap::Parser;
 use k8s::controller;
 use std::process::ExitCode;
+use std::time::Duration;
 
 /// Run the operator subcommand given on the command line
 #[tokio::main]
@@ -26,6 +27,11 @@ async fn main() -> ExitCode {
         args::SubCommands::Crd(_) => {
             k8s::crds::print_crd();
             ExitCode::SUCCESS
+        }
+        // delete a ThoriumCluster and wait for the operator to clean it up
+        args::SubCommands::Uninstall(uninstall) => {
+            let timeout = Duration::from_secs(uninstall.timeout);
+            k8s::uninstall::run(&uninstall.namespace, &uninstall.name, timeout).await
         }
     }
 }

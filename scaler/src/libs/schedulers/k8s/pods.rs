@@ -158,11 +158,8 @@ impl Pods {
         error_out: &mut Vec<ErrorOutKinds>,
     ) -> Result<(), Error> {
         // get this pods name
-        let pod_name = match &pod.metadata.name {
-            Some(name) => name,
-            None => {
-                return Err(Error::new("Pod has no name".to_owned()));
-            }
+        let Some(pod_name) = &pod.metadata.name else {
+            return Err(Error::new("Pod has no name".to_owned()));
         };
         // error on pods without a status block
         if pod.status.is_none() {
@@ -417,11 +414,11 @@ impl Pods {
         // prune any of our no longer pending deletes
         for (name, delete) in ns_map.drain() {
             // check if this pod has been deleted
-            if !condensed.contains(&name) {
+            if condensed.contains(&name) {
+                temp.push((name, delete));
+            } else {
                 // this pod no longer exists so it has been deleted
                 results.push(WorkerDeletion::Deleted(delete));
-            } else {
-                temp.push((name, delete));
             }
         }
         // readd any still pending deletes to our pending deletes map
@@ -526,13 +523,10 @@ impl Pods {
     /// * `spawn` - The spawn to generate a pod for
     pub async fn generate(&self, cache: &Cache, spawn: &Spawned) -> Result<Pod, Error> {
         // get our user info
-        let user = match cache.users.get(&spawn.req.user) {
-            Some(user) => user,
-            None => {
-                // build our error message
-                let msg = format!("User {} not in cache", spawn.req.user);
-                return Err(Error::new(msg));
-            }
+        let Some(user) = cache.users.get(&spawn.req.user) else {
+            // build our error message
+            let msg = format!("User {} not in cache", spawn.req.user);
+            return Err(Error::new(msg));
         };
         // grab our workload info
         let workload = cache
@@ -722,7 +716,7 @@ impl Pods {
                 // we clone the strings to work around some FnOnce is not general enough errors
                 let pod_names = error_out_ns
                     .iter()
-                    .map(|kind| kind.worker())
+                    .map(ErrorOutKinds::worker)
                     .collect::<Vec<&String>>();
                 // try delete this groups failed pods 10 at a time
                 // if we fail thats fine we can try again later

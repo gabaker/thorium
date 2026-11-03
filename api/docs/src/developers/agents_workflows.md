@@ -317,4 +317,7 @@ Reference](../architecture/api.md#rest-api-reference)).
 Common errors: `401` when you lack edit rights or the `Entities` allow flag in a group, `404` when a group,
 tool, or linked entity doesn't exist or isn't visible, `409` when the change conflicts with how other
 entities use this one (for example removing a group that something linked still needs) or when deleting
-something still in use, and `422` when the request has the wrong shape.
+something still in use, `413` when a create or update form is larger than `thorium.limits.body.entities`
+(14 MiB by default), and `422` when the request has the wrong shape. A submitted toolset or workflow
+instance larger than `thorium.limits.body.instances` (12 MiB by default) is refused with `400` before
+any revision is reserved; see [Request body limits](../admins/deploy/helm-configuration.md#request-body-limits).

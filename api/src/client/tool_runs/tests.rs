@@ -413,9 +413,13 @@ async fn run_polls_and_downloads_results() {
         .windows(2)
         .map(|pair| pair[1].at - pair[0].at)
         .collect();
-    assert!(gaps[0] >= Duration::from_millis(50), "{gaps:?}");
-    assert!(gaps[1] > gaps[0] + Duration::from_millis(30), "{gaps:?}");
-    assert!(gaps[2] > gaps[1] + Duration::from_millis(60), "{gaps:?}");
+    // each gap is at least the backoff's wait before that read (60, 120, then 240 ms), less
+    // 10 ms for the timer; a loaded machine only lengthens the gaps, so only their minimum is
+    // checked
+    for (index, gap) in gaps.iter().enumerate() {
+        let wait = Duration::from_millis(60) * 2_u32.pow(u32::try_from(index).unwrap());
+        assert!(*gap + Duration::from_millis(10) >= wait, "{gaps:?}");
+    }
     // the results were read under the run's tool name, hidden results included
     let results = mock.matching("/api/files/results/");
     assert!(
@@ -634,9 +638,10 @@ async fn status_hint_follows_backoff() {
     .unwrap();
     let failed_json =
         serde_json::to_string(&tool_reaction(failed, ReactionStatus::Failed, &[SHA256])).unwrap();
+    let created = Utc::now() - chrono::Duration::seconds(5);
     let logs = json!([{
         "group": "corn", "pipeline": "harvester", "reaction": running.to_string(),
-        "action": "ReactionCreated", "timestamp": Utc::now() - chrono::Duration::seconds(5),
+        "action": "ReactionCreated", "timestamp": created,
         "msg": null, "update": {},
     }])
     .to_string();
@@ -676,11 +681,16 @@ async fn status_hint_follows_backoff() {
     let report = status(&thorium, running, Some("corn")).await;
     assert_eq!(report.exit, ToolRunExit::Completed);
     assert_eq!(report.output.status, Some(ReactionStatus::Started));
-    let expected = tool_run_retry_after(&ReactionStatus::Started, 5);
+    // the run was at least 5 seconds old when its hint was taken, and at most as old as it is
+    // now, so the hint is the backoff's for one of those whole-second ages
+    let oldest = u64::try_from((Utc::now() - created).num_seconds()).unwrap();
+    let allowed = (5..=oldest)
+        .map(|elapsed| tool_run_retry_after(&ReactionStatus::Started, elapsed))
+        .collect::<Vec<Option<u64>>>();
     let hint = report.output.retry_after_secs;
     assert!(
-        hint == expected || hint == tool_run_retry_after(&ReactionStatus::Started, 6),
-        "{hint:?}"
+        allowed.contains(&hint),
+        "{hint:?} isn't one of {allowed:?} for a run 5 to {oldest} seconds old"
     );
     // a finished run has no hint, found in the caller's groups
     let report = status(&thorium, finished, None).await;

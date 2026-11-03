@@ -399,7 +399,7 @@ impl ActiveWorker {
                 Level::ERROR,
                 error = true,
                 error_msg = "Failed to add child to cgroup!"
-            )
+            );
         }
         // build our worker struct
         let active = ActiveWorker {
@@ -525,7 +525,9 @@ impl BareMetal {
                 }
             };
             // delete this workers info its not alive
-            if !alive {
+            if alive {
+                true
+            } else {
                 // get this workers and add it to our deletes
                 if let Some(worker_info) = active.remove(name) {
                     // decide whether this dead worker should still be deleted from the API
@@ -539,12 +541,10 @@ impl BareMetal {
                     event!(Level::ERROR, error = true, error_msg = error.to_string());
                 }
                 false
-            } else {
-                true
             }
         });
         // Add any running workers that do not exist on our node to our delete map
-        for (name, worker) in info.workers.iter() {
+        for (name, worker) in &info.workers {
             // add any workers that are running and not in our active set to our delete list
             if worker.status == WorkerStatus::Running && !self.active.contains_key(name) {
                 deletes.add_mut(name);
@@ -736,7 +736,7 @@ impl BareMetal {
                                 Level::ERROR,
                                 msg = "Failed to cast stderr to str",
                                 error = error.to_string()
-                            )
+                            );
                         }
                     }
                 }

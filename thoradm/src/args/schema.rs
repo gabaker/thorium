@@ -2,6 +2,7 @@
 
 use clap::Parser;
 use std::path::PathBuf;
+use thorium::models::schema::DEFAULT_VIEW_WAIT_SECS;
 use thorium::models::upgrades::SchemaBackend;
 
 /// The schema subcommands
@@ -92,6 +93,12 @@ pub struct ApplySchema {
     /// workers stop at their next batch
     #[clap(long)]
     pub force_break_lease: bool,
+    /// Wait up to this many seconds for materialized views to build on every Scylla node, then
+    /// fail naming the views and the nodes that haven't built them, recording nothing; a node
+    /// that is down never reports, so the apply can't finish while one is down (the default of
+    /// five hours is under the operator's six hour Job limit)
+    #[clap(long, default_value_t = DEFAULT_VIEW_WAIT_SECS, value_parser = clap::value_parser!(u64).range(1..))]
+    pub view_wait_secs: u64,
 }
 
 /// Compare the live schema with the recorded revision

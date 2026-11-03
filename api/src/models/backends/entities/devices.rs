@@ -15,7 +15,7 @@ impl DeviceEntity {
     /// * `_id` - The device's entity id
     /// * `_groups` - The groups the entity is in (used to check for vendor)
     /// * `_shared` - Shared Thorium objects
-    pub async fn update(
+    pub fn update(
         &mut self,
         mut form: EntityMetadataUpdateForm,
         _id: Uuid,

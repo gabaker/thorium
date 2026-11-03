@@ -6,6 +6,7 @@
 
 use scylla::client::session::Session;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 use super::apply::{ApplyError, read_texts, wait_for_views};
 use super::{ObjectDef, SchemaDefinition, SchemaObject, ViewDef};
@@ -184,12 +185,15 @@ pub fn recreate_warning(view: &ViewDef) -> String {
 /// * `conf` - The Thorium config, for the keyspace
 /// * `views` - The declared views to recreate
 /// * `dry_run` - Return the statements without executing them
+/// * `view_wait` - The longest to wait for the builds before failing with the views and hosts
+///   still building; `None` waits for as long as they take
 /// * `progress` - Receives the warning for each view and the progress of the builds
 pub async fn recreate_views(
     session: &Session,
     conf: &Conf,
     views: &[ViewDef],
     dry_run: bool,
+    view_wait: Option<Duration>,
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<RecreateReport, ViewError> {
     // refuse any definition the registry doesn't declare, however it was built
@@ -265,6 +269,6 @@ pub async fn recreate_views(
     }
     // wait until every recreated view has built
     let names = views.iter().map(|view| view.name).collect::<Vec<_>>();
-    wait_for_views(session, &stored, &names, progress).await?;
+    wait_for_views(session, &stored, &names, view_wait, progress).await?;
     Ok(report)
 }

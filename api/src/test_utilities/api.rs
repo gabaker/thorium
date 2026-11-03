@@ -183,6 +183,7 @@ async fn apply_schema(config: &Conf) -> Result<(), Error> {
     let options = ApplyOptions {
         target: ApplyTarget::Declared,
         dry_run: false,
+        view_wait: None,
     };
     apply(&scylla, config, &options, "test harness", &|_| ())
         .await

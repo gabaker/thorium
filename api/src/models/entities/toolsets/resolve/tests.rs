@@ -1,13 +1,13 @@
 //! Tests for the toolset resolver, run against an in-memory graph
 
 use std::collections::BTreeSet;
-use std::time::Instant;
 use uuid::Uuid;
 
 use super::{
     ResolvedToolSet, ToolSetBuild, build_tool_set_instance, is_current_with_scheme,
     newest_tool_set_instance, resolve_tool_set,
 };
+use crate::models::entities::thread_timer::ThreadTimer;
 use crate::models::entities::workflows::resolve::test_graph::{
     Graph, MARS, MINERVA, agentic, image, with_effects,
 };
@@ -765,9 +765,9 @@ async fn worst_case_under_limits() {
         g.tag_in(selected, "toolset", "ghidra", &both);
     }
     g.reader.clear_reads();
-    let start = Instant::now();
+    let timer = ThreadTimer::start();
     let resolved = resolve(&g, ts).await;
-    let elapsed = start.elapsed();
+    let elapsed = timer.elapsed();
     let reads = g.reader.reads().len();
     assert_eq!(resolved.instance.members.len(), cap * 2);
     assert_invalid(&resolved, &["512 members", "max_tools_per_toolset (64)"]);
@@ -794,9 +794,9 @@ async fn worst_case_under_limits() {
         g.tag_in(tool, "toolset", "ghidra", &both);
     }
     g.reader.clear_reads();
-    let start = Instant::now();
+    let timer = ThreadTimer::start();
     let resolved = resolve(&g, ts).await;
-    let elapsed = start.elapsed();
+    let elapsed = timer.elapsed();
     assert_invalid(&resolved, &["100000 Includes edges", "256"]);
     assert_invalid(&resolved, &["`toolset=ghidra`", "more than 256", MARS]);
     assert_eq!(resolved.instance.members, Vec::<ToolSetMember>::new());

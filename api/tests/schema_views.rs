@@ -15,10 +15,11 @@ use std::collections::BTreeSet;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use thorium::models::schema::{
-    ApplyError, ApplyOptions, ApplyTarget, ColumnRole, RangeDifference, RangeSelection, RangeSide,
-    RecreateReport, TOKEN_RANGES, VerifyOptions, VerifyReport, ViewCheck, ViewDef, ViewError,
-    ViewState, apply, declared_views, range_of, recreate_statements, recreate_views,
-    recreate_warning, resolve_views, token_range, verify_views,
+    ApplyError, ApplyOptions, ApplyTarget, ColumnRole, HostStatus, RangeDifference, RangeSelection,
+    RangeSide, RecreateReport, TOKEN_RANGES, VerifyOptions, VerifyReport, ViewCheck, ViewDef,
+    ViewError, ViewState, apply, cluster_hosts, declared_views, member_build, range_of,
+    recreate_statements, recreate_views, recreate_warning, resolve_views, token_range,
+    verify_views, view_build_statuses,
 };
 use thorium::test_utilities::{self, CONF};
 use thorium::{Conf, Error};
@@ -87,6 +88,7 @@ async fn applied(session: &Session, suffix: &str) -> Result<Conf, Error> {
     let options = ApplyOptions {
         target: ApplyTarget::Declared,
         dry_run: false,
+        view_wait: None,
     };
     apply(session, &conf, &options, "", &|_| ())
         .await
@@ -336,7 +338,15 @@ async fn an_undeclared_view_is_refused_and_nothing_is_dropped() -> Result<(), Er
         name: "extra_by_name",
         ..view("samples")
     };
-    let refused = recreate_views(&session, &conf, &[view("samples"), extra], false, &|_| ()).await;
+    let refused = recreate_views(
+        &session,
+        &conf,
+        &[view("samples"), extra],
+        false,
+        None,
+        &|_| (),
+    )
+    .await;
     assert!(
         matches!(&refused, Err(ViewError::Undeclared { name }) if name == "extra_by_name"),
         "{refused:?}"
@@ -403,6 +413,7 @@ async fn a_failed_create_after_the_drop_says_the_view_is_missing() -> Result<(),
         &conf,
         &[view("network_policies_by_name")],
         false,
+        None,
         &|_| (),
     )
     .await
@@ -489,9 +500,11 @@ async fn a_stale_view_is_recreated_and_matches_its_base_again() -> Result<(), Er
     let absent = absent.expect("a hidden row's sha256");
     // recreate it, keeping the progress it reports
     let lines = Lines::default();
-    let report = recreate_views(&session, &conf, &[samples], false, &|line| lines.push(line))
-        .await
-        .map_err(|err| Error::new(err.to_string()))?;
+    let report = recreate_views(&session, &conf, &[samples], false, None, &|line| {
+        lines.push(line);
+    })
+    .await
+    .map_err(|err| Error::new(err.to_string()))?;
     assert_eq!(
         report,
         RecreateReport {
@@ -542,7 +555,7 @@ async fn a_dry_run_drops_nothing_and_a_missing_view_is_created() -> Result<(), E
         resolve_views(&["samples", "comments_by_id"]).map_err(|err| Error::new(err.to_string()))?;
     // a dry run lists both views' statements and changes nothing
     let before = object_id(&session, &ks, "samples").await?;
-    let report = recreate_views(&session, &conf, &views, true, &|_| ())
+    let report = recreate_views(&session, &conf, &views, true, None, &|_| ())
         .await
         .map_err(|err| Error::new(err.to_string()))?;
     let statements = views
@@ -555,7 +568,7 @@ async fn a_dry_run_drops_nothing_and_a_missing_view_is_created() -> Result<(), E
     assert_eq!(object_id(&session, &ks, "samples").await?, before);
     assert_eq!(object_id(&session, &ks, "comments_by_id").await?, None);
     // a real run replaces the existing view and creates the missing one
-    let report = recreate_views(&session, &conf, &views, false, &|_| ())
+    let report = recreate_views(&session, &conf, &views, false, None, &|_| ())
         .await
         .map_err(|err| Error::new(err.to_string()))?;
     assert_eq!(report.recreated, ["samples", "comments_by_id"]);
@@ -563,6 +576,63 @@ async fn a_dry_run_drops_nothing_and_a_missing_view_is_created() -> Result<(), E
     assert!(after.is_some());
     assert_ne!(after, before);
     assert!(object_id(&session, &ks, "comments_by_id").await?.is_some());
+    exec(&session, &format!("DROP KEYSPACE IF EXISTS {ks}")).await?;
+    Ok(())
+}
+
+/// A `view_build_status` row left by a host that is no longer a cluster member doesn't hold a
+/// built view back, and a member without a `SUCCESS` row is named as the one the view waits on
+///
+/// Scylla 6.2 doesn't keep a row written straight into `system_distributed.view_build_status`, so
+/// the former member's row is added to the rows read back from the live table.
+#[tokio::test]
+async fn a_former_members_view_build_row_is_ignored() -> Result<(), Error> {
+    // a converged keyspace, whose views every member has built
+    let _guard = RESTART.read().await;
+    let session = test_utilities::scylla_session().await?;
+    let conf = applied(&session, "views_former_member").await?;
+    let ks = conf.thorium.namespace.to_lowercase();
+    // the members the driver knows, each with a host id the rows are keyed by
+    let hosts = cluster_hosts(&session);
+    assert!(!hosts.is_empty());
+    // read the view's rows until every member reports it built, which may trail the apply
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut rows = loop {
+        let rows = view_build_statuses(&session, &ks, "samples")
+            .await
+            .map_err(|err| Error::new(err.to_string()))?;
+        if member_build(&hosts, &rows).waiting.is_empty() || Instant::now() > deadline {
+            break rows;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    let live = member_build(&hosts, &rows);
+    assert!(live.waiting.is_empty(), "{live:?} from {rows:?}");
+    assert_eq!(live.built.len(), hosts.len());
+    // add the row a removed node leaves when it never finished the build
+    let former = Uuid::new_v4().to_string();
+    rows.push(HostStatus {
+        host_id: former.clone(),
+        status: "STARTED".to_owned(),
+    });
+    // every row counted would never finish, but only the members' rows decide
+    assert!(!rows.iter().all(|row| row.status == "SUCCESS"));
+    let build = member_build(&hosts, &rows);
+    assert!(build.waiting.is_empty(), "{build:?}");
+    assert_eq!(build.built.len(), hosts.len());
+    assert_eq!(build.ignored, std::slice::from_ref(&former));
+    // with only the former member's row, every member is named as one the view waits on
+    let only_former = rows
+        .iter()
+        .filter(|row| row.host_id == former)
+        .cloned()
+        .collect::<Vec<_>>();
+    let waiting = member_build(&hosts, &only_former);
+    assert_eq!(waiting.built, Vec::<String>::new());
+    assert_eq!(waiting.waiting, hosts.values().cloned().collect::<Vec<_>>());
+    for (id, name) in &hosts {
+        assert!(name.contains(id.as_str()), "{name} names {id}");
+    }
     exec(&session, &format!("DROP KEYSPACE IF EXISTS {ks}")).await?;
     Ok(())
 }
@@ -581,7 +651,7 @@ async fn a_view_without_its_base_table_is_refused() -> Result<(), Error> {
     let before = object_id(&session, &ks, "samples").await?;
     let views =
         resolve_views(&["samples", "s3_sha256s"]).map_err(|err| Error::new(err.to_string()))?;
-    let refused = recreate_views(&session, &conf, &views, false, &|_| ()).await;
+    let refused = recreate_views(&session, &conf, &views, false, None, &|_| ()).await;
     assert!(
         matches!(&refused, Err(ViewError::MissingBase { view, base }) if view == "s3_sha256s" && base == "s3_ids"),
         "{refused:?}"
@@ -614,7 +684,7 @@ async fn a_view_name_held_by_a_table_is_refused_before_any_drop() -> Result<(), 
     let before = object_id(&session, &ks, "samples").await?;
     let views =
         resolve_views(&["samples", "results_auth"]).map_err(|err| Error::new(err.to_string()))?;
-    let refused = recreate_views(&session, &conf, &views, false, &|_| ()).await;
+    let refused = recreate_views(&session, &conf, &views, false, None, &|_| ()).await;
     assert!(
         matches!(&refused, Err(ViewError::Apply(ApplyError::ViewHeldByTable { views })) if views == &["results_auth"]),
         "{refused:?}"
@@ -1261,7 +1331,7 @@ async fn stale_views_report_the_first_differing_range_until_recreated() -> Resul
     .await?;
     assert_eq!(report.views[0].state, ViewState::InStep);
     // recreating both views brings every view back in step
-    recreate_views(&session, &conf, &[samples, s3], false, &|_| ())
+    recreate_views(&session, &conf, &[samples, s3], false, None, &|_| ())
         .await
         .map_err(|err| Error::new(err.to_string()))?;
     let report = verify(&session, &conf, None, RangeSelection::All).await?;
@@ -1448,7 +1518,7 @@ async fn a_wrong_value_in_a_view_row_reports_out_of_step() -> Result<(), Error> 
         ViewState::OutOfStep { first: expected }
     );
     // recreating the view brings it back in step in both modes
-    recreate_views(&session, &conf, &[samples], false, &|_| ())
+    recreate_views(&session, &conf, &[samples], false, None, &|_| ())
         .await
         .map_err(|err| Error::new(err.to_string()))?;
     for ranges in [RangeSelection::All, RangeSelection::Sample(TOKEN_RANGES)] {

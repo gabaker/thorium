@@ -500,10 +500,9 @@ impl Repos {
         // build the url for listing repos
         let url = format!("{}/api/repos/", self.host);
         // get the correct page size if our limit is smaller then our page_size
-        let page_size = opts.limit.map_or_else(
-            || opts.page_size,
-            |limit| std::cmp::min(opts.page_size, limit),
-        );
+        let page_size = opts
+            .limit
+            .map_or(opts.page_size, |limit| std::cmp::min(opts.page_size, limit));
         // build our query params
         let mut query = vec![("limit".to_owned(), page_size.to_string())];
         add_query_list!(query, "groups[]".to_owned(), opts.groups);
@@ -547,10 +546,9 @@ impl Repos {
         // build the url for listing repo details
         let url = format!("{}/api/repos/details/", self.host);
         // get the correct page size if our limit is smaller then our page_size
-        let page_size = opts.limit.map_or_else(
-            || opts.page_size,
-            |limit| std::cmp::min(opts.page_size, limit),
-        );
+        let page_size = opts
+            .limit
+            .map_or(opts.page_size, |limit| std::cmp::min(opts.page_size, limit));
         // build our query params
         let mut query = vec![("limit".to_owned(), page_size.to_string())];
         add_query_list!(query, "groups[]".to_owned(), opts.groups);
@@ -599,10 +597,9 @@ impl Repos {
         // build the url for listing commits
         let url = format!("{}/api/repos/commitishes/{}", self.host, repo);
         // get the correct page size if our limit is smaller then our page_size
-        let page_size = opts.limit.map_or_else(
-            || opts.page_size,
-            |limit| std::cmp::min(opts.page_size, limit),
-        );
+        let page_size = opts
+            .limit
+            .map_or(opts.page_size, |limit| std::cmp::min(opts.page_size, limit));
         // build our query params
         let mut query = vec![("limit", page_size.to_string())];
         add_query_list!(query, "groups[]", opts.groups);
@@ -644,10 +641,9 @@ impl Repos {
         // build the url for listing commit details
         let url = format!("{}/api/repos/commitish-details/{}", self.host, repo);
         // get the correct page size if our limit is smaller then our page_size
-        let page_size = opts.limit.map_or_else(
-            || opts.page_size,
-            |limit| std::cmp::min(opts.page_size, limit),
-        );
+        let page_size = opts
+            .limit
+            .map_or(opts.page_size, |limit| std::cmp::min(opts.page_size, limit));
         // build our query params
         let mut query = vec![("limit", page_size.to_string())];
         add_query_list!(query, "groups[]", opts.groups);

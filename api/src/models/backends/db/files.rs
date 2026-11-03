@@ -126,7 +126,7 @@ async fn add_child(
             temp.insert(row.id, row.uploaded);
         }
         // add this child to the target results
-        for (result_id, uploaded) in temp.into_iter() {
+        for (result_id, uploaded) in temp {
             // update our child field in this result
             shared
                 .scylla
@@ -206,7 +206,7 @@ pub async fn create(
         HashMap::with_capacity(form.groups.len())
     };
     // add any new groups
-    for group in form.groups.iter() {
+    for group in &form.groups {
         earliest.entry(group.to_owned()).or_insert_with(|| now);
     }
     // get the current year and month so we can bucket this sample by time
@@ -215,7 +215,7 @@ pub async fn create(
     let id = Uuid::new_v4();
     // save submission objects into scylla
     // currently do it one at a time instead of with buffered_unordered to work around Fn Once
-    for group in form.groups.iter() {
+    for group in &form.groups {
         // build this group's submission row from borrowed values
         let row = SamplesListTableRef {
             group,
@@ -454,7 +454,7 @@ pub async fn get(
         get_comments(groups, sha256, &mut sample.comments, shared).await?;
         // return our sample
         return Ok(Some(sample));
-    };
+    }
     Ok(None)
 }
 
@@ -852,7 +852,7 @@ pub async fn update(
         // determine what bucket to add data too
         let bucket = helpers::partition(sub.uploaded, year, chunk_size);
         // update all of the submission rows for this submission
-        for group in sub.groups.iter() {
+        for group in &sub.groups {
             // build this group's submission row from borrowed values
             let row = SamplesListTableRef {
                 group,
@@ -922,7 +922,7 @@ pub async fn create_comment(
     // get the current timestamp
     let now = Utc::now();
     // create a comment row for each group, with its s3 paths serialized as JSON
-    for group in form.groups.iter() {
+    for group in &form.groups {
         let row = CommentsTableRef {
             group,
             sha256,

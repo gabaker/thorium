@@ -55,6 +55,7 @@ pub enum NotificationType {
 
 impl NotificationType {
     /// Cast this notification type to a str
+    #[must_use]
     pub fn as_str(&self) -> &str {
         match self {
             Self::Images => "Images",

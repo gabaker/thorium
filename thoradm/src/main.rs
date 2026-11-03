@@ -39,7 +39,9 @@ async fn main() -> ExitCode {
         args::SubCommands::Users(users_cmd) => users::handle(users_cmd, &args)
             .await
             .map(|()| RunOutcome::Complete),
-        args::SubCommands::Migrate(migrate_cmd) => migrate::handle(migrate_cmd, &args).await,
+        args::SubCommands::Migrate(migrate_cmd) => {
+            Box::pin(migrate::handle(migrate_cmd, &args)).await
+        }
         args::SubCommands::Schema(schema_cmd) => schema::handle(schema_cmd, &args).await,
     };
     // an error that ended the command early is an abort

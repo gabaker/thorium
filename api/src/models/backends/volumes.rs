@@ -87,8 +87,7 @@ impl Volume {
                 }
                 Ok(())
             }
-            VolumeTypes::ConfigMap => Ok(()),
-            VolumeTypes::Secret => Ok(()),
+            VolumeTypes::ConfigMap | VolumeTypes::Secret => Ok(()),
             VolumeTypes::NFS => {
                 // make sure nfs exists
                 let nfs = unwrap_opt!(self.nfs, "NFS", "nfs");

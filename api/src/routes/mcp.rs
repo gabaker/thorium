@@ -502,25 +502,45 @@ mod tests {
         assert_eq!(parsed, value);
     }
 
-    /// The workspace locks one rmcp release, the current one, without the SSE server transport
+    /// The rmcp release thorium-api itself locks is on the 3.6 line or later, without the SSE server transport
     #[test]
-    fn single_current_rmcp() {
+    fn api_rmcp_is_current() {
         // read the workspace lock file and the api manifest
         let api = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let lock = std::fs::read_to_string(api.join("../Cargo.lock")).expect("lock file reads");
         let manifest = std::fs::read_to_string(api.join("Cargo.toml")).expect("manifest reads");
-        // collect the version of every locked rmcp package
-        let lines = lock.lines().collect::<Vec<&str>>();
-        let versions = lines
-            .windows(2)
-            .filter(|pair| pair[0] == "name = \"rmcp\"")
-            .map(|pair| pair[1].to_owned())
-            .collect::<Vec<String>>();
-        // there is exactly one, on the 3.6 line or later
-        assert_eq!(versions.len(), 1, "{versions:?}");
-        let version = versions[0]
-            .trim_start_matches("version = \"")
-            .trim_end_matches('"');
+        // split the lock into its package entries
+        let packages = lock.split("[[package]]").collect::<Vec<&str>>();
+        // find the rmcp dependency line in thorium-api's own entry; other crates may lock other rmcp releases
+        let api_entry = packages
+            .iter()
+            .find(|entry| entry.lines().any(|line| line == "name = \"thorium-api\""))
+            .expect("the lock has a thorium-api entry");
+        let dependency = api_entry
+            .lines()
+            .map(|line| line.trim().trim_end_matches(',').trim_matches('"'))
+            .find(|dep| *dep == "rmcp" || dep.starts_with("rmcp "))
+            .expect("thorium-api locks rmcp");
+        // a versioned line names the release; a bare name means the lock holds a single rmcp release
+        let version = match dependency.split_whitespace().nth(1) {
+            Some(version) => version.to_owned(),
+            None => {
+                // collect the version of every locked rmcp package, which must be exactly one
+                let versions = packages
+                    .iter()
+                    .filter(|entry| entry.lines().any(|line| line == "name = \"rmcp\""))
+                    .filter_map(|entry| {
+                        entry
+                            .lines()
+                            .find_map(|line| line.strip_prefix("version = "))
+                    })
+                    .map(|version| version.trim_matches('"').to_owned())
+                    .collect::<Vec<String>>();
+                assert_eq!(versions.len(), 1, "{versions:?}");
+                versions[0].clone()
+            }
+        };
+        // the release is on the 3.6 line or later
         let mut parts = version
             .split('.')
             .map(|part| part.parse::<u64>().unwrap_or(0));

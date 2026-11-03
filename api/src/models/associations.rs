@@ -607,8 +607,7 @@ impl AssociationRequest {
         I::Item: Into<String>,
     {
         // extend our groups with our new groups
-        self.groups
-            .extend(groups.into_iter().map(std::convert::Into::into));
+        self.groups.extend(groups.into_iter().map(Into::into));
         self
     }
 
@@ -747,8 +746,7 @@ impl AssociationDeleteRequest {
         I::Item: Into<String>,
     {
         // extend our groups with our new groups
-        self.groups
-            .extend(groups.into_iter().map(|group| group.into()));
+        self.groups.extend(groups.into_iter().map(Into::into));
         self
     }
 
@@ -885,8 +883,7 @@ impl AssociationListOpts {
     #[must_use]
     pub fn groups<T: Into<String>>(mut self, groups: Vec<T>) -> Self {
         // set the date to end listing associations at
-        self.groups
-            .extend(groups.into_iter().map(std::convert::Into::into));
+        self.groups.extend(groups.into_iter().map(Into::into));
         self
     }
 }

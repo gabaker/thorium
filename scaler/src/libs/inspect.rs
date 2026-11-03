@@ -86,7 +86,7 @@ impl DockerInfo {
         let err = String::from_utf8_lossy(&output.stderr);
         // Throw an erorr if stdout has text
         if !err.is_empty() {
-            return Err(Error::new(format!("Error while inspecting image {}", err)));
+            return Err(Error::new(format!("Error while inspecting image {err}")));
         }
         DockerInfo::deserialize(&raw)
     }

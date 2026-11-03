@@ -84,10 +84,12 @@ async fn fresh(session: &Session, suffix: &str) -> Result<Conf, Error> {
     // replace any keyspace an earlier run left behind
     let keyspace = format!("{}_{suffix}", CONF.thorium.namespace);
     exec(session, &format!("DROP KEYSPACE IF EXISTS {keyspace}")).await?;
-    // point a copy of the test config at it, with a short setup time so a refused start is quick
+    // point a copy of the test config at it, with the API's default setup time: a full apply on
+    // a shared Scylla holding many keyspaces takes 20 seconds or more while the other tests apply
+    // beside it, and a refused start returns at once whatever the setup time
     let mut conf = CONF.clone();
     conf.thorium.namespace = keyspace;
-    conf.scylla.setup_time = 20;
+    conf.scylla.setup_time = 120;
     Ok(conf)
 }
 
@@ -184,6 +186,7 @@ async fn apply_declared(session: &Session, conf: &Conf) -> Result<(), Error> {
     let options = ApplyOptions {
         target: ApplyTarget::Declared,
         dry_run: false,
+        view_wait: None,
     };
     apply(session, conf, &options, "key-startup", &|_| ())
         .await
@@ -552,6 +555,37 @@ async fn the_apply_flag_applies_the_schema_before_starting() -> Result<(), Error
         .await?
         .map_err(|err| Error::new(format!("the second start refused: {err}")))?;
     assert_eq!(shape(&session, &keyspace).await?, before);
+    exec(&session, &format!("DROP KEYSPACE IF EXISTS {keyspace}")).await
+}
+
+/// A setup attempt that runs out of time is stopped before the next one starts, so once the start
+/// gives up no attempt is left applying DDL in the background
+#[tokio::test]
+async fn a_timed_out_setup_stops_applying() -> Result<(), Error> {
+    // give the apply flag far less time than a full apply takes
+    let session = test_utilities::scylla_session().await?;
+    let mut conf = fresh(&session, "su_timeout").await?;
+    conf.scylla.setup_time = 1;
+    let keyspace = conf.thorium.namespace.clone();
+    // every attempt times out, so the start gives up by panicking
+    let opts = StartupOpts { apply_schema: true };
+    let Err(err) = start(&conf, opts).await else {
+        panic!("a full apply finished within the one second setup time");
+    };
+    assert!(
+        err.to_string().contains("Failed to connect/setup Scylla"),
+        "{err}"
+    );
+    // let a statement the last attempt already sent finish on the server
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    let settled = shape(&session, &keyspace).await?;
+    // the keyspace then stays as it is, since no attempt is still running
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    assert_eq!(
+        shape(&session, &keyspace).await?,
+        settled,
+        "a timed-out setup kept applying after the start gave up"
+    );
     exec(&session, &format!("DROP KEYSPACE IF EXISTS {keyspace}")).await
 }
 

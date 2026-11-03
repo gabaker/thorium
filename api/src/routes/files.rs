@@ -23,7 +23,7 @@ use crate::models::{
     SampleListLine, SampleSubmissionResponse, SubmissionChunk, SubmissionUpdate, TagCounts,
     TagDeleteRequest, TagRequest, ToolVersion, TruncationReason, ZipDownloadParams,
 };
-use crate::utils::{ApiError, AppState};
+use crate::utils::{ApiError, AppState, body_limits};
 
 /* TODO_UTOIPA: the '/files/download_result_file/:sha256/:tool/:result_id/\*path'
    route is implemented with a wildcard on the path variable, but
@@ -1014,7 +1014,8 @@ async fn openapi() -> Json<utoipa::openapi::OpenApi> {
 /// * `router` - The router to add routes too
 pub fn mount(router: Router<AppState>) -> Router<AppState> {
     router
-        .route("/files/", get(list).post(upload))
+        // uploads have no body limit
+        .route("/files/", body_limits::unlimited(post(upload)).get(list))
         .route("/files/count/", get(count))
         .route("/files/details/", get(list_details))
         .route("/files/associations/{sha256}", get(list_associations))
@@ -1027,7 +1028,10 @@ pub fn mount(router: Router<AppState>) -> Router<AppState> {
         .route("/files/sample/{sha256}/download/zip", get(download_as_zip))
         .route("/files/sample/{sha256}", patch(update))
         .route("/files/tags/{sha256}", post(tag).delete(delete_tags))
-        .route("/files/comment/{sha256}", post(create_comment))
+        .route(
+            "/files/comment/{sha256}",
+            body_limits::unlimited(post(create_comment)),
+        )
         .route("/files/comment/{sha256}/{id}", delete(delete_comment))
         .route(
             "/files/comment/download/{sha256}/{comment}/{name}",
@@ -1035,7 +1039,7 @@ pub fn mount(router: Router<AppState>) -> Router<AppState> {
         )
         .route(
             "/files/results/{sha256}",
-            get(get_results).post(upload_results),
+            body_limits::unlimited(post(upload_results)).get(get_results),
         )
         .route(
             "/files/result-files/{sha256}/{tool}/{result_id}",

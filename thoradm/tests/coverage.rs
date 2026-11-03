@@ -377,6 +377,35 @@ async fn every_stored_resource_is_classified() {
         .unwrap();
 }
 
+/// The `ttl` alias is dropped only when the statement reads a TTL under it
+#[test]
+fn only_a_ttl_alias_is_dropped_from_the_read_columns() {
+    // a real column named `ttl` stays when the statement has no TTL alias
+    let plain = drop_ttl_alias(
+        "SELECT id, ttl FROM ns.t WHERE id = ?",
+        vec!["id".to_owned(), "ttl".to_owned()],
+    );
+    assert_eq!(plain, BTreeSet::from(["id".to_owned(), "ttl".to_owned()]));
+    // the alias of a TTL expression isn't a column
+    let aliased = drop_ttl_alias(
+        "SELECT id, msg, TTL(msg) AS ttl FROM ns.t WHERE id = ?",
+        vec!["id".to_owned(), "msg".to_owned(), "ttl".to_owned()],
+    );
+    assert_eq!(aliased, BTreeSet::from(["id".to_owned(), "msg".to_owned()]));
+    // the alias is matched in any case
+    let lower = drop_ttl_alias(
+        "select id, ttl(msg) as TTL from ns.t",
+        vec!["id".to_owned(), "ttl".to_owned()],
+    );
+    assert_eq!(lower, BTreeSet::from(["id".to_owned()]));
+    // a real `ttl` column beside the alias survives, since only one name is dropped
+    let both = drop_ttl_alias(
+        "SELECT ttl, TTL(msg) AS ttl FROM ns.t",
+        vec!["ttl".to_owned(), "ttl".to_owned()],
+    );
+    assert_eq!(both, BTreeSet::from(["ttl".to_owned()]));
+}
+
 /// The bucket roles the harness and the registry use are exactly the ones the config has
 #[test]
 fn bucket_roles_follow_the_config() {
@@ -493,6 +522,32 @@ async fn live_columns(harness: &Harness, table: &str) -> BTreeSet<String> {
         .collect()
 }
 
+/// Drops the column a statement's `TTL(..) AS ttl` expression adds to its result columns
+///
+/// A row's remaining TTL is read beside the table's columns under the alias `ttl`; it isn't a
+/// column. A statement that doesn't alias a TTL expression as `ttl` keeps a column named `ttl`.
+///
+/// # Arguments
+///
+/// * `statement` - The statement's text
+/// * `columns` - The names of the statement's result columns
+fn drop_ttl_alias(statement: &str, mut columns: Vec<String>) -> BTreeSet<String> {
+    // find a TTL expression aliased as exactly `ttl` in the statement's text
+    let lower = statement.to_lowercase();
+    let aliased = lower.find("ttl(").is_some_and(|start| {
+        lower[start..].match_indices(") as ttl").any(|(at, found)| {
+            // the alias ends at the name's end, so `ttl_left` isn't `ttl`
+            let after = lower[start + at + found.len()..].chars().next();
+            !after.is_some_and(|next| next.is_alphanumeric() || next == '_')
+        })
+    });
+    // drop a single `ttl` name, so a real column called `ttl` beside the alias is kept
+    if aliased && let Some(position) = columns.iter().position(|column| column == "ttl") {
+        columns.remove(position);
+    }
+    columns.into_iter().collect()
+}
+
 /// Returns the columns a table's backup statement reads
 ///
 /// # Arguments
@@ -505,11 +560,13 @@ async fn read_columns<T: Backup>(harness: &Harness) -> (String, BTreeSet<String>
         .await
         .unwrap();
     let specs = prepared.get_current_result_set_col_specs();
-    let columns = specs
+    let names = specs
         .get()
         .iter()
         .map(|spec| spec.name().to_owned())
         .collect();
+    // a TTL aliased as `ttl` is read beside the columns, but isn't one
+    let columns = drop_ttl_alias(prepared.get_statement(), names);
     (T::name().to_owned(), columns)
 }
 
@@ -588,10 +645,7 @@ async fn backed_up_columns_match_the_schema_and_the_archives() {
         statements.len(),
         Registry::backed_up(Store::ScyllaTable).count()
     );
-    for (table, mut read) in statements {
-        // a row's remaining TTL, which notifications read beside their columns under the alias
-        // `ttl`, isn't a column
-        read.retain(|column| !column.starts_with("ttl(") && column != "ttl");
+    for (table, read) in statements {
         let entry = Registry::classify(Store::ScyllaTable, &table)
             .unwrap_or_else(|| panic!("{table} has an archive but no entry"));
         assert!(matches!(entry.coverage, Coverage::BackedUp(_)), "{table}");

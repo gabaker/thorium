@@ -6,6 +6,7 @@
 //! read into memory, so every candidate is checked without another read. The admin run models
 //! read turns a run's recorded bindings into the models and credentials its harness gets.
 
+use chrono::{DateTime, Utc};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tracing::instrument;
 use uuid::Uuid;
@@ -227,6 +228,8 @@ struct CredentialView<'a> {
     bans: Vec<&'a ModelBan>,
     /// The missing access key an assumed role names, if it's missing
     broken: Option<Uuid>,
+    /// Whether the credential, or the access key an assumed role uses, is past its expiry
+    expired: bool,
 }
 
 /// How a candidate authenticates: with a credential or keyless
@@ -288,6 +291,17 @@ fn allowed_levels(agent: &ModelAuthSource, workflow: &ModelAuthSource) -> BTreeS
         .filter(|level| allows(agent, level) && allows(workflow, level))
         .copied()
         .collect()
+}
+
+/// Check whether a credential is past the time it stops working
+///
+/// # Arguments
+///
+/// * `expires` - When the credential stops working, if known
+/// * `now` - The time to check against
+fn has_expired(expires: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    // a credential with no known expiry never expires here
+    expires.is_some_and(|expires| expires <= now)
 }
 
 /// Get the ban a set of bans holds, the oldest first, if any
@@ -388,6 +402,8 @@ fn missed_requirement(
 struct Resolver<'a> {
     /// Everything resolution reads
     inputs: &'a ResolveInputs<'a>,
+    /// The time credential expiries are checked against, fixed for the whole resolution
+    now: DateTime<Utc>,
 }
 
 impl<'a> Resolver<'a> {
@@ -566,10 +582,14 @@ impl<'a> Resolver<'a> {
         let credential = self.inputs.credentials.get(&id)?;
         let mut bans = credential.bans.values().collect::<Vec<&ModelBan>>();
         let mut broken = None;
-        // an assumed role also needs its access key
+        let mut expired = has_expired(credential.expires, self.now);
+        // an assumed role also needs its access key, unexpired
         if let Some(source) = credential.kind.role_source() {
             match self.inputs.credentials.get(&source) {
-                Some(key) => bans.extend(key.bans.values()),
+                Some(key) => {
+                    bans.extend(key.bans.values());
+                    expired |= has_expired(key.expires, self.now);
+                }
                 None => broken = Some(source),
             }
         }
@@ -578,6 +598,7 @@ impl<'a> Resolver<'a> {
             kind: &credential.kind,
             bans,
             broken,
+            expired,
         })
     }
 
@@ -590,7 +611,8 @@ impl<'a> Resolver<'a> {
     fn user_credential(&self, credential: &'a UserCredentialRef) -> CredentialView<'a> {
         let mut bans = credential.bans.values().collect::<Vec<&ModelBan>>();
         let mut broken = None;
-        // an assumed role also needs the runner's access key it names
+        let mut expired = has_expired(credential.expires, self.now);
+        // an assumed role also needs the runner's access key it names, unexpired
         if let Some(source) = credential.kind.role_source() {
             match self
                 .inputs
@@ -599,7 +621,10 @@ impl<'a> Resolver<'a> {
                 .values()
                 .find(|other| other.id == source)
             {
-                Some(key) => bans.extend(key.bans.values()),
+                Some(key) => {
+                    bans.extend(key.bans.values());
+                    expired |= has_expired(key.expires, self.now);
+                }
                 None => broken = Some(source),
             }
         }
@@ -608,6 +633,7 @@ impl<'a> Resolver<'a> {
             kind: &credential.kind,
             bans,
             broken,
+            expired,
         }
     }
 
@@ -648,6 +674,15 @@ impl<'a> Resolver<'a> {
                 Some(level),
                 Some(endpoint.reference),
                 ModelRejectReason::Banned(ModelBanKind::BrokenReference(missing)),
+            );
+            return None;
+        }
+        // a credential past its expiry would fail the run, so it's skipped like an expired ban
+        if credential.is_some_and(|credential| credential.expired) {
+            attempt.reject(
+                Some(level),
+                Some(endpoint.reference),
+                ModelRejectReason::Banned(ModelBanKind::CredentialExpired),
             );
             return None;
         }
@@ -990,7 +1025,10 @@ pub fn resolve(
     inputs: &ResolveInputs<'_>,
 ) -> Result<Vec<ReactionModelBinding>, ModelResolutionError> {
     // resolve each agent in agent order, keeping every failure
-    let resolver = Resolver { inputs };
+    let resolver = Resolver {
+        inputs,
+        now: Utc::now(),
+    };
     let mut bindings = Vec::with_capacity(inputs.agents.len());
     let mut mismatches = Vec::new();
     for agent in inputs.agents {
@@ -1347,8 +1385,8 @@ pub struct DeliverySources<'a> {
 
 /// Build the credential a binding names as its harness gets it, with its secrets
 ///
-/// Returns why it can't be delivered when it's deleted or banned, or when an assumed role's
-/// access key is. A ban is named only by its kind, since the reason reaches the run's stage logs.
+/// Returns why it can't be delivered when it's deleted, banned, or past its expiry, or when an
+/// assumed role's access key is. A ban is named only by its kind, since the reason reaches the run's stage logs.
 ///
 /// # Arguments
 ///
@@ -1359,7 +1397,7 @@ fn deliver_credential(
     sources: &DeliverySources,
 ) -> Result<HarnessCredential, String> {
     // find the credential and the access key an assumed role uses
-    let (kind, secrets, bans, source) = match reference {
+    let (kind, secrets, bans, expires, source) = match reference {
         ModelConfigRef::Group(id) => {
             let Some(credential) = sources.credentials.get(&id) else {
                 return Err(format!("model credential {id} no longer exists"));
@@ -1372,6 +1410,7 @@ fn deliver_credential(
                 &credential.kind,
                 &credential.secrets,
                 &credential.bans,
+                credential.expires,
                 source,
             )
         }
@@ -1390,6 +1429,7 @@ fn deliver_credential(
                 &credential.kind,
                 &credential.secrets,
                 &credential.bans,
+                credential.expires,
                 source,
             )
         }
@@ -1403,6 +1443,16 @@ fn deliver_credential(
                 ModelConfigRef::Group(id) | ModelConfigRef::User(id) => id,
             },
             ban.ban_kind.name()
+        ));
+    }
+    // an expired credential would fail the run, so it isn't delivered even to a run queued before
+    // it expired
+    if has_expired(expires, Utc::now()) {
+        return Err(format!(
+            "model credential {} has expired",
+            match reference {
+                ModelConfigRef::Group(id) | ModelConfigRef::User(id) => id,
+            }
         ));
     }
     Ok(HarnessCredential::new(
@@ -1519,7 +1569,7 @@ fn deliver_binding(
 /// Build the models a run's harness gets from its recorded bindings
 ///
 /// Returns why they can't be delivered when an endpoint they name is deleted or no longer allowed
-/// by the deployment, or a credential they name is deleted or banned.
+/// by the deployment, or a credential they name is deleted, banned, or past its expiry.
 ///
 /// # Arguments
 ///
@@ -1575,8 +1625,9 @@ async fn read_everywhere(ids: &[Uuid], shared: &Shared) -> Result<Vec<Entity>, A
 ///
 /// Only admins authenticated with their full token may read them. A reaction with no live run
 /// token, or that isn't a workflow run, has none (`404`). A run can't get them (`409`) when a bound
-/// endpoint or credential is deleted, a bound credential is banned, or a bound endpoint is banned
-/// `NotAllowedByDeployment` or no longer on the deployment's allowed endpoint list.
+/// endpoint or credential is deleted, a bound credential is banned or past its expiry, or a bound
+/// endpoint is banned `NotAllowedByDeployment` or no longer on the deployment's allowed endpoint
+/// list.
 ///
 /// # Arguments
 ///

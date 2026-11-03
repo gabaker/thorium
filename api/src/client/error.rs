@@ -137,6 +137,7 @@ impl Error {
     }
 
     /// Get the error message for this error if one exists
+    #[must_use]
     pub fn msg(&self) -> Option<String> {
         // get the msg from any error types that support it
         match self {
@@ -202,6 +203,7 @@ impl Error {
     }
 
     /// get the kind of error as a str
+    #[must_use]
     pub fn kind(&self) -> &'static str {
         // get the msg from any error types that support it
         match self {

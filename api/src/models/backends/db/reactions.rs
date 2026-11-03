@@ -333,7 +333,7 @@ pub async fn create_bulk<S: std::hash::BuildHasher>(
         // add this reaction to our redis pipeline
         let (reaction, _) = build(&mut pipe, cast, cache, memo, None, shared).await?;
         // add this newly created reactions id to our response object
-        response.created.push(reaction.id)
+        response.created.push(reaction.id);
     }
     // create all reactions along with their jobs in redis
     let _: () = pipe.atomic().query_async(conn!(shared)).await?;
@@ -845,9 +845,10 @@ async fn build_expire(
     dest: &str,
     shared: &Shared,
 ) -> Result<(), ApiError> {
-    // get time when we should expire things out of reaction status list
-    let expiration =
-        chrono::Utc::now() + chrono::Duration::seconds(shared.config.thorium.retention.data as i64);
+    // get time when we should expire things out of reaction status list, saturating a retention
+    // too large for an i64
+    let retention = i64::try_from(shared.config.thorium.retention.data).unwrap_or(i64::MAX);
+    let expiration = chrono::Utc::now() + chrono::Duration::seconds(retention);
     let expiration = expiration.timestamp();
     // add comamnd to expire out of the destination set
     add_expire!(pipe, expiration, "srem", dest, &reaction.id, shared);
@@ -915,7 +916,7 @@ async fn build_expire(
         // 200 jobs to expire at at time
         let jobs = list_jobs(reaction, cursor, 200, shared).await?;
         // expire all the data for these jobs
-        for id in jobs.names.iter(){
+        for id in &jobs.names{
             let key = JobKeys::data(id, shared);
             pipe.cmd("expire").arg(key).arg(shared.config.thorium.retention.data);
         }
@@ -1709,20 +1710,20 @@ pub async fn delete(reaction: &Reaction, shared: &Shared) -> Result<(), ApiError
                          .arg(job.stream_data())
                     .cmd("del").arg(ReactionKeys::stage_logs(&reaction.id, &job.stage, shared)));
         // filter out any jobs that don't have a running worker
-        jobs.details.iter().filter(|job| job.worker.is_some()).fold(&mut pipe, |pipe, job|
+        jobs.details.iter().filter_map(|job| job.worker.as_ref().map(|worker| (job, worker))).fold(&mut pipe, |pipe, (job, worker)|
             // remove this job from the running queue
             pipe.cmd("zrem")
                 .arg(StreamKeys::system_scaler(job.scaler, "running", shared))
-                .arg(force_serialize!(&serde_json::json!({"job_id": job.id, "worker": &job.worker.as_ref().unwrap()})))
+                .arg(force_serialize!(&serde_json::json!({"job_id": job.id, "worker": worker})))
         );
         // execute our redis pipeline
         let _: () = pipe.atomic().query_async(conn!(shared)).await?;
-        // check if our cursor has been exhausted
-        if jobs.cursor.is_none() {
-            break
-        }
+        // stop once our cursor has been exhausted, otherwise move on to the next page
+        let Some(next) = jobs.cursor else {
+            break;
+        };
         // update cursor
-        cursor = jobs.cursor.unwrap();
+        cursor = next;
     }
     let keys = ReactionKeys::new(reaction, shared);
     // get our reaction id as a string
@@ -1779,12 +1780,12 @@ pub async fn delete_all(
             .map(|item| item.delete(user, group, None, shared));
         try_join_all(delete_futs).await?;
 
-        // check if our cursor has been exhausted
-        if reactions.cursor.is_none() {
+        // stop once our cursor has been exhausted, otherwise move on to the next page
+        let Some(next) = reactions.cursor else {
             break;
-        }
+        };
         // update cursor
-        cursor = reactions.cursor.unwrap();
+        cursor = next;
     }
     Ok(())
 }

@@ -463,10 +463,8 @@ impl PartialEq<EntityUpdate> for Entity {
                                 return false;
                             }
                         }
-                        (_, Some(val)) => {
-                            if dev.critical_system != Some(*val) {
-                                return false;
-                            }
+                        (_, Some(val)) if dev.critical_system != Some(*val) => {
+                            return false;
                         }
                         _ => {}
                     }
@@ -477,10 +475,8 @@ impl PartialEq<EntityUpdate> for Entity {
                                 return false;
                             }
                         }
-                        (_, Some(val)) => {
-                            if dev.sensitive_location != Some(*val) {
-                                return false;
-                            }
+                        (_, Some(val)) if dev.sensitive_location != Some(*val) => {
+                            return false;
                         }
                         _ => {}
                     }
@@ -520,10 +516,10 @@ impl PartialEq<EntityUpdate> for Entity {
                     }
                     // removed countries absent
                     for code in remove_countries {
-                        if let Ok(country) = Country::new(code) {
-                            if vendor.countries.contains(&country) {
-                                return false;
-                            }
+                        if let Ok(country) = Country::new(code)
+                            && vendor.countries.contains(&country)
+                        {
+                            return false;
                         }
                     }
                     // added sectors present, removed sectors absent
@@ -566,21 +562,21 @@ impl PartialEq<EntityUpdate> for Entity {
                     }
                     // deleted tag values absent
                     for (key, values) in delete_collection_tags {
-                        if let Some(existing) = col.collection_tags.get(key) {
-                            if values.iter().any(|val| existing.contains(val)) {
-                                return false;
-                            }
-                        }
-                    }
-                    if let Some(val) = tags_case_insensitive {
-                        if col.tags_case_insensitive != *val {
+                        if let Some(existing) = col.collection_tags.get(key)
+                            && values.iter().any(|val| existing.contains(val))
+                        {
                             return false;
                         }
                     }
-                    if let Some(val) = ignore_groups {
-                        if col.ignore_groups != *val {
-                            return false;
-                        }
+                    if let Some(val) = tags_case_insensitive
+                        && col.tags_case_insensitive != *val
+                    {
+                        return false;
+                    }
+                    if let Some(val) = ignore_groups
+                        && col.ignore_groups != *val
+                    {
+                        return false;
                     }
                     // start was cleared or set
                     match (clear_start, start) {
@@ -589,10 +585,8 @@ impl PartialEq<EntityUpdate> for Entity {
                                 return false;
                             }
                         }
-                        (_, Some(ts)) => {
-                            if col.start != Some(*ts) {
-                                return false;
-                            }
+                        (_, Some(ts)) if col.start != Some(*ts) => {
+                            return false;
                         }
                         _ => {}
                     }
@@ -603,10 +597,8 @@ impl PartialEq<EntityUpdate> for Entity {
                                 return false;
                             }
                         }
-                        (_, Some(ts)) => {
-                            if col.end != Some(*ts) {
-                                return false;
-                            }
+                        (_, Some(ts)) if col.end != Some(*ts) => {
+                            return false;
                         }
                         _ => {}
                     }
@@ -668,55 +660,55 @@ impl PartialEq<EntityUpdate> for Entity {
                     },
                     EntityMetadata::WindowsProcess(win_proc),
                 ) => {
-                    if let Some(val) = name {
-                        if win_proc.name.as_ref() != Some(val) {
-                            return false;
-                        }
+                    if let Some(val) = name
+                        && win_proc.name.as_ref() != Some(val)
+                    {
+                        return false;
                     }
-                    if let Some(val) = image_path {
-                        if win_proc.image_path.as_ref() != Some(val) {
-                            return false;
-                        }
+                    if let Some(val) = image_path
+                        && win_proc.image_path.as_ref() != Some(val)
+                    {
+                        return false;
                     }
-                    if let Some(val) = command {
-                        if win_proc.command.as_ref() != Some(val) {
-                            return false;
-                        }
+                    if let Some(val) = command
+                        && win_proc.command.as_ref() != Some(val)
+                    {
+                        return false;
                     }
-                    if let Some(val) = offset {
-                        if win_proc.offset != Some(*val) {
-                            return false;
-                        }
+                    if let Some(val) = offset
+                        && win_proc.offset != Some(*val)
+                    {
+                        return false;
                     }
-                    if let Some(val) = threads {
-                        if win_proc.threads != Some(*val) {
-                            return false;
-                        }
+                    if let Some(val) = threads
+                        && win_proc.threads != Some(*val)
+                    {
+                        return false;
                     }
-                    if let Some(val) = handles {
-                        if win_proc.handles != Some(*val) {
-                            return false;
-                        }
+                    if let Some(val) = handles
+                        && win_proc.handles != Some(*val)
+                    {
+                        return false;
                     }
-                    if let Some(val) = is_wow64 {
-                        if win_proc.is_wow64 != Some(*val) {
-                            return false;
-                        }
+                    if let Some(val) = is_wow64
+                        && win_proc.is_wow64 != Some(*val)
+                    {
+                        return false;
                     }
-                    if let Some(val) = session_id {
-                        if win_proc.session_id != Some(*val) {
-                            return false;
-                        }
+                    if let Some(val) = session_id
+                        && win_proc.session_id != Some(*val)
+                    {
+                        return false;
                     }
-                    if let Some(val) = create_time {
-                        if win_proc.create_time != Some(*val) {
-                            return false;
-                        }
+                    if let Some(val) = create_time
+                        && win_proc.create_time != Some(*val)
+                    {
+                        return false;
                     }
-                    if let Some(val) = exit_time {
-                        if win_proc.exit_time != Some(*val) {
-                            return false;
-                        }
+                    if let Some(val) = exit_time
+                        && win_proc.exit_time != Some(*val)
+                    {
+                        return false;
                     }
                 }
                 (
@@ -734,51 +726,50 @@ impl PartialEq<EntityUpdate> for Entity {
                     EntityMetadata::NetworkConnection(conn),
                 ) => {
                     // protocol/state have no PartialEq, so compare their display form
-                    if let Some(val) = protocol {
-                        if conn.protocol.as_ref().map(ToString::to_string) != Some(val.to_string())
-                        {
-                            return false;
-                        }
+                    if let Some(val) = protocol
+                        && conn.protocol.as_ref().map(ToString::to_string) != Some(val.to_string())
+                    {
+                        return false;
                     }
-                    if let Some(val) = source {
-                        if conn.source != *val {
-                            return false;
-                        }
+                    if let Some(val) = source
+                        && conn.source != *val
+                    {
+                        return false;
                     }
-                    if let Some(val) = source_port {
-                        if conn.source_port != Some(*val) {
-                            return false;
-                        }
+                    if let Some(val) = source_port
+                        && conn.source_port != Some(*val)
+                    {
+                        return false;
                     }
-                    if let Some(val) = destination {
-                        if conn.destination != *val {
-                            return false;
-                        }
+                    if let Some(val) = destination
+                        && conn.destination != *val
+                    {
+                        return false;
                     }
-                    if let Some(val) = destination_port {
-                        if conn.destination_port != *val {
-                            return false;
-                        }
+                    if let Some(val) = destination_port
+                        && conn.destination_port != *val
+                    {
+                        return false;
                     }
-                    if let Some(val) = state {
-                        if conn.state.as_ref().map(ToString::to_string) != Some(val.to_string()) {
-                            return false;
-                        }
+                    if let Some(val) = state
+                        && conn.state.as_ref().map(ToString::to_string) != Some(val.to_string())
+                    {
+                        return false;
                     }
-                    if let Some(val) = pid {
-                        if conn.pid != Some(*val) {
-                            return false;
-                        }
+                    if let Some(val) = pid
+                        && conn.pid != Some(*val)
+                    {
+                        return false;
                     }
-                    if let Some(val) = process {
-                        if conn.process.as_ref() != Some(val) {
-                            return false;
-                        }
+                    if let Some(val) = process
+                        && conn.process.as_ref() != Some(val)
+                    {
+                        return false;
                     }
-                    if let Some(val) = create_time {
-                        if conn.create_time != Some(*val) {
-                            return false;
-                        }
+                    if let Some(val) = create_time
+                        && conn.create_time != Some(*val)
+                    {
+                        return false;
                     }
                 }
                 (
@@ -792,15 +783,15 @@ impl PartialEq<EntityUpdate> for Entity {
                     },
                     EntityMetadata::SigmaRule(rule),
                 ) => {
-                    if let Some(val) = sigma_rule {
-                        if &rule.rule != val {
-                            return false;
-                        }
+                    if let Some(val) = sigma_rule
+                        && &rule.rule != val
+                    {
+                        return false;
                     }
-                    if let Some(val) = score {
-                        if rule.score != *val {
-                            return false;
-                        }
+                    if let Some(val) = score
+                        && rule.score != *val
+                    {
+                        return false;
                     }
                     if !add_applies_to
                         .iter()
@@ -891,26 +882,26 @@ impl PartialEq<EntityUpdate> for Entity {
                     },
                     EntityMetadata::Flag(flag),
                 ) => {
-                    if let Some(val) = suspicion {
-                        if flag.suspicion != *val {
-                            return false;
-                        }
+                    if let Some(val) = suspicion
+                        && flag.suspicion != *val
+                    {
+                        return false;
                     }
                     // confidence has no PartialEq, so compare its display form
-                    if let Some(val) = confidence {
-                        if flag.confidence.to_string() != val.to_string() {
-                            return false;
-                        }
+                    if let Some(val) = confidence
+                        && flag.confidence.to_string() != val.to_string()
+                    {
+                        return false;
                     }
-                    if let Some(val) = reasoning {
-                        if &flag.reasoning != val {
-                            return false;
-                        }
+                    if let Some(val) = reasoning
+                        && &flag.reasoning != val
+                    {
+                        return false;
                     }
-                    if let Some(val) = content {
-                        if flag.content.as_ref() != Some(val) {
-                            return false;
-                        }
+                    if let Some(val) = content
+                        && flag.content.as_ref() != Some(val)
+                    {
+                        return false;
                     }
                 }
                 (
@@ -927,10 +918,10 @@ impl PartialEq<EntityUpdate> for Entity {
                     },
                     EntityMetadata::Incident(incident),
                 ) => {
-                    if let Some(val) = cover_term {
-                        if incident.cover_term.as_ref() != Some(val) {
-                            return false;
-                        }
+                    if let Some(val) = cover_term
+                        && incident.cover_term.as_ref() != Some(val)
+                    {
+                        return false;
                     }
                     if !add_mission_teams
                         .iter()
@@ -976,10 +967,10 @@ impl PartialEq<EntityUpdate> for Entity {
                     },
                     EntityMetadata::CompiledFunction(func),
                 ) => {
-                    if let Some(val) = function_address {
-                        if func.address != *val {
-                            return false;
-                        }
+                    if let Some(val) = function_address
+                        && func.address != *val
+                    {
+                        return false;
                     }
                     // disassembly has no PartialEq; it is fully replaced so must json-match
                     if !disassembly.is_empty() && !json_eq(&func.disassembly, disassembly) {
@@ -996,15 +987,15 @@ impl PartialEq<EntityUpdate> for Entity {
                     },
                     EntityMetadata::DecompiledFunction(decomp),
                 ) => {
-                    if let Some(val) = function_address {
-                        if decomp.address != *val {
-                            return false;
-                        }
+                    if let Some(val) = function_address
+                        && decomp.address != *val
+                    {
+                        return false;
                     }
-                    if let Some(val) = decompilation_content {
-                        if &decomp.content != val {
-                            return false;
-                        }
+                    if let Some(val) = decompilation_content
+                        && &decomp.content != val
+                    {
+                        return false;
                     }
                     if !add_tools.iter().all(|tool| decomp.tools.contains(tool)) {
                         return false;
@@ -1028,25 +1019,25 @@ impl PartialEq<EntityUpdate> for Entity {
                     },
                     EntityMetadata::PeSection(section),
                 ) => {
-                    if let Some(val) = md5 {
-                        if section.md5.as_ref() != Some(val) {
-                            return false;
-                        }
+                    if let Some(val) = md5
+                        && section.md5.as_ref() != Some(val)
+                    {
+                        return false;
                     }
-                    if let Some(val) = raw_size {
-                        if section.raw_size != Some(*val) {
-                            return false;
-                        }
+                    if let Some(val) = raw_size
+                        && section.raw_size != Some(*val)
+                    {
+                        return false;
                     }
-                    if let Some(val) = virtual_size {
-                        if section.virtual_size != Some(*val) {
-                            return false;
-                        }
+                    if let Some(val) = virtual_size
+                        && section.virtual_size != Some(*val)
+                    {
+                        return false;
                     }
-                    if let Some(val) = entropy {
-                        if section.entropy != Some(*val) {
-                            return false;
-                        }
+                    if let Some(val) = entropy
+                        && section.entropy != Some(*val)
+                    {
+                        return false;
                     }
                 }
                 (

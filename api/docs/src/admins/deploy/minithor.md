@@ -153,7 +153,7 @@ minithor [--namespace-prefix <prefix>] deploy [options]
 | `--rand-password` | Let the chart generate the admin password on the first deploy; a redeploy without `--password` keeps the stored one. Can't be combined with `--password` |
 | `--version <tag>` | Thorium image tag (default: the chart's appVersion) |
 | `--image <repo[:tag]>` | Thorium image for the operator and every Thorium component, such as the image a fork's CI built for a branch; a tag here replaces `--version` |
-| `--local-image <name:tag>` | A Thorium image built on this host, loaded into every node of the profile and deployed with pull policy `IfNotPresent`; can't be combined with `--image` |
+| `--local-image <name:tag>` | A Thorium image built on this host, loaded into every node of the profile and deployed with pull policy `IfNotPresent`; can't be combined with `--image`. Deploy stops when a node lacks the image after loading or the image, on the host or the node, is built for another architecture than the node (an amd64 image on an Apple-silicon arm64 node, for example, which emulation on the host doesn't help, and which `minikube image load` may refuse); pass `--image` with a multi-architecture registry image instead |
 | `--registry` | Deploy a container registry at `docker-registry.<thorium namespace>.svc.cluster.local:5000` (see [Registry](#registry)) |
 | `--registry-user <name>` | Enable registry basic auth for this user (implies `--registry`; the password is in `credentials --all`) |
 | `--toolbox <path\|url>` | Toolbox to import, a legacy or format 2 toolbox file (default: `tools/toolbox.json` on GitHub main; `thorctl` reads either format and converts a legacy toolbox as it imports), fetched on this host. Read the import report with `kubectl logs job/<toolbox-import-...>` |
@@ -168,13 +168,16 @@ minithor [--namespace-prefix <prefix>] deploy [options]
 | `--values <file>` | Extra values file for the thorium chart (repeatable) |
 | `--set <key.path=value>` | Extra value for the thorium chart (repeatable), for example `--set operator.cluster.components.scaler=null` to omit the k8s scaler |
 | `--skip-operators` | Don't install or upgrade the infra-operators chart |
+| `--reset-infra` | Apply the rendered backing-service sizes and settings instead of keeping the running ones (see [Kept infra settings](#kept-infra-settings)) |
+| `--force-conflicts` | Have Helm take over the fields of the thorium chart's objects that other field managers own when its server-side apply conflicts with them (`helm --server-side=true --force-conflicts`; needs Helm 4 or later, see [Troubleshooting](#troubleshooting)) |
 | `--timeout <seconds>` | Timeout for each install and for the readiness wait (default 1800) |
 
 **Chart values.** The values come, in increasing precedence, from development defaults embedded in
 the script (every backing service in the cluster, an nginx ingress, toolbox `mode: overwrite`, a
 1 GiB Elasticsearch heap), then the values your flags produce (written to
-`~/.cache/minithor/values.yaml`, or `values-<profile>.yaml` for another profile), then your
-`--values` files and `--set` flags. The flag values also set `global.clusterCIDRs` to the
+`~/.cache/minithor/values.yaml`, or `values-<profile>.yaml` for another profile), then the
+running infra settings a redeploy keeps (see [Kept infra settings](#kept-infra-settings)), then
+your `--values` files and `--set` flags. The flag values also set `global.clusterCIDRs` to the
 profile's service and pod CIDRs, `operator.cluster.upgrade.autoTargetDev: true`, and
 `operator.cluster.upgrade.dangerousDowngradeLossy: true` (a development cluster accepts the loss of
 a lossy downgrade step without a code or backup; see [Accepting
@@ -198,6 +201,50 @@ printing the operator's message, when one is in the `Error` phase, in the `Upgra
 (a `targetRevision` or `autoTargetDev: false` from your `--values` or `--set` holds it below the
 latest revision), or has an upgrade step that is `Blocked` (for example a step waiting for an
 approval; see [Upgrading Thorium](./upgrades.md)).
+
+#### Kept infra settings
+
+Since every `deploy` renders its values from its own flags, a newer minithor or chart can render
+other backing-service sizes and settings than a deployment runs with (for example a deployment an
+older chart installed with a 4Gi Redis volume, 8Gi Scylla and Elasticsearch volumes, a 1-CPU
+Scylla limit, and a 512m Elasticsearch heap). Applying those would fail or disrupt the backing
+services: a PVC or Elasticsearch volume can't shrink (and grows only with a storage class that
+allows expansion), the Scylla operator refuses any change to rack storage, Scylla restarts for a
+resource change and fails to start with a lower CPU limit (see below), and any Elasticsearch
+change restarts its nodes. So before installing the thorium chart, `deploy` reads these settings from the running
+objects and renders the chart with the same values (`helm template`, with placeholder
+credentials) to compare them:
+
+| Values key | Running object |
+|------------|----------------|
+| `infra.redis.storage` | The Redis PVC `redis-persistent-storage-claim` |
+| `infra.scylla.storage` | The `ScyllaCluster` rack's `storage.capacity` |
+| `infra.scylla.resources.requests.cpu`, `infra.scylla.resources.requests.memory`, `infra.scylla.resources.limits.cpu`, `infra.scylla.resources.limits.memory` | The `ScyllaCluster` rack's resources |
+| `infra.scylla.developerMode` | The `ScyllaCluster`'s `developerMode` |
+| `infra.elastic.count`, `infra.elastic.storage` | The `Elasticsearch` node set's count and volume size |
+| `infra.elastic.javaOpts` | The node set's `ES_JAVA_OPTS` (the heap) |
+| `infra.elastic.resources.limits.cpu`, `infra.elastic.resources.limits.memory` | The node set's container limits |
+| `infra.elastic.config` | The node set's `elasticsearch.yml` settings (a key the values add is set to `null`, which removes it) |
+
+Every setting that differs is kept: `deploy` prints it with both values and writes the running
+values to `~/.cache/minithor/values-live.yaml` (`values-live-<profile>.yaml` for another profile),
+which it layers above its own values and under your `--values` and `--set`, and prints. A key you
+set yourself still wins, and `deploy` lists it as a change. Pass `--reset-infra` to apply the
+rendered values instead; `deploy` then lists what changes. A first install has nothing running and
+skips the comparison.
+
+**The Scylla CPU limit can only stay or grow.** The Scylla operator starts Scylla with one shard
+per CPU of the rack's CPU limit (Scylla's `--smp`), and a Scylla node restarted with fewer shards
+than its data was written with fails to start (`tablet with invalid replica shard`) and
+crash-loops. So `deploy` refuses, before changing anything, when `--reset-infra` or your
+`--values` or `--set` would lower or remove the running limit, and prints the running value to
+keep (`--set infra.scylla.resources.limits.cpu=<running>`). Raising it is allowed. A running
+Scylla without a CPU limit gets its shard count from elsewhere, so any limit could lower it, and
+`deploy` refuses to add one. To run Scylla on fewer CPUs, or with a limit, remove the deployment
+and its data (`minithor cleanup --confirm`) and deploy again. While a `ScyllaCluster` runs,
+`deploy` also refuses when it can't make the comparison (the chart fails to render, or it can't
+read the running settings or write its temporary files), rather than install the chart's values
+unchecked.
 
 **One deployment per cluster.** A namespace prefix only renames namespaces, so `deploy` refuses
 when a `thorium` release or a `ThoriumCluster` exists under another prefix (pass that prefix, or
@@ -493,6 +540,21 @@ the download URL's port. A backup holds every credential in plaintext; see
 - **`expose` reports a forward as failed.** Each forward logs to `~/.cache/minithor/expose-logs/`.
   A port held by another program is left alone; pick other ports with `--port` or
   `--port-offset`.
+- **`deploy` fails with a pre-upgrade CRD hook error.** Helm runs the `thorium-apply-crd` Job with
+  the new Thorium image before upgrading; `deploy` prints its pods' events and logs when the
+  upgrade fails. A Job whose pod never started (an image no node has or can pull) fails with
+  `DeadlineExceeded` after `operator.crdHook.timeoutSeconds` (600 by default), and the Job
+  controller deletes its pod then, so `deploy` prints the Job's image and pod counts and the last
+  events of the Job and its pods instead (the pull error is among them).
+- **`deploy` fails with `Apply failed with ... conflict`.** Helm 4 applies the chart server-side,
+  and a field another field manager owns conflicts: an operator that updated it (such as
+  `elastic-operator` on the `Elasticsearch` node sets) or `before-first-apply`, which holds the
+  fields an earlier client-side (Helm 3) apply set. `deploy` names the fields and prints the same
+  command with `--force-conflicts`, which has Helm take them over.
+- **Pods of a `--local-image` deployment never start on an Apple-silicon Mac.** The nodes are arm64,
+  and an amd64 image Docker runs through Rosetta or QEMU emulation can't run on them; `deploy`
+  names both architectures and stops, whether `minikube image load` refused the image or loaded it. Pass `--image` with a registry image that has an arm64
+  variant, or build the image with `--platform linux/arm64`.
 - **kubectl can't reach the cluster after a reboot.** Every minithor command fixes a stale
   kubeconfig; run `minithor start` (or any command against a running cluster).
 

@@ -135,7 +135,7 @@ pub enum ApiError {
     StrumParse(strum::ParseError),
     /// An error from parsing a country code
     CountryCode(isocountry::CountryCodeParseErr),
-    /// An error from decoding a user uploaded CaRT file
+    /// An error from decoding a user uploaded `CaRT` file
     Cart(cart_rs::Error),
     /// An IO error
     IO(std::io::Error),
@@ -216,6 +216,10 @@ impl ApiError {
             ApiError::Thorium { code, .. }
             | ApiError::Problems { code, .. }
             | ApiError::Detailed { code, .. } => *code,
+            // a multipart form refused for its size is too large rather than malformed
+            ApiError::Multipart(error) if error.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+                StatusCode::PAYLOAD_TOO_LARGE
+            }
             // errors from parsing user provided data are bad requests
             ApiError::InvalidEnum(_)
             | ApiError::Conversion(_)
@@ -1085,11 +1089,11 @@ impl From<SdkError<aws_sdk_s3::operation::put_object::PutObjectError>> for ApiEr
 }
 
 impl From<SdkError<aws_sdk_s3::operation::get_object::GetObjectError>> for ApiError {
-    /// Cast an S3 get object error into an ApiError
+    /// Cast an S3 get object error into an `ApiError`
     ///
     /// # Arguments
     ///
-    /// * `error` - The S3 get object error to convert to an ApiError
+    /// * `error` - The S3 get object error to convert to an `ApiError`
     fn from(error: SdkError<aws_sdk_s3::operation::get_object::GetObjectError>) -> Self {
         // an object that does not exist is a missing resource, not a failure of the object store
         if error

@@ -106,7 +106,7 @@ fn parse_url(raw: &str, conf: &CtlConf) -> Result<(String, String, String), Erro
             // replace the first : with a /
             let thorium_url = raw[4..].replacen(':', "/", 1);
             // build our https clone url
-            let fixed = format!("https://{}", thorium_url);
+            let fixed = format!("https://{thorium_url}");
             // get our trimmed url
             let (url, trimmed) = trim_url(&fixed)?;
             (url, thorium_url, trimmed)
@@ -589,7 +589,7 @@ impl IngestWorker {
                         clone_repo_ssh(clone_url, nested.clone(), git_conf, &self.bar).await?;
                     }
                     None => clone_repo_https(clone_url, nested.clone(), &self.bar).await?,
-                };
+                }
                 // return the path to our repo
                 Ok(nested)
             }

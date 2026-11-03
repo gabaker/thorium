@@ -2623,6 +2623,39 @@ async fn update_stores_tags() -> Result<(), Error> {
     Ok(())
 }
 
+/// Adding a tag a reaction already has, or the same tag twice in one update, stores it once
+#[tokio::test]
+async fn update_does_not_duplicate_tags() -> Result<(), Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    // Create a group to test reactions creation in
+    let group = generators::groups(1, &client).await?.remove(0).name;
+    // create a random pipeline
+    let pipe_req = generators::pipelines(&group, 1, false, &client)
+        .await?
+        .remove(0);
+    // get the pipeline for this pipeline order
+    let pipe = client.pipelines.get(&group, &pipe_req.name).await?;
+    // pick a tag no other test shares
+    let tag = format!("dup-{}", generators::gen_string(6));
+    // Create a reaction with our tag
+    let react_req = generators::gen_reaction(&group, &pipe, Some(&tag));
+    let create = client.reactions.create(&react_req).await?;
+    // add the tag it already has twice, then add it twice in one update
+    let update = ReactionUpdate::default().tag(&tag);
+    client.reactions.update(&group, &create.id, &update).await?;
+    let updated = client.reactions.update(&group, &create.id, &update).await?;
+    let twice = ReactionUpdate::default().tag(&tag).tag(&tag);
+    let last = client.reactions.update(&group, &create.id, &twice).await?;
+    // the responses and the stored reaction hold the tag once
+    let count = |tags: &[String]| tags.iter().filter(|stored| **stored == tag).count();
+    assert_eq!(count(&updated.tags), 1, "{:?}", updated.tags);
+    assert_eq!(count(&last.tags), 1, "{:?}", last.tags);
+    let stored = client.reactions.get(&group, create.id).await?;
+    assert_eq!(count(&stored.tags), 1, "{:?}", stored.tags);
+    Ok(())
+}
+
 #[tokio::test]
 async fn delete() -> Result<(), Error> {
     // get admin client

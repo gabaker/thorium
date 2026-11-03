@@ -22,14 +22,6 @@ const LEGACY_EVENTS: &str = "CREATE TABLE IF NOT EXISTS {ns}.events (event_type 
     data TEXT, PRIMARY KEY ((event_type, year, bucket), timestamp, id)) \
     WITH default_time_to_live = 2592000";
 
-/// The `entities_by_name` view an older release's setup created, which the registry doesn't
-/// declare
-const LEGACY_ENTITIES_BY_NAME: &str = "CREATE MATERIALIZED VIEW IF NOT EXISTS \
-    {ns}.entities_by_name AS SELECT name, group, kind, created, year, bucket, id, submitter, \
-    kind_data, description, image FROM {ns}.entities WHERE name IS NOT NULL AND group IS NOT NULL \
-    AND kind IS NOT NULL AND created IS NOT NULL AND year IS NOT NULL AND bucket IS NOT NULL \
-    AND id IS NOT NULL PRIMARY KEY (name, group, kind, created, year, bucket, id)";
-
 /// Run a CQL statement, failing with its text on error
 ///
 /// # Arguments
@@ -73,6 +65,7 @@ async fn apply_declared(session: &Session, conf: &Conf) -> Result<(), Error> {
     let options = ApplyOptions {
         target: ApplyTarget::Declared,
         dry_run: false,
+        view_wait: None,
     };
     apply(session, conf, &options, "legacy-test", &|_| ())
         .await
@@ -80,22 +73,20 @@ async fn apply_declared(session: &Session, conf: &Conf) -> Result<(), Error> {
     Ok(())
 }
 
-/// Create the two legacy objects in a keyspace the declared schema already holds
+/// Create the legacy `events` table in a keyspace the declared schema already holds
 ///
 /// # Arguments
 ///
 /// * `session` - The Scylla session to use
-/// * `keyspace` - The keyspace to create them in
+/// * `keyspace` - The keyspace to create it in
 async fn create_legacy_objects(session: &Session, keyspace: &str) -> Result<(), Error> {
-    // the table, then the view of the entities table
-    for cql in [LEGACY_EVENTS, LEGACY_ENTITIES_BY_NAME] {
-        exec(session, &cql.replace("{ns}", keyspace)).await?;
-    }
-    Ok(())
+    // the older release's own statement for the table
+    exec(session, &LEGACY_EVENTS.replace("{ns}", keyspace)).await
 }
 
-/// Create a keyspace the way an older release did, then record it: the declared schema plus both
-/// legacy objects, holding rows
+/// Create a keyspace the way an older release did: the declared schema (which declares the
+/// `entities_by_name` view the older setup also created) plus the legacy `events` table, with
+/// rows in the table and in the view's base table
 ///
 /// # Arguments
 ///
@@ -252,25 +243,23 @@ async fn cleanup(session: &Session, conf: &Conf) -> Result<(), Error> {
     .await
 }
 
-/// On a keyspace an older release created, the listing shows both exemplars present with their row
-/// counts, the revisions that created them, no revision using them, one downgrade line per window
-/// revision, and that they are droppable; nothing else is not registered or unmanaged
+/// On a keyspace an older release created, the listing shows the legacy table present with its row
+/// count, the revisions that created it, no revision using it, one downgrade line per window
+/// revision, and that it is droppable; the re-declared `entities_by_name` view is not listed, and
+/// nothing else is not registered or unmanaged
 #[tokio::test]
-async fn a_keyspace_an_older_release_created_lists_both_objects() -> Result<(), Error> {
-    // two events and three entities, so the table and the view count differently
+async fn a_keyspace_an_older_release_created_lists_the_legacy_table() -> Result<(), Error> {
+    // two events and three entities, so the view's rows can't stand in for the table's
     let session = test_utilities::scylla_session().await?;
     let conf = fresh(&session, "lg_older").await?;
     older_release(&session, &conf, 2, 3).await?;
     let listing = list(&session, &conf).await?;
-    // the registered objects, in registry order
-    assert_eq!(listing.objects.len(), 2);
-    let (events, view) = (&listing.objects[0], &listing.objects[1]);
-    assert_eq!(
-        (events.id.as_str(), view.id.as_str()),
-        ("scylla:events", "scylla:entities_by_name")
-    );
-    assert!(events.present && view.present);
-    assert_eq!((events.rows, view.rows), (2, 3));
+    // the one registered object
+    assert_eq!(listing.objects.len(), 1);
+    let events = &listing.objects[0];
+    assert_eq!(events.id, "scylla:events");
+    assert!(events.present);
+    assert_eq!(events.rows, 2);
     for status in &listing.objects {
         assert_eq!(status.created_by, ["2026-10-v01", "2026-10-v02"]);
         assert_eq!(status.used_by, []);
@@ -289,14 +278,14 @@ async fn a_keyspace_an_older_release_created_lists_both_objects() -> Result<(), 
     let json = serde_json::to_value(&listing).map_err(|err| Error::new(err.to_string()))?;
     assert_eq!(json["objects"][0]["id"], "scylla:events");
     assert_eq!(json["objects"][0]["rows"], 2);
-    assert_eq!(json["objects"][1]["rows"], 3);
     assert_eq!(json["objects"][0]["droppable"]["droppable"], "yes");
     assert_eq!(json["unmanaged_extras"], 0);
     cleanup(&session, &conf).await
 }
 
-/// On a keyspace this release created, the listing shows neither object present, with no rows, and
-/// the probe reports neither `missing` nor `unexpected` against the snapshot that lists them
+/// On a keyspace this release created, the listing shows the legacy table absent, with no rows, and
+/// the probe reports neither it nor the declared `entities_by_name` view as `missing` or
+/// `unexpected` against the snapshot that lists both
 #[tokio::test]
 async fn a_keyspace_this_release_created_holds_neither_object() -> Result<(), Error> {
     // the declared schema alone
@@ -393,60 +382,62 @@ async fn an_unregistered_object_is_listed_with_its_snapshots() -> Result<(), Err
     cleanup(&session, &conf).await
 }
 
-/// Dropping both objects removes them, writes one audit row each recording who, when, the id and
-/// the rows, and leaves every declared object and the rest of the record alone; dropping again
-/// writes nothing
+/// Dropping the legacy table removes it, writes one audit row recording who, when, the id and the
+/// rows, and leaves every declared object and the rest of the record alone; the declared
+/// `entities_by_name` view is refused, and dropping again writes nothing
 #[tokio::test]
 async fn dropping_removes_the_objects_and_records_each_drop() -> Result<(), Error> {
-    // an older release's keyspace with rows in both
+    // an older release's keyspace with rows in the table and the view's base table
     let session = test_utilities::scylla_session().await?;
     let conf = fresh(&session, "lg_drop").await?;
     older_release(&session, &conf, 4, 2).await?;
-    let records = drop_ids(
-        &session,
-        &conf,
-        &["scylla:events", "scylla:entities_by_name"],
-        "admin@host",
-    )
-    .await
-    .map_err(|err| Error::new(err.to_string()))?;
-    // both are gone, and the declared base table of the view is untouched
+    // the view an older setup also created is declared again, so dropping it is refused
+    let refused = drop_ids(&session, &conf, &["scylla:entities_by_name"], "admin@host")
+        .await
+        .expect_err("a declared view is refused");
+    assert_eq!(
+        refused.to_string(),
+        "scylla:entities_by_name is a declared object; refusing."
+    );
+    let records = drop_ids(&session, &conf, &["scylla:events"], "admin@host")
+        .await
+        .map_err(|err| Error::new(err.to_string()))?;
+    // the table is gone, and the declared view and its base table are untouched
     let listing = list(&session, &conf).await?;
     assert!(listing.objects.iter().all(|status| !status.present));
     let observed = observe(&session, &conf).await?;
+    for name in ["entities", "entities_by_name"] {
+        assert!(
+            observed.objects.iter().any(|object| object.name == name),
+            "{name}"
+        );
+    }
     assert!(
-        observed
+        !observed
             .objects
             .iter()
-            .any(|object| object.name == "entities")
+            .any(|object| object.backend == SchemaBackend::Scylla && object.name == "events")
     );
-    assert!(!observed.objects.iter().any(|object| {
-        object.backend == SchemaBackend::Scylla
-            && matches!(object.name.as_str(), "events" | "entities_by_name")
-    }));
-    // one record each, with who, when, the id and the rows
-    assert_eq!(records.len(), 2);
+    // one record, with who, when, the id and the rows
+    assert_eq!(records.len(), 1);
     assert_eq!(
         records
             .iter()
             .map(|record| (record.object.as_str(), record.rows))
             .collect::<Vec<_>>(),
-        [("scylla:events", 4), ("scylla:entities_by_name", 2)]
+        [("scylla:events", 4)]
     );
     assert!(records.iter().all(|record| record.who == "admin@host"));
     let stored = drop_records(&session, &conf)
         .await
         .map_err(|err| Error::new(err.to_string()))?;
-    assert_eq!(stored.len(), 2);
+    assert_eq!(stored.len(), 1);
     assert_eq!(
         stored
             .iter()
             .map(|record| (record.object.as_str(), record.rows, record.who.as_str()))
             .collect::<Vec<_>>(),
-        [
-            ("scylla:events", 4, "admin@host"),
-            ("scylla:entities_by_name", 2, "admin@host")
-        ]
+        [("scylla:events", 4, "admin@host")]
     );
     let now = chrono::Utc::now();
     assert!(
@@ -464,7 +455,7 @@ async fn dropping_removes_the_objects_and_records_each_drop() -> Result<(), Erro
             .await
             .map_err(|err| Error::new(err.to_string()))?
             .len(),
-        2
+        1
     );
     cleanup(&session, &conf).await
 }
@@ -507,27 +498,22 @@ async fn a_drop_that_cannot_be_recorded_is_refused() -> Result<(), Error> {
     cleanup(&session, &conf).await
 }
 
-/// After both objects are dropped, converging down to `2026-10-v02`, whose snapshot lists them,
-/// brings both back (the table empty, the view built from its base table), the keyspace matches
-/// that snapshot, and the API's setup starts on it
+/// After the legacy table is dropped, converging down to `2026-10-v02`, whose snapshot lists it,
+/// brings the table back empty, the keyspace matches that snapshot, and the API's setup starts on
+/// it
 ///
 /// Converging to a snapshot isn't built on this base, so the test recreates what the snapshot
 /// lists and the keyspace lacks with the older release's own statements until it is.
 #[tokio::test]
 async fn a_downgrade_recreates_dropped_objects() -> Result<(), Error> {
-    // drop both objects from an older release's keyspace
+    // drop the legacy table from an older release's keyspace
     let session = test_utilities::scylla_session().await?;
     let conf = fresh(&session, "lg_down").await?;
     older_release(&session, &conf, 3, 2).await?;
-    drop_ids(
-        &session,
-        &conf,
-        &["scylla:events", "scylla:entities_by_name"],
-        "admin",
-    )
-    .await
-    .map_err(|err| Error::new(err.to_string()))?;
-    // the v02 snapshot lists both, which the keyspace now lacks
+    drop_ids(&session, &conf, &["scylla:events"], "admin")
+        .await
+        .map_err(|err| Error::new(err.to_string()))?;
+    // the v02 snapshot lists the table, which the keyspace now lacks
     let v02 = RevisionSnapshot::committed("2026-10-v02")
         .expect("2026-10-v02 has a snapshot")
         .map_err(|err| Error::new(format!("{err:?}")))?;
@@ -539,11 +525,12 @@ async fn a_downgrade_recreates_dropped_objects() -> Result<(), Error> {
         .filter(|object| object.kind == DriftKind::Missing)
         .map(|object| object.object.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(missing, ["entities_by_name", "events"]);
+    assert_eq!(missing, ["events"]);
     // converge down to it
     let options = ApplyOptions {
         target: ApplyTarget::Snapshot("2026-10-v02".parse().expect("a valid revision")),
         dry_run: false,
+        view_wait: None,
     };
     match apply(&session, &conf, &options, "downgrade-test", &|_| ()).await {
         Ok(_) => (),
@@ -552,8 +539,8 @@ async fn a_downgrade_recreates_dropped_objects() -> Result<(), Error> {
         }
         Err(err) => return Err(Error::new(format!("converge down failed: {err:?}"))),
     }
-    // both are back: the table empty, and the view built from the base table's rows, which a
-    // downgrade doesn't touch
+    // the table is back and empty, and the declared view still holds the base table's rows,
+    // which a downgrade doesn't touch
     let listing = list(&session, &conf).await?;
     for status in &listing.objects {
         assert!(status.present, "{}", status.id);
@@ -571,7 +558,7 @@ async fn a_downgrade_recreates_dropped_objects() -> Result<(), Error> {
         )),
         "{scylla:?}"
     );
-    // and the API's startup check runs on it without panicking, leaving both in place: it either
+    // and the API's startup check runs on it without panicking, leaving the table in place: it either
     // starts or refuses the downgraded schema with an error
     let started = {
         let conf = conf.clone();
@@ -593,18 +580,13 @@ async fn a_downgrade_recreates_dropped_objects() -> Result<(), Error> {
 /// only rows of its own kind, the record still reads, and the legacy-drop partition holds the rows
 #[tokio::test]
 async fn legacy_drop_rows_do_not_reach_older_readers() -> Result<(), Error> {
-    // drop both objects so the record holds two legacy-drop rows
+    // drop the legacy table so the record holds one legacy-drop row
     let session = test_utilities::scylla_session().await?;
     let conf = fresh(&session, "lg_kinds").await?;
     older_release(&session, &conf, 1, 1).await?;
-    drop_ids(
-        &session,
-        &conf,
-        &["scylla:events", "scylla:entities_by_name"],
-        "admin",
-    )
-    .await
-    .map_err(|err| Error::new(err.to_string()))?;
+    drop_ids(&session, &conf, &["scylla:events"], "admin")
+        .await
+        .map_err(|err| Error::new(err.to_string()))?;
     let keyspace = &conf.thorium.namespace;
     // every older kind's partition holds no legacy-drop row, and the table still parses as a whole
     for kind in MigrationRecordKind::ALL {
@@ -630,7 +612,7 @@ async fn legacy_drop_rows_do_not_reach_older_readers() -> Result<(), Error> {
             "{kind:?}"
         );
         let expected = if kind == MigrationRecordKind::LegacyDrop {
-            2
+            1
         } else {
             found.len()
         };
@@ -650,11 +632,11 @@ async fn legacy_drop_rows_do_not_reach_older_readers() -> Result<(), Error> {
     cleanup(&session, &conf).await
 }
 
-/// Neither `schema apply` nor recreating a declared view touches the legacy objects, and
-/// recreating `events` as a view is refused as undeclared
+/// Neither `schema apply` nor recreating a declared view touches the legacy table, and recreating
+/// `events` as a view is refused as undeclared
 #[tokio::test]
 async fn apply_and_recreate_leave_legacy_objects_in_place() -> Result<(), Error> {
-    // an older release's keyspace holding rows in both objects
+    // an older release's keyspace holding rows in the legacy table
     let session = test_utilities::scylla_session().await?;
     let conf = fresh(&session, "lg_dr1").await?;
     older_release(&session, &conf, 2, 2).await?;
@@ -667,11 +649,11 @@ async fn apply_and_recreate_leave_legacy_objects_in_place() -> Result<(), Error>
             .iter()
             .map(|status| (status.present, status.rows))
             .collect::<Vec<_>>(),
-        [(true, 2), (true, 2)]
+        [(true, 2)]
     );
-    // recreating a declared view leaves them in place
+    // recreating a declared view leaves it in place
     let views = resolve_views(&["entities_by_id"]).map_err(|err| Error::new(err.to_string()))?;
-    recreate_views(&session, &conf, &views, false, &|_| ())
+    recreate_views(&session, &conf, &views, false, None, &|_| ())
         .await
         .map_err(|err| Error::new(err.to_string()))?;
     let listing = list(&session, &conf).await?;
@@ -681,18 +663,16 @@ async fn apply_and_recreate_leave_legacy_objects_in_place() -> Result<(), Error>
             .iter()
             .map(|status| (status.present, status.rows))
             .collect::<Vec<_>>(),
-        [(true, 2), (true, 2)]
+        [(true, 2)]
     );
-    // an undeclared view, `events` or the legacy view, is refused as undeclared
-    for name in ["events", "entities_by_name"] {
-        let refused = resolve_views(&[name]);
-        assert!(
-            matches!(&refused, Err(thorium::models::schema::ViewError::Undeclared { name: found }) if found == name),
-            "{name}"
-        );
-    }
+    // the legacy table is refused as an undeclared view
+    let refused = resolve_views(&["events"]);
+    assert!(
+        matches!(&refused, Err(thorium::models::schema::ViewError::Undeclared { name: found }) if found == "events"),
+        "{refused:?}"
+    );
     let registered: Vec<String> = LEGACY.iter().map(LegacyDef::id).collect();
-    assert_eq!(registered, ["scylla:events", "scylla:entities_by_name"]);
+    assert_eq!(registered, ["scylla:events"]);
     cleanup(&session, &conf).await
 }
 

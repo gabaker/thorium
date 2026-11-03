@@ -180,7 +180,7 @@ mod tests {
     /// Under heavy truncation a small item's `truncation_amt` (ceil of its proportional share
     /// plus the 3-byte ellipsis) can exceed its own byte length, and `proportional_truncate`
     /// handles that without underflowing (which would panic in debug and wrap in release). With
-    /// total=1000, max_len=100, one huge item plus a ~29-byte item, there is no panic and the
+    /// total=1000, `max_len=100`, one huge item plus a ~29-byte item, there is no panic and the
     /// small item is never left longer than it started.
     #[test]
     fn small_item_under_heavy_truncation_does_not_underflow() {

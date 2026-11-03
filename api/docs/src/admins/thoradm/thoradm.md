@@ -453,7 +453,7 @@ The restore runs in this order:
    Each node is written as registered, with no heartbeat: its workers were Redis state, so each
    node must check in again before the scheduler counts it.
 6. **The schema, after loading**, under the writer lease again. `schema apply` runs again and creates every view the table
-   restores dropped from the schema, waiting for them to build with no time limit and logging the
+   restores dropped from the schema, waiting up to five hours for them to build and logging the
    views still building every ten seconds: no API restart is needed. A view whose name a table
    holds is refused, naming the view, and the table has to be dropped by hand (see
    the Views paragraph below). Then restore writes the backup's schema record (see [The Schema
@@ -484,8 +484,10 @@ guide](./taking_backups.md#large-restores-flushing-the-redis-database) covers it
 
 **Views.** `schema apply` defines every view, so the restore saves no view statements: it creates
 each view it dropped, and any view an interrupted restore left dropped, from the schema, and waits
-for them to build, with no time limit, logging every 10 seconds how many views are built and which are
-still building (and, on a cluster, how many nodes have finished each). A view that can't be created is
+for them to build for up to five hours (the default of `schema apply --view-wait-secs`), logging
+every 10 seconds how many views are built and which are still building (and, on a cluster, how
+many nodes have finished each and which nodes it still waits on). A Scylla node that is down never
+finishes a build, so restore with every node up. A view that can't be created is
 recorded (operation `post-restore`, key `schema apply`) and the summary says the views couldn't be recreated; once the cause is fixed, run
 `thoradm schema apply`, which creates them. The schema apply that converges the keyspace before any
 row is restored records its failure with operation `pre-restore` and key `schema apply`.
@@ -1055,6 +1057,7 @@ thoradm schema hash [--backend scylla|elastic|redis|s3]
 thoradm schema apply [--dry-run] [--wait-for-scylla <secs>] [--seed-revision <revision>]
                      [--to-revision <revision>] [--accept-partition-sizes]
                      [--recreate-view <view>]... [--yes] [--force-break-lease]
+                     [--view-wait-secs <secs>]
 thoradm schema status [--acknowledged <json>] [--no-probe] [--result <job uid>]
                       [--wait-for-scylla <secs>]
 thoradm schema diff [--json] [--acknowledged <file>]
@@ -1101,10 +1104,27 @@ default TTL differs from the live one is altered.
   way before changing anything, naming the table. It never drops a view, so drop it by hand once
   you have checked nothing needs it; the next `schema apply` creates the table.
 - `--wait-for-scylla <secs>` waits up to that long for Scylla to accept connections.
+- `--view-wait-secs <secs>` (default 18000, five hours) is the longest `schema apply` and
+  `--recreate-view` wait for materialized views to build. When it passes with views still
+  building, the command fails (exit 1) naming each view and the Scylla nodes that haven't built
+  it, and records nothing; run it again once the cause is fixed. The operator's schema-apply Job
+  relies on this default, an hour under its six hour limit, so the Job's failure carries that
+  message. Raise it when a view's build over a large table legitimately takes longer.
 
-`schema apply` exits 0 on success, 1 when it refuses, 2 for an unusable config or flag, 3 when
-`--to-revision` names a revision with no committed snapshot, and 4 when Scylla or Redis can't be
-reached or a statement failed in a way a retry may get past.
+**A schema apply that creates views can't finish while a Scylla node is down.** After it creates
+a view, `schema apply` waits until every node of the cluster reports the view built in
+`system_distributed.view_build_status` (on a single node, until `system.built_views` lists it). A
+node that is down never reports, so the wait runs to `--view-wait-secs` and fails naming that node.
+The operator applies the schema before any step that changes data, so when that apply creates
+views, an upgrade's data migrations don't start either. Bring the node back, or remove it from the
+cluster (`nodetool removenode`), first. Only the cluster's current members count: a status row
+left by a node that was removed or replaced, which isn't a member any more, is ignored. Each
+waiting progress line names the nodes a view still waits on, as `<address> (<host id>)`.
+
+`schema apply` exits 0 on success, 1 when it refuses (including a view wait that reached
+`--view-wait-secs`), 2 for an unusable config or flag, 3 when `--to-revision` names a revision with
+no committed snapshot, and 4 when Scylla or Redis can't be reached or a statement failed in a way a
+retry may get past.
 
 ## Comparing the Live Schema
 

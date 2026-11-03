@@ -79,7 +79,7 @@ impl Default for DryRun {
 }
 
 impl DryRun {
-    /// Create some DryRun cluster schedulers
+    /// Create some `DryRun` cluster schedulers
     #[allow(
         clippy::new_ret_no_self,
         reason = "registers one scheduler per cluster in the given map instead of returning one; renaming it changes its callers"
@@ -131,7 +131,7 @@ impl Scheduler for DryRun {
         // start with a default cluster resource update
         let mut update = AllocatableUpdate::default();
         // get all of our nodes resources and workers
-        for (name, node) in self.nodes.iter() {
+        for (name, node) in &self.nodes {
             // handle this nodes health correctly
             match node.health {
                 NodeHealth::Unhealthy => {
@@ -214,16 +214,13 @@ impl Scheduler for DryRun {
             // crawl over the spawns in this spawn group
             for spawn in spawns {
                 // get the node for this spawn
-                let node = match self.nodes.get_mut(&spawn.node) {
-                    Some(node) => node,
-                    None => {
-                        // build the error to set
-                        let error = Error::new(format!("Failed to find node {}", spawn.node));
-                        // set our error
-                        errors.insert(spawn.name.clone(), error);
-                        // skip to the next spawn
-                        continue;
-                    }
+                let Some(node) = self.nodes.get_mut(&spawn.node) else {
+                    // build the error to set
+                    let error = Error::new(format!("Failed to find node {}", spawn.node));
+                    // set our error
+                    errors.insert(spawn.name.clone(), error);
+                    // skip to the next spawn
+                    continue;
                 };
                 // make sure we have enough resources for this spawn
                 if node.resources.available.enough(&spawn.resources) {
@@ -264,21 +261,18 @@ impl Scheduler for DryRun {
         // crawl over our scale downs and remove them from nodes
         for scale_down in scaledowns {
             // try to get this workers node
-            let node = match self.nodes.get_mut(&scale_down.node) {
-                Some(node) => node,
-                None => {
-                    // build the error to set
-                    let error = Error::new(format!("Failed to find node {}", scale_down.node));
-                    // build the worker delete object
-                    let delete = WorkerDeletion::Error {
-                        delete: scale_down,
-                        error,
-                    };
-                    // add this failed dleete
-                    deletes.push(delete);
-                    // skip to the next spawn
-                    continue;
-                }
+            let Some(node) = self.nodes.get_mut(&scale_down.node) else {
+                // build the error to set
+                let error = Error::new(format!("Failed to find node {}", scale_down.node));
+                // build the worker delete object
+                let delete = WorkerDeletion::Error {
+                    delete: scale_down,
+                    error,
+                };
+                // add this failed dleete
+                deletes.push(delete);
+                // skip to the next spawn
+                continue;
             };
             // get this nodes worker
             node.workers.retain(|spawn| spawn.name != scale_down.name);

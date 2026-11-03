@@ -1009,6 +1009,44 @@ async fn malformed_instances() -> Result<(), Error> {
     Ok(())
 }
 
+/// An instance over the instances limit is refused with a 400 naming the setting before any
+/// revision is reserved, so the next valid submission is still revision 1
+#[tokio::test]
+async fn oversized_instance_refused() -> Result<(), Error> {
+    // a toolset with one member
+    let admin = test_utilities::admin_client().await?;
+    let suffix = generators::name_suffix();
+    let callisto = moon_user(&admin, "callisto", &suffix).await?;
+    let roles = GroupRoles::default().user(&callisto.username);
+    let a = god_group(&admin, "minerva", &suffix, &roles).await?;
+    let (_, tool) = agentic_tool(&[&a], &admin).await?;
+    let created = toolset(&admin, "oversized", &[&a], ToolSetEntityRequest::default()).await?;
+    // pad the warnings, which aren't in the digest, past the 12 MiB instances default but under
+    // the 14 MiB entities default
+    let mut padded = generators::gen_toolset_instance(&created, 1, None, &[&tool]);
+    padded.warnings = vec!["w".repeat(4096); 3150];
+    let (status, msg) = refusal(submit(&admin, &padded).await);
+    assert_eq!(status, 400);
+    assert!(msg.contains("thorium.limits.body.instances"), "{msg}");
+    // invalid JSON under the limit is refused as an invalid instance
+    let fields = [
+        ("kind", "ToolSetInstance".to_owned()),
+        ("groups[]", a.clone()),
+        (
+            "metadata[toolset_instance]",
+            format!("[\"{}", "x".repeat(4 << 20)),
+        ),
+    ];
+    let (status, body) = raw_form(&callisto, None, &fields).await?;
+    assert_eq!(status, 400);
+    assert!(body.contains("not a valid toolset instance"), "{body}");
+    // the next valid submission is revision 1
+    let valid = generators::gen_toolset_instance(&created, 1, None, &[&tool]);
+    let r1 = submit(&admin, &valid).await?;
+    assert_eq!(instance_meta(&admin.entities.get(r1.id).await?).revision, 1);
+    Ok(())
+}
+
 /// A toolset an agent calls can't be deleted until the agent is; deleting it then removes its
 /// includes and leaves its instances
 #[tokio::test]

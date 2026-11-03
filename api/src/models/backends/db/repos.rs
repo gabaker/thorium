@@ -6,6 +6,7 @@ use futures::stream::{self, StreamExt};
 use itertools::Itertools;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::hash::BuildHasher;
 use tracing::{Level, event, instrument};
 use uuid::Uuid;
 
@@ -195,7 +196,7 @@ async fn update_earliest(
         (Some(old), new) if new < old => *old = *new,
         (None, new) => repo.earliest = Some(*new),
         _ => (),
-    };
+    }
     Ok(())
 }
 
@@ -480,7 +481,7 @@ async fn get_base(
         descending.for_each(|sub| repo.add(sub));
         // return our repo
         return Ok(Some(repo));
-    };
+    }
     Ok(None)
 }
 
@@ -932,21 +933,18 @@ pub async fn commitish_details(
 /// * `repo` - The repo to get the latest commit for
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "db::repos::latest_commit", skip(user, shared), err(Debug))]
-pub async fn latest_commit(
+pub async fn latest_commit<S: BuildHasher>(
     user: &User,
-    groups: &HashSet<&String>,
+    groups: &HashSet<&String, S>,
     repo: &Repo,
     shared: &Shared,
 ) -> Result<String, ApiError> {
     // convert groups to owned strings
-    let groups = groups
-        .iter()
-        .map(|item| item.to_string())
-        .collect::<Vec<String>>();
+    let groups = groups.iter().copied().cloned().collect::<Vec<String>>();
     // build the params for listing this repos commits back to its earliest commit
     let params = CommitishListParams::new(groups, repo.earliest.map(listing_end), 1);
     // build our extra filters to only search commits for this repo
-    let extra = (vec![CommitishKinds::Commit], repo.url.to_owned());
+    let extra = (vec![CommitishKinds::Commit], repo.url.clone());
     // get our cursor scoped to the creating user
     let mut cursor: ScyllaCursor<Commitish> =
         ScyllaCursor::from_params_extra(params, extra, &user.username, false, shared).await?;
@@ -1052,8 +1050,8 @@ async fn is_ambiguous(
 /// * `commitish` - The commitish we are searching for
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "db::repos::repo_data_hash", skip(shared), err(Debug))]
-pub async fn repo_data_hash(
-    groups: &HashSet<&String>,
+pub async fn repo_data_hash<S: BuildHasher>(
+    groups: &HashSet<&String, S>,
     repo: &str,
     kinds: &Vec<CommitishKinds>,
     commitish: &str,
@@ -1062,10 +1060,7 @@ pub async fn repo_data_hash(
     // track our previous kinds across checks
     let mut previous = None;
     // bind the groups in the order the set yields them
-    let groups = groups
-        .iter()
-        .map(|name| (*name).clone())
-        .collect::<Vec<String>>();
+    let groups = groups.iter().copied().cloned().collect::<Vec<String>>();
     // retrieve this commitish's rows from every chunk of groups, keeping kinds times groups
     // under 100 in each chunk
     let query = shared

@@ -29,7 +29,7 @@ never printed or returned; Thorium shows a fingerprint instead.
 ```yaml
 # credential.yaml
 kind: ApiKey
-expires: 2027-01-01T00:00:00Z   # optional
+expires: 2027-01-01T00:00:00Z   # optional; runs don't use the credential after this time
 ```
 
 ```bash
@@ -191,8 +191,8 @@ When a workflow run is created, each agent gets one model:
    has none.
 2. For each model, the run group's endpoints and credentials are tried first, then yours, limited
    to the levels the workflow allows (`--model-auth`).
-3. A candidate is skipped when it is banned, disabled on the endpoint, on your endpoint, or on the
-   harness, not on the deployment's allowed list, below the agent's model requirements, or uses a
+3. A candidate is skipped when it is banned, its credential is past its `expires` time, it is
+   disabled on the endpoint, on your endpoint, or on the harness, not on the deployment's allowed list, below the agent's model requirements, or uses a
    protocol or credential kind the harness can't use.
 
 If any agent can't get a model, or a harness that runs every agent on one model would get different
@@ -201,8 +201,8 @@ reason it was skipped at each level. The choices are recorded on the run (see
 `thorctl runs describe`) without secrets, and a retry picks again.
 
 The models are checked once more when the run's harness starts. If a credential the run uses was
-banned or deleted, or an admin stopped allowing its endpoint, after the run was created, the run
-fails before its harness starts. Its stage logs (`thorctl runs logs`) say
+banned, deleted, or reached its `expires` time, or an admin stopped allowing its endpoint, after the
+run was created, the run fails before its harness starts. Its stage logs (`thorctl runs logs`) say
 `run models can't be delivered` and give the reason. Retry the run to pick again.
 
 ### Bans and notifications

@@ -22,17 +22,14 @@ futures = "0.3"
 serde = { workspace = true }
 serde_json = { workspace = true }
 clap = { workspace = true }
-itertools = "0.14.0"
 rand = "0.9.1"
 config = { version = "0.15", features = ["yaml"] }
 kube = { workspace = true }
 k8s-openapi = { workspace = true }
 chrono = { workspace = true }
-async-recursion = "1"
 regex = "1"
 dirs = "6"
 base64 = "0.22"
-bincode = "2.0.1"
 uuid = { version = "1", features = ["serde", "v4"] }
 openssl = { workspace = true}
 tracing = {  workspace = true }

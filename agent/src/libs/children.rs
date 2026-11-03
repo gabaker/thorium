@@ -277,23 +277,14 @@ async fn get_parent_groups(thorium: &Thorium, job: &GenericJob) -> Result<Vec<St
         // get info on this sample
         let sample = thorium.files.get(sha256).await?;
         // add this samples goups to our hashset
-        groups.extend(
-            sample
-                .groups()
-                .into_iter()
-                .map(std::borrow::ToOwned::to_owned),
-        );
+        groups.extend(sample.groups().into_iter().map(ToOwned::to_owned));
     }
     // get the info on all the repos we depend on
     for repo_target in &job.repos {
         // get info on this repo
         let repo = thorium.repos.get(&repo_target.url).await?;
         // add this repos goups to our hashset
-        groups.extend(
-            repo.groups()
-                .into_iter()
-                .map(std::borrow::ToOwned::to_owned),
-        );
+        groups.extend(repo.groups().into_iter().map(ToOwned::to_owned));
     }
     // convert our hash set to a vec
     let group_vec = groups.into_iter().collect();
@@ -640,7 +631,7 @@ impl Children {
         // wrap the collected pcap children as loose files
         let pcap = Some(ChildrenFiles::Loose(pcap_children));
         // recursively walk through this directory skipping any hidden files
-        self.carved = CarvedChildren { unknown, pcap };
+        self.carved = CarvedChildren { pcap, unknown };
         Ok(())
     }
 

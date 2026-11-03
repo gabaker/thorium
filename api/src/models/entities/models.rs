@@ -1175,8 +1175,8 @@ pub enum ModelRefreshState {
 /// The most models one refresh report may list, far more than any provider serves
 pub const MAX_LISTED_MODELS: usize = 10_000;
 
-/// The result of listing one endpoint's models, sent by the AI worker and merged into the catalog
-/// by the API
+/// The result of listing one endpoint's models, sent by the workflows worker and merged into the
+/// catalog by the API
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct ModelRefreshReport {
@@ -2413,7 +2413,7 @@ impl super::EntityMetadataUpdate {
 
     /// Set the listing result a model endpoint update merges into the endpoint's catalog
     ///
-    /// Only admins may send one; the AI worker sends one after each refresh.
+    /// Only admins may send one; the workflows worker sends one after each refresh.
     ///
     /// # Arguments
     ///

@@ -93,9 +93,10 @@ pub use crate::models::upgrades::{
     BackendSchemaStatus, DriftKind, Enumeration, LayoutDef, SchemaBackend,
 };
 pub use apply::{
-    ApplyError, ApplyOptions, ApplyReport, ApplyTarget, ConfigChange, SeedRequest, SnapshotRun,
-    apply, apply_accepting, apply_objects, apply_seeding, apply_snapshot, fingerprints,
-    keyspace_cql, redact_trigger_key, render, table_cql, view_cql,
+    ApplyError, ApplyOptions, ApplyReport, ApplyTarget, ConfigChange, DEFAULT_VIEW_WAIT_SECS,
+    HostStatus, MemberBuild, SeedRequest, SnapshotRun, StuckView, apply, apply_accepting,
+    apply_objects, apply_seeding, apply_snapshot, cluster_hosts, fingerprints, keyspace_cql,
+    member_build, redact_trigger_key, render, table_cql, view_build_statuses, view_cql,
 };
 pub use baseline::BASELINE_REVISIONS;
 pub(crate) use baseline::object_added_later;

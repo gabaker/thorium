@@ -649,7 +649,7 @@ fn spawn_api(conf: Conf) {
         runtime.block_on(async move {
             thorium::axum_with(conf, opts)
                 .await
-                .expect("the API starts")
+                .expect("the API starts");
         });
     });
 }

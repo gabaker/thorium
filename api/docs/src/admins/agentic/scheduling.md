@@ -63,9 +63,9 @@ Each workflow run and direct tool run gets its own workers, which hold only the 
   these tokens and credentials**, so non-admin users must not have pod read in group namespaces
   (see [Protecting run secrets on K8s](#protecting-run-secrets-on-k8s)).
 - A spawn whose reads fail is recorded as a failed spawn and tried again on the next tick. A run
-  whose bound model credential is banned or deleted, whose bound endpoint is deleted, or whose bound
-  endpoint is no longer allowed by the deployment (a `NotAllowedByDeployment` ban, or off the
-  allowed endpoint list), gets `409` from `run-models`. If it is still Created or Started, the
+  whose bound model credential is banned, deleted, or past its `expires` time, whose bound endpoint
+  is deleted, or whose bound endpoint is no longer allowed by the deployment (a
+  `NotAllowedByDeployment` ban, or off the allowed endpoint list), gets `409` from `run-models`. If it is still Created or Started, the
   scaler fails it once with the stage logs `run models can't be delivered` and the API's reason,
   which names the item and the ban's kind but not the ban's detail (anyone who can view the run
   reads it), rather than retrying it every tick; its owner retries the run, which picks its models

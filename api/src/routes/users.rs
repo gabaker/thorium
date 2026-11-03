@@ -1,5 +1,5 @@
 use axum::Router;
-use axum::extract::{DefaultBodyLimit, Json, Multipart, Path, State};
+use axum::extract::{Json, Multipart, Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -22,7 +22,7 @@ use crate::models::{
     UserCredentialRef, UserModelEndpoint, UserModelSettings, UserModelSettingsUpdate, UserRole,
     UserSettings, UserSettingsUpdate, UserUpdate,
 };
-use crate::utils::{ApiError, AppState};
+use crate::utils::{ApiError, AppState, body_limits};
 use crate::{bad, conflict, is_admin, not_found, unauthorized, unavailable};
 
 /// A notification for a user as the documents describe it
@@ -31,9 +31,9 @@ pub type UserNotification = Notification<User>;
 /// The maximum size (bytes) accepted for a profile-icon upload. Static images are client-resized to a small
 /// PNG, but animated GIFs and short video clips (MP4/WebM) are uploaded as-is since they can't be cheaply
 /// downscaled in the browser, so the cap is sized to fit a short clip while still bounding what a user can
-/// stream into the graphics bucket. This is applied only to the icon-upload route; the global body limit
-/// stays disabled so large sample/repo uploads are unaffected.
-const ICON_MAX_BYTES: usize = 10 << 20;
+/// stream into the graphics bucket. This fixed cap replaces the configured default body limit on the
+/// icon-upload route only.
+const ICON_MAX_BYTES: u64 = 10 << 20;
 
 /// Creates a new user
 ///
@@ -1153,13 +1153,10 @@ pub fn mount(router: Router<AppState>) -> Router<AppState> {
             "/users/notifications/{id}",
             post(create_notification).delete(delete_notification),
         )
-        // cap the icon upload body only (the global limit is disabled for large file uploads); delete carries
-        // no body so it's left unwrapped
+        // cap the icon upload body at its own fixed size; delete carries no body so it's left unwrapped
         .route(
             "/users/image",
-            post(upload_image)
-                .layer(DefaultBodyLimit::max(ICON_MAX_BYTES))
-                .delete(delete_image),
+            body_limits::fixed(post(upload_image), ICON_MAX_BYTES).delete(delete_image),
         )
         .route("/users/user/{username}/image", get(get_image))
         .route(

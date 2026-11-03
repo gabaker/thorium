@@ -362,7 +362,7 @@ pub async fn delete_all(
         // get the details for these pipelines
         let pipelines = names.details(group, shared).await?;
         // delete objects owned by these pipelines
-        for pipeline in pipelines.details.iter() {
+        for pipeline in &pipelines.details {
             // delete this pipelines reactions
             Reaction::delete_all(user, group, pipeline, true, shared).await?;
             // delete the pipeline's notifications
@@ -379,12 +379,12 @@ pub async fn delete_all(
             .exec_async(conn!(shared))
             .await?;
 
-        // check if we have iterated over all pipelines
-        if pipelines.cursor.is_none() {
+        // stop once our cursor has been exhausted, otherwise move on to the next page
+        let Some(next) = pipelines.cursor else {
             break;
-        }
+        };
         // update cursor
-        cursor = pipelines.cursor.unwrap();
+        cursor = next;
     }
     Ok(())
 }

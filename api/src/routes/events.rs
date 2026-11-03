@@ -18,7 +18,7 @@ use crate::models::{
     WorkflowGraphEvent, YaraSampleScanEvent, YaraScanTrigger,
 };
 use crate::not_found;
-use crate::utils::{ApiError, AppState};
+use crate::utils::{ApiError, AppState, body_limits};
 
 /// Pop and handle some events
 ///
@@ -738,6 +738,6 @@ pub fn mount(router: Router<AppState>) -> Router<AppState> {
         )
         .route(
             "/events/yara/ruleset/{engine_version}/{ruleset_hash}/",
-            get(get_yara_ruleset).post(upload_yara_ruleset),
+            body_limits::unlimited(post(upload_yara_ruleset)).get(get_yara_ruleset),
         )
 }

@@ -5,6 +5,8 @@
 
 use chrono::Utc;
 use scylla::client::session::Session;
+use scylla::statement::Consistency;
+use scylla::statement::unprepared::Statement;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
@@ -31,6 +33,9 @@ pub struct ApplyOptions {
     pub target: ApplyTarget,
     /// Return the statements without executing them (`print`, `diff`, and `--dry-run`)
     pub dry_run: bool,
+    /// The longest the run waits for views to build before failing with the views and hosts
+    /// still building (`--view-wait-secs`); `None` waits for as long as the builds take
+    pub view_wait: Option<Duration>,
 }
 
 /// The definitions the applier converges to; either way it only creates and adds, never drops
@@ -159,6 +164,14 @@ pub enum ApplyError {
         /// The views that no longer exist
         views: Vec<String>,
     },
+    /// Views being waited for didn't finish building within the wait's limit, so nothing was
+    /// recorded
+    ViewWaitExpired {
+        /// How long the wait lasted, in seconds
+        waited: u64,
+        /// Each view still building, with the hosts that haven't reported it built
+        stuck: Vec<StuckView>,
+    },
     /// A statement failed
     Query {
         /// The statement that failed
@@ -174,6 +187,8 @@ impl std::fmt::Display for ApplyError {
     /// # Arguments
     ///
     /// * `f` - The formatter to write to
+    // one arm per error reads as the list of reasons an apply stops
+    #[allow(clippy::too_many_lines)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ApplyError::ConfigChanged {
@@ -276,7 +291,54 @@ impl std::fmt::Display for ApplyError {
                  `thoradm schema apply` creates them again",
                 quoted(views)
             ),
+            ApplyError::ViewWaitExpired { waited, stuck } => {
+                write!(f, "{}", StuckView::expired(*waited, stuck))
+            }
             ApplyError::Query { statement, error } => write!(f, "`{statement}` failed: {error}"),
+        }
+    }
+}
+
+/// A view still building when the wait for it ended, with the hosts that haven't built it
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StuckView {
+    /// The view's name
+    pub view: String,
+    /// The cluster members that haven't reported the view built, each as its address and host
+    /// id; empty on a single node, where `system.built_views` doesn't list the view yet
+    pub hosts: Vec<String>,
+}
+
+impl StuckView {
+    /// Describe a view wait that reached its limit, naming each view still building and the hosts
+    /// it waits on, and saying what to do
+    ///
+    /// # Arguments
+    ///
+    /// * `waited` - How long the wait lasted, in seconds
+    /// * `stuck` - Each view still building
+    fn expired(waited: u64, stuck: &[StuckView]) -> String {
+        // name each view still building and the hosts it waits on
+        let views = stuck
+            .iter()
+            .map(StuckView::describe)
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!(
+            "the materialized views didn't finish building within {waited}s, so nothing was \
+             recorded: {views}. A Scylla node that is down or still building holds them: bring it \
+             back, or remove it from the cluster, then run `thoradm schema apply` again (with a \
+             longer `--view-wait-secs` if the builds are only slow)"
+        )
+    }
+
+    /// Describe the view and the hosts it waits on, for an error message
+    fn describe(&self) -> String {
+        // a single node has no hosts to name, only its own list of built views
+        if self.hosts.is_empty() {
+            format!("`{}` (not yet in system.built_views)", self.view)
+        } else {
+            format!("`{}` (not built on {})", self.view, self.hosts.join(", "))
         }
     }
 }
@@ -321,6 +383,11 @@ const VIEW_POLL: Duration = Duration::from_secs(1);
 
 /// How often to report the views still building
 const VIEW_REPORT: Duration = Duration::from_secs(10);
+
+/// How long `thoradm schema apply` waits for views to build unless `--view-wait-secs` says
+/// otherwise, in seconds: five hours, which leaves the operator's six hour schema-apply Job time to
+/// fail with the stuck views and hosts instead of being killed without a summary
+pub const DEFAULT_VIEW_WAIT_SECS: u64 = 5 * 3600;
 
 /// What `system_schema` holds for Thorium's keyspace
 #[derive(Debug, Default)]
@@ -719,8 +786,123 @@ struct ViewBuild<'a> {
     name: &'a str,
     /// Whether the view is built everywhere
     built: bool,
-    /// On a cluster, how many nodes have built it and how many nodes there are; `None` on one node
+    /// On a cluster, how many member nodes have built it and how many members there are; `None`
+    /// on one node
     nodes: Option<(usize, usize)>,
+    /// On a cluster, the members that haven't reported the view built, each as its address and
+    /// host id
+    waiting: Vec<String>,
+}
+
+/// One node's build status for a view, as `system_distributed.view_build_status` holds it
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostStatus {
+    /// The host id of the node that wrote the row
+    pub host_id: String,
+    /// The node's status for the view, such as `STARTED` or `SUCCESS`
+    pub status: String,
+}
+
+/// How a view's build stands across the cluster's members
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemberBuild {
+    /// The members that reported the view built, each as its address and host id
+    pub built: Vec<String>,
+    /// The members that haven't reported the view built, each as its address and host id
+    pub waiting: Vec<String>,
+    /// The host ids with a status row for the view that aren't cluster members (a removed or
+    /// replaced node), whose rows are ignored
+    pub ignored: Vec<String>,
+}
+
+/// Judge a view's build from its status rows, counting only the cluster's members: a member is
+/// done once its own row says `SUCCESS`, and a row left by a host that is no longer a member
+/// (a removed or replaced node) neither holds the view back nor counts toward it
+///
+/// # Arguments
+///
+/// * `hosts` - The cluster's members, by host id, each named by its address and host id
+/// * `statuses` - The view's status rows, from `view_build_status`
+#[must_use]
+pub fn member_build(hosts: &BTreeMap<String, String>, statuses: &[HostStatus]) -> MemberBuild {
+    // split the members by whether their own row reports success
+    let mut build = MemberBuild::default();
+    for (id, name) in hosts {
+        let done = statuses
+            .iter()
+            .any(|row| &row.host_id == id && row.status == "SUCCESS");
+        if done {
+            build.built.push(name.clone());
+        } else {
+            build.waiting.push(name.clone());
+        }
+    }
+    // name the hosts whose rows were set aside, once each
+    build.ignored = statuses
+        .iter()
+        .filter(|row| !hosts.contains_key(&row.host_id))
+        .map(|row| row.host_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    build
+}
+
+/// Get the cluster's members by host id, each named by its address and host id
+///
+/// The driver reads them from `system.local` and `system.peers` on one connection, so the list
+/// is consistent; it keeps a member that is down and drops one removed from the cluster.
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session whose view of the cluster to read
+#[must_use]
+pub fn cluster_hosts(session: &Session) -> BTreeMap<String, String> {
+    // name each member by its address, with the host id its status rows carry
+    session
+        .get_cluster_state()
+        .get_nodes_info()
+        .iter()
+        .map(|node| {
+            let id = node.host_id.to_string();
+            let name = format!("{} ({id})", node.address.ip());
+            (id, name)
+        })
+        .collect()
+}
+
+/// Read each node's build status for a view from `system_distributed.view_build_status`
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to read with
+/// * `keyspace` - The view's keyspace, as Scylla stores its name
+/// * `view` - The view
+pub async fn view_build_statuses(
+    session: &Session,
+    keyspace: &str,
+    view: &str,
+) -> Result<Vec<HostStatus>, ApplyError> {
+    // each node writes its own row, so one replica answers; the keyspace's replication factor of
+    // three is more than a small cluster can give a quorum read
+    let cql = "SELECT CAST(host_id AS text), status FROM system_distributed.view_build_status \
+               WHERE keyspace_name = ? AND view_name = ?";
+    let mut statement = Statement::new(cql);
+    statement.set_consistency(Consistency::One);
+    let rows = session
+        .query_unpaged(statement, (keyspace, view))
+        .await
+        .map_err(|err| ApplyError::query(cql, err))?
+        .into_rows_result()
+        .map_err(|err| ApplyError::query(cql, err))?;
+    // keep each row's host and status
+    rows.rows::<(String, String)>()
+        .map_err(|err| ApplyError::query(cql, err))?
+        .map(|row| {
+            row.map(|(host_id, status)| HostStatus { host_id, status })
+                .map_err(|err| ApplyError::query(cql, err))
+        })
+        .collect()
 }
 
 /// Get the build state of a view on a single node, which lists each view it finished building
@@ -735,27 +917,31 @@ fn single_node_build(name: &str, listed: bool) -> ViewBuild<'_> {
         name,
         built: listed,
         nodes: None,
+        waiting: Vec::new(),
     }
 }
 
-/// Get the build state of a view on a cluster from the statuses its nodes reported
+/// Get the build state of a view on a cluster from the statuses its members reported, ignoring
+/// rows of hosts that are no longer members
 ///
 /// # Arguments
 ///
 /// * `name` - The view's name
-/// * `nodes` - How many nodes the cluster has
-/// * `statuses` - Each reporting node's status for the view, from `view_build_status`
-fn cluster_build<'a>(name: &'a str, nodes: usize, statuses: &[String]) -> ViewBuild<'a> {
-    // count the nodes that finished; a node that hasn't reported yet hasn't finished
-    let done = statuses
-        .iter()
-        .filter(|status| status.as_str() == "SUCCESS")
-        .count();
-    // the view is built once every node has reported and every report is a success
+/// * `hosts` - The cluster's members, by host id, each named by its address and host id
+/// * `statuses` - The view's status rows, from `view_build_status`
+fn cluster_build<'a>(
+    name: &'a str,
+    hosts: &BTreeMap<String, String>,
+    statuses: &[HostStatus],
+) -> ViewBuild<'a> {
+    // judge the members' rows alone
+    let build = member_build(hosts, statuses);
+    // the view is built once every member has reported success
     ViewBuild {
         name,
-        built: statuses.len() >= nodes && done == statuses.len(),
-        nodes: Some((done, nodes)),
+        built: build.waiting.is_empty(),
+        nodes: Some((build.built.len(), hosts.len())),
+        waiting: build.waiting,
     }
 }
 
@@ -768,12 +954,17 @@ fn cluster_build<'a>(name: &'a str, nodes: usize, statuses: &[String]) -> ViewBu
 fn progress_line(elapsed: u64, builds: &[ViewBuild<'_>]) -> String {
     // split the views into those finished and those still building
     let built = builds.iter().filter(|build| build.built).count();
-    // name each view still building, with the nodes that finished it where a cluster reports them
+    // name each view still building, with the nodes that finished it and the members it waits
+    // on where a cluster reports them
     let building = builds
         .iter()
         .filter(|build| !build.built)
         .map(|build| match build.nodes {
-            Some((done, total)) => format!("{} ({done} of {total} nodes)", build.name),
+            Some((done, total)) => format!(
+                "{} ({done} of {total} nodes, waiting on {})",
+                build.name,
+                build.waiting.join(", ")
+            ),
             None => build.name.to_owned(),
         })
         .collect::<Vec<_>>()
@@ -785,7 +976,7 @@ fn progress_line(elapsed: u64, builds: &[ViewBuild<'_>]) -> String {
 }
 
 /// Get how far each view of a list has built: on one node, from `system.built_views`; on a
-/// cluster, from the status each node reported in `system_distributed.view_build_status`
+/// cluster, from the status each member reported in `system_distributed.view_build_status`
 ///
 /// # Arguments
 ///
@@ -801,6 +992,12 @@ async fn view_builds<'a>(
     let peers = read_texts::<1>(session, "SELECT CAST(peer AS text) FROM system.peers", &[])
         .await?
         .len();
+    // the members whose rows count, read once for every view
+    let hosts = if peers == 0 {
+        BTreeMap::new()
+    } else {
+        cluster_hosts(session)
+    };
     let mut builds = Vec::with_capacity(views.len());
     for view in views {
         let build = if peers == 0 {
@@ -815,18 +1012,9 @@ async fn view_builds<'a>(
             .is_empty();
             single_node_build(view, listed)
         } else {
-            // a cluster reports each node's build, and every node must be done
-            let statuses = read_texts::<1>(
-                session,
-                "SELECT status FROM system_distributed.view_build_status \
-                 WHERE keyspace_name = ? AND view_name = ?",
-                &[keyspace, view],
-            )
-            .await?
-            .into_iter()
-            .map(|[status]| status)
-            .collect::<Vec<_>>();
-            cluster_build(view, peers + 1, &statuses)
+            // a cluster reports each node's build, and every member must be done
+            let statuses = view_build_statuses(session, keyspace, view).await?;
+            cluster_build(view, &hosts, &statuses)
         };
         builds.push(build);
     }
@@ -869,23 +1057,58 @@ fn vanished_views(builds: &[ViewBuild<'_>], existing: &[[String; 1]]) -> Vec<Str
         .collect()
 }
 
+/// Get the error for a wait that reached its limit with views still building, or `None` while
+/// the wait has time left or has no limit
+///
+/// # Arguments
+///
+/// * `builds` - The build state of every view waited for
+/// * `elapsed` - How long the wait has lasted
+/// * `limit` - The longest the wait may last, if it has a limit
+fn wait_expired(
+    builds: &[ViewBuild<'_>],
+    elapsed: Duration,
+    limit: Option<Duration>,
+) -> Option<ApplyError> {
+    // a wait with no limit, or with time left, carries on
+    if limit.is_none_or(|limit| elapsed < limit) {
+        return None;
+    }
+    // name each view still building and the members it waits on
+    let stuck = builds
+        .iter()
+        .filter(|build| !build.built)
+        .map(|build| StuckView {
+            view: build.name.to_owned(),
+            hosts: build.waiting.clone(),
+        })
+        .collect::<Vec<_>>();
+    Some(ApplyError::ViewWaitExpired {
+        waited: elapsed.as_secs(),
+        stuck,
+    })
+}
+
 /// Wait until every listed view is built, reporting which views are built and which are still
-/// building every few seconds, with no limit on the wait; the wait ends with an error only when a
-/// view it waits for no longer exists
+/// building every few seconds; the wait ends with an error when a view it waits for no longer
+/// exists, or when the limit passes with views still building
 ///
 /// `CREATE MATERIALIZED VIEW` returns before Scylla has built the view, so a reader moved to a
-/// new view would otherwise see a partial one.
+/// new view would otherwise see a partial one. On a cluster every member must report the view
+/// built, including one that is down, so the wait can't finish while a node is down.
 ///
 /// # Arguments
 ///
 /// * `session` - The Scylla session to read with
 /// * `keyspace` - The keyspace, as Scylla stores its name
 /// * `views` - The views to wait for
+/// * `limit` - The longest the wait may last; `None` waits for as long as the builds take
 /// * `progress` - Receives each progress report
 pub(super) async fn wait_for_views(
     session: &Session,
     keyspace: &str,
     views: &[&str],
+    limit: Option<Duration>,
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<(), ApplyError> {
     // time the wait from here, with no report made yet
@@ -914,6 +1137,11 @@ pub(super) async fn wait_for_views(
         let vanished = vanished_views(&builds, &existing);
         if !vanished.is_empty() {
             return Err(ApplyError::ViewVanished { views: vanished });
+        }
+        // fail hard once the limit passes, naming what is still building and where
+        if let Some(expired) = wait_expired(&builds, started.elapsed(), limit) {
+            progress(&progress_line(started.elapsed().as_secs(), &builds));
+            return Err(expired);
         }
         // report what's still building at the start and every few seconds after
         if reported.is_none_or(|at| at.elapsed() >= VIEW_REPORT) {
@@ -1169,7 +1397,8 @@ async fn record_snapshot(
 ///
 /// * `session` - The Scylla session to apply with
 /// * `conf` - The Thorium config
-/// * `options` - What to converge to, and whether to execute anything
+/// * `options` - What to converge to, whether to execute anything, and how long to wait for
+///   views to build
 /// * `trigger_key` - The trigger key this run applies for, recorded with the fingerprint
 ///   without the files password's hash
 /// * `progress` - Receives a line for each progress report while views build
@@ -1192,7 +1421,8 @@ pub async fn apply(
 ///
 /// * `session` - The Scylla session to apply with
 /// * `conf` - The Thorium config
-/// * `options` - What to converge to, and whether to execute anything
+/// * `options` - What to converge to, whether to execute anything, and how long to wait for
+///   views to build
 /// * `accept` - What to record instead of refusing
 /// * `trigger_key` - The trigger key this run applies for, recorded with the fingerprint
 ///   without the files password's hash
@@ -1229,7 +1459,8 @@ pub struct SeedRequest {
 ///
 /// * `session` - The Scylla session to apply with
 /// * `conf` - The Thorium config
-/// * `options` - What to converge to, and whether to execute anything
+/// * `options` - What to converge to, whether to execute anything, and how long to wait for
+///   views to build
 /// * `accept` - What to record instead of refusing
 /// * `seed` - The revision to record when `schema_migrations` holds none
 /// * `trigger_key` - The trigger key this run applies for, recorded with the fingerprint
@@ -1253,6 +1484,7 @@ pub async fn apply_seeding(
                 accept,
                 trigger_key,
                 seed,
+                view_wait: options.view_wait,
             };
             converge(session, conf, &objects, &run, progress).await
         }
@@ -1278,6 +1510,7 @@ pub async fn apply_seeding(
                 accept: accept.clone(),
                 trigger_key,
                 skip: BTreeSet::new(),
+                view_wait: options.view_wait,
             };
             apply_snapshot(session, conf, &snapshot, &run, progress).await
         }
@@ -1288,10 +1521,10 @@ pub async fn apply_seeding(
 ///
 /// Checks the data-shaping settings against the record first, then creates the keyspace and
 /// `schema_migrations`, then every missing object in creation order, adds the table columns the
-/// keyspace lacks, waits until every declared view is built, and records the data-shaping
-/// settings the record lacks, the applied fingerprints, and the layout versions. It never drops
-/// or alters an existing object, so running it again on a converged keyspace issues no schema
-/// statement.
+/// keyspace lacks, waits with no limit until every declared view is built, and records the
+/// data-shaping settings the record lacks, the applied fingerprints, and the layout versions. It
+/// never drops or alters an existing object, so running it again on a converged keyspace issues no
+/// schema statement.
 ///
 /// # Arguments
 ///
@@ -1317,6 +1550,7 @@ pub async fn apply_objects(
         accept: &accept,
         trigger_key,
         seed: None,
+        view_wait: None,
     };
     converge(session, conf, objects, &run, progress).await
 }
@@ -1474,6 +1708,8 @@ struct RunSettings<'a> {
     trigger_key: &'a str,
     /// The revision to record when none is recorded
     seed: Option<&'a SeedRequest>,
+    /// The longest the run waits for views to build; `None` waits for as long as they take
+    view_wait: Option<Duration>,
 }
 
 /// Pick the views a stopped earlier run left building: unbuilt views that exist and that this run
@@ -1507,12 +1743,14 @@ pub(super) fn left_building<'a>(
 /// * `keyspace` - The keyspace, as Scylla stores its name
 /// * `views` - Every view the run's schema holds
 /// * `changes` - The changes the run issued
+/// * `limit` - The longest the wait may last; `None` waits for as long as the builds take
 /// * `progress` - Receives a line for each progress report
 async fn wait_for_changed_views(
     session: &Session,
     keyspace: &str,
     views: &[&str],
     changes: &[Change],
+    limit: Option<Duration>,
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<Vec<String>, ApplyError> {
     // the views this run created
@@ -1541,7 +1779,7 @@ async fn wait_for_changed_views(
         .copied()
         .filter(|view| created.contains(view) || waiting.contains(view))
         .collect::<Vec<_>>();
-    wait_for_views(session, keyspace, &waited, progress).await?;
+    wait_for_views(session, keyspace, &waited, limit, progress).await?;
     Ok(waited.into_iter().map(ToOwned::to_owned).collect())
 }
 
@@ -1689,8 +1927,15 @@ async fn converge(
             ObjectDef::Table(_) => None,
         })
         .collect::<Vec<_>>();
-    report.views_built =
-        wait_for_changed_views(session, &keyspace, &views, &changes, progress).await?;
+    report.views_built = wait_for_changed_views(
+        session,
+        &keyspace,
+        &views,
+        &changes,
+        run.view_wait,
+        progress,
+    )
+    .await?;
     // record what was applied
     report.fingerprint = record(session, conf, objects, &trigger_key, &config.rows).await?;
     // a requested seed is recorded last, so a stopped run records none and seeds again
@@ -1771,18 +2016,36 @@ pub(super) async fn check_config(session: &Session, conf: &Conf) -> Result<(), A
 #[cfg(test)]
 mod tests {
     use super::{
-        LiveSchema, ObjectDef, SchemaMigrationsTable, ScyllaObject, ViewBuild, cluster_build,
-        progress_line, single_node_build, tables_held_by_views, vanished_views,
+        ApplyError, HostStatus, LiveSchema, ObjectDef, SchemaMigrationsTable, ScyllaObject,
+        StuckView, ViewBuild, cluster_build, member_build, progress_line, single_node_build,
+        tables_held_by_views, vanished_views, wait_expired,
     };
     use std::collections::{BTreeMap, BTreeSet};
+    use std::time::Duration;
 
-    /// Collect statuses from literals
+    /// Name cluster members by host id, each as `<id>-addr (<id>)`
     ///
     /// # Arguments
     ///
-    /// * `listed` - The status literals
-    fn statuses(listed: &[&str]) -> Vec<String> {
-        listed.iter().map(|status| (*status).to_owned()).collect()
+    /// * `ids` - The members' host ids
+    fn hosts(ids: &[&str]) -> BTreeMap<String, String> {
+        ids.iter()
+            .map(|id| ((*id).to_owned(), format!("{id}-addr ({id})")))
+            .collect()
+    }
+
+    /// Collect status rows from host and status literals
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - Each row's host id and status
+    fn statuses(rows: &[(&str, &str)]) -> Vec<HostStatus> {
+        rows.iter()
+            .map(|(host_id, status)| HostStatus {
+                host_id: (*host_id).to_owned(),
+                status: (*status).to_owned(),
+            })
+            .collect()
     }
 
     /// A single node's views are built when `built_views` lists them, and carry no node counts
@@ -1795,27 +2058,78 @@ mod tests {
         let building = single_node_build("tags_by_item", false);
         assert!(!building.built);
         assert_eq!(building.nodes, None);
+        assert_eq!(building.waiting, Vec::<String>::new());
     }
 
-    /// A cluster's view is built only once every node reported success, and the count says how many did
+    /// A cluster's view is built only once every member reported success, and the count says how
+    /// many did
     #[test]
-    fn cluster_builds_count_the_nodes_that_finished() {
-        // every node reported success
-        let done = cluster_build("samples", 3, &statuses(&["SUCCESS", "SUCCESS", "SUCCESS"]));
+    fn cluster_builds_count_the_members_that_finished() {
+        let members = hosts(&["a", "b", "c"]);
+        // every member reported success
+        let rows = statuses(&[("a", "SUCCESS"), ("b", "SUCCESS"), ("c", "SUCCESS")]);
+        let done = cluster_build("samples", &members, &rows);
         assert!(done.built);
         assert_eq!(done.nodes, Some((3, 3)));
-        // one node still building
-        let partial = cluster_build("samples", 3, &statuses(&["SUCCESS", "STARTED", "SUCCESS"]));
+        assert_eq!(done.waiting, Vec::<String>::new());
+        // one member still building
+        let rows = statuses(&[("a", "SUCCESS"), ("b", "STARTED"), ("c", "SUCCESS")]);
+        let partial = cluster_build("samples", &members, &rows);
         assert!(!partial.built);
         assert_eq!(partial.nodes, Some((2, 3)));
-        // a node that has not reported yet leaves the view unbuilt
-        let silent = cluster_build("samples", 3, &statuses(&["SUCCESS", "SUCCESS"]));
+        assert_eq!(partial.waiting, ["b-addr (b)"]);
+        // a member that has not reported yet, such as one that is down, leaves the view unbuilt
+        let rows = statuses(&[("a", "SUCCESS"), ("b", "SUCCESS")]);
+        let silent = cluster_build("samples", &members, &rows);
         assert!(!silent.built);
         assert_eq!(silent.nodes, Some((2, 3)));
-        // no node has reported
-        let none = cluster_build("samples", 3, &[]);
+        assert_eq!(silent.waiting, ["c-addr (c)"]);
+        // no member has reported
+        let none = cluster_build("samples", &members, &[]);
         assert!(!none.built);
         assert_eq!(none.nodes, Some((0, 3)));
+        assert_eq!(none.waiting.len(), 3);
+    }
+
+    /// A row left by a host that is no longer a member neither holds a view back nor counts
+    /// toward it
+    #[test]
+    fn rows_of_former_members_are_ignored() {
+        let members = hosts(&["a", "b", "c"]);
+        // every member built it, and a removed node left a row that never finished
+        let rows = statuses(&[
+            ("a", "SUCCESS"),
+            ("b", "SUCCESS"),
+            ("c", "SUCCESS"),
+            ("gone", "STARTED"),
+        ]);
+        let build = cluster_build("samples", &members, &rows);
+        assert!(build.built);
+        assert_eq!(build.nodes, Some((3, 3)));
+        assert_eq!(member_build(&members, &rows).ignored, ["gone"]);
+        // a removed node's success doesn't stand in for a member that hasn't finished
+        let rows = statuses(&[("a", "SUCCESS"), ("b", "SUCCESS"), ("gone", "SUCCESS")]);
+        let build = cluster_build("samples", &members, &rows);
+        assert!(!build.built);
+        assert_eq!(build.nodes, Some((2, 3)));
+        assert_eq!(build.waiting, ["c-addr (c)"]);
+    }
+
+    /// The members are split by their own rows, and each ignored host is named once
+    #[test]
+    fn member_builds_split_members_and_name_ignored_hosts_once() {
+        let members = hosts(&["a", "b"]);
+        let rows = statuses(&[
+            ("a", "SUCCESS"),
+            ("b", "STARTED"),
+            ("x", "STARTED"),
+            ("x", "SUCCESS"),
+            ("w", "STARTED"),
+        ]);
+        let build = member_build(&members, &rows);
+        assert_eq!(build.built, ["a-addr (a)"]);
+        assert_eq!(build.waiting, ["b-addr (b)"]);
+        assert_eq!(build.ignored, ["w", "x"]);
     }
 
     /// On one node the line says how many views are built and names those still building
@@ -1834,18 +2148,75 @@ mod tests {
         );
     }
 
-    /// On a cluster each view still building shows how many nodes have finished it
+    /// On a cluster each view still building shows how many members have finished it and which
+    /// it waits on
     #[test]
     fn the_line_shows_node_counts_on_a_cluster() {
+        let members = hosts(&["n1", "n2", "n3"]);
+        let done = statuses(&[("n1", "SUCCESS"), ("n2", "SUCCESS"), ("n3", "SUCCESS")]);
+        let partial = statuses(&[("n1", "SUCCESS"), ("n2", "STARTED"), ("n3", "STARTED")]);
         let builds = [
-            cluster_build("a", 3, &statuses(&["SUCCESS", "SUCCESS", "SUCCESS"])),
-            cluster_build("b", 3, &statuses(&["SUCCESS", "STARTED", "STARTED"])),
-            cluster_build("c", 3, &[]),
+            cluster_build("a", &members, &done),
+            cluster_build("b", &members, &partial),
+            cluster_build("c", &members, &[]),
         ];
         assert_eq!(
             progress_line(0, &builds),
-            "1 of 3 views built after 0s; building: b (1 of 3 nodes), c (0 of 3 nodes)"
+            "1 of 3 views built after 0s; building: b (1 of 3 nodes, waiting on n2-addr (n2), \
+             n3-addr (n3)), c (0 of 3 nodes, waiting on n1-addr (n1), n2-addr (n2), n3-addr (n3))"
         );
+    }
+
+    /// A wait with no limit, or with time left, carries on; one past its limit fails naming each
+    /// view still building and the members it waits on
+    #[test]
+    fn the_wait_fails_at_its_limit_naming_views_and_hosts() {
+        let members = hosts(&["n1", "n2", "n3"]);
+        let down = statuses(&[("n1", "SUCCESS"), ("n2", "SUCCESS")]);
+        let done = statuses(&[("n1", "SUCCESS"), ("n2", "SUCCESS"), ("n3", "SUCCESS")]);
+        let builds = [
+            cluster_build("samples", &members, &down),
+            cluster_build("tags", &members, &done),
+            single_node_build("local", false),
+        ];
+        let limit = Some(Duration::from_secs(60));
+        // no limit never ends the wait, and neither does time left
+        assert!(wait_expired(&builds, Duration::from_secs(7_777), None).is_none());
+        assert!(wait_expired(&builds, Duration::from_secs(59), limit).is_none());
+        // at the limit the wait fails with the views still building
+        let Some(ApplyError::ViewWaitExpired { waited, stuck }) =
+            wait_expired(&builds, Duration::from_secs(60), limit)
+        else {
+            panic!("the wait should have expired");
+        };
+        assert_eq!(waited, 60);
+        assert_eq!(
+            stuck,
+            [
+                StuckView {
+                    view: "samples".to_owned(),
+                    hosts: vec!["n3-addr (n3)".to_owned()],
+                },
+                StuckView {
+                    view: "local".to_owned(),
+                    hosts: Vec::new(),
+                },
+            ]
+        );
+        // the message names each view and host, and says what to do
+        let message = ApplyError::ViewWaitExpired { waited, stuck }.to_string();
+        assert!(message.contains("within 60s"), "{message}");
+        assert!(message.contains("nothing was recorded"), "{message}");
+        assert!(
+            message.contains("`samples` (not built on n3-addr (n3))"),
+            "{message}"
+        );
+        assert!(
+            message.contains("`local` (not yet in system.built_views)"),
+            "{message}"
+        );
+        assert!(message.contains("--view-wait-secs"), "{message}");
+        assert!(!message.contains("`tags`"), "{message}");
     }
 
     /// Only a view still building that the keyspace no longer holds counts as vanished

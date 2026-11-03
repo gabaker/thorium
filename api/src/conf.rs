@@ -296,7 +296,7 @@ pub struct OauthProvider {
     pub scopes: Vec<String>,
     /// Trust the provider's `email` claim even when it omits the `email_verified` claim
     ///
-    /// Some IdPs never emit `email_verified` for genuinely verified addresses. This opt-in lets an
+    /// Some `IdPs` never emit `email_verified` for genuinely verified addresses. This opt-in lets an
     /// administrator trust a *specific* provider's email claim when `email_verified` is absent. It
     /// still rejects an explicit `email_verified: false`. Defaults to false so we fail closed.
     #[serde(default)]
@@ -304,9 +304,9 @@ pub struct OauthProvider {
     /// Regexes restricting which emails may register through this provider
     ///
     /// When non-empty, any email placed on a new account through this provider — whether returned by
-    /// the IdP or supplied by the user when the IdP returns none — must match one of these regexes.
+    /// the `IdP` or supplied by the user when the `IdP` returns none — must match one of these regexes.
     /// A non-empty list is also what opts this provider into accepting a user-supplied email when the
-    /// IdP returns none. When empty (the default) the provider does not accept a user-supplied email,
+    /// `IdP` returns none. When empty (the default) the provider does not accept a user-supplied email,
     /// so a provider that returns no email claim fails closed exactly as before.
     #[serde(default)]
     pub approved_emails: Vec<String>,
@@ -1264,7 +1264,7 @@ pub struct Scaler {
     /// Specific settings for the K8s scaler
     #[serde(default)]
     pub k8s: K8s,
-    /// Specific settings for the BareMetal scaler
+    /// Specific settings for the `BareMetal` scaler
     #[serde(default)]
     pub bare_metal: BareMetal,
     /// The windows specific settings
@@ -2821,7 +2821,72 @@ fn default_data_limit() -> u64 {
     1024
 }
 
-/// The request size limits to use in the API
+/// Helps serde default the body limit of routes without their own limit to 16 MiB
+fn default_body_limit() -> ByteSize {
+    ByteSize::mib(16)
+}
+
+/// Helps serde default the body limit of entity creates and updates to 14 MiB
+fn default_entities_body_limit() -> ByteSize {
+    ByteSize::mib(14)
+}
+
+/// Helps serde default the size limit of a submitted toolset or workflow instance to 12 MiB
+fn default_instances_body_limit() -> ByteSize {
+    ByteSize::mib(12)
+}
+
+/// The request body limits the API enforces; each accepts M, MB, MiB, or equivalents for KB and GB
+///
+/// File, result, repo, comment attachment, reaction cache, and serialized YARA ruleset uploads and
+/// system restores have no limit. A body over its limit is answered with a `413` whose JSON body
+/// names the setting.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]
+pub struct BodyLimits {
+    /// The largest body a route without its own limit accepts
+    ///
+    /// Scylla refuses a single write over 16 MB by default, so a larger JSON body couldn't be
+    /// stored in one row anyway.
+    #[serde(default = "default_body_limit")]
+    #[schemars(example = "16 MiB")]
+    #[schemars(schema_with = "bytesize_schema_gen")]
+    pub default: ByteSize,
+    /// The largest entity create or update form, including an entity's image, and the largest
+    /// hunt create, hunt checkpoint, or YARA hit write
+    #[serde(default = "default_entities_body_limit")]
+    #[schemars(example = "14 MiB")]
+    #[schemars(schema_with = "bytesize_schema_gen")]
+    pub entities: ByteSize,
+    /// The largest toolset or workflow instance a create submits, checked before it is parsed
+    ///
+    /// This also bounds the size of the warnings and names an instance stores; lower it to
+    /// store less.
+    #[serde(default = "default_instances_body_limit")]
+    #[schemars(example = "12 MiB")]
+    #[schemars(schema_with = "bytesize_schema_gen")]
+    pub instances: ByteSize,
+}
+
+impl Default for BodyLimits {
+    /// Build the default body limits, matching the serde defaults
+    fn default() -> Self {
+        BodyLimits {
+            default: default_body_limit(),
+            entities: default_entities_body_limit(),
+            instances: default_instances_body_limit(),
+        }
+    }
+}
+
+/// The limits the API applies to requests
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
+pub struct Limits {
+    /// The request body limits
+    #[serde(default)]
+    pub body: BodyLimits,
+}
+
+/// Legacy request size limits that the API doesn't enforce; see [`Limits`] for the enforced ones
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]
 pub struct RequestSizeLimits {
     /// The limit to apply to json bodies
@@ -3172,9 +3237,12 @@ pub struct Thorium {
     /// The settings for the search-streamer
     #[serde(default)]
     pub search_streamer: SearchStreamer,
-    /// The request size limits to use in the API
+    /// Legacy request size limits that aren't enforced; see `limits.body` instead
     #[serde(default)]
     pub request_size_limits: RequestSizeLimits,
+    /// The limits the API applies to requests
+    #[serde(default)]
+    pub limits: Limits,
     /// The path to the Thorium docs to serve
     #[serde(default)]
     pub assets: Assets,
@@ -3605,10 +3673,7 @@ impl Conf {
             .try_deserialize()?;
         // allow the override of the scylla node list to make testing easier
         if let Some(node) = conf.scylla_override.take() {
-            conf.scylla.nodes = node
-                .split(',')
-                .map(std::borrow::ToOwned::to_owned)
-                .collect();
+            conf.scylla.nodes = node.split(',').map(ToOwned::to_owned).collect();
         }
         // refuse a namespace that can't name the keyspace or prefix the Redis keys
         validate_namespace(&conf.thorium.namespace).map_err(|error| {
@@ -3815,6 +3880,54 @@ mod tests {
             Some("http://thorium-mcp/api/mcp")
         );
         assert_eq!(access.cli, defaults.cli);
+    }
+
+    /// The body limits default to 16, 14, and 12 MiB, parse size strings, load from a config
+    /// without them, and are overridden by their environment variables
+    #[test]
+    fn body_limits_defaults_and_overrides() {
+        // the defaults are 16 MiB for most routes, 14 MiB for entities, and 12 MiB for instances
+        let defaults = super::BodyLimits::default();
+        assert_eq!(defaults.default.as_u64(), 16 << 20);
+        assert_eq!(defaults.entities.as_u64(), 14 << 20);
+        assert_eq!(defaults.instances.as_u64(), 12 << 20);
+        // an empty limits section gets the same defaults
+        let parsed: super::Limits = serde_norway::from_str("{}").expect("parses");
+        assert_eq!(parsed.body, defaults);
+        // sizes are written with units
+        let parsed: super::Limits =
+            serde_norway::from_str("body:\n  default: 4 MiB\n  entities: 3MB\n").expect("parses");
+        assert_eq!(parsed.body.default.as_u64(), 4 << 20);
+        assert_eq!(parsed.body.entities.as_u64(), 3_000_000);
+        assert_eq!(parsed.body.instances, defaults.instances);
+        // the config template loads with the defaults
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("thorium-template.yml");
+        let raw = std::fs::read_to_string(&path).expect("config file reads");
+        let conf: Conf = serde_norway::from_str(&raw).expect("the template parses");
+        assert_eq!(conf.thorium.limits.body, defaults);
+        // each limit is overridden by its variable the way `Conf::new` reads the environment
+        let vars = [
+            ("THORIUM__THORIUM__LIMITS__BODY__DEFAULT", "2 MiB"),
+            ("THORIUM__THORIUM__LIMITS__BODY__ENTITIES", "1 MiB"),
+            ("THORIUM__THORIUM__LIMITS__BODY__INSTANCES", "512 KiB"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect::<config::Map<String, String>>();
+        let limits: super::Limits = config::Config::builder()
+            .add_source(
+                config::Environment::with_prefix("thorium")
+                    .prefix_separator("__")
+                    .separator("__")
+                    .source(Some(vars)),
+            )
+            .build()
+            .expect("build config")
+            .get("thorium.limits")
+            .expect("limits settings");
+        assert_eq!(limits.body.default.as_u64(), 2 << 20);
+        assert_eq!(limits.body.entities.as_u64(), 1 << 20);
+        assert_eq!(limits.body.instances.as_u64(), 512 << 10);
     }
 
     /// The MCP server accepts loopback, the in-cluster service names, the hosts of the API urls

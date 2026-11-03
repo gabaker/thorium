@@ -7,6 +7,7 @@
 
 use serde_json::Value;
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 use super::{
     Change, ConfigAccept, LiveSchema, config_record, execute, live_schema, plan, record_snapshot,
@@ -38,6 +39,9 @@ pub struct SnapshotRun<'a> {
     /// The names of snapshot tables and views this run leaves uncreated, such as the objects no
     /// release reads any more
     pub skip: BTreeSet<String>,
+    /// The longest the run waits for views to build before failing with the views and hosts
+    /// still building; `None` waits for as long as the builds take
+    pub view_wait: Option<Duration>,
 }
 
 /// One Scylla table or view of a snapshot, read from its canonical form
@@ -437,8 +441,15 @@ pub async fn apply_snapshot(
         .filter(|object| object.view)
         .map(|object| object.name)
         .collect::<Vec<_>>();
-    report.views_built =
-        wait_for_changed_views(session, &keyspace, &views, &changes, progress).await?;
+    report.views_built = wait_for_changed_views(
+        session,
+        &keyspace,
+        &views,
+        &changes,
+        run.view_wait,
+        progress,
+    )
+    .await?;
     // record the snapshot's fingerprints and layouts with the data-shaping settings
     record_snapshot(session, conf, snapshot, &trigger_key, &config.rows).await?;
     Ok(report)

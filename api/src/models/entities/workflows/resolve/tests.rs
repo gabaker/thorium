@@ -1,6 +1,7 @@
 //! Tests for the workflow resolver, run against an in-memory graph
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use uuid::Uuid;
 
@@ -10,6 +11,7 @@ use super::{
     DedupeKey, GraphEdge, ResolvedWorkflow, WorkflowBuild, build_workflow_instance,
     is_current_with_scheme, newest_instance, resolve_workflow,
 };
+use crate::models::entities::thread_timer::ThreadTimer;
 use crate::models::{
     AgentConfig, AssociationKind, CrawlLimits, Directionality, EntityKinds, EntityMetadata,
     InstancedTool, ModelAuthLevel, ModelAuthSource, ModelMatcher, ToolChoice, ToolKind,
@@ -1394,9 +1396,9 @@ async fn worst_case_under_limits() {
         }
     }
     let wf = g.workflow("Huge", &[MINERVA], &agents, Some(agents[0]));
-    let start = Instant::now();
+    let timer = ThreadTimer::start();
     let resolved = resolve(&g, wf).await;
-    let elapsed = start.elapsed();
+    let elapsed = timer.elapsed();
     assert_ready(&resolved);
     assert_eq!(resolved.instance.agents.len(), 32);
     assert_eq!(resolved.instance.tools.len(), 32 * 128 * 2 + 1);
@@ -1434,9 +1436,9 @@ async fn worst_case_under_limits() {
     g.edge(AssociationKind::DelegatesTo, lead, helper);
     let wf = g.workflow("Wide", &[MINERVA], &[lead], Some(lead));
     g.reader.clear_reads();
-    let start = Instant::now();
+    let timer = ThreadTimer::start();
     let resolved = resolve(&g, wf).await;
-    let elapsed = start.elapsed();
+    let elapsed = timer.elapsed();
     assert_invalid(&resolved, &["max_tools_per_agent (128)"]);
     assert_invalid(&resolved, &["max_agents_per_workflow (32)"]);
     assert!(g.reader.reads().len() <= 2 + limits.max_agents_per_workflow);
@@ -1993,9 +1995,9 @@ async fn worst_case_toolsets() {
     }
     let wf = g.workflow("Huge", &[MINERVA], &agents, Some(agents[0]));
     g.reader.clear_reads();
-    let start = Instant::now();
+    let timer = ThreadTimer::start();
     let resolved = resolve(&g, wf).await;
-    let elapsed = start.elapsed();
+    let elapsed = timer.elapsed();
     let reads = g.reader.reads().len();
     assert_ready(&resolved);
     assert_eq!(resolved.instance.tools.len(), 32 * 64 + 1);
@@ -2046,9 +2048,9 @@ async fn worst_case_toolsets() {
     }
     let (wf, lead) = calling(&mut g, &[ts]);
     g.reader.clear_reads();
-    let start = Instant::now();
+    let timer = ThreadTimer::start();
     let resolved = resolve(&g, wf).await;
-    let elapsed = start.elapsed();
+    let elapsed = timer.elapsed();
     assert_invalid(
         &resolved,
         &["agent `lead`", "100000 tools", "max_tools_per_agent (128)"],
@@ -2338,22 +2340,46 @@ async fn worst_case_shared_fat_members() {
     let wf = g.workflow("Huge", &[MINERVA], &agents, Some(agents[0]));
     // the resolve is ready, quick, and reads each member once
     g.reader.clear_reads();
-    let start = Instant::now();
+    let timer = ThreadTimer::start();
     let resolved = resolve(&g, wf).await;
-    let elapsed = start.elapsed();
+    let elapsed = timer.elapsed();
     assert_ready(&resolved);
     for (member, _) in &members {
         assert_eq!(g.reader.node_reads(*member), 1);
     }
-    assert!(elapsed.as_secs_f64() < 5.0, "resolving took {elapsed:?}");
+    // the bound is processor time, about six times what a debug build takes on a development
+    // machine, so slow and loaded runners pass while handling each member once per toolset that
+    // holds it, 64 times the work, still fails
+    assert!(elapsed.as_secs_f64() < 15.0, "resolving took {elapsed:?}");
     println!("32 agents x 64 shared fat members resolved in {elapsed:?}");
 }
 
-/// A graph reader that takes a few milliseconds for every entity read, as the API does
-struct SlowGraph<'a>(
+/// A graph reader that takes a few milliseconds for every entity read, as the API does, and
+/// counts how many of its reads wait at once
+struct SlowGraph<'a> {
     /// The in-memory graph it reads
-    &'a crate::models::entities::workflows::MemoryGraph,
-);
+    graph: &'a crate::models::entities::workflows::MemoryGraph,
+    /// The number of reads waiting now
+    waiting: AtomicUsize,
+    /// The most reads that have waited at once
+    peak: AtomicUsize,
+}
+
+impl<'a> SlowGraph<'a> {
+    /// Read an in-memory graph slowly
+    ///
+    /// # Arguments
+    ///
+    /// * `graph` - The in-memory graph to read
+    fn new(graph: &'a crate::models::entities::workflows::MemoryGraph) -> Self {
+        // no reads have waited yet
+        SlowGraph {
+            graph,
+            waiting: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl super::GraphReader for SlowGraph<'_> {
@@ -2370,9 +2396,13 @@ impl super::GraphReader for SlowGraph<'_> {
         kinds: &[AssociationKind],
         direction: Directionality,
     ) -> Result<Option<super::GraphNode>, crate::Error> {
+        // count this read as waiting, raising the peak if no more have waited at once before
+        let waiting = self.waiting.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(waiting, Ordering::SeqCst);
         // wait as a round trip to the API would, then read
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        self.0.node(id, kinds, direction).await
+        self.waiting.fetch_sub(1, Ordering::SeqCst);
+        self.graph.node(id, kinds, direction).await
     }
 
     /// Find the entities of a kind tagged with a value in any of some groups
@@ -2391,7 +2421,7 @@ impl super::GraphReader for SlowGraph<'_> {
         groups: &[String],
     ) -> Result<Vec<crate::models::Entity>, crate::Error> {
         // tag lookups are passed through
-        self.0.tagged(kind, key, value, groups).await
+        self.graph.tagged(kind, key, value, groups).await
     }
 }
 
@@ -2399,8 +2429,7 @@ impl super::GraphReader for SlowGraph<'_> {
 /// trip per entity reads the entities a few at a time, each one once
 #[tokio::test]
 async fn slow_reader_reads_concurrently() {
-    // 32 agents that each call 64 container-backed tools of their own: a read-concurrency check,
-    // so the size stays where 5 ms reads finish well inside the time budget
+    // 32 agents that each call 64 container-backed tools of their own
     let limits = CrawlLimits::default();
     let tools_per_agent = 64;
     let mut g = Graph::default();
@@ -2420,20 +2449,25 @@ async fn slow_reader_reads_concurrently() {
         agents.push(agent);
     }
     let wf = g.workflow("Wide", &[MINERVA], &agents, Some(agents[0]));
-    // the slow resolve is ready, quick, and reads each entity once
+    // the slow resolve is ready, reads a few entities at a time, and reads each entity once
     g.reader.clear_reads();
+    let slow = SlowGraph::new(&g.reader);
     let start = Instant::now();
-    let resolved = resolve_workflow(&SlowGraph(&g.reader), wf, &limits)
-        .await
-        .unwrap();
+    let resolved = resolve_workflow(&slow, wf, &limits).await.unwrap();
     let elapsed = start.elapsed();
     assert_ready(&resolved);
     let reads = g.reader.reads().len();
     // the workflow, each agent, each tool with its instance and Image instance, and the entry
     // agent's harness
     assert_eq!(reads, 1 + 32 + 3 * 32 * tools_per_agent + 1);
-    assert!(elapsed.as_secs_f64() < 5.0, "resolving took {elapsed:?}");
-    println!("{reads} slow reads resolved in {elapsed:?}");
+    // several reads waited together, but never more than the prefetch window; counting them
+    // rather than timing the resolve keeps a slow or loaded machine from failing the check
+    let peak = slow.peak.load(Ordering::SeqCst);
+    assert!(
+        peak > 1 && peak <= super::PREFETCH_CONCURRENCY,
+        "{peak} reads waited at once"
+    );
+    println!("{reads} slow reads, up to {peak} at once, resolved in {elapsed:?}");
 }
 
 /// A workflow whose stored newest instance is gone, or that names none after giving out a

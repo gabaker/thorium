@@ -680,7 +680,8 @@ impl WindowsProcessTreeBuilder {
         Ok(context.id)
     }
 
-    /// Convert all of this process tree to a a list of EntityRequests
+    /// Convert all of this process tree to a a list of `EntityRequests`
+    #[must_use]
     pub fn to_requests(self) -> Vec<EntityRequest> {
         // correctly size our list of entity requests (one extra with our root entity)
         let mut reqs = Vec::with_capacity(self.processes.len() + 1);

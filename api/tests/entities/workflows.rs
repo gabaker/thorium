@@ -1207,6 +1207,47 @@ async fn settings_updates() -> Result<(), Error> {
     Ok(())
 }
 
+/// An instance over the instances limit is refused with a 400 naming the setting before any
+/// revision is reserved, so the next valid submission is still revision 1
+#[tokio::test]
+async fn oversized_instance_refused() -> Result<(), Error> {
+    // a workflow with one agent run in a harness
+    let admin = test_utilities::admin_client().await?;
+    let suffix = generators::name_suffix();
+    let io = moon_user(&admin, "io", &suffix).await?;
+    let roles = GroupRoles::default().user(&io.username);
+    let a = god_group(&admin, "minerva", &suffix, &roles).await?;
+    let solo = agent(&admin, "solo", &[&a], |req| req).await?;
+    let req = WorkflowCatalogEntityRequest::default()
+        .agent(solo.id)
+        .entry_agent(solo.id);
+    let created = workflow(&admin, "oversized", &[&a], req).await?;
+    let (_, harness) = harness_tool(&[&a], &admin).await?;
+    // pad the warnings, which aren't in the digest, past the 12 MiB instances default but under
+    // the 14 MiB entities default
+    let mut padded = generators::gen_workflow_instance(&created, 1, None, &[(&solo, &[&harness])]);
+    padded.warnings = vec!["w".repeat(4096); 3150];
+    let (status, msg) = refusal(submit(&admin, &padded).await);
+    assert_eq!(status, 400);
+    assert!(msg.contains("thorium.limits.body.instances"), "{msg}");
+    // invalid JSON under the limit is refused as an invalid instance
+    let fields = [
+        ("kind", "WorkflowInstance".to_owned()),
+        ("groups[]", a.clone()),
+        (
+            "metadata[workflow_instance]",
+            format!("[\"{}", "x".repeat(4 << 20)),
+        ),
+    ];
+    let (status, body) = raw_form(&io, None, &fields).await?;
+    assert_eq!(status, 400);
+    assert!(body.contains("not a valid workflow instance"), "{body}");
+    // the next valid submission is revision 1
+    let valid = generators::gen_workflow_instance(&created, 1, None, &[(&solo, &[&harness])]);
+    assert_eq!(submit(&admin, &valid).await?.name, "oversized#r1");
+    Ok(())
+}
+
 /// A submitted Ready instance must run its entry agent in a Harness instance and bind each of
 /// every agent's tools exactly once
 #[tokio::test]

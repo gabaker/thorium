@@ -203,10 +203,10 @@ impl TriggerCache {
                         // could have false positives
                         match event.could_trigger(trigger) {
                             TriggerPotential::Confirmed => {
-                                confirmed.push((group, pipeline, trigger))
+                                confirmed.push((group, pipeline, trigger));
                             }
                             TriggerPotential::Potentially => {
-                                potential.push((group, pipeline, trigger))
+                                potential.push((group, pipeline, trigger));
                             }
                             // this trigger can never fire for this event, but other
                             // triggers still might so don't clear this event yet
@@ -221,11 +221,11 @@ impl TriggerCache {
         let potential_empty = potential.is_empty();
         // check if we found any confirmed triggers or not
         if !confirmed.is_empty() {
-            filtered.confirmed.push((event.id, confirmed))
+            filtered.confirmed.push((event.id, confirmed));
         }
         // check if we found any confirmed triggers or not
         if !potential.is_empty() {
-            filtered.potentials.push((event.id, potential))
+            filtered.potentials.push((event.id, potential));
         }
         // clear any event that matched no triggers so it does not leak
         if Self::should_clear_no_matches(confirmed_empty, potential_empty) {
@@ -269,7 +269,7 @@ impl TriggerCache {
                 // add this event to the clear list
                 filtered.clears.push(event.id);
             }
-        };
+        }
     }
 
     /// Filter any events that will not hit any triggers
@@ -472,38 +472,32 @@ impl DataCache {
                 match tag_type {
                     TagType::Files => {
                         // try to get this file from our cache
-                        let file = match self.samples.get(item) {
-                            Some(file) => file,
-                            None => {
-                                // log that we are missing data
-                                event!(
-                                    Level::ERROR,
-                                    missing_data = true,
-                                    tag_type = "Files",
-                                    sha256 = item
-                                );
-                                // return false since we are missing this data
-                                return false;
-                            }
+                        let Some(file) = self.samples.get(item) else {
+                            // log that we are missing data
+                            event!(
+                                Level::ERROR,
+                                missing_data = true,
+                                tag_type = "Files",
+                                sha256 = item
+                            );
+                            // return false since we are missing this data
+                            return false;
                         };
                         // check against all the tags for this file
                         Event::check_all_tag_trigger(&user.groups, &file.tags, required, not)
                     }
                     TagType::Repos => {
                         // try to get this repo from our cache
-                        let repo = match self.repos.get(item) {
-                            Some(repo) => repo,
-                            None => {
-                                // log that we are missing data
-                                event!(
-                                    Level::ERROR,
-                                    missing_data = true,
-                                    tag_type = "Repos",
-                                    url = item
-                                );
-                                // return false since we are missing this data
-                                return false;
-                            }
+                        let Some(repo) = self.repos.get(item) else {
+                            // log that we are missing data
+                            event!(
+                                Level::ERROR,
+                                missing_data = true,
+                                tag_type = "Repos",
+                                url = item
+                            );
+                            // return false since we are missing this data
+                            return false;
                         };
                         // check against all the tags for this repo
                         Event::check_all_tag_trigger(&user.groups, &repo.tags, required, not)
@@ -719,8 +713,8 @@ mod tests {
         cache.check_event(&disabled_event, &mut filtered);
         // the disabled users event should be cleared and trigger nothing
         assert_eq!(filtered.clears, vec![disabled_event.id]);
-        assert!(filtered.confirmed.is_empty());
-        assert!(filtered.potentials.is_empty());
+        assert_eq!(filtered.confirmed, [] as [(uuid::Uuid, Vec<_>); 0]);
+        assert_eq!(filtered.potentials, [] as [(uuid::Uuid, Vec<_>); 0]);
         // check an event from our enabled user
         let enabled_event = test_event("enabled");
         let mut filtered = FilteredEvents::default();

@@ -18,6 +18,22 @@ pub enum SubCommands {
     Operate(OperateCluster),
     /// Print the `ThoriumCluster` CRD as YAML, or apply it to the cluster
     Crd(CrdArgs),
+    /// Delete a `ThoriumCluster` and wait until the operator has cleaned it up
+    Uninstall(UninstallArgs),
+}
+
+/// The arguments for deleting a `ThoriumCluster` and waiting for its cleanup
+#[derive(Parser, Debug, Clone)]
+pub struct UninstallArgs {
+    /// The namespace the `ThoriumCluster` is in
+    #[clap(long)]
+    pub namespace: String,
+    /// The name of the `ThoriumCluster`
+    #[clap(long, default_value = "thorium")]
+    pub name: String,
+    /// How many seconds to wait for the operator to clean up before failing
+    #[clap(long, default_value_t = 240)]
+    pub timeout: u64,
 }
 
 /// The `ThoriumCluster` CRD arguments
@@ -44,7 +60,7 @@ pub struct OperateCluster {
 mod tests {
     use super::*;
 
-    /// The operate and crd subcommands parse with their flags
+    /// The operate, crd, and uninstall subcommands parse with their flags
     #[test]
     fn args_parse() {
         // operate takes a url and a namespace
@@ -75,6 +91,38 @@ mod tests {
             args.cmd,
             SubCommands::Crd(CrdArgs { apply: true })
         ));
+        // uninstall needs a namespace and defaults the name and timeout
+        let args = Args::try_parse_from([
+            "thorium-operator",
+            "uninstall",
+            "--namespace",
+            "dev-thorium",
+        ])
+        .expect("uninstall should parse");
+        let SubCommands::Uninstall(uninstall) = args.cmd else {
+            panic!("expected the uninstall subcommand");
+        };
+        assert_eq!(uninstall.namespace, "dev-thorium");
+        assert_eq!(uninstall.name, "thorium");
+        assert_eq!(uninstall.timeout, 240);
+        // and takes a name and timeout
+        let args = Args::try_parse_from([
+            "thorium-operator",
+            "uninstall",
+            "--namespace",
+            "thorium",
+            "--name",
+            "corn",
+            "--timeout",
+            "30",
+        ])
+        .expect("uninstall with a name and timeout should parse");
+        let SubCommands::Uninstall(uninstall) = args.cmd else {
+            panic!("expected the uninstall subcommand");
+        };
+        assert_eq!((uninstall.name.as_str(), uninstall.timeout), ("corn", 30));
+        // a namespace is required
+        assert!(Args::try_parse_from(["thorium-operator", "uninstall"]).is_err());
         // a subcommand is required
         assert!(Args::try_parse_from(["thorium-operator"]).is_err());
     }

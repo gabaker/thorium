@@ -635,10 +635,10 @@ impl<S: S3Backup> S3BackupController<S> {
         path.push("maps");
         // crawl all of our maps for this table
         let mut walker = WalkDir::new(path.clone()).filter(|entry| async move {
-            if !entry.file_name().to_string_lossy().ends_with(".thoriummap") {
-                Filtering::Ignore
-            } else {
+            if entry.file_name().to_string_lossy().ends_with(".thoriummap") {
                 Filtering::Continue
+            } else {
+                Filtering::Ignore
             }
         });
         while let Some(entry) = walker.next().await {

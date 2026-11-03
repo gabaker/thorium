@@ -63,8 +63,8 @@ template:
           - -c
           - |
             set -e
-            # the Thorium image ships thorctl under the API's binary names (only linux/x86-64 is built), so other
-            # architectures need operator.toolbox.thorctlPath
+            # the Thorium image ships thorctl for linux/x86-64 and linux/arm64 under the API's binary
+            # names; operator.toolbox.thorctlPath points at another one
             thorctl="$THORCTL"
             if [ -z "$thorctl" ]; then
               case "$(uname -m)" in
@@ -78,26 +78,6 @@ template:
               echo "$thorctl doesn't exist in this image; set operator.toolbox.thorctlPath to its thorctl"
               exit 1
             fi
-            for attempt in $(seq 1 90); do
-              curl -sf "$THORIUM_URL/api/health" >/dev/null && break
-              echo "Waiting for the Thorium API ($attempt/90)..."
-              sleep 10
-            done
-            # credentials go to curl on stdin as a curl config line with backslashes and quotes
-            # escaped (printf is a shell builtin and sed reads them from a pipe), so they never
-            # appear in the process list
-            creds() { printf 'user = "%s"\n' "$(printf '%s:%s' "$THORIUM_USER" "$THORIUM_PASSWORD" | sed 's/[\\"]/\\&/g')"; }
-            # the API turns healthy before the operator has created the admin user, so wait for its login
-            for attempt in $(seq 1 30); do
-              code="$(creds | curl -K - -s -o /dev/null -w '%{http_code}' -X POST "$THORIUM_URL/api/users/auth" || true)"
-              [ "$code" = 200 ] && break
-              if [ "$attempt" = 30 ]; then
-                echo "The admin user $THORIUM_USER still can't log in to Thorium (HTTP $code)"
-                exit 1
-              fi
-              echo "Waiting for the admin user $THORIUM_USER to log in (HTTP $code, $attempt/30)..."
-              sleep 10
-            done
             # thorctl login only takes a password as an argument, so thorctl's config is written
             # directly with the credentials as YAML single-quoted strings
             yaml_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"; }
@@ -113,13 +93,39 @@ template:
               printf 'skip_update: true\n'
             } > "$HOME/.thorium/config.yml"
             chmod 600 "$HOME/.thorium/config.yml"
-            # create the groups and network policies the toolbox references; existing ones are left as is
-            post() { creds | curl -K - -s -o /dev/null -w "$1 -> %{http_code}\n" -H "Content-Type: application/json" -X POST "$THORIUM_URL$1" -d "$2"; }
+            # thorctl's errors can span many lines, so messages show them on one line
+            oneline() { printf '%s' "$1" | tr -s ' \n' ' ' | cut -c 1-400; }
+            # wait for the API and the admin login together: `thorctl groups get` reads the admin's
+            # own user, so it fails until the API is up and the operator has created the admin
+            attempt=1
+            until out="$("$thorctl" groups get 2>&1)"; do
+              if [ "$attempt" -ge 120 ]; then
+                echo "Thorium still can't be reached or the admin user $THORIUM_USER still can't log in: $out"
+                exit 1
+              fi
+              echo "Waiting for the Thorium API and the admin user $THORIUM_USER ($attempt/120): $(oneline "$out")"
+              attempt=$((attempt + 1))
+              sleep 10
+            done
+            # create the groups and network policies the toolbox references; the API refuses ones
+            # that already exist, so a failed create is reported and anything existing is left as is
+            create() {
+              what="$1"
+              shift
+              if out="$("$thorctl" "$@" 2>&1)"; then
+                echo "$what: created"
+              else
+                echo "$what: not created, an existing one is left as is ($(oneline "$out"))"
+              fi
+            }
             {{- range $t.groups }}
-            post /api/groups/ {{ include "operator.shellQuote" (dict "name" . | toJson) }}
+            create {{ include "operator.shellQuote" (printf "Group %s" .) }} groups create {{ include "operator.shellQuote" . }}
             {{- end }}
-            {{- range $t.networkPolicies }}
-            post /api/network-policies {{ include "operator.shellQuote" (toJson .) }}
+            {{- range $i, $policy := $t.networkPolicies }}
+            {{- $groups := required (printf "operator.toolbox.networkPolicies[%d] (%s) needs groups" $i $policy.name) $policy.groups }}
+            {{- /* the rules file holds only the directions the policy sets, since a missing one allows all traffic */}}
+            printf '%s' {{ include "operator.shellQuote" (pick $policy "ingress" "egress" | toJson) }} > "/tmp/network-policy-{{ $i }}.json"
+            create {{ include "operator.shellQuote" (printf "Network policy %s" $policy.name) }} network-policies create --name {{ include "operator.shellQuote" $policy.name }} --groups {{ include "operator.shellQuote" (join "," $groups) }} --rules-file "/tmp/network-policy-{{ $i }}.json" --format json{{ if $policy.forced_policy }} --forced{{ end }}{{ if $policy.default_policy }} --default{{ end }}
             {{- end }}
             # thorctl exits 0 when the import applied or found nothing to change and 1 when it failed (a
             # conflict, a refusal, or a rollback); its report is the Job's log. A failed import can be

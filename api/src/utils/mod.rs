@@ -3,6 +3,7 @@
 #[cfg(feature = "api")]
 #[path = ""]
 mod utils_api_reexport {
+    pub mod body_limits;
     pub mod bounder;
     pub mod errors;
     pub mod macros;

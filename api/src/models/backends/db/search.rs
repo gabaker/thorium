@@ -39,8 +39,8 @@ pub async fn search(
     // save this cursor
     cursor.save(shared).await?;
     let data = std::mem::take(&mut cursor.data);
-    // determine if this cursor has been exhausted or not
-    if data.len() < cursor.limit as usize {
+    // determine if this cursor has been exhausted or not; a negative limit can never be filled
+    if data.len() < usize::try_from(cursor.limit).unwrap_or(usize::MAX) {
         // this cursor is exhausted so omit the cursor ID
         Ok(ApiCursor {
             cursor: None,

@@ -778,7 +778,7 @@ mod tests {
                 missing_groups,
                 existing,
             } => {
-                assert!(missing_groups.is_empty());
+                assert_eq!(missing_groups, [] as [String; 0]);
                 assert_eq!(existing.len(), 1);
             }
             other => panic!("expected mismatched, got {other:?}"),
@@ -967,7 +967,7 @@ mod tests {
         let updates = build_updates(&mismatch);
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].add_groups, vec!["b".to_string()]);
-        assert!(updates[0].drift.is_empty());
+        assert_eq!(updates[0].drift, [] as [String; 0]);
     }
 
     /// Build a policy whose egress allows the given `(cidr, except)` blocks

@@ -102,13 +102,11 @@ where
         self.spawn_workers(&mut futures, source, &store);
         // try initiating the search store and starting/resuming an init session
         let maybe_init_session = self.try_init(store).await?;
-        // get the tokens remaining
+        // get the tokens remaining; with no init session this is an empty map so the init feeder
+        // processes no tokens
         let tokens_remaining = maybe_init_session
             .as_ref()
-            .map(|s| s.tokens_remaining.clone())
-            // if we have no init session, return an empty map so we don't process any
-            // tokens in the init feeder
-            .unwrap_or_default();
+            .map_or_default(|s| s.tokens_remaining.clone());
         // spawn our monitor
         self.spawn_monitor(&mut futures, maybe_init_session);
         // spawn the feeder for init jobs

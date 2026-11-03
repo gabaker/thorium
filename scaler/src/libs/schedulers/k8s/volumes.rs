@@ -100,7 +100,7 @@ impl Volumes {
             volumes.push(Self::passwd(&user.username)?);
         }
         // inject any user requested volumes
-        for vol in image.volumes.iter() {
+        for vol in &image.volumes {
             volumes.push(self.build(vol, &image.group).await?);
         }
         Ok(volumes)
@@ -186,7 +186,7 @@ impl Volumes {
     /// * `user` - The username of the user whose keys we are binding in
     fn passwd(username: &str) -> Result<Volume, serde_json::Error> {
         // build name of the secret
-        let name = format!("thorium-{}-passwd", username);
+        let name = format!("thorium-{username}-passwd");
         // build base volume
         let mut vol = Self::base(&name);
         // create config map source
@@ -301,13 +301,13 @@ impl Volumes {
         ns: &str,
     ) -> Result<Volume, Error> {
         // if read_only is set then force default_mode to that otherwise use default mode
-        let default_mode = match vol.read_only {
+        let default_mode = if vol.read_only {
             // if read only is set then force the mode to the octal 0444
-            true => Some(0o444),
-            _ => match &vol.secret {
-                Some(settings) => settings.default_mode,
-                None => None,
-            },
+            Some(0o444)
+        } else {
+            vol.secret
+                .as_ref()
+                .and_then(|settings| settings.default_mode)
         };
         // build required config_map settings in
         let mut secret = SecretVolumeSource {
@@ -337,7 +337,7 @@ impl Volumes {
         // insert anything from the secret specific settings
         if let Some(specific) = vol.secret.as_ref() {
             // set if this volume is optional
-            secret.optional = specific.optional
+            secret.optional = specific.optional;
         }
     }
 

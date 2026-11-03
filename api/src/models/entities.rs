@@ -38,6 +38,8 @@ pub mod processes;
 pub mod rules;
 pub mod rulesets;
 pub mod shared;
+#[cfg(test)]
+pub(crate) mod thread_timer;
 pub mod tools;
 pub mod toolsets;
 pub mod vendors;

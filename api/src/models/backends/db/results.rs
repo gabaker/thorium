@@ -116,7 +116,7 @@ pub async fn create<O: OutputSupport>(
     let applies_to = form
         .entities
         .keys()
-        .filter_map(|kind| kind.to_sigma_applies_to())
+        .filter_map(EntityKinds::to_sigma_applies_to)
         .collect::<Vec<SigmaRuleAppliesTo>>();
     // if this result had any scannable entities then create a sigma scanning event
     if !applies_to.is_empty() {
@@ -136,7 +136,7 @@ pub async fn create<O: OutputSupport>(
     Ok(key_str)
 }
 
-/// Authorize a user has access to a specific result_id
+/// Authorize a user has access to a specific `result_id`
 ///
 /// # Arguments
 ///
@@ -202,7 +202,7 @@ async fn get_ids(
     // build a list of queries
     let mut queries = Vec::with_capacity(groups.len() * tools.len() / 50);
     // get the number of tools or default to 10
-    let tools_len = if !tools.is_empty() { tools.len() } else { 1 };
+    let tools_len = if tools.is_empty() { 1 } else { tools.len() };
     event!(Level::INFO, groups = groups.len(), tools = tools.len());
     // check if can do this all in one request or not
     if groups.len() * tools_len < 100 {
@@ -418,13 +418,13 @@ async fn prune_helper(
         // then dangling ones
         for name in files {
             // build our result id path
-            let s3_path = format!("{}/{}", result_id, name);
+            let s3_path = format!("{result_id}/{name}");
             shared.s3.results.delete(&s3_path).await?;
         }
         // delete all of our dangling entity files
         for kind in entities.keys() {
             // build the path to save this attachment at in s3
-            let s3_path = format!("{}/__thorium_entities/{}.json", result_id, kind);
+            let s3_path = format!("{result_id}/__thorium_entities/{kind}.json");
             // delete this result file from s3
             shared.s3.results.delete(&s3_path).await?;
         }
@@ -455,11 +455,11 @@ pub async fn prune(
     // track the results we prune
     let mut pruned = Vec::default();
     // increment the groups for the results we just added
-    for group in groups.iter() {
+    for group in groups {
         stock.insert(group, 1);
     }
     // crawl these results and prune any that are not longer needed
-    for result in results.iter() {
+    for result in results {
         // get the year and hour this result was uploaded
         let year = result.uploaded.year();
         // get the partition size for results
@@ -468,7 +468,7 @@ pub async fn prune(
         let bucket = helpers::partition(result.uploaded, year, chunk_size);
         // track if we pruned this result for a group
         let mut prune_flag = false;
-        for group in result.groups.iter() {
+        for group in &result.groups {
             // get this group if it wasn' already added
             let entry = stock.entry(group).or_insert(0);
             // if we are already at our retention limit then prune this result

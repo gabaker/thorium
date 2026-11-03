@@ -298,7 +298,7 @@ pub struct SubReactionLists {
 }
 
 impl SubReactionLists {
-    /// Create a new SubReactionLists from a reaction
+    /// Create a new `SubReactionLists` from a reaction
     ///
     /// # Arguments
     ///

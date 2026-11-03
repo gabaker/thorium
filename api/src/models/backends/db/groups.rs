@@ -267,7 +267,7 @@ pub async fn backup(shared: &Shared) -> Result<(Vec<Group>, Vec<BackupProblem>),
     // get data of all requested groups
     let raw_data: Vec<HashMap<String, String>> = {
         let mut raw_data: Vec<HashMap<String, String>> = Vec::new();
-        for name in names.iter() {
+        for name in &names {
             raw_data.push(
                 redis::cmd("hgetall")
                     .arg(GroupKeys::data(name, shared))
@@ -309,7 +309,7 @@ pub async fn restore(groups: &[Group], shared: &Shared, span: &Span) -> Result<(
     // build the our redis pipeline
     let mut pipe = redis::pipe();
     // crawl over groups and build the pipeline to restore each one
-    for group in groups.iter() {
+    for group in groups {
         // build group keys
         let keys = GroupKeys::new(&group.name, shared);
         // add command to insert this group into the group set
@@ -392,7 +392,7 @@ fn update_role(pipe: &mut redis::Pipeline, users: &HashSet<String>, key: &str) {
     // clear this key first
     pipe.cmd("del").arg(key);
     // add each of our users to this set
-    for user in users.iter() {
+    for user in users {
         pipe.cmd("sadd").arg(key).arg(user);
     }
 }
