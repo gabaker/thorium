@@ -746,6 +746,11 @@ pub struct Backup {
     /// added; left out when nothing was pruned, which is always the case without the param
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pruned: Vec<PrunedReference>,
+    /// The dangling user and group references a backup taken with `accept_dangling` kept as
+    /// Redis holds them; in a restore, the dangling references the restore accepts. Left out when
+    /// empty
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted: Vec<DanglingReference>,
 }
 
 /// The params for taking a backup
@@ -758,6 +763,11 @@ pub struct BackupParams {
     /// backup and whose referent is confirmed gone, instead of failing the backup
     #[serde(default)]
     pub prune_dangling: bool,
+    /// Keep the group members and user memberships that are still dangling after every read of
+    /// the backup and whose referent is confirmed gone, listing them in the backup's `accepted`,
+    /// instead of failing the backup; `prune_dangling` takes precedence when both are set
+    #[serde(default)]
+    pub accept_dangling: bool,
 }
 
 impl BackupParams {
@@ -766,6 +776,15 @@ impl BackupParams {
     pub fn prune_dangling(mut self) -> Self {
         // ask the API to prune what stays dangling
         self.prune_dangling = true;
+        self
+    }
+
+    /// Keeps confirmed-dangling group members and user memberships, listing them in the backup's
+    /// `accepted`, instead of failing the backup
+    #[must_use]
+    pub fn accept_dangling(mut self) -> Self {
+        // ask the API to keep and list what stays dangling
+        self.accept_dangling = true;
         self
     }
 }
@@ -805,8 +824,8 @@ pub enum PruneAction {
     Deleted,
 }
 
-/// The kind of record a pruned name refers to
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+/// The kind of record a pruned or dangling name refers to
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum PrunedReferent {
@@ -833,6 +852,21 @@ pub struct PrunedReference {
     pub referent: Option<PrunedReferent>,
     /// Why the change was made
     pub reason: String,
+}
+
+/// A group member or user membership in a backup that names a user or group the backup doesn't
+/// hold, which a backup taken with `accept_dangling` keeps and a restore accepts when listed
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct DanglingReference {
+    /// The record holding the reference: `groups/<group>` or `users/<user>`
+    pub record: String,
+    /// The field holding it: a group role (`owners`, `managers`, `users`, `monitors`) or `groups`
+    pub field: String,
+    /// The name of the user or group the backup doesn't hold
+    pub name: String,
+    /// The kind of record `name` names
+    pub referent: PrunedReferent,
 }
 
 /// The network policies available in one group (its `netpols` set in Redis)

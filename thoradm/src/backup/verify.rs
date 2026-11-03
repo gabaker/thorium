@@ -1569,6 +1569,7 @@ impl Verifier {
                 bucket = link.bucket,
                 key = link.key,
                 referrer = link.referrer,
+                target = link.target,
                 "accepted broken link: {}",
                 link.error
             );

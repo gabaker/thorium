@@ -246,15 +246,18 @@ pub struct NewBackup {
     /// state and whose user or group the API confirms is gone, instead of failing the redis
     /// component: group members, user memberships, and scoped-token groups. Each change is listed
     /// in pruned.jsonl and counted in the manifest, the run exits 2, and a restore of the backup
-    /// needs --accept-failures. Every other problem still fails the redis component
+    /// needs --accept-failures. Every other problem still fails the redis component. With
+    /// --accept-broken-links too, the references are pruned rather than kept
     #[clap(long)]
     pub prune_dangling: bool,
     /// Keep going past a broken link, a reference to an S3 object the cluster itself lacks (an
-    /// entity's or user's graphic, a sample or repo object, a result file, a comment attachment),
-    /// instead of failing the object: the link stays as the cluster holds it, and each one is
-    /// recorded as a broken-link record in failures.jsonl and counted apart in the manifest. The
-    /// run exits 2 when anything is recorded, and a restore of a backup whose only records are
-    /// accepted broken links needs no --accept-failures. Every other failure is unchanged
+    /// entity's or user's graphic, a sample or repo object, a result file, a comment attachment)
+    /// or a group member or user membership naming a user or group the cluster lacks, instead of
+    /// failing the object or the redis component: the link stays as the cluster holds it, and
+    /// each one is recorded as a broken-link record in failures.jsonl and counted apart in the
+    /// manifest. The run exits 2 when anything is recorded, and a restore of a backup whose only
+    /// records are accepted broken links needs no --accept-failures. Every other failure is
+    /// unchanged
     #[clap(long)]
     pub accept_broken_links: bool,
 }

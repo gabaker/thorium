@@ -1,7 +1,9 @@
 //! `backup new --prune-dangling`: the user and group references that stay dangling through every
 //! read, and whose referent is confirmed gone, are dropped from the Redis state and recorded in
 //! `pruned.jsonl`; without the flag they fail the backup, and every other problem fails it with
-//! the flag too
+//! the flag too. With `--accept-broken-links` the dangling group members and user memberships are
+//! kept instead, each recorded as a `broken-link` record of the `redis` component, and a restore
+//! accepts exactly the ones the backup recorded
 //!
 //! Every test changes the namespace's Redis state in ways another test's backup would trip over,
 //! so each holds the binary's restore guard.
@@ -17,12 +19,15 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Output;
 use std::time::Duration;
-use thoradm::backup::failures::{FAILURES_FILE, FailureRecord, read_records};
+use thoradm::backup::failures::{
+    FAILURES_FILE, FailureKind, FailureRecord, Operation, read_records,
+};
 use thoradm::backup::manifest::{MANIFEST_FILE, Manifest, file_sha256};
+use thorium::Thorium;
 use thorium::client::{ClientSettings, Users};
 use thorium::models::{
-    Backup, BackupParams, GroupUpdate, GroupUsersUpdate, ScopedToken, ScopedTokenRequest,
-    UserCreate,
+    AuthResponse, Backup, BackupParams, GroupUpdate, GroupUsersUpdate, ScopedToken,
+    ScopedTokenRequest, UserCreate,
 };
 use thorium::test_utilities::generators;
 
@@ -128,6 +133,42 @@ fn backup_redis(harness: &Harness, out: &Path, prune: bool) -> Output {
     backup_command(harness, out, prune)
         .output()
         .expect("failed to run thoradm")
+}
+
+/// Runs `backup new redis` into a directory with extra flags
+///
+/// # Arguments
+///
+/// * `harness` - The harness whose configs thoradm loads
+/// * `out` - The backup directory
+/// * `flags` - The flags to add
+fn backup_redis_with(harness: &Harness, out: &Path, flags: &[&str]) -> Output {
+    // run it to its end with the flags
+    backup_command(harness, out, false)
+        .args(flags)
+        .output()
+        .expect("failed to run thoradm")
+}
+
+/// Returns the `redis` broken-link record a backup wrote for one referring record and target
+///
+/// # Arguments
+///
+/// * `records` - The backup's failure records
+/// * `referrer` - The referring record, as `<collection>:<name>`
+/// * `target` - The missing user or group, as `<kind>:<name>`
+fn redis_link<'a>(records: &'a [FailureRecord], referrer: &str, target: &str) -> &'a FailureRecord {
+    // exactly one record names the pair
+    let found: Vec<&FailureRecord> = records
+        .iter()
+        .filter(|record| {
+            record.component == "redis"
+                && record.referrer.as_deref() == Some(referrer)
+                && record.target.as_deref() == Some(target)
+        })
+        .collect();
+    assert_eq!(found.len(), 1, "{records:#?}");
+    found[0]
 }
 
 /// Reads the `redis.json` of a backup
@@ -825,6 +866,15 @@ async fn everything_but_user_and_group_references_still_fails_with_the_flag() {
     );
     let manifest = Manifest::read(&out).await.unwrap().expect("no manifest");
     assert!(manifest.pruned.is_none());
+    // accepting broken links doesn't accept these either
+    let accepted = harness.scratch("still-fatal-accepted");
+    let run = backup_redis_with(harness, &accepted, &["--accept-broken-links"]);
+    let records = assert_failed(&run, &accepted);
+    assert!(
+        recorded(&records, &image, "isn't in the backup"),
+        "{records:#?}"
+    );
+    assert!(recorded(&records, &scoped, "primary token"), "{records:#?}");
     // put everything back as it was
     srem(harness, &format!("{ns}:groups"), &bad).await;
     redis_run(
@@ -836,4 +886,265 @@ async fn everything_but_user_and_group_references_still_fails_with_the_flag() {
     hset(harness, &pipe_key, "order", &original_order).await;
     hset(harness, &image_key, "group", &original_group).await;
     srem(harness, &owners, &ghost).await;
+}
+
+/// With `--accept-broken-links`, a group owner naming a user that is gone and a user's membership
+/// in a group that is gone are kept in `redis.json` as Redis holds them, each recorded as a
+/// `broken-link` record of the `redis` component and counted in the manifest's `broken_links`;
+/// the run exits 2, verify passes, a restore needs no `--accept-failures` and writes the
+/// references back, and the API still serves the group and the user, who can still log in
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn accepted_dangling_references_are_kept_recorded_and_restored() {
+    let harness = Harness::get().await;
+    let _guard = harness.restore_guard().await;
+    let ns = harness.conf.thorium.namespace.clone();
+    // a group whose owners include a user that doesn't exist
+    let client = harness.client().await;
+    let names = Names::new();
+    let group = names.group("metis");
+    seed::group(&client, &group).await;
+    let ghost = names.user("amalthea");
+    let owners = [
+        format!("{ns}:groups_direct:{group}:owners"),
+        format!("{ns}:groups_combined:{group}:owners"),
+    ];
+    for set in &owners {
+        sadd(harness, set, &ghost).await;
+    }
+    // a user whose groups include a group that doesn't exist
+    let user = names.user("callisto");
+    create_user(harness, &user).await;
+    let gone = names.group("adrastea");
+    let memberships = format!("{ns}:user_groups:{user}");
+    sadd(harness, &memberships, &gone).await;
+    // the backup keeps both and exits 2
+    let out = harness.scratch("accepted-links");
+    let run = backup_redis_with(harness, &out, &["--accept-broken-links"]);
+    assert_eq!(run.status.code(), Some(2), "{}", describe(&run));
+    let backup = redis_json(&out);
+    let held = backup
+        .groups
+        .iter()
+        .find(|held| held.name == group)
+        .expect("the group isn't in the backup");
+    assert!(held.owners.direct.contains(&ghost), "{held:?}");
+    assert!(held.owners.combined.contains(&ghost), "{held:?}");
+    let kept = backup
+        .users
+        .iter()
+        .find(|held| held.username == user)
+        .expect("the user isn't in the backup");
+    assert!(kept.groups.contains(&gone), "{kept:?}");
+    // the list of what was kept is in failures.jsonl, never in redis.json, and nothing is pruned
+    let redis: Value =
+        serde_json::from_slice(&std::fs::read(out.join("redis.json")).unwrap()).unwrap();
+    assert!(redis.get("accepted").is_none(), "{redis:#}");
+    assert!(!out.join(PRUNED_FILE).exists());
+    // each reference is a broken-link record naming the referring record, field, and target
+    let records = read_records(&out.join(FAILURES_FILE)).unwrap();
+    assert!(
+        records
+            .iter()
+            .all(|record| record.kind == FailureKind::BrokenLink),
+        "{records:#?}"
+    );
+    let owner = redis_link(
+        &records,
+        &format!("groups:{group}"),
+        &format!("user:{ghost}"),
+    );
+    assert_eq!(owner.field.as_deref(), Some("owners"), "{owner:?}");
+    assert_eq!(owner.operation, Operation::Redis);
+    assert!(owner.bucket.is_none() && owner.key.is_none(), "{owner:?}");
+    let membership = redis_link(&records, &format!("users:{user}"), &format!("group:{gone}"));
+    assert_eq!(
+        membership.field.as_deref(),
+        Some("groups"),
+        "{membership:?}"
+    );
+    // the manifest counts them apart, with nothing failed or pruned
+    let manifest = Manifest::read(&out).await.unwrap().expect("no manifest");
+    assert_eq!(manifest.broken_links, records.len() as u64);
+    assert_eq!(manifest.failures, 0);
+    assert!(manifest.pruned.is_none());
+    // verify accepts the backup
+    let checked = verify(harness, &out);
+    assert_eq!(checked.status.code(), Some(0), "{}", describe(&checked));
+    // clear both references so the restore visibly writes them back
+    for set in &owners {
+        srem(harness, set, &ghost).await;
+    }
+    srem(harness, &memberships, &gone).await;
+    // the restore needs no --accept-failures
+    let restored = restore_with(harness, &out, &[]);
+    assert_eq!(restored.status.code(), Some(0), "{}", describe(&restored));
+    // the API serves the group with its missing owner, and the user with its missing group
+    let after = client.groups.get(&group).await.unwrap();
+    assert!(after.owners.combined.contains(&ghost), "{after:?}");
+    let groups = client.groups.list().details().exec().await.unwrap();
+    assert!(
+        groups.details.iter().any(|listed| listed.name == group),
+        "{:?}",
+        groups.names
+    );
+    let fetched = client.users.get(&user).await.unwrap();
+    assert!(fetched.groups.contains(&gone), "{fetched:?}");
+    let listed = client.users.list_details().await.unwrap();
+    assert!(listed.iter().any(|listed| listed.username == user));
+    // the user in the missing group still logs in and lists its groups
+    let auth = Users::auth_basic(
+        &harness.api_url,
+        &user,
+        "prune-password",
+        &reqwest::Client::new(),
+    )
+    .await
+    .unwrap();
+    let AuthResponse::Authed { token, .. } = auth else {
+        panic!("the user must verify an email: {auth:?}");
+    };
+    let as_user = Thorium::build(harness.api_url.clone())
+        .token(&token)
+        .build()
+        .await
+        .unwrap();
+    let info = as_user.users.info().await.unwrap();
+    assert!(info.groups.contains(&gone), "{info:?}");
+    as_user.groups.list().exec().await.unwrap();
+    // verify --cluster takes the cluster's state with the references and finds it matches
+    let cluster = harness
+        .thoradm()
+        .args(["backup", "verify", "--cluster", "-b"])
+        .arg(&out)
+        .output()
+        .expect("failed to run thoradm");
+    assert_eq!(cluster.status.code(), Some(0), "{}", describe(&cluster));
+    // put the cluster back as it was
+    for set in &owners {
+        srem(harness, set, &ghost).await;
+    }
+    srem(harness, &memberships, &gone).await;
+}
+
+/// A restore accepts only the dangling references the backup recorded: the API refuses a state
+/// whose accepted list leaves one out (400), naming it, and thoradm refuses a backup whose
+/// `failures.jsonl` lost a recorded reference, since the manifest no longer matches it
+#[tokio::test]
+async fn a_restore_refuses_dangling_references_the_backup_did_not_record() {
+    let harness = Harness::get().await;
+    let _guard = harness.restore_guard().await;
+    let ns = harness.conf.thorium.namespace.clone();
+    // a group with two members that don't exist
+    let client = harness.client().await;
+    let names = Names::new();
+    let group = names.group("praxidike");
+    seed::group(&client, &group).await;
+    let first = names.user("iocaste");
+    let second = names.user("harpalyke");
+    let users = [
+        format!("{ns}:groups_direct:{group}:users"),
+        format!("{ns}:groups_combined:{group}:users"),
+    ];
+    for set in &users {
+        sadd(harness, set, &first).await;
+        sadd(harness, set, &second).await;
+    }
+    // the API keeps both and lists them as accepted
+    let params = BackupParams::default().accept_dangling();
+    let mut held = client.system.backup_with(&params).await.unwrap();
+    let record = format!("groups/{group}");
+    let ours: Vec<_> = held
+        .accepted
+        .iter()
+        .filter(|accepted| accepted.record == record)
+        .map(|accepted| (accepted.field.clone(), accepted.name.clone()))
+        .collect();
+    assert_eq!(ours.len(), 2, "{:?}", held.accepted);
+    assert!(
+        ours.contains(&("users".to_owned(), first.clone())),
+        "{ours:?}"
+    );
+    // a plain backup still fails on them
+    assert!(client.system.backup().await.is_err());
+    // a restore whose accepted list leaves one out is refused, naming it
+    let full = held.accepted.clone();
+    held.accepted.retain(|accepted| accepted.name != second);
+    let Err(error) = client.system.restore(&held).await else {
+        panic!("a restore of an unrecorded dangling member succeeded");
+    };
+    assert_eq!(error.status().map(|code| code.as_u16()), Some(400));
+    let body = error.msg().unwrap_or_default();
+    assert!(body.contains(&second), "{body}");
+    assert!(!body.contains(&first), "{body}");
+    // with every reference listed it is restored
+    held.accepted = full;
+    client.system.restore(&held).await.unwrap();
+    // thoradm refuses a backup whose failures.jsonl lost one of the recorded references
+    let out = harness.scratch("unrecorded-link");
+    let run = backup_redis_with(harness, &out, &["--accept-broken-links"]);
+    assert_eq!(run.status.code(), Some(2), "{}", describe(&run));
+    let path = out.join(FAILURES_FILE);
+    let kept: Vec<String> = std::fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.contains(&second))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    std::fs::write(&path, kept.concat()).unwrap();
+    let refused = restore_with(harness, &out, &["--accept-failures"]);
+    assert_eq!(refused.status.code(), Some(1), "{}", describe(&refused));
+    // put the cluster back as it was
+    for set in &users {
+        srem(harness, set, &first).await;
+        srem(harness, set, &second).await;
+    }
+}
+
+/// With both `--prune-dangling` and `--accept-broken-links`, pruning wins for the Redis state: a
+/// dangling owner is dropped and listed in `pruned.jsonl`, and nothing is recorded as a Redis
+/// broken link
+#[tokio::test]
+async fn pruning_wins_over_accepting_dangling_references() {
+    let harness = Harness::get().await;
+    let _guard = harness.restore_guard().await;
+    let ns = harness.conf.thorium.namespace.clone();
+    // a group whose owners include a user that doesn't exist
+    let client = harness.client().await;
+    let names = Names::new();
+    let group = names.group("kalyke");
+    seed::group(&client, &group).await;
+    let ghost = names.user("euanthe");
+    let owners = [
+        format!("{ns}:groups_direct:{group}:owners"),
+        format!("{ns}:groups_combined:{group}:owners"),
+    ];
+    for set in &owners {
+        sadd(harness, set, &ghost).await;
+    }
+    // both flags: the owner is pruned, not kept
+    let out = harness.scratch("prune-and-accept");
+    let run = backup_redis_with(
+        harness,
+        &out,
+        &["--prune-dangling", "--accept-broken-links"],
+    );
+    assert_eq!(run.status.code(), Some(2), "{}", describe(&run));
+    let backup = redis_json(&out);
+    let held = backup
+        .groups
+        .iter()
+        .find(|held| held.name == group)
+        .expect("the group isn't in the backup");
+    assert!(!held.owners.combined.contains(&ghost), "{held:?}");
+    assert_eq!(changes(&out, &format!("groups/{group}")).len(), 1);
+    let records = read_records(&out.join(FAILURES_FILE)).unwrap_or_default();
+    assert!(
+        records.iter().all(|record| record.component != "redis"),
+        "{records:#?}"
+    );
+    // put the cluster back as it was
+    for set in &owners {
+        srem(harness, set, &ghost).await;
+    }
 }

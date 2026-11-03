@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+use thorium::models::BackupParams;
 use thorium::{Conf, CtlConf, Thorium};
 use tracing::{info, warn};
 
@@ -457,6 +458,9 @@ impl<'a> ClusterVerifier<'a> {
     /// Diffs the API's Redis state with `redis.json`, record by record, naming the fields that
     /// differ but never their values, which hold credentials; sets compare in any order
     ///
+    /// The cluster's state is read with its dangling group members and user memberships kept, so
+    /// a cluster restored from a backup that accepted them can still be compared.
+    ///
     /// # Arguments
     ///
     /// * `root` - The backup root
@@ -474,7 +478,11 @@ impl<'a> ClusterVerifier<'a> {
                 .await;
         }
         let live = match Thorium::from_ctl_conf(ctl_conf.clone()).await {
-            Ok(client) => client.system.backup().await.map_err(Error::from),
+            Ok(client) => client
+                .system
+                .backup_with(&BackupParams::default().accept_dangling())
+                .await
+                .map_err(Error::from),
             Err(error) => Err(Error::from(error)),
         };
         let live = match live.and_then(|live| Ok(serde_json::to_value(live)?)) {

@@ -812,34 +812,48 @@ async fn a_failed_redis_component_records_that_user_icons_were_not_checked() {
         FailureKind::BrokenLink
     );
     assert_eq!(manifest_of(&healthy).skipped, 0);
-    // a group owner that isn't a user makes the API refuse the Redis backup
+    // a group whose name holds the key separator makes the API refuse the Redis backup even when
+    // broken links are accepted, so copy the seeded group's data under such a name and list it
     let ns = harness.conf.thorium.namespace.clone();
-    let ghost = Names::new().user("carme");
+    let bad = format!("bad:{}", Names::new().suffix);
+    let bad_data = format!("{ns}:groups_data:{bad}");
     let pool = redis_pool(&harness.conf).await.unwrap();
     let mut conn = pool.get().await.unwrap();
-    let sets = [
-        format!("{ns}:groups_direct:{}:owners", seeded.group),
-        format!("{ns}:groups_combined:{}:owners", seeded.group),
-    ];
-    for set in &sets {
-        let _: redis::Value = redis::cmd("SADD")
-            .arg(set)
-            .arg(&ghost)
+    let data: Vec<(String, String)> = redis::cmd("HGETALL")
+        .arg(format!("{ns}:groups_data:{}", seeded.group))
+        .query_async(&mut *conn)
+        .await
+        .unwrap();
+    assert!(!data.is_empty(), "no data for group {}", seeded.group);
+    for (field, value) in &data {
+        let _: redis::Value = redis::cmd("HSET")
+            .arg(&bad_data)
+            .arg(field)
+            .arg(value)
             .query_async(&mut *conn)
             .await
             .unwrap();
     }
+    let _: redis::Value = redis::cmd("SADD")
+        .arg(format!("{ns}:groups"))
+        .arg(&bad)
+        .query_async(&mut *conn)
+        .await
+        .unwrap();
     let broken = harness.scratch("links-icons-failed").join("backup");
     let taken = backup_of(harness, components, &broken, &["--accept-broken-links"]);
-    // remove the dangling owner and put the icon back before any assertion can end the test
-    for set in &sets {
-        let _: redis::Value = redis::cmd("SREM")
-            .arg(set)
-            .arg(&ghost)
-            .query_async(&mut *conn)
-            .await
-            .unwrap();
-    }
+    // remove the bad group and put the icon back before any assertion can end the test
+    let _: redis::Value = redis::cmd("SREM")
+        .arg(format!("{ns}:groups"))
+        .arg(&bad)
+        .query_async(&mut *conn)
+        .await
+        .unwrap();
+    let _: redis::Value = redis::cmd("DEL")
+        .arg(&bad_data)
+        .query_async(&mut *conn)
+        .await
+        .unwrap();
     put_graphic(harness, &seeded.icon).await;
     // the run exits 2 and warns that the icons weren't checked
     assert_eq!(taken.status.code(), Some(2), "{}", describe(&taken));
