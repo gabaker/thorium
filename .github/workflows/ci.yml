@@ -10,8 +10,8 @@
 #      push decides which lints and tests this run needs, and whether the image publishes (see
 #      its step for the rules).
 #   1. Builds, in parallel: the mdBook docs, the UI bundle, and the glibc (x86_64 and arm64), musl
-#      (x86_64 and arm64), Windows, and macOS binaries. The macOS thorctl and thoradm build in two
-#      jobs, so the run asks for two of the scarce macOS runners.
+#      (x86_64 and arm64), Windows, and macOS binaries. The macOS thorctl and thoradm build in one
+#      job, so the run asks for a single one of the scarce macOS runners.
 #   2. Build · core container image: the image is built from the build artifacts, once for
 #      linux/amd64 and once for linux/arm64 (the publish joins the two into one multi-arch
 #      image under the tag, each architecture also pushed under the tag plus `-amd64` or `-arm64`
@@ -612,23 +612,26 @@ jobs:
           path: target/x86_64-pc-windows-gnu/release/thorium-reactor.exe
           if-no-files-found: error
 
-  # thorctl and thoradm build in separate jobs, on two macOS runners, so thorctl compiles
-  # thorium-api with its client features only instead of with thoradm's server features, and
-  # each job builds its two targets one after the other so a runner's memory holds one target's
-  # compile at a time. Neither needs another job, so both start with the other builds. The image
-  # serves both binaries for each macOS target. Cargo runs directly, as actions-rust-cross does on
-  # macOS, since that action takes a single target.
-  build-macos-thorctl:
-    name: Build · macOS thorctl
+  # thorctl and thoradm build on one macOS runner, so a run asks for a single one of the scarce
+  # macOS runners. Each binary builds for each target in its own cargo run, in turn: a shared
+  # `cargo build -p thorctl -p thoradm` would unify their features and compile thorctl's
+  # thorium-api with thoradm's server features instead of its client features only, and one
+  # target at a time keeps one target's compile in the runner's memory. It needs no other job, so
+  # it starts with the other builds. The image serves both binaries for each macOS target. Cargo
+  # runs directly, as actions-rust-cross does on macOS, since that action takes a single target.
+  # The four release builds run in turn, so the job takes the longest timeout GitHub allows a job
+  # (360 minutes), twice the 180 minutes each of the other release builds gets
+  build-macos-binaries:
+    name: Build · macOS binaries
     runs-on: macOS-latest
-    timeout-minutes: 180
+    timeout-minutes: 360
     permissions:
       contents: read
     # gxhash needs AES, which aarch64-apple-darwin enables by default and x86_64 needs named.
     # Target-specific flags keep each target's own; RUSTFLAGS would apply to both.
-    # LZMA_API_STATIC makes liblzma-sys build its bundled liblzma instead of linking a Homebrew
-    # liblzma that pkg-config finds on the runner and most Macs lack. thorctl does not depend on
-    # liblzma-sys; the variable is set so a dependency that pulls it in still links it statically
+    # LZMA_API_STATIC makes liblzma-sys (through thoradm's zip) build its bundled liblzma instead
+    # of linking a Homebrew liblzma that pkg-config finds on the runner and most Macs lack; it
+    # applies to every build, so a thorctl dependency that pulls liblzma-sys in links it statically
     env:
       CARGO_TARGET_X86_64_APPLE_DARWIN_RUSTFLAGS: "-C target-feature=+aes,+sse2"
       LZMA_API_STATIC: "1"
@@ -638,46 +641,57 @@ jobs:
           persist-credentials: false
       - name: Install Rust nightly
         run: rustup toolchain install nightly --profile minimal --target aarch64-apple-darwin --target x86_64-apple-darwin
-      # one target at a time, so the runner's memory holds one target's compile, not both
+      # one binary and one target per cargo run, so each binary resolves its own features and the
+      # runner's memory holds one target's compile at a time
       - name: Build thorctl for aarch64-apple-darwin
         run: cargo +nightly build --release --features vendored-openssl -p thorctl --target aarch64-apple-darwin
       - name: Build thorctl for x86_64-apple-darwin
         run: cargo +nightly build --release --features vendored-openssl -p thorctl --target x86_64-apple-darwin
+      - name: Build thoradm for aarch64-apple-darwin
+        run: cargo +nightly build --release --features vendored-openssl -p thoradm --target aarch64-apple-darwin
+      - name: Build thoradm for x86_64-apple-darwin
+        run: cargo +nightly build --release --features vendored-openssl -p thoradm --target x86_64-apple-darwin
       # the upload's if-no-files-found only fails when every path is missing, so a shipped binary
       # that cargo did not produce fails here, in this step, instead of as a COPY error in the image
       # build
-      - name: Check macOS thorctl binaries exist
+      - name: Check macOS binaries exist
         run: |
           missing=0
-          for target in aarch64-apple-darwin x86_64-apple-darwin; do
-            if [ ! -f "target/${target}/release/thorctl" ]; then
-              echo "::error::target/${target}/release/thorctl was not built"
-              missing=1
-            fi
+          for binary in thorctl thoradm; do
+            for target in aarch64-apple-darwin x86_64-apple-darwin; do
+              if [ ! -f "target/${target}/release/${binary}" ]; then
+                echo "::error::target/${target}/release/${binary} was not built"
+                missing=1
+              fi
+            done
           done
           exit "$missing"
-      - name: Strip macOS thorctl binaries
+      - name: Strip macOS binaries
         run: |
-          for target in aarch64-apple-darwin x86_64-apple-darwin; do
-            strip "target/${target}/release/thorctl"
+          for binary in thorctl thoradm; do
+            for target in aarch64-apple-darwin x86_64-apple-darwin; do
+              strip "target/${target}/release/${binary}"
+            done
           done
       # the image serves these binaries for download onto any Mac, so they must be self-contained:
       # a library linked from outside the system paths, such as a Homebrew dylib the runner has,
       # would fail to load on a Mac without it, so any such library fails the job here
-      - name: Check macOS thorctl binaries link only system libraries
+      - name: Check macOS binaries link only system libraries
         run: |
           outside=0
-          for target in aarch64-apple-darwin x86_64-apple-darwin; do
-            path="target/${target}/release/thorctl"
-            libs=$(otool -L "$path" | tail -n +2 | awk '{print $1}')
-            for lib in $libs; do
-              case "$lib" in
-                /usr/lib/*|/System/*) ;;
-                *)
-                  echo "::error::${path} links ${lib}, which is outside /usr/lib and /System"
-                  outside=1
-                  ;;
-              esac
+          for binary in thorctl thoradm; do
+            for target in aarch64-apple-darwin x86_64-apple-darwin; do
+              path="target/${target}/release/${binary}"
+              libs=$(otool -L "$path" | tail -n +2 | awk '{print $1}')
+              for lib in $libs; do
+                case "$lib" in
+                  /usr/lib/*|/System/*) ;;
+                  *)
+                    echo "::error::${path} links ${lib}, which is outside /usr/lib and /System"
+                    outside=1
+                    ;;
+                esac
+              done
             done
           done
           exit "$outside"
@@ -693,69 +707,6 @@ jobs:
           name: x86_64-apple-darwin-thorctl
           path: target/x86_64-apple-darwin/release/thorctl
           if-no-files-found: error
-
-  build-macos-thoradm:
-    name: Build · macOS thoradm
-    runs-on: macOS-latest
-    timeout-minutes: 180
-    permissions:
-      contents: read
-    # gxhash needs AES, which aarch64-apple-darwin enables by default and x86_64 needs named.
-    # Target-specific flags keep each target's own; RUSTFLAGS would apply to both.
-    # LZMA_API_STATIC makes liblzma-sys (through zip) build its bundled liblzma instead of linking
-    # a Homebrew liblzma that pkg-config finds on the runner and most Macs lack
-    env:
-      CARGO_TARGET_X86_64_APPLE_DARWIN_RUSTFLAGS: "-C target-feature=+aes,+sse2"
-      LZMA_API_STATIC: "1"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install Rust nightly
-        run: rustup toolchain install nightly --profile minimal --target aarch64-apple-darwin --target x86_64-apple-darwin
-      # one target at a time, so the runner's memory holds one target's compile, not both
-      - name: Build thoradm for aarch64-apple-darwin
-        run: cargo +nightly build --release --features vendored-openssl -p thoradm --target aarch64-apple-darwin
-      - name: Build thoradm for x86_64-apple-darwin
-        run: cargo +nightly build --release --features vendored-openssl -p thoradm --target x86_64-apple-darwin
-      # the upload's if-no-files-found only fails when every path is missing, so a shipped binary
-      # that cargo did not produce fails here, in this step, instead of as a COPY error in the image
-      # build
-      - name: Check macOS thoradm binaries exist
-        run: |
-          missing=0
-          for target in aarch64-apple-darwin x86_64-apple-darwin; do
-            if [ ! -f "target/${target}/release/thoradm" ]; then
-              echo "::error::target/${target}/release/thoradm was not built"
-              missing=1
-            fi
-          done
-          exit "$missing"
-      - name: Strip macOS thoradm binaries
-        run: |
-          for target in aarch64-apple-darwin x86_64-apple-darwin; do
-            strip "target/${target}/release/thoradm"
-          done
-      # the image serves these binaries for download onto any Mac, so they must be self-contained:
-      # a library linked from outside the system paths, such as a Homebrew dylib the runner has,
-      # would fail to load on a Mac without it, so any such library fails the job here
-      - name: Check macOS thoradm binaries link only system libraries
-        run: |
-          outside=0
-          for target in aarch64-apple-darwin x86_64-apple-darwin; do
-            path="target/${target}/release/thoradm"
-            libs=$(otool -L "$path" | tail -n +2 | awk '{print $1}')
-            for lib in $libs; do
-              case "$lib" in
-                /usr/lib/*|/System/*) ;;
-                *)
-                  echo "::error::${path} links ${lib}, which is outside /usr/lib and /System"
-                  outside=1
-                  ;;
-              esac
-            done
-          done
-          exit "$outside"
       - name: Upload thoradm aarch64-apple-darwin binary artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -779,8 +730,7 @@ jobs:
       - build-cross-binaries
       - build-arm64-cross-binaries
       - build-arm64-glibc-binaries
-      - build-macos-thorctl
-      - build-macos-thoradm
+      - build-macos-binaries
       - build-windows-cross-binaries
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -851,7 +801,7 @@ jobs:
         with:
           name: x86_64-pc-windows-gnu-reactor
           path: windows/reactor
-      # each macOS job uploads one artifact per binary and target; merging them puts both
+      # the macOS build uploads one artifact per binary and target; merging them puts both
       # binaries of a target in one directory
       - name: Download Thorium macos x86_64 Binary Artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
