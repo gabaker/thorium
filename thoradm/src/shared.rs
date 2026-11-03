@@ -1,5 +1,6 @@
 //! The shared utilties across thoradm
 
+pub mod ctl_conf;
 pub mod monitor;
 pub mod progress;
 pub mod record_guard;

@@ -1817,7 +1817,7 @@ pub async fn run(
 pub async fn handle(backup_args: &NewBackup, args: &Args) -> Result<RunOutcome, Error> {
     // load our config
     let config = Conf::new(&args.cluster_conf)?;
-    let ctl_conf = CtlConf::from_path(&args.ctl_conf)?;
+    let ctl_conf = crate::shared::ctl_conf::load(&args.ctl_conf)?;
     // build a new scylla client
     let scylla = Arc::new(utils::get_scylla_client(&config).await?);
     // take the backup through the real file system, boxing its large future
