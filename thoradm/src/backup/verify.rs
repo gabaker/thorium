@@ -1873,7 +1873,7 @@ pub async fn handle(args: &VerifyBackup, thoradm: &Args) -> Result<RunOutcome, E
     }
     // a cluster is reached through its config and its API
     let conf = thorium::Conf::new(&thoradm.cluster_conf)?;
-    let ctl_conf = thorium::CtlConf::from_path(&thoradm.ctl_conf)?;
+    let ctl_conf = crate::shared::ctl_conf::load(&thoradm.ctl_conf)?;
     let scylla = crate::shared::scylla::get_client(&conf).await?;
     Box::pin(super::verify_cluster::run(
         args,
