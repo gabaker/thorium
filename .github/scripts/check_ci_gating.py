@@ -59,7 +59,8 @@ the workflows under .github/workflows and fails when any of these rules is broke
   pinned, and each server-<arch> stage copies every server binary (`SERVER_BINARIES`) from that
   architecture's build; ci.yml's core image job needs that build, stages its artifact, and
   builds, checks (check_image_arch.sh), and saves each architecture's image
-* ci.yml's macOS build (`MACOS_JOB`) is one job, so a run asks for one macOS runner; it needs
+* ci.yml's macOS build (`MACOS_JOB`) is one job, so a run asks for one macOS runner, on the image
+  `MACOS_RUNS_ON` gives (the MACOS_RUNNER repository variable, else macos-latest); it needs
   no other job, so it runs in parallel with the other builds, builds each binary of
   `MACOS_BINARIES` once per macOS target, each binary and target in its own cargo run (one `-p`,
   one `--target`) with every variable of `MACOS_BUILD_ENV` set, builds nothing else, and uploads
@@ -250,6 +251,9 @@ TRIVY_SCAN = re.compile(r'(?:\$\{?TRIVY_IMAGE\}?"?|\btrivy)\s+(?:image|fs|filesy
 # run, so thorctl compiles thorium-api without thoradm's server features), and the job that builds
 # the core image from them
 MACOS_JOB = "build-macos-binaries"
+# the macOS build's runs-on: the MACOS_RUNNER repository variable when set, so the runner image
+# can change without a commit, else macos-latest
+MACOS_RUNS_ON = "${{ vars.MACOS_RUNNER || 'macos-latest' }}"
 MACOS_BINARIES = ["thorctl", "thoradm"]
 CORE_IMAGE_JOB = "build-core-container"
 # the macOS targets the core image serves each macOS binary for
@@ -721,6 +725,10 @@ def check_macos_binaries(checker, workflows):
     checker.expect(job is not None, f"ci.yml: has no {MACOS_JOB} job")
     if job is None:
         return
+    checker.expect(
+        job.get("runs-on") == MACOS_RUNS_ON,
+        f"ci.yml: {MACOS_JOB} runs on {job.get('runs-on')!r}, not {MACOS_RUNS_ON!r}",
+    )
     # any need would hold the scarce macOS runner request back until that job finishes
     checker.expect(
         not as_list(job.get("needs")),
