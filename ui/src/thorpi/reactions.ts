@@ -70,7 +70,7 @@ export async function getReaction(
   errorHandler: (error: string) => void,
   statusHandler?: (status: number) => void,
 ): Promise<Reaction | null> {
-  const url = '/reactions/' + group + '/' + uuid;
+  const url = `/reactions/${encodeURIComponent(group)}/${encodeURIComponent(uuid)}`;
   return client
     .get<Reaction>(url)
     .then((res) => {
@@ -228,7 +228,7 @@ export async function listReactions(
  * @returns `true` if the reaction was deleted (HTTP 204), otherwise `false`.
  */
 export async function deleteReaction(group: string, uuid: string, errorHandler: (error: string) => void): Promise<boolean> {
-  const url = '/reactions/' + group + '/' + uuid;
+  const url = `/reactions/${encodeURIComponent(group)}/${encodeURIComponent(uuid)}`;
   return client
     .delete(url)
     .then((res) => {

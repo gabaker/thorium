@@ -2,13 +2,25 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // project imports
 import client from './client';
-import { getReactionLogs, getReactionStageLogs, listReactions } from './reactions';
+import { deleteReaction, getReaction, getReactionLogs, getReactionStageLogs, listReactions } from './reactions';
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
 describe('reaction path segments', () => {
+  it('encodes the group and id of a reaction read', async () => {
+    const get = vi.spyOn(client, 'get').mockResolvedValue({ status: 200, data: { id: 'id' } });
+    await expect(getReaction('g/x', 'id?1', () => undefined)).resolves.toEqual({ id: 'id' });
+    expect(get).toHaveBeenCalledWith('/reactions/g%2Fx/id%3F1');
+  });
+
+  it('encodes the group and id of a reaction delete', async () => {
+    const del = vi.spyOn(client, 'delete').mockResolvedValue({ status: 204 });
+    await expect(deleteReaction('g#x', 'id/1', () => undefined)).resolves.toBe(true);
+    expect(del).toHaveBeenCalledWith('/reactions/g%23x/id%2F1');
+  });
+
   it('encodes the stage name of a stage log request', async () => {
     const get = vi.spyOn(client, 'get').mockResolvedValue({ status: 200, data: { logs: ['one'] } });
     await expect(getReactionStageLogs('g', 'id', 'tool@1#a?b', () => undefined)).resolves.toEqual(['one']);
