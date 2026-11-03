@@ -1,6 +1,6 @@
 import React, { Fragment } from 'react';
 import { Button, Card, Col, Row } from 'react-bootstrap';
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import { FaChevronDown, FaChevronUp, FaRedo } from 'react-icons/fa';
 import Subtitle from '@components/shared/titles/Subtitle';
 import { useUpload } from './UploadContext';

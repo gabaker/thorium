@@ -1,5 +1,5 @@
 import { useMemo, useState, JSX } from 'react';
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import { Card, Col, Pagination, Row } from 'react-bootstrap';
 
 // project imports

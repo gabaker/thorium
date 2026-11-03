@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { NavLink, useLocation } from 'react-router-dom';
+import { NavLink, useLocation } from 'react-router';
 import { FaChevronDown, FaChevronRight } from 'react-icons/fa';
 import styled, { createGlobalStyle, css, keyframes } from 'styled-components';
 

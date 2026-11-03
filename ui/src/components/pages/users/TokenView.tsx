@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router';
 import { Alert, Badge, Button, Col, Container, Modal, OverlayTrigger, Row, Tooltip } from 'react-bootstrap';
 import styled from 'styled-components';
 import { FaClipboard, FaCheck } from 'react-icons/fa6';

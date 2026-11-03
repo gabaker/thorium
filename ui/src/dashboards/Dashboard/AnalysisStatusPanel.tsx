@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import { FaArrowsRotate } from 'react-icons/fa6';
 import { useInView } from 'react-intersection-observer';
 

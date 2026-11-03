@@ -1,6 +1,6 @@
 import React, { Fragment, useMemo } from 'react';
 import { Button, Card, Col, Row } from 'react-bootstrap';
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import { FaRedo } from 'react-icons/fa';
 import { FaChartColumn } from 'react-icons/fa6';
 import { OverlayTipTop } from '@components/shared/overlay/tips';

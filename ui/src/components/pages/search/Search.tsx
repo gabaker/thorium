@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import { Card, Col, Row, Stack } from 'react-bootstrap';
 import DOMPurify from 'dompurify';
 import AlertBanner from '@components/shared/alerts/AlertBanner';

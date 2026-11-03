@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams } from 'react-router';
 import { Button, Card, Col, Modal, Row, Tab, Tabs } from 'react-bootstrap';
 import { FaTrash } from 'react-icons/fa';
 

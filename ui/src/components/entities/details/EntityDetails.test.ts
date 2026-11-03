@@ -32,9 +32,7 @@ describe('nextErrorAfterPollSuccess', () => {
   });
 
   it('preserves an error a user action raised after the failed tick', () => {
-    expect(nextErrorAfterPollSuccess('Cancel Hunt: Permission Denied', 'Failed to Get Entity: 500')).toBe(
-      'Cancel Hunt: Permission Denied',
-    );
+    expect(nextErrorAfterPollSuccess('Cancel Hunt: Permission Denied', 'Failed to Get Entity: 500')).toBe('Cancel Hunt: Permission Denied');
   });
 
   it('leaves the page untouched when the poll never failed', () => {

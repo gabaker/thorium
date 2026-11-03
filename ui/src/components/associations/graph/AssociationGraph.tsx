@@ -443,8 +443,8 @@ const AssociationGraph3DInner: React.FC<{ bordered?: boolean }> = ({ bordered })
    * Focus-on-click camera move shared by graph node clicks and tree-driven focus: with
    * "Fit Neighborhood" on it frames the node's 1-hop neighborhood via its bounding
    * sphere, otherwise it recenters on the node keeping the current distance. The
-   * bounding sphere is computed manually because `zoomToFit(nodeFilter)` cannot be
-   * used: the underlying `fitToBbox` always aims the camera at the world origin.
+   * bounding sphere is computed here rather than through `zoomToFit(nodeFilter)` so
+   * node and edge focus share one framing rule (`sphereFitDistance`) and one camera move.
    *
    * @param node - The node to focus; ignored unless it has finite layout coordinates.
    */

@@ -79,13 +79,12 @@
     "zustand"
   ],
   "react": [
-    "cookie",
+    "@remix-run/route-pattern",
+    "cookie-es",
     "react",
     "react-dom",
     "react-router",
-    "react-router-dom",
-    "scheduler",
-    "set-cookie-parser"
+    "scheduler"
   ],
   "core-js": [
     "core-js"
@@ -98,6 +97,7 @@
     "@codemirror/lang-yaml",
     "@codemirror/language",
     "@codemirror/legacy-modes",
+    "@codemirror/streamparser",
     "@codemirror/lint",
     "@codemirror/state",
     "@codemirror/view",
@@ -353,6 +353,7 @@
     "micromark-util-combine-extensions",
     "micromark-util-decode-numeric-character-reference",
     "micromark-util-decode-string",
+    "micromark-util-edit-map",
     "micromark-util-encode",
     "micromark-util-html-tag-name",
     "micromark-util-normalize-identifier",

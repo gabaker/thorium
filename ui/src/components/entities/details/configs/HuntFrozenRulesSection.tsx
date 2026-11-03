@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, JSX } from 'react';
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import { Badge, Card, Col, Pagination, Row } from 'react-bootstrap';
 
 // project imports

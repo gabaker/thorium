@@ -381,7 +381,7 @@ const BuilderBrowseList: React.FC<BuilderBrowseListProps> = ({ mode, onModeChang
   }
 
   // after the TAG_MODE guard above, mode is narrowed to an entity kind
-  const kind = mode as keyof ExtendedTypeMap;
+  const kind = mode;
   const config = EntityBrowsingConfig[kind];
 
   return (

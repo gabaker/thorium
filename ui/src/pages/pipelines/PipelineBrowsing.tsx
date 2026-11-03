@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { FC } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router';
 
 // project imports
 import { CountBadge, HeaderBar, OmnibarRow } from './PipelineBrowsing.styled';
