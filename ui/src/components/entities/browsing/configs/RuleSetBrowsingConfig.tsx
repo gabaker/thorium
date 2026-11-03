@@ -22,8 +22,6 @@ import { RuleSetEntity, RuleSetMember } from '@models/entities/rulesets';
 import { SUBMITTER_TAG } from '@models/tags';
 import { getDetailsBasePathByEntity } from '@components/entities/details/EntityDetailsRoutes';
 
-// spec: ../EntityBrowsing.spec.md
-
 // the submitter chip duplicates the row's submitter column (rulesets carry no other
 // intrinsic tags), so it stays hidden
 const RULESET_ROW_HIDDEN_TAG_KEYS = [SUBMITTER_TAG];

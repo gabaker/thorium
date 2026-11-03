@@ -100,7 +100,7 @@ Use when you need to verify the **full data flow** — UI sends a request, the A
 
 Live tests require `minithor/expose` and a running Thorium cluster.
 
-The agentic specs (`agentic-*.spec.ts`, `legacy-tools.spec.ts`) also read the names of seeded
+The agentic specs (`agentic-*.spec.ts`, `images-pipelines.spec.ts`) also read the names of seeded
 fixtures (group, sample, tools, workflow, toolset, agent, model endpoints, banned endpoint and
 pipeline) from the JSON file named by `THORIUM_FIXTURES`; its shape is `LiveFixtures` in
 `e2e/agentic-fixtures.ts`. Without `THORIUM_FIXTURES` those spec files are skipped and the rest

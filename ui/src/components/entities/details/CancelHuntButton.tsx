@@ -8,8 +8,6 @@ import { OverlayTipBottom } from '@components/shared/overlay/tips';
 import { cancelHunt } from '@thorpi/hunts';
 import { Hunt, isActiveHuntStatus } from '@models/entities/hunts';
 
-// spec: ./EntityDetails.spec.md
-
 type CancelHuntProps = {
   hunt: Hunt;
   setError: (error: string) => void;

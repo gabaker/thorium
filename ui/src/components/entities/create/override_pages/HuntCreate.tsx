@@ -31,8 +31,6 @@ import { safeDateToStringConversion } from '@utilities/inputs';
 import { Entities, EntityTypes } from '@models/entities/entities';
 import { HuntEngine, HUNT_ENGINES } from '@models/entities/hunts';
 
-// spec: ../EntityCreate.spec.md
-
 const CreateEntityTitle = styled.div`
   display: grid;
   place-items: center;

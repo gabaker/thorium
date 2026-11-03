@@ -48,7 +48,7 @@ const CONVERTED = {
 };
 
 /** A pipeline of image stages: its stages are image names and no tool backs them. */
-const LEGACY = { group: MOCK_GROUP, name: 'legacy', creator: 'test', order: ['old-image'], sla: 86400, triggers: {} };
+const IMAGE_STAGES = { group: MOCK_GROUP, name: 'image-stages', creator: 'test', order: ['old-image'], sla: 86400, triggers: {} };
 
 /** The body of each PATCH the page sent, newest last. */
 type Patches = Record<string, unknown>[];
@@ -63,7 +63,7 @@ type Patches = Record<string, unknown>[];
 async function mockPipelines(page: Page, tools: { kind: string }[]): Promise<Patches> {
   const patches: Patches = [];
   await page.route('**/api/groups/details/**', (route) => fulfillJson(route, { details: [GROUP] }));
-  await page.route('**/api/pipelines/list/**/details/**', (route) => fulfillJson(route, { details: [CONVERTED, LEGACY] }));
+  await page.route('**/api/pipelines/list/**/details/**', (route) => fulfillJson(route, { details: [CONVERTED, IMAGE_STAGES] }));
   await mockEntityList(page, tools);
   await page.route('**/api/pipelines/*/*', (route) => {
     if (route.request().method() === 'PATCH') {
@@ -71,7 +71,7 @@ async function mockPipelines(page: Page, tools: { kind: string }[]): Promise<Pat
       return route.fulfill({ status: 204 });
     }
     const name = route.request().url().split('/').pop();
-    return fulfillJson(route, name === 'legacy' ? LEGACY : CONVERTED);
+    return fulfillJson(route, name === 'image-stages' ? IMAGE_STAGES : CONVERTED);
   });
   return patches;
 }

@@ -4,7 +4,7 @@ import { expect, fulfillJson, MOCK_GROUP } from './agentic-mocks';
 import { setupMockAuth } from './helpers';
 
 /**
- * Mock the group list and fail the legacy list read with a 500.
+ * Mock the group list and fail a list read with a 500.
  *
  * @param page - A signed in page.
  * @param listRoute - The glob of the list route that fails.
@@ -16,7 +16,7 @@ async function failList(page: Page, listRoute: string) {
   await page.route(listRoute, (route) => fulfillJson(route, { error: 'uiloop boom' }, 500));
 }
 
-test.describe('legacy list read errors', () => {
+test.describe('image and pipeline list read errors', () => {
   test.beforeEach(async ({ page }) => {
     await setupMockAuth(page);
   });

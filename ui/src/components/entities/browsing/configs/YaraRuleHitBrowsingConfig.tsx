@@ -23,8 +23,6 @@ import { Entities } from '@models/entities/entities';
 import { YaraRuleHit } from '@models/entities/rules/yara_hits';
 import { getDetailsBasePathByEntity } from '@components/entities/details/EntityDetailsRoutes';
 
-// spec: ../EntityBrowsing.spec.md
-
 // shorten a sample sha256 so the column stays scannable; the details page has the full hash
 const shortSha256 = (sha256: string): string => (sha256.length > 16 ? `${sha256.substring(0, 16)}...` : sha256);
 

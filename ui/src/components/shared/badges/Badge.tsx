@@ -9,7 +9,7 @@ export enum BadgeTone {
   Error = 'error',
   Info = 'info',
   Active = 'active',
-  Legacy = 'legacy',
+  Caution = 'caution',
   Accent = 'accent',
 }
 
@@ -27,7 +27,7 @@ const BADGE_COLORS: Record<BadgeTone, string> = {
   [BadgeTone.Error]: 'var(--thorium-danger-bg)',
   [BadgeTone.Info]: 'var(--thorium-badge-info, var(--thorium-link-text))',
   [BadgeTone.Active]: 'var(--thorium-badge-active, var(--thorium-link-text))',
-  [BadgeTone.Legacy]: 'var(--thorium-warning-secondary-bg)',
+  [BadgeTone.Caution]: 'var(--thorium-warning-secondary-bg)',
   [BadgeTone.Accent]: 'var(--thorium-badge-accent, var(--thorium-link-text))',
 };
 
@@ -90,7 +90,7 @@ export interface BadgeProps extends React.HTMLAttributes<HTMLSpanElement> {
 }
 
 /**
- * A small label with nearly square sides, used for kinds, statuses, counts, and legacy markers. It has no outer margin:
+ * A small label with nearly square sides, used for kinds, statuses, counts, and notices. It has no outer margin:
  * a run of badges is spaced by the gap of its container (`InlineList`), and it centres on the line it sits in.
  */
 export const Badge = forwardRef<HTMLSpanElement, BadgeProps>(

@@ -9,8 +9,6 @@ import { isAdmin } from '@utilities/permissions';
 import { YaraRule } from '@models/entities/rules/yara';
 import { UserInfo } from '@models/users';
 
-// spec: ./EntityDetails.spec.md
-
 type QuarantineExemptProps = {
   rule: YaraRule;
   setError: (error: string) => void;

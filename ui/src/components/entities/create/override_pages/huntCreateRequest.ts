@@ -2,8 +2,6 @@
 import { Hunt, HuntCreateRequest, HuntCorpusBoundsRequest, HuntEngine, HuntSelector, HUNT_ENGINES } from '@models/entities/hunts';
 import { requestTagsToTagEntryList, tagEntriesToRequestTags } from '@utilities/tags';
 
-// spec: ../EntityCreate.spec.md
-
 /**
  * The selector shapes the create form can build, in display order.
  */

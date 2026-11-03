@@ -357,7 +357,7 @@ const nodeTypes = { imageStep: ImageStepNode, terminal: TerminalNodeComponent, b
 
 interface PipelineOrderFlowProps {
   order: (string | string[])[];
-  // The tool (or pinned tool instance) id behind each stage, by stage name. Legacy stages have none.
+  // The tool (or pinned tool instance) id behind each stage, by stage name. Image stages have none.
   stageTools?: Record<string, string>;
   // Called with the edited order and the stage tools that go with it; omit to show the diagram read-only.
   onOrderChange?: (newOrder: (string | string[])[], newStageTools: Record<string, string>) => void;

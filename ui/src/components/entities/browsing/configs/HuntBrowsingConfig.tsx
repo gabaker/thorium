@@ -23,8 +23,6 @@ import { Hunt, HUNT_ACTIVE_TAG, HUNT_ENGINES, HUNT_ENGINE_TAG, HUNT_STATUS_TAG }
 import { SUBMITTER_TAG } from '@models/tags';
 import { getDetailsBasePathByEntity } from '@components/entities/details/EntityDetailsRoutes';
 
-// spec: ../EntityBrowsing.spec.md
-
 // intrinsic tag chips duplicating row fields stay hidden: the Engine · Status column
 // shows engine and status (HuntActive derives from status) and submitter has its own
 // column, so their chips carry no extra information here

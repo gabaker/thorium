@@ -24,7 +24,6 @@ import {
   launchSearchParams,
   LaunchState,
   LaunchSubmission,
-  mapWithConcurrency,
   newLaunchItem,
   uploadGroups,
 } from './launchForms';
@@ -62,15 +61,15 @@ const WORKFLOW = {
   metadata: { WorkflowCatalog: { latest_instance: 'wi' } },
 } as unknown as Workflow;
 
-/** A runnable pipeline and one with a legacy stage. */
+/** A runnable pipeline and one with a stage no tool backs. */
 const PIPELINE = { group: 'system', name: 'scan-all', order: [['scan']], stage_tools: { scan: { tool: 't1' } } } as unknown as Pipeline;
-const LEGACY = { group: 'system', name: 'legacy', order: [['harvest']], stage_tools: {} } as unknown as Pipeline;
+const NEEDS_TOOL = { group: 'system', name: 'image-stages', order: [['harvest']], stage_tools: {} } as unknown as Pipeline;
 
 /** Everything listed and nothing loading. */
 const CATALOG: LaunchCatalog = {
   workflows: [WORKFLOW],
   tools: [tool('t1', 'scan'), tool('t2', 'strings'), tool('h', 'harness', ['system'], 'Harness'), tool('m', 'multi', ['system', 'other'])],
-  pipelines: [PIPELINE, LEGACY],
+  pipelines: [PIPELINE, NEEDS_TOOL],
   instances: {},
   loading: [],
 };
@@ -181,12 +180,12 @@ describe('describeItem', () => {
     expect(view({ kind: LaunchTab.Workflow, ref: '../../users/delete-me' }).found).toBe(false);
     expect(view({ kind: LaunchTab.Workflow, ref: 'w' }, { ...CATALOG, workflows: [], loading: [LaunchTab.Workflow] }).found).toBe(false);
   });
-  it('runs a pipeline in its group and refuses one with a legacy stage', () => {
+  it('runs a pipeline in its group and refuses one with a stage no tool backs', () => {
     expect(view({ kind: LaunchTab.Pipeline, ref: 'system/scan-all' })).toMatchObject({ groups: ['system'], blocker: null });
-    expect(view({ kind: LaunchTab.Pipeline, ref: 'system/legacy' })).toMatchObject({
-      blocker: 'legacy cannot be run.',
+    expect(view({ kind: LaunchTab.Pipeline, ref: 'system/image-stages' })).toMatchObject({
+      blocker: 'image-stages cannot be run.',
     });
-    expect(view({ kind: LaunchTab.Pipeline, ref: 'system/legacy' }).pipelineProblem).toContain('harvest');
+    expect(view({ kind: LaunchTab.Pipeline, ref: 'system/image-stages' }).pipelineProblem).toContain('harvest');
   });
   it('waits for a list that is loading, and says when a linked run is not available', () => {
     expect(view({ kind: LaunchTab.Tool, ref: 'gone' }, { ...CATALOG, loading: [LaunchTab.Tool] }).blocker).toBe('Loading the tool list.');
@@ -314,22 +313,6 @@ describe('launchRuns', () => {
     const result = await launchRuns(views, state.shared, state.inputs, () => Promise.resolve(null), send);
     expect(result).toEqual({ error: 'The prompt could not be uploaded', outcomes: [] });
     expect(sent).toHaveLength(0);
-  });
-});
-
-describe('mapWithConcurrency', () => {
-  it('keeps at most the limit in flight and the results in order', async () => {
-    let active = 0;
-    let peak = 0;
-    const results = await mapWithConcurrency([5, 1, 4, 2, 3], 2, async (delay) => {
-      active += 1;
-      peak = Math.max(peak, active);
-      await new Promise((resolve) => setTimeout(resolve, delay));
-      active -= 1;
-      return delay * 10;
-    });
-    expect(results).toEqual([50, 10, 40, 20, 30]);
-    expect(peak).toBe(2);
   });
 });
 
