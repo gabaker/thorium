@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """Choose the tags and versions a workflow run publishes the Thorium image and Helm charts under.
 
-Both the release workflow (deploy.yml) and the chart workflow (charts.yml) call this script, so
-images and charts follow the same rules:
+The Thorium Build workflow (ci.yml) calls this script for both the image and the charts, so they
+follow the same rules:
 
 * every push and pull request builds, but only some runs publish:
   - every branch on forks, so a fork can test its own image and charts
   - only the default branch on the core repo
   - release tags, on the core repo and forks
   - never pull requests
-* release tags must be SemVer versions (`X.Y.Z` or `X.Y.Z-<prerelease>`), since Helm needs SemVer
-  chart versions and Docker cannot use `+` build metadata in an image tag
+* a release tag is a SemVer version (`X.Y.Z` or `X.Y.Z-<prerelease>`), with or without a leading
+  `v`, since Helm needs SemVer chart versions and Docker cannot use `+` build metadata in an image
+  tag. Any other tag builds and is scanned but publishes nothing, and the run logs a warning
+  saying why; the decision is made before any job pushes
 * branch names are used in image tags and chart versions as-is when they are valid there. A name
   that has to be changed (characters replaced, a `branch-` prefix added, or shortened) gets `-` and
   the first 8 hex digits of its sha256 appended, so two branches never share a tag or version
@@ -20,16 +22,17 @@ Two subcommands write `key=value` lines to `$GITHUB_OUTPUT` (and to stdout for t
 * `image` - the Thorium image's reference and whether to publish it, plus which release image
   `latest` should point at:
   - `image`: `ghcr.io/<owner>/<repo>/infrastructure/thorium:<tag>`, where the tag is the release
-    tag, `pr-<number>`, or the branch name made into a valid Docker tag
+    tag as pushed (a leading `v` kept), `pr-<number>`, or the branch or other tag name made into
+    a valid Docker tag
   - `latest-image`: the same repository's `latest` tag
-  - `latest-source`: the highest `X.Y.Z` release reachable from the default branch, set on
-    default-branch runs and on that release's own tag run, otherwise empty
+  - `latest-source`: the highest `X.Y.Z` or `vX.Y.Z` release reachable from the default branch,
+    set on default-branch runs only, otherwise empty: a release tag publishes its image under the
+    tag alone and never moves `latest`, `main`, or a branch tag
   - `publish`: `true` or `false`
 * `chart <Chart.yaml>...` - the version to package the charts as, whether to publish them, and the
   image the thorium chart should deploy (the image the `image` subcommand picks for this ref):
-  - `version`: the release tag (which must equal every chart's version or be a prerelease of
-    it), `<version>-pr.<number>`,
-    or the prerelease `<version>-<branch>.<run number>.g<short sha>`
+  - `version`: the release tag without a leading `v`, `<version>-pr.<number>`, or the
+    prerelease `<version>-<branch or tag>.<run number>.g<short sha>`
   - `publish`: `true` or `false`
   - `image-repository` and `image-tag`
 
@@ -56,6 +59,8 @@ RELEASE_RE = re.compile(
     r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
     r"(?:-((?:0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*))*))?"
 )
+# the prefix a release tag may carry, which the chart version drops
+RELEASE_TAG_PREFIX = "v"
 # a final release (no prerelease), the only kind `latest` points at
 FINAL_RELEASE_RE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 # a branch-derived image tag that could be mistaken for a release tag
@@ -139,22 +144,39 @@ class Run:
         return self.ref_name.split("/", 1)[0]
 
 
-def release_tag(run):
-    """Return the run's release tag after checking it is a valid release version.
+def tag_release_version(tag):
+    """Return the release version a tag names, or None when the tag is not a release tag.
+
+    The version is the tag without a leading `v`; the tag itself, `v` included, is the image tag,
+    so it must also fit Docker's tag length limit.
 
     # Arguments
 
-    * `run` - The workflow run, which must be building a tag
+    * `tag` - The pushed tag name
     """
-    # the workflow's tag filter allows any suffix, so the full SemVer rule is enforced here, along
-    # with the image tag length limit since the release tag is also the image tag
-    if not RELEASE_RE.fullmatch(run.ref_name) or len(run.ref_name) > MAX_IMAGE_TAG:
-        raise ReleaseRefError(
-            f"release tag {run.ref_name!r} must be a SemVer version of at most {MAX_IMAGE_TAG} "
-            "characters: X.Y.Z, optionally followed by '-' and dot-separated prerelease "
-            "identifiers (letters, digits, '-')"
-        )
-    return run.ref_name
+    # the workflow's tag filter allows any suffix, so the full SemVer rule is enforced here
+    version = tag.removeprefix(RELEASE_TAG_PREFIX)
+    if RELEASE_RE.fullmatch(version) and len(tag) <= MAX_IMAGE_TAG:
+        return version
+    return None
+
+
+def tag_problem(run):
+    """Return why a tag run publishes nothing, or None when the run is not a tag or is a release.
+
+    # Arguments
+
+    * `run` - The workflow run
+    """
+    # only tags that are not release versions are refused
+    if not run.is_tag or tag_release_version(run.ref_name) is not None:
+        return None
+    return (
+        f"tag {run.ref_name!r} is not a release tag, so this run builds and scans it but publishes "
+        f"nothing: a release tag is a SemVer version of at most {MAX_IMAGE_TAG} characters, X.Y.Z "
+        "or vX.Y.Z, optionally followed by '-' and dot-separated prerelease identifiers "
+        "(letters, digits, '-')"
+    )
 
 
 def should_publish(run):
@@ -164,11 +186,11 @@ def should_publish(run):
 
     * `run` - The workflow run
     """
-    # pull requests never publish, release tags always do
+    # pull requests never publish; tags publish only when they are release versions
     if run.is_pull_request:
         return False
     if run.is_tag:
-        return True
+        return tag_release_version(run.ref_name) is not None
     # branches publish everywhere on forks but only from the default branch on the core repo
     return run.is_fork or run.ref_name == run.default_branch
 
@@ -218,6 +240,19 @@ def branch_image_tag(branch):
     return tag
 
 
+def other_tag_image_tag(tag):
+    """Turn a tag that is not a release into a valid Docker image tag for a build never published.
+
+    # Arguments
+
+    * `tag` - The pushed tag name
+    """
+    # replace characters Docker does not allow in tags; the prefix and hash keep the name from
+    # looking like a release, `latest`, or a branch's tag
+    name = re.sub(r"[^a-zA-Z0-9._-]", "-", tag)
+    return with_name_hash(f"tag-{name}", tag, MAX_IMAGE_TAG)
+
+
 def image_tag(run):
     """Return the tag the run's Thorium image is built under.
 
@@ -228,9 +263,24 @@ def image_tag(run):
     # pull request images stay on the runner, so they only need a readable name
     if run.is_pull_request:
         return f"pr-{run.pr_number}"
+    # a release tag is the image tag as pushed; any other tag only needs a valid name
     if run.is_tag:
-        return release_tag(run)
+        if tag_release_version(run.ref_name) is not None:
+            return run.ref_name
+        return other_tag_image_tag(run.ref_name)
     return branch_image_tag(run.ref_name)
+
+
+def final_release_version(tag):
+    """Return the final release version a tag names (`X.Y.Z` or `vX.Y.Z`), or None.
+
+    # Arguments
+
+    * `tag` - A tag name
+    """
+    # the leading `v` is optional, as for every release tag
+    version = tag.removeprefix(RELEASE_TAG_PREFIX)
+    return version if FINAL_RELEASE_RE.fullmatch(version) else None
 
 
 def release_sort_key(tag):
@@ -238,10 +288,12 @@ def release_sort_key(tag):
 
     # Arguments
 
-    * `tag` - A tag matching `FINAL_RELEASE_RE`
+    * `tag` - A tag `final_release_version` accepts
     """
-    # compare each numeric component as an integer so 1.10.0 sorts above 1.9.0
-    return tuple(int(part) for part in tag.split("."))
+    # compare each numeric component as an integer so 1.10.0 sorts above 1.9.0, and prefer the
+    # tag without a `v` when both spellings of a version exist
+    version = final_release_version(tag)
+    return (tuple(int(part) for part in version.split(".")), tag == version)
 
 
 def highest_release(ref):
@@ -256,30 +308,30 @@ def highest_release(ref):
     if result.returncode != 0:
         raise ReleaseRefError(f"cannot list the release tags on {ref}: {result.stderr.strip()}")
     # keep only final releases, then pick the highest by version
-    releases = [tag for tag in result.stdout.split() if FINAL_RELEASE_RE.fullmatch(tag)]
+    releases = [tag for tag in result.stdout.split() if final_release_version(tag)]
     return max(releases, key=release_sort_key) if releases else None
 
 
 def latest_source(run, repository):
     """Return the release image `latest` should point at after this run, or an empty string.
 
-    `latest` follows the highest release on the default branch. A release tag's own run sets it
-    when the tag is already on the default branch, and every default-branch run re-points it so a
-    release merged after its tag was pushed is still promoted.
+    `latest` follows the highest release on the default branch. Only default-branch runs re-point
+    it, so a release tag's run publishes the tag alone, and a release is promoted by the next
+    default-branch run that publishes, whether its tag was pushed before or after it was merged.
 
     # Arguments
 
     * `run` - The workflow run
     * `repository` - The image repository
     """
-    # only release tags and default-branch pushes move `latest`
+    # only default-branch runs move `latest`; tags, other branches, and pull requests never do
     is_default = not run.is_pull_request and not run.is_tag and run.ref_name == run.default_branch
-    if not (run.is_tag or is_default):
+    if not is_default:
         return ""
     # checkout fetches the current default branch, so a re-run of an older commit still finds the
     # newest release
     highest = highest_release(f"origin/{run.default_branch}")
-    if not highest or (run.is_tag and run.ref_name != highest):
+    if not highest:
         return ""
     return f"{repository}:{highest}"
 
@@ -328,13 +380,13 @@ def chart_version(run, version):
     # pull request charts are never published, so they only need a readable version
     if run.is_pull_request:
         return f"{version}-pr.{run.pr_number}"
-    # a release tag must be the charts' version, or a prerelease of it
+    # a release tag is the chart version without its leading `v`
     if run.is_tag:
-        tag = release_tag(run)
-        if tag != version and not tag.startswith(f"{version}-"):
-            raise ReleaseRefError(f"release tag {tag} does not match the chart version {version}")
-        return tag
-    # the g prefix keeps an all-digit short sha with a leading zero a valid identifier
+        release = tag_release_version(run.ref_name)
+        if release is not None:
+            return release
+    # any other tag, which never publishes, is versioned like a branch. The g prefix keeps an
+    # all-digit short sha with a leading zero a valid identifier
     branch = chart_branch_identifier(run.ref_name)
     return f"{version}-{branch}.{run.run_number}.g{run.sha[:7]}"
 
@@ -411,6 +463,10 @@ def main():
     except (ReleaseRefError, OSError) as error:
         print(f"::error::{error}")
         return 1
+    # a tag that publishes nothing says why in a warning annotation
+    problem = tag_problem(run)
+    if problem:
+        print(f"::warning::{problem}")
     write_outputs(outputs)
     return 0
 

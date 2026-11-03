@@ -451,6 +451,29 @@ done
 After that, `minithor deploy` (without `--skip-operators`) installs the infra-operators chart and
 a fresh deployment.
 
+## Backing up a cluster
+
+[Thoradm](../thoradm/thoradm.md) backs up a minithor cluster from the host it runs on, a Mac
+laptop included, through the forwards of `expose --dev`. Use the thoradm the cluster's API
+serves, so its version matches the API's (see
+[Run thoradm at the API's version](../thoradm/taking_backups.md#run-thoradm-at-the-apis-version)):
+
+```bash
+./minithor expose --dev          # the API on localhost:8080, plus Scylla, Redis, and SeaweedFS
+./minithor get-config --local    # ~/thorium.local.yml, pointing at those forwards
+curl -fsSL "http://localhost:8080/api/binaries/$(uname -s | tr '[:upper:]' '[:lower:]')/$(uname -m | tr _ -)/thoradm" -o thoradm
+chmod +x thoradm
+./thoradm --cluster-conf ~/thorium.local.yml backup new -o ~/thorium-backup-$(date +%F)
+```
+
+Thoradm fetches the Redis data through the API as the admin `deploy` logged thorctl in as
+(`~/.thorium/config.yml`; after `--no-thorctl`, log in as an admin with `thorctl login` first). For
+another profile, pass `--ctl-conf ~/.thorium/config-<profile>.yml` and
+`--cluster-conf ~/thorium-<profile>.local.yml`, and add the `--port-offset` given to `expose` to
+the download URL's port. A backup holds every credential in plaintext; see
+[Taking Backups](../thoradm/taking_backups.md) for what it holds, and the
+[Thoradm guide](../thoradm/thoradm.md#restoring-a-backup) for restoring it.
+
 ## Troubleshooting
 
 - **`deploy` times out or keeps printing "still waiting".** The message is the `ThoriumCluster`'s

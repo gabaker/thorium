@@ -15,7 +15,28 @@ installing anything; the API pod already reaches every backend:
 kubectl -n thorium exec deploy/api -- /app/thoradm migrate list
 ```
 
-Every Thorium API also serves a Linux build at `<THORIUM_URL>/api/binaries/linux/x86-64/thoradm`.
+Every Thorium API also serves Thoradm builds from its image, at the API's own version:
+
+| Platform | URL |
+|----------|-----|
+| Linux (x86-64) | `<THORIUM_URL>/api/binaries/linux/x86-64/thoradm` |
+| Linux (arm64) | `<THORIUM_URL>/api/binaries/linux/arm64/thoradm` |
+| macOS (Apple silicon) | `<THORIUM_URL>/api/binaries/darwin/arm64/thoradm` |
+| macOS (Intel) | `<THORIUM_URL>/api/binaries/darwin/x86-64/thoradm` |
+
+The API also serves the Linux arm64 builds under `linux/aarch64`, the name `uname -m` gives, so
+this downloads the build for the host it runs on (there is no Windows build). An older release
+whose image has no Linux arm64 builds answers 404 for them:
+
+```bash
+curl -fsSL "<THORIUM_URL>/api/binaries/$(uname -s | tr '[:upper:]' '[:lower:]')/$(uname -m | tr _ -)/thoradm" -o thoradm
+chmod +x thoradm
+```
+
+macOS blocks a copy downloaded with a browser until you remove its quarantine attribute
+(`xattr -d com.apple.quarantine thoradm`); one downloaded with `curl` has none. To back up a
+minithor cluster from the laptop it runs on, see
+[Backing up a cluster](../deploy/minithor.md#backing-up-a-cluster).
 
 ## Config
 

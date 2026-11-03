@@ -1,50 +1,78 @@
-# Scans the repo for secrets, for Helm and Ansible misconfigurations, and for
-# vulnerable dependencies in its lockfiles, with Trivy (open source edition)
+# Scans Thorium with Trivy (open source edition): the repo for secrets, for Helm
+# and Ansible misconfigurations, and for vulnerable dependencies in its
+# lockfiles, and the Thorium core image for vulnerabilities
 #
-# - Trivy runs from the same digest-pinned image as dockerfile-lint.yml,
-#   image-rescan.yml and deploy.yml; keep the digests in step.
+# - ci.yml calls this workflow on every push and pull request once its core
+#   image is built, whatever the build concluded, beside the image publish
+#   rather than before it: nothing in ci.yml waits for these scans, so they
+#   never delay or block a publish. ci.yml passes the name of the artifact it
+#   saved the image in, and the image scan reads it; a build that saved no image
+#   passes an empty name and the image scan is skipped. The repo scans wait for
+#   nothing, the image scan included.
+# - It also runs weekly and on demand on its own. Those runs scan the repo the
+#   same way and, in place of a build's image, rescan the images this repo has
+#   published, so CVEs disclosed after an image was built still surface.
+# - Trivy runs from the same digest-pinned image as dockerfile-lint.yml; keep
+#   the digests in step.
 # - The secret and IaC scans run with no network, a read-only root filesystem,
 #   no capabilities, as the runner's unprivileged user, and with the repo
 #   mounted read-only. They receive no tokens and no Docker socket, and run
 #   from outside the repo so a trivy.yaml, .trivyignore or trivy-secret.yaml
-#   added by a pull request is never auto-loaded.
+#   added by a pull request is never auto-loaded. The dependency and image
+#   scans run the same way but with the network, for Trivy's vulnerability
+#   database (and the published images' layers).
 # - Every finding, at every severity, is written to the job log, inline
 #   annotations, the job summary, and a `<scan>-report` artifact by
-#   .github/scripts/lint_report.py, and to code scanning by a separate upload
-#   job that runs no scanner code (the warn-only scans are not uploaded for
+#   .github/scripts/lint_report.py, and to code scanning by separate upload
+#   jobs that run no scanner code (the warn-only scans are not uploaded for
 #   pull requests, where code scanning's own check would fail on them).
 #   Findings matching .github/lint-ignore.toml are left out everywhere.
 # - Gates: any secret fails the job. Helm and Ansible misconfigurations and
-#   dependency vulnerabilities only warn; they never fail the workflow.
-# - The dependency scan reads every lockfile Trivy recognizes (Cargo.lock,
-#   ui/package-lock.json, and any others) and ranks its findings with
+#   dependency and image vulnerabilities only warn; they never fail the
+#   workflow.
+# - The dependency and image scans rank their findings with
 #   .github/scripts/vuln_report.py with EPSS and CISA KEV data (downloaded in
-#   full, so no CVE IDs leave the runner), attributing each to its lockfile.
-# - The Thorium image is scanned on every build, before it is published, in
-#   deploy.yml, and its published images are rescanned weekly by
-#   image-rescan.yml.
+#   full, so no CVE IDs leave the runner). The dependency scan reads every
+#   lockfile Trivy recognizes (Cargo.lock, ui/package-lock.json, and any
+#   others) and attributes each finding to its lockfile. The image scans write
+#   a CycloneDX SBOM of each image they scan, and are uploaded to code scanning
+#   as `trivy-image-build` (a build's image) and `trivy-image-published` (the
+#   published images).
 #
 # To bump Trivy, resolve the new tag's multi-arch index digest from ghcr.io and
-# update both the tag comment and the digest here, in dockerfile-lint.yml,
-# image-rescan.yml and deploy.yml.
+# update both the tag comment and the digest here and in dockerfile-lint.yml
+# (and thorpal-harness.yml, in checkouts that have it).
 name: Security Scan
 
 on:
-  # Dependabot branches are checked by their pull requests instead, so each
-  # update runs once
-  push:
-    branches: ['**', '!dependabot/**']
-  pull_request:
+  # called by ci.yml for pushes and pull requests
+  workflow_call:
+    inputs:
+      core-image-artifact:
+        description: >-
+          The name of this run's artifact holding the saved core image, or empty
+          when the build saved none, which skips the image scan
+        required: false
+        type: string
+        default: ''
+      core-image:
+        description: The name of the core image, for the image scan's report
+        required: false
+        type: string
+        default: ''
   schedule:
-    # weekly, to surface newly disclosed dependency vulnerabilities and new checks
+    # weekly, to surface newly disclosed vulnerabilities in the dependencies and
+    # the published images, and new checks
     - cron: '23 6 * * 1'
   workflow_dispatch:
 
 permissions: {}
 
-# superseded runs are cancelled, except on main
+# superseded runs are cancelled, except on main, so a rescan of main always
+# finishes. A called run's github.workflow is the caller's name, so the suffix
+# keeps this group apart from the caller's own
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-security-scan-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
@@ -52,8 +80,9 @@ env:
   TRIVY_IMAGE: ghcr.io/aquasecurity/trivy@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
 
 jobs:
+  # scans the repository for committed secrets
   trivy-secret:
-    name: trivy secret
+    name: Scan · secrets (Trivy)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -105,8 +134,9 @@ jobs:
           path: ${{ runner.temp }}/trivy-secret/
           retention-days: 7
 
+  # scans the Helm charts and Ansible playbooks for misconfigurations
   trivy-iac:
-    name: trivy helm and ansible
+    name: Scan · Helm and Ansible config (Trivy)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     # misconfigurations only warn, so a failed image pull or scan must not fail the workflow either
@@ -160,8 +190,9 @@ jobs:
           path: ${{ runner.temp }}/trivy-iac/
           retention-days: 7
 
+  # scans the lockfiles for vulnerable dependencies, ranked with EPSS and CISA KEV
   trivy-deps:
-    name: trivy dependencies
+    name: Scan · dependencies (Trivy)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     # dependency vulnerabilities, and failures to scan or rank them, never fail the workflow
@@ -224,10 +255,11 @@ jobs:
           path: ${{ runner.temp }}/trivy-deps/
           retention-days: 30
 
+  # uploads each repo scan's SARIF to code scanning in a job that runs no scanner
   upload:
     # a static name, since a skipped matrix job shows its name unexpanded;
     # GitHub appends the scan to it when the job runs
-    name: Upload results
+    name: Scan · upload repository scan results
     needs: [trivy-secret, trivy-iac, trivy-deps]
     # Fork pull requests get a read-only token, so only upload for pushes,
     # schedules, manual runs, and same-repo pull requests. Each scan uploads
@@ -279,3 +311,347 @@ jobs:
         with:
           sarif_file: ${{ runner.temp }}/report/${{ matrix.scan }}-filtered.sarif
           category: ${{ matrix.scan }}
+
+  # Scans the core image ci.yml built in this run, the published one included,
+  # from the artifact it saved the image in. A called run's github context is
+  # the caller's, so a run of this workflow on its own is told apart by its
+  # workflow_ref naming this file; those runs scan the published images instead.
+  # Trivy reads the saved image, so it gets no Docker socket, and needs the
+  # network only for its vulnerability database. Vulnerabilities, and failures
+  # to scan, only warn, and the step timeouts keep a stalled download from
+  # running into the job's.
+  scan-core-image:
+    name: Scan · core container image (Trivy)
+    if: ${{ !contains(github.workflow_ref, '/.github/workflows/security-scan.yml@') && inputs.core-image-artifact != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download Thorium Container Image
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.core-image-artifact }}
+          path: ${{ runner.temp }}/image
+
+      - name: Scan Thorium Container Image
+        id: scan
+        continue-on-error: true
+        timeout-minutes: 15
+        run: |
+          # Trivy spills large files to TMPDIR while analyzing, so it is on disk under the cache
+          # rather than in the small /tmp tmpfs
+          mkdir -p "${RUNNER_TEMP}/trivy-image" "${RUNNER_TEMP}/trivy-cache/tmp"
+          docker run --rm --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --user "$(id -u):$(id -g)" \
+            --tmpfs /tmp:rw,size=512m -e HOME=/tmp -e TMPDIR=/cache/tmp -w /tmp \
+            -v "${RUNNER_TEMP}/image/thorium-image.tar:/in/thorium-image.tar:ro" \
+            -v "${RUNNER_TEMP}/trivy-cache:/cache" \
+            -v "${RUNNER_TEMP}/trivy-image:/out" \
+            "$TRIVY_IMAGE" image --input /in/thorium-image.tar --scanners vuln --list-all-pkgs \
+            --skip-version-check --timeout 10m --cache-dir /cache --format json --output /out/thorium.json
+
+      # the CycloneDX SBOM is converted from the scan, so the image is read once
+      - name: Write Thorium Container Image SBOM
+        if: steps.scan.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --user "$(id -u):$(id -g)" \
+            --tmpfs /tmp:rw,size=512m -e HOME=/tmp -w /tmp \
+            -v "${RUNNER_TEMP}/trivy-image:/out" \
+            "$TRIVY_IMAGE" convert --format cyclonedx --output /out/thorium.cdx.json /out/thorium.json
+
+      # ranks findings by EPSS and CISA KEV; vulnerabilities never fail the job
+      - name: Report Thorium Container Image Vulnerabilities
+        if: steps.scan.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 15
+        env:
+          IMAGE: ${{ inputs.core-image }}
+        run: |
+          python3 .github/scripts/vuln_report.py --input "${RUNNER_TEMP}/trivy-image/thorium.json" \
+            --image-name "$IMAGE" --dockerfile Dockerfile \
+            --sarif "${RUNNER_TEMP}/trivy-image/trivy-image.sarif" \
+            --json "${RUNNER_TEMP}/trivy-image/vulnerabilities.json" \
+            --markdown "${RUNNER_TEMP}/trivy-image/vulnerabilities.md"
+          cat "${RUNNER_TEMP}/trivy-image/vulnerabilities.md" >> "$GITHUB_STEP_SUMMARY"
+          python3 .github/scripts/lint_report.py --tool trivy-image --format sarif --collapse-by-rule \
+            --input "${RUNNER_TEMP}/trivy-image/trivy-image.sarif" \
+            --sarif-output "${RUNNER_TEMP}/trivy-image/trivy-image-filtered.sarif" \
+            --ignore-file .github/lint-ignore.toml \
+            --output-dir "${RUNNER_TEMP}/trivy-image" --fail-level none
+
+      - name: Store Thorium Container Image Scan
+        if: ${{ !cancelled() && steps.scan.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: trivy-image-build-report
+          path: ${{ runner.temp }}/trivy-image/
+          retention-days: 30
+
+  # uploads the core image scan to code scanning in a job that runs no scanner
+  upload-core-image-scan:
+    name: Scan · upload core container image scan
+    needs: scan-core-image
+    # Pushes only: a pull request's upload would make GitHub's code scanning
+    # check fail on high severity CVEs, and image vulnerabilities only warn. Pull
+    # requests still get the artifact, job summary and annotations.
+    if: ${{ !cancelled() && needs.scan-core-image.result == 'success' && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # a missing or unreadable scan never fails the workflow
+    continue-on-error: true
+    permissions:
+      contents: read
+      security-events: write # upload SARIF results to code scanning
+    steps:
+      - name: Download Thorium Container Image Scan
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: trivy-image-build-report
+          path: ${{ runner.temp }}/trivy-image
+
+      # the report step may have failed after the scan, leaving no SARIF to upload
+      - name: Check for filtered SARIF
+        id: sarif
+        run: |
+          if [ -f "${RUNNER_TEMP}/trivy-image/trivy-image-filtered.sarif" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No filtered SARIF in the scan artifact; nothing to upload"
+          fi
+
+      # the filtered SARIF leaves out findings ignored by .github/lint-ignore.toml
+      - name: Upload Thorium Container Image Scan SARIF
+        if: steps.sarif.outputs.found == 'true'
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: ${{ runner.temp }}/trivy-image/trivy-image-filtered.sarif
+          category: trivy-image-build
+
+  # Rescans the Thorium images this repo has published, on this workflow's own
+  # weekly and manual runs (named by workflow_ref, since a called run's github
+  # context is the caller's). A push's image is scanned by scan-core-image
+  # instead, since it is not in the registry until ci.yml publishes it.
+  scan-published-images:
+    name: Scan · published images (Trivy)
+    if: ${{ contains(github.workflow_ref, '/.github/workflows/security-scan.yml@') }}
+    runs-on: ubuntu-24.04
+    # the 90-minute scan step plus the SBOM, report and store steps
+    timeout-minutes: 130
+    # vulnerabilities, and failures to fetch or scan an image, never fail the workflow
+    continue-on-error: true
+    permissions:
+      contents: read
+    env:
+      # the most release tags scanned in one run; past it the oldest are dropped
+      MAX_RELEASES: 50
+    steps:
+      # full history and tags, to find the release tags on the default branch
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Pull Trivy image
+        run: docker pull "$TRIVY_IMAGE"
+
+      # Scans only the images ci.yml published for the ref this run is on,
+      # worked out from git rather than by listing the registry:
+      # - the default branch (every scheduled run): main, latest, and the release
+      #   tags on it, newest first
+      # - a branch on a fork (a manual run on that branch): the branch's tag,
+      #   sanitized as ci.yml does; the core repo publishes no branch images
+      # - a release tag (a manual run on that tag): that tag
+      - name: Choose images to scan
+        env:
+          IS_FORK: ${{ github.event.repository.fork }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -o pipefail
+          : > "${RUNNER_TEMP}/tags.txt"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            echo "$GITHUB_REF_NAME" >> "${RUNNER_TEMP}/tags.txt"
+          # GitHub runs schedules only on the default branch, but documents no
+          # repository payload for them, so DEFAULT_BRANCH may be empty there
+          elif [[ "$GITHUB_EVENT_NAME" == "schedule" || "$GITHUB_REF_NAME" == "$DEFAULT_BRANCH" ]]; then
+            # ci.yml tags the default branch's image with the branch name;
+            # this repo and its forks use main, so a renamed default branch
+            # would need this tag changed too
+            printf '%s\n' main latest >> "${RUNNER_TEMP}/tags.txt"
+            # the release tags ci.yml publishes (a leading v optional), newest version first
+            git tag --merged HEAD | { grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || true; } \
+              | awk '{ version = $0; sub(/^v/, "", version); print version "\t" $0 }' \
+              | sort -rV -k1,1 | cut -f2 | head -n "$MAX_RELEASES" >> "${RUNNER_TEMP}/tags.txt"
+          elif [[ "$IS_FORK" == "true" ]]; then
+            # keep in step with the branch tag in ci.yml's "Choose Image Tags" step
+            TAG="${GITHUB_REF_NAME//[^a-zA-Z0-9._-]/-}"
+            TAG=$(sed -E 's/^[.-]+//' <<< "$TAG")
+            if [[ "$TAG" == "latest" || "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+              TAG="branch-${TAG}"
+            fi
+            if [[ -z "$TAG" || ${#TAG} -gt 128 || "$TAG" != "$GITHUB_REF_NAME" ]]; then
+              HASH=$(printf '%s' "$GITHUB_REF_NAME" | sha256sum | cut -c1-8)
+              TAG="${TAG:+${TAG:0:119}-}${HASH}"
+            fi
+            echo "$TAG" >> "${RUNNER_TEMP}/tags.txt"
+          else
+            echo "::notice::This repo publishes images only from ${DEFAULT_BRANCH} and release tags, so ${GITHUB_REF_NAME} has none to scan"
+          fi
+          echo "Tags to scan:"
+          cat "${RUNNER_TEMP}/tags.txt"
+
+      # Trivy pulls each image itself, which needs no credentials or Docker
+      # socket because the images are public; it needs the network only for its
+      # vulnerability database and the image layers. An image it cannot scan is
+      # skipped with a warning. The step timeout leaves time to report whatever
+      # finished, since a job timeout would cancel the report and store steps and
+      # lose every result.
+      - name: Scan published images
+        id: trivy
+        continue-on-error: true
+        timeout-minutes: 90
+        run: |
+          # Trivy spills large files to TMPDIR while analyzing, so it is on disk
+          # under the cache rather than in the small /tmp tmpfs
+          mkdir -p "${RUNNER_TEMP}/trivy-image" "${RUNNER_TEMP}/trivy-cache/tmp"
+          IMAGE_PATH=$(echo "ghcr.io/${GITHUB_REPOSITORY}/infrastructure/thorium" | tr '[:upper:]' '[:lower:]')
+          while IFS= read -r tag; do
+            if docker run --rm --read-only --cap-drop ALL \
+              --security-opt no-new-privileges --user "$(id -u):$(id -g)" \
+              --tmpfs /tmp:rw,size=512m -e HOME=/tmp -e TMPDIR=/cache/tmp -w /tmp \
+              -v "${RUNNER_TEMP}/trivy-cache:/cache" \
+              -v "${RUNNER_TEMP}/trivy-image:/out" \
+              "$TRIVY_IMAGE" image --image-src remote --scanners vuln --list-all-pkgs \
+              --skip-version-check --timeout 10m --cache-dir /cache --format json \
+              --output "/out/thorium-${tag}.json" "${IMAGE_PATH}:${tag}" < /dev/null; then
+              :
+            else
+              echo "::warning::Could not scan ${IMAGE_PATH}:${tag}"
+              rm -f "${RUNNER_TEMP}/trivy-image/thorium-${tag}.json"
+            fi
+          done < "${RUNNER_TEMP}/tags.txt"
+
+      # Reports are built from the scans that finished rather than from the scan
+      # step's outcome, so a timed-out step still reports its completed images.
+      # A scan killed mid-write leaves invalid JSON, which is dropped.
+      - name: Collect finished scans
+        id: results
+        if: ${{ !cancelled() }}
+        env:
+          SCAN_OUTCOME: ${{ steps.trivy.outcome }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/trivy-image"
+          count=0
+          for report in "${RUNNER_TEMP}"/trivy-image/thorium-*.json; do
+            [ -e "$report" ] || continue
+            case "$report" in *.cdx.json) continue ;; esac
+            if python3 -c 'import json, sys; json.load(open(sys.argv[1]))' "$report" 2>/dev/null; then
+              count=$((count + 1))
+            else
+              echo "::warning::Dropping incomplete scan $(basename "$report")"
+              rm -f "$report"
+            fi
+          done
+          if [ "$SCAN_OUTCOME" != "success" ]; then
+            echo "::warning::The scan step did not finish (${SCAN_OUTCOME}); reporting the ${count} images it completed"
+          fi
+          echo "count=${count}" >> "$GITHUB_OUTPUT"
+
+      # one SBOM per image, converted from the scan so the image is read once
+      - name: Write SBOMs
+        if: ${{ !cancelled() && steps.results.outputs.count != '0' }}
+        # the report does not need the SBOMs, so it still runs if one fails
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          for report in "${RUNNER_TEMP}"/trivy-image/thorium-*.json; do
+            case "$report" in *.cdx.json) continue ;; esac
+            name=$(basename "$report" .json)
+            docker run --rm --network none --read-only --cap-drop ALL \
+              --security-opt no-new-privileges --user "$(id -u):$(id -g)" \
+              --tmpfs /tmp:rw,size=512m -e HOME=/tmp -w /tmp \
+              -v "${RUNNER_TEMP}/trivy-image:/out" \
+              "$TRIVY_IMAGE" convert --format cyclonedx \
+              --output "/out/${name}.cdx.json" "/out/${name}.json"
+          done
+
+      # ranks findings by EPSS and CISA KEV; vulnerabilities never fail the job
+      - name: Report image vulnerabilities
+        if: ${{ !cancelled() && steps.results.outputs.count != '0' }}
+        continue-on-error: true
+        timeout-minutes: 15
+        run: |
+          inputs=()
+          for report in "${RUNNER_TEMP}"/trivy-image/thorium-*.json; do
+            case "$report" in *.cdx.json) continue ;; esac
+            inputs+=(--input "$report")
+          done
+          python3 .github/scripts/vuln_report.py "${inputs[@]}" --dockerfile Dockerfile \
+            --sarif "${RUNNER_TEMP}/trivy-image/trivy-image.sarif" \
+            --json "${RUNNER_TEMP}/trivy-image/vulnerabilities.json" \
+            --markdown "${RUNNER_TEMP}/trivy-image/vulnerabilities.md"
+          cat "${RUNNER_TEMP}/trivy-image/vulnerabilities.md" >> "$GITHUB_STEP_SUMMARY"
+          python3 .github/scripts/lint_report.py --tool trivy-image --format sarif --collapse-by-rule \
+            --input "${RUNNER_TEMP}/trivy-image/trivy-image.sarif" \
+            --sarif-output "${RUNNER_TEMP}/trivy-image/trivy-image-filtered.sarif" \
+            --ignore-file .github/lint-ignore.toml \
+            --output-dir "${RUNNER_TEMP}/trivy-image" --fail-level none
+
+      - name: Store image scan report
+        if: ${{ !cancelled() && steps.results.outputs.count != '0' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: trivy-image-published-report
+          path: ${{ runner.temp }}/trivy-image/
+          retention-days: 30
+
+  # uploads the published image scan to code scanning in a job that runs no scanner
+  upload-published-image-scan:
+    name: Scan · upload published image scan
+    needs: scan-published-images
+    # the scan job never fails, so this runs whenever it ran
+    if: ${{ !cancelled() && needs.scan-published-images.result != 'skipped' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # failing to upload never fails the workflow
+    continue-on-error: true
+    permissions:
+      contents: read
+      security-events: write # upload SARIF results to code scanning
+    steps:
+      - name: Download SARIF
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: trivy-image-published-report
+          path: ${{ runner.temp }}/report
+
+      - name: Check for filtered SARIF
+        id: sarif
+        if: steps.download.outcome == 'success'
+        run: |
+          if [ -f "${RUNNER_TEMP}/report/trivy-image-filtered.sarif" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No filtered SARIF; nothing to upload"
+          fi
+
+      # the filtered SARIF leaves out findings ignored by .github/lint-ignore.toml
+      - name: Upload SARIF
+        if: steps.sarif.outputs.found == 'true'
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: ${{ runner.temp }}/report/trivy-image-filtered.sarif
+          category: trivy-image-published

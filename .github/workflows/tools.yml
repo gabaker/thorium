@@ -9,8 +9,8 @@ on:
       - main
   # rebuilds the tool images on demand; runs started from any other branch build nothing
   workflow_dispatch:
-  # checks that the toolbox is current when the toolbox or its sources change; a pull request run
-  # builds and pushes nothing
+  # checks that the toolbox is current when the toolbox, its sources, or the CI files change; a
+  # pull request run builds and pushes nothing
   pull_request:
     paths:
       - 'tools/toolbox.json'
@@ -18,7 +18,7 @@ on:
       - 'tools/images/**'
       - 'tools/pipelines/**'
       - 'tools/scripts/**'
-      - '.github/workflows/tools.yml'
+      - '.github/**'
 
 # image builds share one group so only one runs at a time; pull request checks use a group of
 # their own so they never displace a pending image build
@@ -33,7 +33,7 @@ jobs:
   # tools/toolbox.json is built from the manifests in tools/ and is what the images are built
   # from; this fails when it drifts from them
   check-toolbox:
-    name: Check the toolbox
+    name: Check · toolbox
     # the nightly schedule only rebuilds images
     if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
@@ -69,8 +69,9 @@ jobs:
           cargo +nightly test --locked -p thorctl --test toolbox_build
           real_tools_reproduce_the_committed_toolboxes
 
+  # lists the tool images to build from tools/toolbox.json
   generate-tool-builds:
-    name: Generate Tool Build Matrix
+    name: Build · tool image plan
     # tool images are pushed to their published tags, so they are only built from main
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
@@ -92,8 +93,9 @@ jobs:
           MATRIX=$(python3 tools/scripts/build-actions-matrix.py --registry-prefix "$REGISTRY_PREFIX" tools/toolbox.json)
           echo "matrix=$(echo "$MATRIX" | jq -c .)" >> "$GITHUB_OUTPUT"
 
+  # builds, tags, and pushes one tool image per matrix entry
   build-tools:
-    name: Build Thorium Tool Image - ${{ matrix.tool.name }}:${{ matrix.tool.version }}
+    name: Build · tool image ${{ matrix.tool.name }}:${{ matrix.tool.version }}
     needs: generate-tool-builds
     runs-on: ubuntu-24.04
     timeout-minutes: 120
