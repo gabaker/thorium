@@ -1,8 +1,6 @@
 // project imports
 import { HuntLane } from '@models/entities/hunts';
 
-// spec: ../EntityDetails.spec.md
-
 /**
  * Clamp a fraction into [0, 1].
  *

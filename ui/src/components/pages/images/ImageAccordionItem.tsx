@@ -88,7 +88,7 @@ const ImageAccordionItem: FC<ImageAccordionItemProps> = ({ image, images, groups
         </div>
         <div className="accordion-item-status">
           <OverlayTipRight tip="Images can no longer be created or changed. This one still works in pipelines that name it; create a tool to replace it.">
-            <Badge $tone={BadgeTone.Legacy} data-testid="legacy-badge">
+            <Badge $tone={BadgeTone.Caution} data-testid="legacy-badge">
               legacy
             </Badge>
           </OverlayTipRight>

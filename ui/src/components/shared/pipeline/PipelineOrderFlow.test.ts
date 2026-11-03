@@ -224,8 +224,8 @@ describe('estimateNodeWidth', () => {
   });
 
   test('a stage name that overflowed the old estimate fits its node', () => {
-    // "legacy-stub" = 11 chars: 11 * 8 + 40 = 128, wider than the 84px of text room in a 120px node
-    expect(estimateNodeWidth('legacy-stub')).toBe(128);
+    // "image-stage" = 11 chars: 11 * 8 + 40 = 128, wider than the 84px of text room in a 120px node
+    expect(estimateNodeWidth('image-stage')).toBe(128);
   });
 
   test('empty string clamps to min-width', () => {

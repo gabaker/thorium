@@ -3,10 +3,10 @@ import { test, expect } from '@playwright/test';
 import { adminApi, loadFixtures, uniqueName } from './agentic-helpers';
 import { loginViaUI } from './helpers';
 
-// the legacy image page and the pipeline page run against the live fixture stack
+// the images page and the pipelines page run against the live fixture stack
 const fixtures = loadFixtures();
 
-test.describe('legacy images and pipeline pages', () => {
+test.describe('images and pipelines pages', () => {
   test.beforeEach(async ({ page }) => {
     await loginViaUI(page);
   });

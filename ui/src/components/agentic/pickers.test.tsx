@@ -41,11 +41,11 @@ describe('pipelineOptions', () => {
   it('keys pipelines by group and name and notes one that cannot run', () => {
     const pipelines = [
       { group: 'system', name: 'triage', order: [['scan']], stage_tools: { scan: { tool: 't' } } },
-      { group: 'system', name: 'legacy', order: [['harvest']], stage_tools: {} },
+      { group: 'system', name: 'image-stages', order: [['harvest']], stage_tools: {} },
     ] as unknown as Pipeline[];
     expect(pipelineOptions(pipelines)).toEqual([
       { value: 'system/triage', text: 'triage', note: 'in system' },
-      { value: 'system/legacy', text: 'legacy', note: 'in system; cannot be run' },
+      { value: 'system/image-stages', text: 'image-stages', note: 'in system; cannot be run' },
     ]);
   });
 });

@@ -1,8 +1,6 @@
 // project imports
 import { HuntLane, HuntSelector, HuntStatus } from '@models/entities/hunts';
 
-// spec: ../EntityDetails.spec.md
-
 /**
  * Map a hunt status to a react-bootstrap Badge background variant.
  *

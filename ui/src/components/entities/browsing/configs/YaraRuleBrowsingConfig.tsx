@@ -24,8 +24,6 @@ import { YaraRule, YARA_RULE_STATUS_TAG } from '@models/entities/rules/yara';
 import { SUBMITTER_TAG } from '@models/tags';
 import { getDetailsBasePathByEntity } from '../../details/EntityDetailsRoutes';
 
-// spec: ../EntityBrowsing.spec.md
-
 // intrinsic tag chips duplicating row fields stay hidden: submitter has its own column
 // and the quarantine status renders as the row's warning badges
 const YARA_RULE_ROW_HIDDEN_TAG_KEYS = [SUBMITTER_TAG, YARA_RULE_STATUS_TAG];

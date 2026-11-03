@@ -2,6 +2,7 @@
 import { BLANK_INPUTS, initialInputs, InputsRequirement, InputsState, resolveInputs, SampleUploader } from './inputs';
 import { buildJobArgs, buildToolRequest, buildWorkflowRequest, candidateGroups, LaunchTab, runPagePath, slaProblem } from './launch';
 import { buildPipelineRunRequest, pipelineBlocker } from './pipelineRequest';
+import { mapWithConcurrency } from '@utilities/concurrency';
 import { Pipeline } from '@models/pipelines';
 import { ReactionRequest, RepoDependencyRequest } from '@models/reactions';
 import { ToolRunRequest, WorkflowRunRequest } from '@models/runs';
@@ -535,31 +536,6 @@ export interface LaunchOutcome {
 
 /** How many runs a launch starts at once. */
 export const LAUNCH_CONCURRENCY = 3;
-
-/**
- * Run an async step over a list with at most `limit` steps in flight, keeping the results in list order.
- *
- * @template T - The type of the list entries.
- * @template R - The type of a step's result.
- * @param entries - The entries to process.
- * @param limit - The most steps in flight at once (at least one).
- * @param step - The step; a step that throws rejects the whole run, so steps report failures in their result.
- * @returns The results, in the order of the entries.
- */
-export async function mapWithConcurrency<T, R>(entries: T[], limit: number, step: (entry: T) => Promise<R>): Promise<R[]> {
-  const results: R[] = new Array<R>(entries.length);
-  let next = 0;
-  // each worker takes the next unstarted entry until none are left
-  const worker = async () => {
-    while (next < entries.length) {
-      const index = next;
-      next += 1;
-      results[index] = await step(entries[index]);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, entries.length)) }, worker));
-  return results;
-}
 
 /**
  * Run an action unless one started through the same guard is still running, so a second click can't start a second

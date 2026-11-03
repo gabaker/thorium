@@ -76,7 +76,7 @@ export const PipelineStageTools: FC<PipelineStageToolsProps> = ({ pipeline }) =>
                     </Muted>
                   )
                 ) : (
-                  <Badge $tone={BadgeTone.Legacy}>needs a tool: no tool backs this stage</Badge>
+                  <Badge $tone={BadgeTone.Caution}>needs a tool: no tool backs this stage</Badge>
                 )}
               </td>
               <td>

@@ -55,11 +55,10 @@ const PipelineBrowsing: FC = () => {
   const [groups, setGroups] = useState<Record<string, Group>>({});
   // the messages from pipeline list reads that failed, so an unreadable list is not shown as an empty one
   const [listErrors, setListErrors] = useState<string[]>([]);
-  // expanded accordion rows + omnibar filters live in the URL so the view is shareable
-  // const [activeKeys, setActiveKeys] = useUrlState(listCodec('open'), []);
+  // the omnibar filters live in the URL so the view is shareable
   const { clauses, setClauses } = useOmnibarUrlState({ clauses: [], time: defaultTimeSelection() });
   const { userInfo, checkCookie } = useAuth();
-
+  // the expanded accordion rows; a URL hash naming a pipeline opens its row on load
   const [activeKeys, setActiveKeys] = useState<string[]>([]);
   const location = useLocation();
 

@@ -6,8 +6,6 @@ import AlertBanner from '@components/shared/alerts/AlertBanner';
 import { deleteEntityTags } from '@thorpi/entities';
 import { CLEARABLE_QUARANTINE_STATUSES, YARA_RULE_STATUS_TAG, YaraRule } from '@models/entities/rules/yara';
 
-// spec: ./EntityDetails.spec.md
-
 type ClearQuarantineProps = {
   rule: YaraRule;
   setError: (error: string) => void;

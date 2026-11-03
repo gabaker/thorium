@@ -7,8 +7,6 @@ import { OverlayTipBottom } from '@components/shared/overlay/tips';
 import { buildTagBrowseHref } from '@components/tags/utilities';
 import { Hunt, HUNT_ENGINES, HUNT_ID_TAG } from '@models/entities/hunts';
 
-// spec: ./EntityDetails.spec.md
-
 /**
  * Build the browse URL listing a hunt's findings: the engine's hit kind pre-filtered by the
  * `HuntId` tag the hit route stamps on every decorated finding.
