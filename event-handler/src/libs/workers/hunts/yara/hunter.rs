@@ -740,8 +740,8 @@ impl EventWorkerSupportCore for YaraHuntWorker {
     ///
     /// A chunk is minutes of scanning, chunks in a page process sequentially,
     /// and claimed events age toward the in flight backstop while they queue -
-    /// so the page is one chunk: the lease matches the work unit, a SIGTERM
-    /// quiesce replays at most one chunk, and cancels are observed between
+    /// so the page is one chunk: the lease matches the work unit, a graceful
+    /// shutdown replays at most one chunk, and cancels are observed between
     /// chunks.
     #[inline]
     fn pop_limit() -> usize {

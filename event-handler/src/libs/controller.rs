@@ -463,8 +463,8 @@ impl EventWorkerController {
     /// How long workers get to finish and clear their current page on shutdown
     ///
     /// Kubernetes grants 30 seconds of termination grace by default, so this
-    /// quiesce budget leaves time for the drain call and process teardown.
-    const QUIESCE_GRACE: Duration = Duration::from_secs(20);
+    /// shutdown grace period leaves time for the drain call and process teardown.
+    const SHUTDOWN_GRACE: Duration = Duration::from_secs(20);
 
     /// Stop every spawned task so nothing pops new events mid drain
     ///
@@ -491,13 +491,13 @@ impl EventWorkerController {
             }
         }
         // give every worker a shared deadline to finish its current page
-        let deadline = Instant::now() + Self::QUIESCE_GRACE;
+        let deadline = Instant::now() + Self::SHUTDOWN_GRACE;
         // stop every event worker before draining so none of them can pop
         // drained events right back into our in flight keys
         for kind in EventWorkerKinds::iter() {
-            // quiesce each worker of this kind
+            // wait for each worker of this kind to stop between pages
             for (_, mut handle) in self.handles[kind].drain(..) {
-                // compute how much of the quiesce budget remains
+                // compute how much of the shutdown grace period remains
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 // wait for this worker to stop cleanly between pages
                 if tokio::time::timeout(remaining, &mut handle).await.is_err() {

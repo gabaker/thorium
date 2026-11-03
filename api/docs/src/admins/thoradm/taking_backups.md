@@ -59,7 +59,7 @@ same version pass it. An API older than this thoradm's release clears Redis for 
 than only the restored namespace's keys; a restore through such an API does that whenever the check
 lets it through, because the versions match or `--allow-version-mismatch` was given.
 
-### Quiesce writers for a consistent backup
+### Pause writers for a consistent backup
 
 A backup is taken table by table while the cluster runs; it is not a snapshot. Rows written while
 the backup runs may or may not be in it, and a sample uploaded after its table was read but before
