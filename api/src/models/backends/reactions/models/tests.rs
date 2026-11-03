@@ -1566,8 +1566,10 @@ fn run_models_refuse_banned_credentials() {
             refused,
             format!("model credential {key} is banned (CredentialRejected)")
         );
-        assert!(!refused.contains("401"));
-        assert!(!refused.contains("wxyz"));
+        // the key is random hex that can hold "401", so look for the ban's detail without it
+        let detail = refused.replace(&key.to_string(), "");
+        assert!(!detail.contains("401"));
+        assert!(!detail.contains("wxyz"));
     }
     // and so does a deleted one
     credentials.clear();
