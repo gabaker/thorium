@@ -7,6 +7,8 @@ import { deleteGroup, updateGroup } from '@thorpi/groups';
 import AlertBanner from '@components/shared/alerts/AlertBanner';
 import { useAuth } from '@utilities/auth';
 import { isGroupOwner } from '@utilities/permissions';
+import { useChangeAndInvalidate } from '@utilities/queries/changes';
+import { invalidateGroupAccess, invalidateGroups } from '@utilities/queries/groups';
 
 interface UpdateGroupButtonProps {
   group: Group;
@@ -29,6 +31,8 @@ interface DeleteGroupButtonProps {
 }
 
 export const UpdateGroupButton = ({ group, changes, disableUpdate, refreshSingleGroup }: UpdateGroupButtonProps) => {
+  // a change marks the cached group details stale, so other pages show it at once
+  const change = useChangeAndInvalidate(invalidateGroups);
   const [updateError, setUpdateError] = useState('');
   const [showUpdateModal, setShowUpdateModal] = useState(false);
   const handleCloseUpdateModal = () => {
@@ -203,7 +207,7 @@ export const UpdateGroupButton = ({ group, changes, disableUpdate, refreshSingle
             className="ok-btn m-1"
             onClick={() => {
               void (async () => {
-                if (await updateGroup(group.name, changes, setUpdateError)) {
+                if (await change(() => updateGroup(group.name, changes, setUpdateError))) {
                   // Refresh only the edited group so its accordion stays open and just its content rerenders.
                   handleCloseUpdateModal();
                   await refreshSingleGroup(group.name);
@@ -220,6 +224,8 @@ export const UpdateGroupButton = ({ group, changes, disableUpdate, refreshSingle
 };
 
 export const LeaveGroupButton = ({ group, username, setLoading, setGroups }: LeaveGroupButtonProps) => {
+  // the change marks stale the group details and the agentic and pipeline lists the group's membership let the user see
+  const change = useChangeAndInvalidate(invalidateGroupAccess);
   const [showLeaveModal, setShowLeaveModal] = useState(false);
   const [leaveError, setLeaveError] = useState('');
   const handleCloseLeaveModal = () => setShowLeaveModal(false);
@@ -266,7 +272,7 @@ export const LeaveGroupButton = ({ group, username, setLoading, setGroups }: Lea
               className="warning-btn"
               onClick={() => {
                 void (async () => {
-                  if (await updateGroup(group.name, roleAction, setLeaveError)) {
+                  if (await change(() => updateGroup(group.name, roleAction, setLeaveError))) {
                     void fetchGroups(setGroups as (groups: Record<string, Group> | Group[] | string[]) => void, setLoading, true);
                   }
                 })();
@@ -284,6 +290,8 @@ export const LeaveGroupButton = ({ group, username, setLoading, setGroups }: Lea
 };
 
 export const DeleteGroupButton = ({ group, setLoading, setGroups }: DeleteGroupButtonProps) => {
+  // the change marks stale the group details and the agentic and pipeline lists the group's membership let the user see
+  const change = useChangeAndInvalidate(invalidateGroupAccess);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleteError, setDeleteError] = useState('');
   const { userInfo } = useAuth();
@@ -318,7 +326,7 @@ export const DeleteGroupButton = ({ group, setLoading, setGroups }: DeleteGroupB
               className="danger-btn"
               onClick={() => {
                 void (async () => {
-                  if (await deleteGroup(group.name, setDeleteError)) {
+                  if (await change(() => deleteGroup(group.name, setDeleteError))) {
                     void fetchGroups(setGroups as (groups: Record<string, Group> | Group[] | string[]) => void, setLoading, true);
                   }
                 })();

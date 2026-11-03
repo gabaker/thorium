@@ -14,7 +14,8 @@ const iconHoverCss = css`
   color: var(--thorium-highlight-text);
 `;
 
-const StyledButton = styled.button<{ $variant: ButtonVariant; $size: ButtonSize }>`
+/** The look of a button, shared by real buttons and links drawn as buttons. */
+export const buttonStyles = css<{ $variant: ButtonVariant; $size: ButtonSize }>`
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -61,6 +62,10 @@ const StyledButton = styled.button<{ $variant: ButtonVariant; $size: ButtonSize 
     cursor: not-allowed;
     filter: none;
   }
+`;
+
+const StyledButton = styled.button<{ $variant: ButtonVariant; $size: ButtonSize }>`
+  ${buttonStyles}
 `;
 
 const Button = forwardRef<HTMLButtonElement, ButtonProps>(

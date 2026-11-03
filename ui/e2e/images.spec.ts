@@ -54,6 +54,14 @@ const MOCK_IMAGE_EXTERNAL = {
   description: 'External scaler image',
 };
 
+const MOCK_IMAGE_BANNED = {
+  ...MOCK_IMAGE,
+  name: 'banned-image',
+  bans: {
+    'ban-1': { id: 'ban-1', time_banned: '2026-10-01T12:00:00Z', ban_kind: { Generic: { msg: 'The image registry is gone' } } },
+  },
+};
+
 async function setupMockAuth(page: Page) {
   await page.route('**/api/users/whoami', (route) =>
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(MOCK_USER) }),
@@ -102,6 +110,11 @@ async function setupImageMocks(page: Page, images = [MOCK_IMAGE, MOCK_IMAGE_EXTE
   });
 }
 
+/// Finds the accordion item for the image with the given name
+function imageItem(page: Page, name: string) {
+  return page.locator('[data-testid="accordion-item"]').filter({ hasText: name });
+}
+
 test.describe('Image Browsing Page', () => {
   test.beforeEach(async ({ page }) => {
     await setupMockAuth(page);
@@ -110,116 +123,52 @@ test.describe('Image Browsing Page', () => {
 
   test('image list renders with correct count', async ({ page }) => {
     await page.goto('/images');
-    await page.waitForSelector('.accordion', { timeout: 10000 });
+    await page.waitForSelector('[data-testid="accordion"]', { timeout: 10000 });
 
-    const badge = page.locator('.count-badge');
+    const badge = page.locator('[data-testid="image-count"]');
     await expect(badge).toContainText('2');
 
-    const items = page.locator('.accordion-item');
+    const items = page.locator('[data-testid="accordion-item"]');
     await expect(items).toHaveCount(2);
+
+    // every image is marked legacy
+    await expect(page.locator('[data-testid="legacy-badge"]')).toHaveCount(2);
 
     await snapshot(page, SCREENSHOT_DIR, 'images-list');
   });
 
   test('image names and groups display correctly', async ({ page }) => {
     await page.goto('/images');
-    await page.waitForSelector('.accordion', { timeout: 10000 });
+    await page.waitForSelector('[data-testid="accordion"]', { timeout: 10000 });
 
-    await expect(page.locator('.accordion-item-name .text').first()).toContainText('test-image');
-    await expect(page.locator('.accordion-item-ownership i').first()).toContainText('system');
+    // the list is sorted by name, so the external image comes first
+    await expect(page.locator('.accordion-item-name .text').first()).toContainText('external-tool');
+    await expect(page.locator('.accordion-item-name .text').nth(1)).toContainText('test-image');
+    await expect(page.locator('.accordion-item-subtitle i').first()).toContainText('system');
   });
 
   test('expand image shows details', async ({ page }) => {
     await page.goto('/images');
-    await page.waitForSelector('.accordion', { timeout: 10000 });
+    await page.waitForSelector('[data-testid="accordion"]', { timeout: 10000 });
 
-    await page.locator('.accordion-header').first().click();
+    await imageItem(page, 'test-image').locator('[data-testid="accordion-header"]').click();
     await page.waitForTimeout(500);
 
-    await expect(page.locator('text=test')).toBeVisible();
-    await expect(page.locator('text=K8s')).toBeVisible();
+    // the details show the creator and scaler under their headings
+    const body = imageItem(page, 'test-image').locator('[data-testid="accordion-body"]');
+    await expect(body.getByText('Creator', { exact: true })).toBeVisible();
+    await expect(body.getByText('test', { exact: true }).first()).toBeVisible();
+    await expect(body.getByText('K8s', { exact: true })).toBeVisible();
+    await expect(body.getByText('A test image for E2E testing')).toBeVisible();
 
     await snapshot(page, SCREENSHOT_DIR, 'image-details-expanded');
   });
 
-  test('edit button enters edit mode with form', async ({ page }) => {
-    await page.goto('/images');
-    await page.waitForSelector('.accordion', { timeout: 10000 });
-
-    await page.locator('.accordion-header').first().click();
-    await page.waitForTimeout(500);
-
-    await page.locator('button:has-text("Edit")').first().click();
-    await page.waitForTimeout(500);
-
-    await expect(page.locator('button:has-text("Discard")').first()).toBeVisible();
-    await expect(page.locator('button:has-text("Accept")').first()).toBeVisible();
-
-    await snapshot(page, SCREENSHOT_DIR, 'image-edit-form-mode');
-  });
-
-  test('view mode toggle appears in edit mode', async ({ page }) => {
-    await page.goto('/images');
-    await page.waitForSelector('.accordion', { timeout: 10000 });
-
-    await page.locator('.accordion-header').first().click();
-    await page.waitForTimeout(500);
-
-    await page.locator('button:has-text("Edit")').first().click();
-    await page.waitForTimeout(500);
-
-    const formBtn = page.locator('button:has-text("Form")');
-    const editorBtn = page.locator('button:has-text("Editor")');
-    await expect(formBtn).toBeVisible();
-    await expect(editorBtn).toBeVisible();
-  });
-
-  test('switching to editor mode shows code editor', async ({ page }) => {
-    await page.goto('/images');
-    await page.waitForSelector('.accordion', { timeout: 10000 });
-
-    await page.locator('.accordion-header').first().click();
-    await page.waitForTimeout(500);
-
-    await page.locator('button:has-text("Edit")').first().click();
-    await page.waitForTimeout(500);
-
-    await page.locator('button:has-text("Editor")').click();
-    await page.waitForTimeout(500);
-
-    await waitForEditor(page);
-
-    const yamlBtn = page.locator('button:has-text("YAML")');
-    await expect(yamlBtn).toBeVisible();
-
-    await snapshot(page, SCREENSHOT_DIR, 'image-edit-editor-mode');
-  });
-
-  test('cancel edit returns to view mode', async ({ page }) => {
-    await page.goto('/images');
-    await page.waitForSelector('.accordion', { timeout: 10000 });
-
-    await page.locator('.accordion-header').first().click();
-    await page.waitForTimeout(500);
-
-    await page.locator('button:has-text("Edit")').first().click();
-    await page.waitForTimeout(500);
-
-    await page.locator('button:has-text("Discard")').first().click();
-    await page.waitForTimeout(300);
-
-    await expect(page.locator('button:has-text("Edit")').first()).toBeVisible();
-    await expect(page.locator('button:has-text("Discard")')).toHaveCount(0);
-  });
-
   test('delete image shows confirmation modal', async ({ page }) => {
     await page.goto('/images');
-    await page.waitForSelector('.accordion', { timeout: 10000 });
+    await page.waitForSelector('[data-testid="accordion"]', { timeout: 10000 });
 
-    await page.locator('.accordion-header').first().click();
-    await page.waitForTimeout(500);
-
-    await page.locator('button:has-text("Delete")').first().click();
+    await imageItem(page, 'test-image').locator('[data-testid="header-btn-delete"]').click();
     await page.waitForTimeout(300);
 
     const modal = page.locator('.modal');
@@ -241,12 +190,9 @@ test.describe('Image Browsing Page', () => {
     });
 
     await page.goto('/images');
-    await page.waitForSelector('.accordion', { timeout: 10000 });
+    await page.waitForSelector('[data-testid="accordion"]', { timeout: 10000 });
 
-    await page.locator('.accordion-header').first().click();
-    await page.waitForTimeout(500);
-
-    await page.locator('button:has-text("Delete")').first().click();
+    await imageItem(page, 'test-image').locator('[data-testid="header-btn-delete"]').click();
     await page.waitForTimeout(300);
 
     await page.locator('.danger-btn:has-text("Confirm")').click();
@@ -254,317 +200,64 @@ test.describe('Image Browsing Page', () => {
 
     expect(deleteRequested).toBe(true);
   });
-
-  test('copy image navigates to create page', async ({ page }) => {
-    await page.goto('/images');
-    await page.waitForSelector('.accordion', { timeout: 10000 });
-
-    await page.locator('.accordion-header').first().click();
-    await page.waitForTimeout(500);
-
-    await page.locator('button:has-text("Copy")').first().click();
-    await page.waitForTimeout(500);
-
-    await expect(page).toHaveURL(/\/create\/image/);
-  });
-
-  test('create image button navigates to create page', async ({ page }) => {
-    await page.goto('/images');
-    await page.waitForSelector('.accordion', { timeout: 10000 });
-
-    await page.locator('.ok-btn:has-text("+")').click();
-    await page.waitForTimeout(500);
-
-    await expect(page).toHaveURL(/\/create\/image/);
-  });
 });
 
-test.describe('Image Create Page', () => {
-  test.beforeEach(async ({ page }) => {
-    await setupMockAuth(page);
-    await setupImageMocks(page);
-  });
-
-  test('create page renders with form view by default', async ({ page }) => {
-    await page.goto('/create/image');
-    await page.waitForSelector('h3:has-text("Create An Image")', { timeout: 10000 });
-
-    const formBtn = page.locator('button:has-text("Form")');
-    const editorBtn = page.locator('button:has-text("Editor")');
-    await expect(formBtn).toBeVisible();
-    await expect(editorBtn).toBeVisible();
-
-    await snapshot(page, SCREENSHOT_DIR, 'image-create-form');
-  });
-
-  test('toggle to editor mode shows code editor', async ({ page }) => {
-    await page.goto('/create/image');
-    await page.waitForSelector('h3:has-text("Create An Image")', { timeout: 10000 });
-
-    await page.locator('button:has-text("Editor")').click();
-    await page.waitForTimeout(500);
-
-    await waitForEditor(page);
-
-    const yamlBtn = page.locator('button:has-text("YAML")');
-    await expect(yamlBtn).toBeVisible();
-
-    await snapshot(page, SCREENSHOT_DIR, 'image-create-editor');
-  });
-
-  test('editor mode has format toggle', async ({ page }) => {
-    await page.goto('/create/image');
-    await page.waitForSelector('h3:has-text("Create An Image")', { timeout: 10000 });
-
-    await page.locator('button:has-text("Editor")').click();
-    await page.waitForTimeout(500);
-
-    const yamlBtn = page.locator('button:has-text("YAML")');
-    const jsonBtn = page.locator('button:has-text("JSON")');
-    await expect(yamlBtn).toBeVisible();
-    await expect(jsonBtn).toBeVisible();
-  });
-
-  test('format toggle switches between YAML and JSON', async ({ page }) => {
-    await page.goto('/create/image');
-    await page.waitForSelector('h3:has-text("Create An Image")', { timeout: 10000 });
-
-    await page.locator('button:has-text("Editor")').click();
-    await page.waitForTimeout(500);
-    await waitForEditor(page);
-
-    const editorContent = await page.locator('.cm-content').textContent();
-    expect(editorContent).toContain('group');
-
-    await page.locator('button:has-text("JSON")').click();
-    await page.waitForTimeout(500);
-    await waitForEditor(page);
-
-    const jsonContent = await page.locator('.cm-content').textContent();
-    expect(jsonContent).toContain('{');
-  });
-
-  test('cancel button navigates back', async ({ page }) => {
-    await page.goto('/create/image');
-    await page.waitForSelector('h3:has-text("Create An Image")', { timeout: 10000 });
-
-    const currentUrl = page.url();
-    await page.locator('button:has-text("Cancel")').click();
-    await page.waitForTimeout(500);
-
-    expect(page.url()).not.toBe(currentUrl);
-  });
-
-  test('create and cancel buttons are visible', async ({ page }) => {
-    await page.goto('/create/image');
-    await page.waitForSelector('h3:has-text("Create An Image")', { timeout: 10000 });
-
-    await expect(page.locator('button:has-text("Create")')).toBeVisible();
-    await expect(page.locator('button:has-text("Cancel")')).toBeVisible();
-  });
-});
-
-test.describe('Image Create — Lossless View Switching', () => {
-  test.beforeEach(async ({ page }) => {
-    await setupMockAuth(page);
-    await setupImageMocks(page);
-  });
-
-  test('form data persists through Form → Editor → Form round trip', async ({ page }) => {
-    await page.goto('/create/image');
-    await page.waitForSelector('h3:has-text("Create An Image")', { timeout: 10000 });
-
-    // Switch to editor, verify default template is present
-    await page.locator('button:has-text("Editor")').click();
-    await waitForEditor(page);
-
-    const editorContent = await page.locator('.cm-content').textContent();
-    expect(editorContent).toContain('group');
-    expect(editorContent).toContain('timeout');
-
-    // Switch back to form — no data loss, no confirmation dialog
-    await page.locator('button:has-text("Form")').click();
-    await page.waitForTimeout(300);
-
-    // Form should still be visible with fields
-    await expect(page.locator('h5:has-text("Image")')).toBeVisible();
-  });
-
-  test('editor changes persist when switching back to form', async ({ page }) => {
-    await page.goto('/create/image');
-    await page.waitForSelector('h3:has-text("Create An Image")', { timeout: 10000 });
-
-    // Switch to editor and set content
-    await page.locator('button:has-text("Editor")').click();
-    await waitForEditor(page);
-
-    const yaml = `group: system\nname: my-tool\nimage: thorium/my-tool:latest\nscaler: K8s\ntimeout: 600`;
-    await setEditorContent(page, yaml);
-    await page.waitForTimeout(300);
-
-    // Switch back to form
-    await page.locator('button:has-text("Form")').click();
-    await page.waitForTimeout(500);
-
-    // Switch to editor again and verify content persisted
-    await page.locator('button:has-text("Editor")').click();
-    await waitForEditor(page);
-
-    const content = await page.locator('.cm-content').textContent();
-    expect(content).toContain('my-tool');
-    expect(content).toContain('600');
-  });
-
-  test('no confirmation dialog when switching views', async ({ page }) => {
-    await page.goto('/create/image');
-    await page.waitForSelector('h3:has-text("Create An Image")', { timeout: 10000 });
-
-    // Switch to editor
-    await page.locator('button:has-text("Editor")').click();
-    await waitForEditor(page);
-
-    // Switch back — should not show any modal/confirm
-    await page.locator('button:has-text("Form")').click();
-    await page.waitForTimeout(300);
-
-    const modals = page.locator('.modal');
-    await expect(modals).toHaveCount(0);
-    await expect(page.locator('h5:has-text("Image")')).toBeVisible();
-  });
-});
-
-test.describe('Image Create — Form Validation', () => {
-  test.beforeEach(async ({ page }) => {
-    await setupMockAuth(page);
-    await setupImageMocks(page);
-  });
-
-  test('create button shows validation error when required fields empty', async ({ page }) => {
-    await page.goto('/create/image');
-    await page.waitForSelector('h3:has-text("Create An Image")', { timeout: 10000 });
-
-    await page.locator('.ok-btn:has-text("Create")').click();
-    await page.waitForTimeout(300);
-
-    // the bottom validation banner appears when required fields are missing
-    await expect(page.getByText('Please resolve missing fields or invalid entries')).toBeVisible();
-
-    await snapshot(page, SCREENSHOT_DIR, 'image-create-validation-error');
-  });
-
-  test('create submits successfully with valid data in editor mode', async ({ page }) => {
-    let createRequested = false;
-    let createBody: Record<string, unknown> = {};
-    await page.route('**/api/images/', (route) => {
-      if (route.request().method() === 'POST') {
-        createRequested = true;
-        createBody = route.request().postDataJSON() as Record<string, unknown>;
-        return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
-      }
-      return route.fallback();
+/// Counts the columns of the balanced section grid in an expanded image's details
+async function sectionColumns(page: Page, name: string): Promise<number> {
+  return imageItem(page, name)
+    .locator('[data-testid="accordion-body"] b', { hasText: /^Resources$/ })
+    .evaluate((heading) => {
+      // the section cards sit in columns that are the children of the nearest grid container
+      let node: HTMLElement | null = heading as HTMLElement;
+      while (node && getComputedStyle(node).display !== 'grid') node = node.parentElement;
+      return node ? node.children.length : 0;
     });
+}
 
-    await page.goto('/create/image');
-    await page.waitForSelector('h3:has-text("Create An Image")', { timeout: 10000 });
-
-    await page.locator('button:has-text("Editor")').click();
-    await waitForEditor(page);
-
-    const yaml = `group: system\nname: new-image\nimage: thorium/new:latest\nscaler: K8s\ntimeout: 300`;
-    await setEditorContent(page, yaml);
-    await page.waitForTimeout(300);
-
-    await page.locator('.ok-btn:has-text("Create")').click();
-    await page.waitForTimeout(500);
-
-    expect(createRequested).toBe(true);
-    expect(createBody.group).toBe('system');
-    expect(createBody.name).toBe('new-image');
-  });
-});
-
-test.describe('Image Browsing — Edit and Update', () => {
+test.describe('Image details', () => {
   test.beforeEach(async ({ page }) => {
     await setupMockAuth(page);
+  });
+
+  test('a banned image shows a warning icon and its ban details', async ({ page }) => {
+    await setupImageMocks(page, [MOCK_IMAGE, MOCK_IMAGE_BANNED]);
+    await page.goto('/images');
+    await page.waitForSelector('[data-testid="accordion"]', { timeout: 10000 });
+
+    // only the banned image carries the warning icon in its header status
+    await expect(imageItem(page, 'banned-image').locator('.accordion-item-status svg')).toHaveCount(1);
+    await expect(imageItem(page, 'test-image').locator('.accordion-item-status svg')).toHaveCount(0);
+
+    await imageItem(page, 'banned-image').locator('[data-testid="accordion-header"]').click();
+    const body = imageItem(page, 'banned-image').locator('[data-testid="accordion-body"]');
+    await expect(body.getByText('Ban: The image registry is gone. Banned on')).toBeVisible();
+  });
+
+  test('an External image shows None badges and leaves out the sections it does not use', async ({ page }) => {
     await setupImageMocks(page);
+    await page.goto('/images');
+    await page.waitForSelector('[data-testid="accordion"]', { timeout: 10000 });
+
+    await imageItem(page, 'external-tool').locator('[data-testid="accordion-header"]').click();
+    const body = imageItem(page, 'external-tool').locator('[data-testid="accordion-body"]');
+    await expect(body.locator('b', { hasText: /^Resources$/ })).toBeVisible();
+    // the image sets none of its optional fields, so their grey badges say none
+    expect(await body.locator('.bg-grey', { hasText: /^none$/ }).count()).toBeGreaterThanOrEqual(3);
+    // an External image is not run by Thorium, so it has no output collection, dependencies, or child filters
+    for (const section of ['Output Collection', 'Dependencies', 'Child Filters']) {
+      await expect(body.locator('b', { hasText: new RegExp(`^${section}$`) })).toHaveCount(0);
+    }
   });
 
-  test('update sends PATCH request', async ({ page }) => {
-    let patchRequested = false;
-    await page.route('**/api/images/system/test-image', (route) => {
-      if (route.request().method() === 'PATCH') {
-        patchRequested = true;
-        return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
-      }
-      return route.fallback();
-    });
-
+  test('the detail sections fill two columns on a wide window and one on a narrow one', async ({ page }) => {
+    await setupImageMocks(page);
+    await page.setViewportSize({ width: 1400, height: 900 });
     await page.goto('/images');
-    await page.waitForSelector('.accordion', { timeout: 10000 });
+    await page.waitForSelector('[data-testid="accordion"]', { timeout: 10000 });
+    await imageItem(page, 'test-image').locator('[data-testid="accordion-header"]').click();
+    await expect.poll(() => sectionColumns(page, 'test-image')).toBe(2);
 
-    await page.locator('.accordion-header').first().click();
-    await page.waitForTimeout(500);
-
-    await page.locator('button:has-text("Edit")').first().click();
-    await page.waitForTimeout(500);
-
-    // Switch to editor to make a change
-    await page.locator('button:has-text("Editor")').click();
-    await waitForEditor(page);
-
-    await page.locator('button:has-text("Accept")').first().click();
-    await page.waitForTimeout(500);
-
-    expect(patchRequested).toBe(true);
-  });
-
-  test('lossless view switching in edit mode', async ({ page }) => {
-    await page.goto('/images');
-    await page.waitForSelector('.accordion', { timeout: 10000 });
-
-    await page.locator('.accordion-header').first().click();
-    await page.waitForTimeout(500);
-
-    await page.locator('button:has-text("Edit")').first().click();
-    await page.waitForTimeout(500);
-
-    // Switch to editor
-    await page.locator('button:has-text("Editor")').click();
-    await waitForEditor(page);
-
-    const editorContent = await page.locator('.cm-content').textContent();
-    expect(editorContent).toContain('test-image');
-
-    // Switch back to form — no data loss
-    await page.locator('button:has-text("Form")').click();
-    await page.waitForTimeout(300);
-
-    // Should still be in edit mode with Accept/Discard buttons
-    await expect(page.locator('button:has-text("Accept")').first()).toBeVisible();
-    await expect(page.locator('button:has-text("Discard")').first()).toBeVisible();
-
-    await snapshot(page, SCREENSHOT_DIR, 'image-edit-lossless-roundtrip');
-  });
-
-  test('editor shows image data in YAML when entering edit mode', async ({ page }) => {
-    await page.goto('/images');
-    await page.waitForSelector('.accordion', { timeout: 10000 });
-
-    await page.locator('.accordion-header').first().click();
-    await page.waitForTimeout(500);
-
-    await page.locator('button:has-text("Edit")').first().click();
-    await page.waitForTimeout(500);
-
-    await page.locator('button:has-text("Editor")').click();
-    await waitForEditor(page);
-
-    const content = await page.locator('.cm-content').textContent();
-    expect(content).toContain('test-image');
-    expect(content).toContain('system');
-    expect(content).toContain('K8s');
-    expect(content).toContain('300');
-
-    await snapshot(page, SCREENSHOT_DIR, 'image-edit-editor-yaml');
+    await page.setViewportSize({ width: 800, height: 900 });
+    await expect.poll(() => sectionColumns(page, 'test-image')).toBe(1);
   });
 });

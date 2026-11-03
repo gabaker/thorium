@@ -1,43 +1,104 @@
+import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router';
-import { Button, ButtonToolbar, Card, Col, FormCheck, Modal, Row } from 'react-bootstrap';
-import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
 import { FaTrash } from 'react-icons/fa';
+import { Link } from 'react-router';
+import styled from 'styled-components';
 
 // project imports
-import { LinkFields } from '@entities/browsing/shared';
+import { getStatusBadge } from './reactions';
+import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
+import { Button, ButtonSize, ButtonVariant, IconButton } from '@components/shared/buttons';
 import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
+import Modal, { ModalSize } from '@components/shared/modal/Modal';
 import Subtitle from '@components/shared/titles/Subtitle';
 import { OverlayTipTop, OverlayTipLeft } from '@components/shared/overlay/tips';
 import { useAuth } from '@utilities/auth';
 import { listReactions, deleteReaction } from '@thorpi/reactions';
-import { getStatusBadge } from './reactions';
+import { invalidateRunLists } from '@utilities/queries/runs';
+import { reactionPath } from '@utilities/runs';
+import { spacers } from '@styles';
 import type { Reaction, ReactionRunResult } from '@models/reactions';
 
+/** The reaction tab: the header panel, the reaction rows, and the delete results, kept off the page edges. */
+const ReactionsTab = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: ${spacers.two};
+  margin: 0 ${spacers.four} ${spacers.five};
+`;
+
+/** The header row of the reaction list, drawn as a panel above the rows. */
+const HeaderPanel = styled.div`
+  padding: ${spacers.three} ${spacers.two};
+  border: 1px solid var(--thorium-panel-border);
+  border-radius: 6px;
+  color: var(--thorium-text);
+  background-color: var(--thorium-panel-bg);
+`;
+
+/** One reaction's row; every cell links to the reaction except the selection checkbox. */
+const ReactionLine = styled.div`
+  padding: ${spacers.two};
+  color: var(--thorium-text);
+  background-color: var(--thorium-panel-bg);
+
+  &:hover {
+    background-color: var(--thorium-highlight-panel-bg);
+    box-shadow:
+      inset 0 0 1px var(--thorium-panel-border),
+      0 0 4px var(--thorium-highlight-panel-border);
+  }
+
+  a {
+    color: inherit;
+  }
+`;
+
+/** A cell of the reaction list; it pads only its sides, so a cell's height stays its lines' height. */
+const Cell = styled.div`
+  padding: 0 ${spacers.two};
+`;
+
+/** The selection column: the delete button and the select-all box in the header, a row's box in a row. */
+const SelectionCell = styled(Cell)`
+  gap: ${spacers.three};
+`;
+
+/** The reactions listed for deletion in the confirmation dialog. */
+const DeleteList = styled.ul`
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  text-align: center;
+  font-weight: 700;
+`;
+
+/** The props of {@link DeleteReactionAlerts}. */
 interface DeleteReactionAlertsProps {
+  /** The outcome of each requested deletion; an empty error means it succeeded. */
   responses: ReactionRunResult[];
 }
 
-const DeleteReactionAlerts = ({ responses }: DeleteReactionAlertsProps) => {
-  return (
-    <>
-      {responses.length > 0 &&
-        responses.map((deleteResponse, idx) => (
-          <Row key={idx}>
-            {deleteResponse.error && <AlertBanner className="full-width">{deleteResponse.error}</AlertBanner>}
-            {deleteResponse.error == '' && (
-              <AlertBanner severity={Severity.Info} className="full-width">
-                <span>
-                  {`Successfully deleted reaction ${deleteResponse.id}`}
-                  {` for pipeline ${deleteResponse.pipeline} from group ${deleteResponse.group}!`}
-                </span>
-              </AlertBanner>
-            )}
-          </Row>
-        ))}
-    </>
-  );
-};
+/**
+ * Show one banner per requested deletion: the error for a failure, a notice for a success.
+ *
+ * @param props - The deletion outcomes.
+ * @returns The banners.
+ */
+const DeleteReactionAlerts = ({ responses }: DeleteReactionAlertsProps) => (
+  <>
+    {responses.map((deleteResponse, idx) =>
+      deleteResponse.error ? (
+        <AlertBanner key={idx}>{deleteResponse.error}</AlertBanner>
+      ) : (
+        <AlertBanner key={idx} severity={Severity.Info}>
+          {`Successfully deleted reaction ${deleteResponse.id}`}
+          {` for pipeline ${deleteResponse.pipeline} from group ${deleteResponse.group}!`}
+        </AlertBanner>
+      ),
+    )}
+  </>
+);
 
 // module-level flag to pause auto-refresh during deletion
 let deleteInProgress = false;
@@ -48,6 +109,7 @@ interface ReactionStatusProps {
 }
 
 const ReactionStatus = ({ sha256, autoRefresh }: ReactionStatusProps) => {
+  const client = useQueryClient();
   const [loading, setLoading] = useState(false);
   const [reactionsList, setReactionsList] = useState<Reaction[]>([]);
   const [reactionsMap, setReactionsMap] = useState<Record<string, Reaction>>({});
@@ -195,7 +257,8 @@ const ReactionStatus = ({ sha256, autoRefresh }: ReactionStatusProps) => {
         }
       }
     }
-
+    // the cached run lists may still hold the deleted reactions
+    void invalidateRunLists(client);
     setLoading(false);
     deleteInProgress = false;
     await getReactionsList();
@@ -203,133 +266,114 @@ const ReactionStatus = ({ sha256, autoRefresh }: ReactionStatusProps) => {
   };
 
   return (
-    <div id="reactionstatus-tab" className="mx-4">
+    <ReactionsTab id="reactionstatus-tab">
       {!loading && reactionsList.length == 0 ? (
-        <>
-          <AlertBanner severity={Severity.Info}>
-            <h3>No Reactions Found</h3>
-          </AlertBanner>
-        </>
+        <AlertBanner severity={Severity.Info}>
+          <h3>No Reactions Found</h3>
+        </AlertBanner>
       ) : (
         <>
           <LoadingSpinner loading={loading}></LoadingSpinner>
-          {loading ? (
-            <></>
-          ) : (
+          {!loading && (
             <>
-              <Row>
-                <Card className="panel">
-                  <Row>
-                    <Col className="reactions-pipeline mt-3" md={2}>
-                      <Subtitle>Pipeline</Subtitle>
-                    </Col>
-                    <Col className="reactions-creator mt-3" md={1}>
-                      <Subtitle className="mt-2">Creator</Subtitle>
-                    </Col>
-                    <Col className="reactions-group mt-3" md={1}>
-                      <Subtitle>Group</Subtitle>
-                    </Col>
-                    <Col className="reactions-status mt-3" md={1}>
-                      <Subtitle>Status</Subtitle>
-                    </Col>
-                    <Col className="reactions-id mt-3" md={3}>
-                      <Subtitle>Reaction ID</Subtitle>
-                    </Col>
-                    <Col className="reactions-selection d-flex justify-content-end" md={1}>
-                      <ButtonToolbar className="d-flex justify-content-end">
-                        <OverlayTipTop
-                          tip={`Delete selected reactions. Only system admins,
+              <HeaderPanel className="reactions-grid">
+                <Cell className="reactions-pipeline">
+                  <Subtitle>Run</Subtitle>
+                </Cell>
+                <Cell className="reactions-creator">
+                  <Subtitle>Creator</Subtitle>
+                </Cell>
+                <Cell className="reactions-group">
+                  <Subtitle>Group</Subtitle>
+                </Cell>
+                <Cell className="reactions-status">
+                  <Subtitle>Status</Subtitle>
+                </Cell>
+                <Cell className="reactions-id">
+                  <Subtitle>Reaction ID</Subtitle>
+                </Cell>
+                <SelectionCell className="reactions-selection">
+                  <OverlayTipTop
+                    tip={`Delete selected reactions. Only system admins,
                           group owners/managers, and the submitter can delete a reaction.`}
-                        >
-                          <Button
-                            size="sm"
-                            className="icon-btn me-2 my-1"
-                            variant=""
-                            disabled={!anySelected()}
-                            onClick={handleShowDeleteModal}
-                          >
-                            <FaTrash />
-                          </Button>
-                        </OverlayTipTop>
-                        <OverlayTipLeft tip={'Select All Reactions'}>
-                          <FormCheck onChange={handleSelectAll} className="mt-2" checked={reactionsAllSelected}></FormCheck>
-                        </OverlayTipLeft>
-                      </ButtonToolbar>
-                      <Modal show={showDeleteModal} onHide={handleCloseDeleteModal} backdrop="static" keyboard={false}>
-                        <Modal.Header closeButton>
-                          <Modal.Title>Confirm deletion?</Modal.Title>
-                        </Modal.Header>
-                        <Modal.Body>
-                          <p>Do you really want to delete the following reactions:</p>
-                          {truncateSelections(reactionsListSelections).map((reactionString, idx) => {
-                            return (
-                              <div key={idx}>
-                                <center>
-                                  <b>{reactionString}</b>
-                                </center>
-                              </div>
-                            );
-                          })}
-                        </Modal.Body>
-                        <Modal.Footer className="d-flex justify-content-center">
-                          <Button
-                            className="danger-btn"
-                            onClick={() => {
-                              void handleDeleteClick();
-                            }}
-                          >
-                            Confirm
-                          </Button>
-                          <Button className="primary-btn" onClick={handleCloseDeleteModal}>
-                            Cancel
-                          </Button>
-                        </Modal.Footer>
-                      </Modal>
-                    </Col>
-                  </Row>
-                </Card>
-              </Row>
-              <Row className="mt-1">
-                {reactionsList.map((reaction, idx) => (
-                  <Card key={`${reaction.id}_${idx}`} className="no-border">
-                    <LinkFields className="no-decoration">
-                      <Link to={`/reaction/${reaction.group}/${reaction.id}`} className="no-decoration reactions-pipeline">
-                        <Col>{reaction.pipeline}</Col>
-                      </Link>
-                      <Link to={`/reaction/${reaction.group}/${reaction.id}`} className="no-decoration reactions-creator">
-                        <Col>{reaction.creator}</Col>
-                      </Link>
-                      <Link to={`/reaction/${reaction.group}/${reaction.id}`} className="no-decoration reactions-group">
-                        <Col>{reaction.group}</Col>
-                      </Link>
-                      <Link to={`/reaction/${reaction.group}/${reaction.id}`} className="no-decoration reactions-status">
-                        <Col>{getStatusBadge(reaction.status)}</Col>
-                      </Link>
-                      <Link to={`/reaction/${reaction.group}/${reaction.id}`} className="no-decoration reactions-id">
-                        <Col>{reaction.id}</Col>
-                      </Link>
-                      <Col className="reactions-selection" md={1}>
-                        <FormCheck
-                          onChange={() => {
-                            handleSelectionChange(reaction.id);
-                          }}
-                          checked={reactionsListSelections[reaction.id] ? reactionsListSelections[reaction.id] : false}
-                        ></FormCheck>
-                      </Col>
-                    </LinkFields>
-                  </Card>
-                ))}
-              </Row>
+                  >
+                    <IconButton
+                      size={ButtonSize.Small}
+                      aria-label="Delete selected reactions"
+                      disabled={!anySelected()}
+                      onClick={handleShowDeleteModal}
+                    >
+                      <FaTrash />
+                    </IconButton>
+                  </OverlayTipTop>
+                  <OverlayTipLeft tip={'Select All Reactions'}>
+                    <input type="checkbox" aria-label="Select all reactions" onChange={handleSelectAll} checked={reactionsAllSelected} />
+                  </OverlayTipLeft>
+                </SelectionCell>
+              </HeaderPanel>
+              {reactionsList.map((reaction, idx) => (
+                <ReactionLine key={`${reaction.id}_${idx}`} className="reactions-grid">
+                  <Link to={reactionPath(reaction)} className="no-decoration reactions-pipeline">
+                    <Cell>{reaction.pipeline}</Cell>
+                  </Link>
+                  <Link to={reactionPath(reaction)} className="no-decoration reactions-creator" title={reaction.creator}>
+                    <Cell>{reaction.creator}</Cell>
+                  </Link>
+                  <Link to={reactionPath(reaction)} className="no-decoration reactions-group" title={reaction.group}>
+                    <Cell>{reaction.group}</Cell>
+                  </Link>
+                  <Link to={reactionPath(reaction)} className="no-decoration reactions-status">
+                    <Cell>{getStatusBadge(reaction.status)}</Cell>
+                  </Link>
+                  <Link to={reactionPath(reaction)} className="no-decoration reactions-id" title={reaction.id}>
+                    <Cell>{reaction.id}</Cell>
+                  </Link>
+                  <SelectionCell className="reactions-selection">
+                    <input
+                      type="checkbox"
+                      aria-label={`Select reaction ${reaction.id}`}
+                      onChange={() => {
+                        handleSelectionChange(reaction.id);
+                      }}
+                      checked={reactionsListSelections[reaction.id] ?? false}
+                    />
+                  </SelectionCell>
+                </ReactionLine>
+              ))}
             </>
           )}
         </>
       )}
-      <Row className="mt-2">
-        <DeleteReactionAlerts responses={deleteReactionResponses} />
-      </Row>
-      <br />
-      <br />
-    </div>
+      <DeleteReactionAlerts responses={deleteReactionResponses} />
+      <Modal
+        show={showDeleteModal}
+        onClose={handleCloseDeleteModal}
+        size={ModalSize.Small}
+        title="Confirm deletion?"
+        actions={
+          <>
+            <Button variant={ButtonVariant.Secondary} onClick={handleCloseDeleteModal}>
+              Cancel
+            </Button>
+            <Button
+              variant={ButtonVariant.Danger}
+              onClick={() => {
+                void handleDeleteClick();
+              }}
+            >
+              Confirm
+            </Button>
+          </>
+        }
+      >
+        <p>Do you really want to delete the following reactions:</p>
+        <DeleteList>
+          {truncateSelections(reactionsListSelections).map((reactionString, idx) => (
+            <li key={idx}>{reactionString}</li>
+          ))}
+        </DeleteList>
+      </Modal>
+    </ReactionsTab>
   );
 };
 

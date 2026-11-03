@@ -1,18 +1,42 @@
-import { useEffect, useState } from 'react';
-import { Button, Card, Col, Row } from 'react-bootstrap';
-import AlertBanner from '@components/shared/alerts/AlertBanner';
+import { Fragment, useEffect, useState } from 'react';
+import styled from 'styled-components';
 
 // project imports
 import { orderComparePipelineName } from './pipelines';
 import { buildReactionsList, SelectedPipelines } from './reactions';
+import AlertBanner from '@components/shared/alerts/AlertBanner';
+import { Button, ButtonVariant } from '@components/shared/buttons';
 import Title from '@components/shared/titles/Title';
 import Markdown from '@components/shared/syntax/Markdown';
 import { OverlayTipTop } from '@components/shared/overlay/tips';
 import { cleanDescription } from '@utilities/description';
 import { listPipelines } from '@thorpi/pipelines';
+import { spacers } from '@styles';
 import type { Pipeline } from '@models/pipelines';
 import type { ReactionSelection } from '@models/reactions';
 import type { UserInfo } from '@models/users';
+
+/** The pipeline picker's panel: each group's name over its pipeline buttons, centred. */
+const PickerPanel = styled.div`
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: ${spacers.three};
+  padding: ${spacers.four};
+  text-align: center;
+  border: 1px solid var(--thorium-panel-border);
+  border-radius: 6px;
+  color: var(--thorium-text);
+  background-color: var(--thorium-panel-bg);
+`;
+
+/** One group's pipeline buttons, wrapped onto as many lines as they need. */
+const PipelineButtons = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: ${spacers.three};
+`;
 
 interface SelectPipelinesProps {
   userInfo: UserInfo | null;
@@ -78,66 +102,49 @@ const SelectPipelines = ({ userInfo, setReactionsList, setError, currentSelectio
     if (setError) setError([]);
   };
 
+  // a pipeline's toggle button, drawn filled while the pipeline is selected
+  const pipelineButton = (pipeline: Pipeline) => {
+    const selected = selectedPipelines[pipeline.group]?.[pipeline.name] ?? false;
+    return (
+      <Button
+        variant={selected ? ButtonVariant.Primary : ButtonVariant.Secondary}
+        aria-pressed={selected}
+        onClick={() => handlePipelineClick(pipeline.group, pipeline.name)}
+      >
+        <b>{pipeline.name}</b>
+      </Button>
+    );
+  };
+
   return (
-    <Card className="panel">
-      <Card.Body className="py-0">
-        <center>
-          {pipelinesListErrors &&
-            pipelinesListErrors.map((error, idx) => <AlertBanner key={`pipeline-list-error-${idx}`}>{error}</AlertBanner>)}
-          {pipelines &&
-            userInfo &&
-            userInfo['groups'] &&
-            userInfo.groups.map((group) => {
-              if (pipelines[group] && pipelines[group].length) {
-                return (
-                  <div key={group}>
-                    <Row className="mt-4 mb-2">
-                      <Col>
-                        <Title small>{group}</Title>
-                      </Col>
-                    </Row>
-                    <Row className="mb-4">
-                      <Col>
-                        {pipelines[group]
-                          .sort((a, b) => orderComparePipelineName(a, b))
-                          .map((pipeline) => {
-                            const description = cleanDescription(pipeline.description);
-                            return description ? (
-                              <OverlayTipTop
-                                key={`${pipeline.group}_${pipeline.name}`}
-                                wide
-                                tip={(<Markdown>{description}</Markdown>) as unknown as string}
-                              >
-                                <Button
-                                  variant=""
-                                  className={`m-1 primary-btn ${selectedPipelines[`${pipeline.group}`]?.[`${pipeline.name}`] ? 'selected' : 'unselected'}`}
-                                  onClick={() => handlePipelineClick(pipeline.group, pipeline.name)}
-                                >
-                                  <b>{pipeline.name}</b>
-                                </Button>
-                              </OverlayTipTop>
-                            ) : (
-                              <Button
-                                variant=""
-                                key={`${pipeline.group}_${pipeline.name}`}
-                                className={`m-1 primary-btn ${selectedPipelines[`${pipeline.group}`]?.[`${pipeline.name}`] ? 'selected' : 'unselected'}`}
-                                onClick={() => handlePipelineClick(pipeline.group, pipeline.name)}
-                              >
-                                <b>{pipeline.name}</b>
-                              </Button>
-                            );
-                          })}
-                      </Col>
-                    </Row>
-                  </div>
-                );
-              } else {
-                return null;
-              }
-            })}
-        </center>
-      </Card.Body>
-    </Card>
+    <PickerPanel>
+      {pipelinesListErrors.map((error, idx) => (
+        <AlertBanner key={`pipeline-list-error-${idx}`}>{error}</AlertBanner>
+      ))}
+      {userInfo?.groups?.map((group) => {
+        if (!pipelines[group]?.length) return null;
+        return (
+          <div key={group}>
+            <Title small>{group}</Title>
+            <PipelineButtons>
+              {pipelines[group]
+                .sort((a, b) => orderComparePipelineName(a, b))
+                .map((pipeline) => {
+                  const description = cleanDescription(pipeline.description);
+                  const key = `${pipeline.group}_${pipeline.name}`;
+                  return description ? (
+                    <OverlayTipTop key={key} wide tip={(<Markdown>{description}</Markdown>) as unknown as string}>
+                      {pipelineButton(pipeline)}
+                    </OverlayTipTop>
+                  ) : (
+                    <Fragment key={key}>{pipelineButton(pipeline)}</Fragment>
+                  );
+                })}
+            </PipelineButtons>
+          </div>
+        );
+      })}
+    </PickerPanel>
   );
 };
 

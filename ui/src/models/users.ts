@@ -103,6 +103,20 @@ export type UserInfo = {
   has_image: boolean;
 };
 
+/// What a check of the current session with the server found
+export enum SessionState {
+  /// The server accepted the session
+  Valid = 'valid',
+  /// The server refused the session (401 or 403): it expired or was revoked
+  Expired = 'expired',
+  /// The server could not be reached or failed (a network error or 5xx), so the session is neither confirmed nor refused
+  Unavailable = 'unavailable',
+}
+
+/// The outcome of a session check, with the user's info when the session is valid
+export type SessionCheck =
+  { state: SessionState.Valid; user: UserInfo } | { state: SessionState.Expired } | { state: SessionState.Unavailable };
+
 /// Response to a successful auth
 export type UserAuthResponse = {
   /// The token to use to talk to Thorium

@@ -1,8 +1,24 @@
-import { Form } from 'react-bootstrap';
-import styles from './TokenViewStyles.module.scss';
-import { ScopedTokenRole, ScopedTokenRoleKey, ThoriumDeveloperRoleValue } from '@models/users';
-import { useMemo } from 'react';
+import { useId, useMemo } from 'react';
+import styled from 'styled-components';
 
+// project imports
+import { CheckList, CheckRow, Field, Muted, Select } from '@components/agentic/shared';
+import TextInput from '@components/shared/inputs/TextInput';
+import { ScopedTokenRole, ScopedTokenRoleKey, ThoriumDeveloperRoleValue } from '@models/users';
+
+/** The token form's fields, stacked; the fields' own bottom margins space them. */
+const FormStack = styled.div`
+  display: flex;
+  flex-direction: column;
+`;
+
+/** A checkbox and its label, where a long group name wraps inside the label instead of overflowing the dialog. */
+const WrappingCheck = styled(CheckRow)`
+  white-space: normal;
+  overflow-wrap: anywhere;
+`;
+
+/** The permissions a token gets when its role is switched to Developer: none. */
 const defaultDeveloperPermissions: ThoriumDeveloperRoleValue = {
   k8s: false,
   bare_metal: false,
@@ -11,23 +27,45 @@ const defaultDeveloperPermissions: ThoriumDeveloperRoleValue = {
   kvm: false,
 };
 
+/** A developer permission's name. */
 type DeveloperPermissionKey = keyof ThoriumDeveloperRoleValue;
 
+/** The props of {@link ScopedTokenForm}. */
 type ScopedTokenFormProps = {
+  /** The token's name; only a new token has one to fill in. */
   name?: string;
+  /** Called with the edited name; the name field is shown only when this is set. */
   onNameChange?: (v: string) => void;
+  /** The groups the user can scope the token to. */
   availableGroups: string[];
+  /** The groups ticked for the token. */
   selectedGroups: string[];
+  /** Called when a group's box is ticked or cleared. */
   onGroupToggle: (group: string) => void;
+  /** The token's role. */
   role: ScopedTokenRole;
+  /** Called with the edited role. */
   onRoleChange: (role: ScopedTokenRole) => void;
+  /** The token's permanent expiry date (YYYY-MM-DD), or empty for none. */
   expires: string;
+  /** Called with the edited expiry date. */
   onExpiresChange: (v: string) => void;
+  /** Whether to offer clearing the token's current expiry. */
   showClearExpires?: boolean;
+  /** Whether the token's current expiry is to be cleared. */
   clearExpires?: boolean;
+  /** Called when the clear-expiry box is ticked or cleared. */
   onClearExpiresChange?: (v: boolean) => void;
+  /** The developer permissions the user may grant, or null when they may not make a developer token; unset puts no limit on the form. */
+  grantable?: ThoriumDeveloperRoleValue | null;
 };
 
+/**
+ * The fields of the new and edit scoped token dialogs.
+ *
+ * @param props - The token's fields, their change handlers, and the groups and permissions on offer.
+ * @returns The form fields.
+ */
 export const ScopedTokenForm = ({
   name,
   onNameChange,
@@ -41,9 +79,16 @@ export const ScopedTokenForm = ({
   showClearExpires,
   clearExpires,
   onClearExpiresChange,
+  grantable,
 }: ScopedTokenFormProps) => {
+  // a prefix that keeps the ids of the checkbox groups' headings unique, so each group can be named by its heading
+  const idPrefix = useId();
   const sortedGroups = useMemo(() => [...availableGroups].sort(), [availableGroups]);
   const roleKey = role === ScopedTokenRoleKey.User ? ScopedTokenRoleKey.User : ScopedTokenRoleKey.Developer;
+  // the roles offered; Developer is left out for a user the API would refuse it, unless the token already has it
+  const offeredRoles = Object.values(ScopedTokenRoleKey).filter(
+    (candidate) => candidate !== ScopedTokenRoleKey.Developer || grantable !== null || roleKey === ScopedTokenRoleKey.Developer,
+  );
 
   const developerPermissions = [
     { key: 'k8s', label: 'K8s' },
@@ -80,70 +125,77 @@ export const ScopedTokenForm = ({
   };
 
   return (
-    <Form>
+    <FormStack>
       {onNameChange !== undefined && (
-        <Form.Group className="mb-3">
-          <Form.Label>Name</Form.Label>
-          <Form.Control type="text" placeholder="my-token" value={name ?? ''} onChange={(e) => onNameChange(e.target.value)} />
-          <Form.Text className="text-muted">Scoped token names can contain lower case letters, numbers, and dashes</Form.Text>
-        </Form.Group>
+        <Field>
+          <span className="label">Name</span>
+          <TextInput type="text" placeholder="my-token" value={name ?? ''} onChange={(e) => onNameChange(e.target.value)} />
+          <span className="hint">Scoped token names can contain lower case letters, numbers, and dashes.</span>
+        </Field>
       )}
-      <Form.Group className="mb-3">
-        <Form.Label>Groups</Form.Label>
+      <Field as="div" role="group" aria-labelledby={`${idPrefix}-groups`}>
+        <span className="label" id={`${idPrefix}-groups`}>
+          Groups
+        </span>
         {availableGroups.length === 0 ? (
-          <p className="text-muted">You are not a member of any groups.</p>
+          <Muted>You are not a member of any groups.</Muted>
         ) : (
-          sortedGroups.map((group) => (
-            <Form.Check
-              className={styles.group_check}
-              key={group}
-              type="checkbox"
-              label={group}
-              checked={selectedGroups.includes(group)}
-              onChange={() => onGroupToggle(group)}
-            />
-          ))
+          <CheckList>
+            {sortedGroups.map((group) => (
+              <WrappingCheck key={group}>
+                <input type="checkbox" checked={selectedGroups.includes(group)} onChange={() => onGroupToggle(group)} />
+                {group}
+              </WrappingCheck>
+            ))}
+          </CheckList>
         )}
-      </Form.Group>
-      <Form.Group className="mb-3">
-        <Form.Label>Role</Form.Label>
-        <Form.Select value={roleKey} onChange={(e) => onChangeRoleKey(e.target.value as ScopedTokenRoleKey)}>
-          {Object.values(ScopedTokenRoleKey).map((selectedRole) => (
+      </Field>
+      <Field>
+        <span className="label">Role</span>
+        <Select value={roleKey} onChange={(e) => onChangeRoleKey(e.target.value as ScopedTokenRoleKey)}>
+          {offeredRoles.map((selectedRole) => (
             <option key={selectedRole} value={selectedRole}>
               {selectedRole}
             </option>
           ))}
-        </Form.Select>
-        {roleKey === ScopedTokenRoleKey.Developer && (
-          <div className="mt-3">
-            {developerPermissions.map(({ key, label }) => (
-              <Form.Check
-                key={key}
-                className={styles.group_check}
+        </Select>
+      </Field>
+      {roleKey === ScopedTokenRoleKey.Developer && (
+        <Field as="div" role="group" aria-labelledby={`${idPrefix}-permissions`}>
+          <span className="label" id={`${idPrefix}-permissions`}>
+            Developer permissions
+          </span>
+          {developerPermissions.map(({ key, label }) => (
+            <WrappingCheck key={key}>
+              <input
                 type="checkbox"
-                label={label}
+                // a permission the user doesn't hold themselves is refused by the API, so it can't be ticked
+                disabled={grantable != null && !grantable[key] && !(role !== ScopedTokenRoleKey.User && role.Developer[key])}
                 checked={role !== ScopedTokenRoleKey.User && role.Developer[key]}
                 onChange={() => role !== ScopedTokenRoleKey.User && updateDeveloperPermission(key, !role.Developer[key])}
               />
-            ))}
-          </div>
-        )}
-      </Form.Group>
-      <Form.Group className="mb-3">
-        <Form.Label>Permanent Expiry (optional)</Form.Label>
-        <Form.Control type="date" value={expires} disabled={clearExpires} onChange={(e) => onExpiresChange(e.target.value)} />
-      </Form.Group>
-      {showClearExpires && onClearExpiresChange && (
-        <Form.Check
-          type="checkbox"
-          label="Clear permanent expiry"
-          checked={clearExpires ?? false}
-          onChange={(e) => {
-            onClearExpiresChange(e.target.checked);
-            if (e.target.checked) onExpiresChange('');
-          }}
-        />
+              {label}
+            </WrappingCheck>
+          ))}
+        </Field>
       )}
-    </Form>
+      <Field>
+        <span className="label">Permanent expiry (optional)</span>
+        <TextInput type="date" value={expires} disabled={clearExpires} onChange={(e) => onExpiresChange(e.target.value)} />
+      </Field>
+      {showClearExpires && onClearExpiresChange && (
+        <WrappingCheck>
+          <input
+            type="checkbox"
+            checked={clearExpires ?? false}
+            onChange={(e) => {
+              onClearExpiresChange(e.target.checked);
+              if (e.target.checked) onExpiresChange('');
+            }}
+          />
+          Clear permanent expiry
+        </WrappingCheck>
+      )}
+    </FormStack>
   );
 };

@@ -10,6 +10,7 @@ import {
   Label,
   PipelineFieldsWrapper,
   SectionRow,
+  EditSectionRow,
   Select,
   TextArea,
 } from './shared.styled';
@@ -244,7 +245,7 @@ const Fields: React.FC<FieldsProps> = ({ value, onChange, onValidate, groups, mo
   }
   if (mode === PipelineFormMode.Edit) {
     return (
-      <SectionRow>
+      <EditSectionRow>
         <EditSpacer />
         <EditMiddle>
           <OverlayTipRight tip="Core pipeline fields.">
@@ -254,7 +255,7 @@ const Fields: React.FC<FieldsProps> = ({ value, onChange, onValidate, groups, mo
         <EditFieldCol>
           <FieldInputs form={form} setForm={setForm} errors={errors} groups={groups} mode={mode} showErrors={showErrors} />
         </EditFieldCol>
-      </SectionRow>
+      </EditSectionRow>
     );
   }
   return <FieldInputs form={form} setForm={setForm} errors={errors} groups={groups} mode={mode} showErrors={showErrors} />;

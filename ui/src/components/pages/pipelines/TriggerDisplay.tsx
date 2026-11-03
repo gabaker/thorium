@@ -3,6 +3,7 @@ import { FaQuestionCircle } from 'react-icons/fa';
 
 // project imports
 import { InfoRow, HeaderCol, DetailCol, TriggerRow, TriggerIndent, TriggerField, TriggerValue } from './PipelineInfo.styled';
+import { EmptyNote } from './Triggers.styled';
 import FieldBadge from '@components/shared/badges/FieldBadge';
 import SimpleSubtitle from '@components/shared/titles/SimpleSubtitle';
 import { OverlayTipRight } from '@components/shared/overlay/tips';
@@ -35,7 +36,7 @@ const TriggerDisplay: FC<TriggerDisplayProps> = ({ triggers }) => {
         </HeaderCol>
         {triggerNames.length === 0 && (
           <DetailCol>
-            <FieldBadge field={'None'} color={'#7e7c7c'} />
+            <EmptyNote>No event triggers configured.</EmptyNote>
           </DetailCol>
         )}
       </InfoRow>

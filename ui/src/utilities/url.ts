@@ -1,23 +1,30 @@
 /**
- * Get the absolute API URL, resolved the same way as the API client's base URL.
+ * Get the origin the API is served from, without a trailing slash or `/api` suffix.
  *
  * On `localhost`/`127.0.0.1` it honors the `THORIUM_API_URL` dev-server override; otherwise it uses
- * the page origin, which keeps any non-standard port (e.g. an SSH tunnel) while omitting the
- * default ports 80/443. Guarded with a `typeof window` check so the module remains importable in
- * non-browser environments (e.g. Vitest's node environment).
+ * the page origin (scheme, host and port). Guarded for non-browser environments.
  *
- * @returns The API URL ending in `/api`, without a trailing slash; the relative `/api` outside a browser.
+ * @returns The API origin, or an empty string outside a browser.
+ */
+export function getApiOrigin(): string {
+  if (typeof window === 'undefined') return '';
+  const host = window.location.hostname;
+  if (host === 'localhost' || host === '127.0.0.1') {
+    const apiUrl = import.meta.env.THORIUM_API_URL as string | undefined;
+    if (apiUrl && apiUrl !== '') {
+      return apiUrl.replace(/\/+$/, '');
+    }
+  }
+  return window.location.origin;
+}
+
+/**
+ * Get the absolute API URL, resolved the same way as the API client's base URL.
+ *
+ * @returns The API URL ending in `/api`, without a trailing slash.
  */
 export function getApiUrl(): string {
-  // fall back to a relative path outside of a browser
-  if (typeof window === 'undefined') return '/api';
-  // honor the build-time API override in local development
-  const host = window.location.hostname;
-  if ((host === 'localhost' || host === '127.0.0.1') && import.meta.env.THORIUM_API_URL) {
-    return `${String(import.meta.env.THORIUM_API_URL).replace(/\/+$/, '')}/api`;
-  }
-  // the page origin keeps non-standard ports (tunnels) and omits the default ports 80/443
-  return `${window.location.origin}/api`;
+  return `${getApiOrigin()}/api`;
 }
 
 /**

@@ -13,6 +13,8 @@ import {
   ScopedToken,
   ScopedTokenRequest,
   ScopedTokenUpdate,
+  SessionCheck,
+  SessionState,
   UserInfo,
 } from '@models/users';
 
@@ -327,6 +329,31 @@ export async function updateSingleUser(
 }
 
 /**
+ * Check the current session with the server (`GET /users/whoami`).
+ *
+ * Only a refusal (401 or 403) means the session expired; a network error, a 5xx, or an unexpected answer leaves it
+ * unconfirmed, so a passing outage does not end a session the server would still accept. Failures are logged to the
+ * console rather than surfaced through an error handler.
+ *
+ * @returns The current user's {@link UserInfo} when the session is valid, or whether it expired or could not be checked.
+ */
+export async function checkSession(): Promise<SessionCheck> {
+  return client
+    .get<UserInfo>('/users/whoami')
+    .then((res): SessionCheck => {
+      if (res?.status == 200 && res.data) {
+        return { state: SessionState.Valid, user: res.data };
+      }
+      return { state: SessionState.Unavailable };
+    })
+    .catch((error: unknown): SessionCheck => {
+      parseRequestError(error, console.log, 'Who Am I');
+      const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+      return status === 401 || status === 403 ? { state: SessionState.Expired } : { state: SessionState.Unavailable };
+    });
+}
+
+/**
  * Fetch the currently authenticated user's own info (`GET /users/whoami`).
  *
  * Failures are logged to the console rather than surfaced through an error handler.
@@ -334,18 +361,8 @@ export async function updateSingleUser(
  * @returns The current user's {@link UserInfo}, or `null` if not authenticated or the request failed.
  */
 export async function whoami(): Promise<UserInfo | null> {
-  return client
-    .get<UserInfo>('/users/whoami')
-    .then((res) => {
-      if (res?.status == 200 && res.data) {
-        return res.data;
-      }
-      return null;
-    })
-    .catch((error: unknown) => {
-      parseRequestError(error, console.log, 'Who Am I');
-      return null;
-    });
+  const session = await checkSession();
+  return session.state === SessionState.Valid ? session.user : null;
 }
 
 /**

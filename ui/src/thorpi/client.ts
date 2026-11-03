@@ -1,7 +1,9 @@
-import { ScopedToken } from '@models/users';
-import { getApiUrl } from '@utilities/url';
 import axios, { AxiosResponse } from 'axios';
 import JSONbig from 'json-bigint';
+
+// project imports
+import { getApiOrigin } from '@utilities/url';
+import { ScopedToken } from '@models/users';
 
 interface ClientConfig {
   headers?: Record<string, string>;
@@ -36,18 +38,32 @@ function getCookie(cname: string): string {
   return '';
 }
 
-const apiURL = getApiUrl();
-// warn under the Vite dev server when no THORIUM_API_URL override took effect (the resolved URL is
-// just the page origin): the dev server has no /api proxy, so every API call would fail there;
-// production builds drop this branch
-if (import.meta.env.DEV && typeof window !== 'undefined' && apiURL === `${window.location.origin}/api`) {
-  console.warn(
-    `THORIUM_API_URL is not set for this page (it applies on localhost and 127.0.0.1 only), so API calls go to ` +
-      `the Vite dev server at ${window.location.origin}/api, which does not serve the API. Set it before starting ` +
-      'the dev server, for example `export THORIUM_API_URL=http://localhost:8080` then `npm run dev`, and open ' +
-      'the UI on localhost or 127.0.0.1.',
-  );
+/**
+ * Resolve the base URL (origin) the API client should target.
+ *
+ * Uses the shared API origin (see `getApiOrigin`): the `THORIUM_API_URL` build-time env var on
+ * `localhost`/`127.0.0.1`, otherwise the current page origin. Under the Vite dev server, an API
+ * origin equal to the page origin (no override, or one naming the page itself) logs a `console.warn`,
+ * since the dev server does not serve the API.
+ *
+ * @returns The resolved origin (without a trailing slash or `/api` suffix), or an empty string outside a browser.
+ */
+function resolveBaseURL(): string {
+  const origin = getApiOrigin();
+  // the dev server has no /api proxy, so every API call would fail; production builds drop this branch
+  if (import.meta.env.DEV && typeof window !== 'undefined' && origin === window.location.origin) {
+    console.warn(
+      `THORIUM_API_URL is not set for this page (it applies on localhost and 127.0.0.1 only) or names the page's own ` +
+        `origin, so API calls go to ` +
+        `the Vite dev server at ${window.location.origin}/api, which does not serve the API. Set it before starting ` +
+        'the dev server, for example `export THORIUM_API_URL=http://localhost:8080` then `npm run dev`, and open ' +
+        'the UI on localhost or 127.0.0.1.',
+    );
+  }
+  return origin;
 }
+
+const apiURL = `${resolveBaseURL()}/api`;
 const client = axios.create({
   baseURL: apiURL,
 });

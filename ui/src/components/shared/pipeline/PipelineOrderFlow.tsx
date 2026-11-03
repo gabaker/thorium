@@ -15,7 +15,6 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { FaExclamationTriangle, FaGripLines } from 'react-icons/fa';
-import Select from 'react-select';
 
 // project imports
 import {
@@ -32,10 +31,10 @@ import {
   ResizeHandle,
 } from './PipelineOrderFlow.styled';
 import { edgeTypes } from './ThemedEdge';
+import StageToolPicker from './StageToolPicker';
+import { decorationWidth, StepDecoration } from './decorations';
 import {
   ordersEqual,
-  insertImageAtPosition,
-  removeImageAtPosition,
   getImagesInOrder,
   estimateStageWidth,
   clusterStagesByX,
@@ -44,8 +43,11 @@ import {
   STEP_WIDTH,
   TERMINAL_OFFSET,
 } from './order';
-import { createReactSelectStyles } from '@utilities/select';
-import { listImages } from '@thorpi/images';
+import { addToolStage, removeToolStage, reorderStages } from '@components/agentic/pipelines/diagramEdit';
+import { StageToolOption, stageToolOptions } from '@components/agentic/pipelines/stages';
+import { listAllAgentic } from '@thorpi/agentic';
+import { AgenticKinds } from '@models/agentic';
+import type { Tool } from '@models/tools';
 
 const TERMINAL_WIDTH = 12;
 const PARALLEL_GAP = 54;
@@ -68,7 +70,17 @@ const FIT_MIN_ZOOM = 0.8;
 const FIT_PADDING = 0.2;
 const FIT_VIEW_OPTIONS = { padding: FIT_PADDING, minZoom: FIT_MIN_ZOOM, maxZoom: 1 };
 
-type ImageStepData = { label: string; isParallel: boolean; stepIndex: number; parallelIndex: number; isBanned: boolean };
+type ImageStepData = {
+  label: string;
+  isParallel: boolean;
+  stepIndex: number;
+  parallelIndex: number;
+  isBanned: boolean;
+  // set only on a decorated (run status) diagram
+  decoration?: StepDecoration;
+  // set only when the diagram's stages can be selected
+  onSelect?: (label: string) => void;
+};
 type ImageStepNode = Node<ImageStepData, 'imageStep'>;
 type TerminalData = { label: string };
 type TerminalNode = Node<TerminalData, 'terminal'>;
@@ -82,9 +94,15 @@ type SelectMenuState = { x: number; y: number; flowX: number } | null;
 const EDGE_STYLE = { stroke: 'var(--thorium-secondary-text)', strokeWidth: 1.5 };
 const MARKER_END = { type: MarkerType.ArrowClosed, width: 16, height: 16 };
 
-const selectStyles = createReactSelectStyles('White', 'rgb(160, 162, 163)');
-
-function orderToNodesAndEdges(order: (string | string[])[], bannedImages?: Set<string>): { nodes: FlowNode[]; edges: Edge[] } {
+export function orderToNodesAndEdges(
+  order: (string | string[])[],
+  bannedImages?: Set<string>,
+  decorations?: Record<string, StepDecoration>,
+  onSelect?: (label: string) => void,
+): { nodes: FlowNode[]; edges: Edge[] } {
+  // decorated nodes grow by the icon's width, and every x below that derives from a stage width uses it
+  const extraWidth = decorationWidth(decorations);
+  const stageWidthOf = (step: string | string[]) => estimateStageWidth(step) + extraWidth;
   const nodes: FlowNode[] = [];
   const edges: Edge[] = [];
 
@@ -129,7 +147,7 @@ function orderToNodesAndEdges(order: (string | string[])[], bannedImages?: Set<s
     // Size every node in the stage to the stage's width (the widest image). Nodes are left-aligned,
     // so a shared width also aligns their right edges — the source handles all sit at x + stageWidth —
     // so parallel edges converge on a single vertical. The barrier/End x use the same estimate.
-    const stageWidth = estimateStageWidth(step);
+    const stageWidth = stageWidthOf(step);
 
     for (let i = 0; i < images.length; i++) {
       const id = `step-${stepIdx}-${i}`;
@@ -142,6 +160,8 @@ function orderToNodesAndEdges(order: (string | string[])[], bannedImages?: Set<s
           stepIndex: stepIdx,
           parallelIndex: i,
           isBanned: bannedImages?.has(images[i]) ?? false,
+          decoration: decorations?.[images[i]],
+          onSelect,
         },
         position: { x: TERMINAL_OFFSET + stepIdx * STEP_WIDTH, y: yOffset + i * PARALLEL_GAP },
         style: { width: stageWidth },
@@ -183,7 +203,7 @@ function orderToNodesAndEdges(order: (string | string[])[], bannedImages?: Set<s
         // Multi: sync barrier between stages
         const maxP = Math.max(prevImages.length, images.length);
         const barrierHeight = Math.max(20, (maxP - 1) * PARALLEL_GAP + 10);
-        const barrierX = TERMINAL_OFFSET + (stepIdx - 1) * STEP_WIDTH + (estimateStageWidth(prevStep) + STEP_WIDTH) / 2;
+        const barrierX = TERMINAL_OFFSET + (stepIdx - 1) * STEP_WIDTH + (stageWidthOf(prevStep) + STEP_WIDTH) / 2;
         const barrierId = `barrier-${stepIdx - 1}`;
 
         nodes.push({
@@ -227,7 +247,7 @@ function orderToNodesAndEdges(order: (string | string[])[], bannedImages?: Set<s
   const lastStep = order[order.length - 1];
   const lastImages = typeof lastStep === 'string' ? [lastStep] : lastStep;
 
-  const endX = TERMINAL_OFFSET + (order.length - 1) * STEP_WIDTH + estimateStageWidth(lastStep) + (TERMINAL_OFFSET - TERMINAL_WIDTH);
+  const endX = TERMINAL_OFFSET + (order.length - 1) * STEP_WIDTH + stageWidthOf(lastStep) + (TERMINAL_OFFSET - TERMINAL_WIDTH);
   nodes.push({
     id: 'end',
     type: 'terminal',
@@ -270,9 +290,38 @@ const ImageStepNode: React.FC<NodeProps<ImageStepNode>> = ({ data }) => {
     if (rect) setTipPos({ x: rect.left + rect.width / 2, y: rect.top });
   };
   const hideTip = () => setTipPos(null);
+  const decoration = data.decoration;
+  const tip = decoration?.label ?? data.label;
+  const onSelect = data.onSelect;
+  // a selectable node is a button for the keyboard and screen readers; mouse clicks arrive through the flow's onNodeClick
+  const selectable = onSelect
+    ? {
+        role: 'button',
+        tabIndex: 0,
+        'aria-label': tip,
+        'aria-pressed': decoration?.selected ?? false,
+        onKeyDown: (event: React.KeyboardEvent) => {
+          if (event.key !== 'Enter' && event.key !== ' ') return;
+          event.preventDefault();
+          onSelect(data.label);
+        },
+      }
+    : {};
 
   return (
-    <StepNodeWrapper ref={wrapperRef} $parallel={data.isParallel} $banned={data.isBanned} onMouseEnter={showTip} onMouseLeave={hideTip}>
+    <StepNodeWrapper
+      ref={wrapperRef}
+      $parallel={data.isParallel}
+      $banned={data.isBanned}
+      $accent={decoration?.accent}
+      $selected={decoration?.selected}
+      $active={decoration?.active}
+      $selectable={!!onSelect}
+      data-testid={decoration?.testId}
+      onMouseEnter={showTip}
+      onMouseLeave={hideTip}
+      {...selectable}
+    >
       <Handle type="target" position={Position.Left} />
       <StepLabel>
         {data.isBanned && (
@@ -280,11 +329,12 @@ const ImageStepNode: React.FC<NodeProps<ImageStepNode>> = ({ data }) => {
             <FaExclamationTriangle />
           </BanIcon>
         )}
+        {decoration?.icon}
         <span>{data.label}</span>
       </StepLabel>
       <Handle type="source" position={Position.Right} />
       {/* Portaled to body so the tooltip escapes the canvas's overflow:hidden + zoom transform. */}
-      {tipPos && createPortal(<NodeTooltip style={{ left: tipPos.x, top: tipPos.y }}>{data.label}</NodeTooltip>, document.body)}
+      {tipPos && createPortal(<NodeTooltip style={{ left: tipPos.x, top: tipPos.y }}>{tip}</NodeTooltip>, document.body)}
     </StepNodeWrapper>
   );
 };
@@ -307,14 +357,16 @@ const nodeTypes = { imageStep: ImageStepNode, terminal: TerminalNodeComponent, b
 
 interface PipelineOrderFlowProps {
   order: (string | string[])[];
-  onOrderChange?: (newOrder: (string | string[])[]) => void;
+  // The tool (or pinned tool instance) id behind each stage, by stage name. Legacy stages have none.
+  stageTools?: Record<string, string>;
+  // Called with the edited order and the stage tools that go with it; omit to show the diagram read-only.
+  onOrderChange?: (newOrder: (string | string[])[], newStageTools: Record<string, string>) => void;
   bannedImages?: Set<string>;
   group?: string;
-}
-
-interface SelectOption {
-  readonly label: string;
-  readonly value: string;
+  // How each stage node is drawn beyond its name, by stage name, such as a run's status (read-only diagrams)
+  decorations?: Record<string, StepDecoration>;
+  // Called with a stage's name when its node is clicked or activated from the keyboard
+  onStepSelect?: (label: string) => void;
 }
 
 // Bounding box of the whole graph in flow coords, computed from node positions + known sizes (image
@@ -343,9 +395,22 @@ function computeBounds(nodes: FlowNode[]): { x: number; y: number; width: number
   return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
 
-const PipelineOrderFlowInner: React.FC<PipelineOrderFlowProps> = ({ order, onOrderChange, bannedImages, group }) => {
-  const { nodes: initialNodes, edges } = useMemo(() => orderToNodesAndEdges(order, bannedImages), [order, bannedImages]);
+const PipelineOrderFlowInner: React.FC<PipelineOrderFlowProps> = ({
+  order,
+  stageTools,
+  onOrderChange,
+  bannedImages,
+  group,
+  decorations,
+  onStepSelect,
+}) => {
+  const { nodes: initialNodes, edges } = useMemo(
+    () => orderToNodesAndEdges(order, bannedImages, decorations, onStepSelect),
+    [order, bannedImages, decorations, onStepSelect],
+  );
   const [nodes, setNodes] = useState<FlowNode[]>(initialNodes);
+  // The pipeline as the edit helpers see it: the order and the tool behind each stage.
+  const edit = useMemo(() => ({ order, stageTools: stageTools ?? {} }), [order, stageTools]);
   const { fitView, screenToFlowPosition, setCenter } = useReactFlow();
   const containerRef = useRef<HTMLDivElement>(null);
   // Tracks the images present on the last render so a newly-added image can be detected and centered.
@@ -364,22 +429,32 @@ const PipelineOrderFlowInner: React.FC<PipelineOrderFlowProps> = ({ order, onOrd
 
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
   const [selectMenu, setSelectMenu] = useState<SelectMenuState>(null);
-  const [groupImages, setGroupImages] = useState<string[]>([]);
+  // The tools that can back a stage added to this pipeline, read when the diagram is editable.
+  const [groupTools, setGroupTools] = useState<Tool[]>([]);
+  const [toolsLoading, setToolsLoading] = useState(false);
+  const [toolsError, setToolsError] = useState('');
   // User-chosen canvas height via the bottom resize handle (null = auto height from parallel count).
   const [userHeight, setUserHeight] = useState<number | null>(null);
 
-  // Fetch images for the group when editing is enabled
+  // Fetch the tools a new stage can be backed by when editing is enabled. Keyed on whether the diagram is
+  // editable, not on the callback, so a parent re-render doesn't refetch.
+  const editable = !!onOrderChange;
   useEffect(() => {
-    if (!group || !onOrderChange) return;
+    if (!group || !editable) return;
     let cancelled = false;
-    void listImages(group, console.error, false, null, 1000).then((result) => {
+    setToolsLoading(true);
+    setToolsError('');
+    void listAllAgentic<Tool>(AgenticKinds.Tool, [group], (message) => {
+      if (!cancelled) setToolsError(message);
+    }).then((tools) => {
       if (cancelled) return;
-      if (result && 'names' in result) setGroupImages(result.names);
+      setGroupTools(tools);
+      setToolsLoading(false);
     });
     return () => {
       cancelled = true;
     };
-  }, [group, onOrderChange]);
+  }, [group, editable]);
 
   // Sync nodes when order prop changes
   useEffect(() => {
@@ -431,14 +506,15 @@ const PipelineOrderFlowInner: React.FC<PipelineOrderFlowProps> = ({ order, onOrd
         // Remember the dragged image so the framing effect can focus it once it's re-laid-out in its
         // final placed position (used only when the resulting graph overflows the canvas).
         if (node.type === 'imageStep') dragFocusRef.current = node.data.label;
-        onOrderChange(newOrder);
+        // a reorder keeps every stage, so each keeps its tool
+        onOrderChange(newOrder, reorderStages(edit, newOrder).stageTools);
       } else {
         // Order unchanged (dropped in place): the [initialNodes] effect won't re-run, so restore the
         // clean layout here — otherwise a parallel node dragged-and-dropped stays snapped to y=0.
         setNodes(initialNodes);
       }
     },
-    [nodes, order, onOrderChange, initialNodes],
+    [nodes, order, edit, onOrderChange, initialNodes],
   );
 
   // Right-click on empty pane
@@ -470,7 +546,7 @@ const PipelineOrderFlowInner: React.FC<PipelineOrderFlowProps> = ({ order, onOrd
     [onOrderChange, group],
   );
 
-  // Double-click on empty pane: open image select
+  // Double-click on empty pane: open the tool select
   const handlePaneDoubleClick = useCallback(
     (event: React.MouseEvent) => {
       if (!onOrderChange || !group) return;
@@ -479,6 +555,15 @@ const PipelineOrderFlowInner: React.FC<PipelineOrderFlowProps> = ({ order, onOrd
       setSelectMenu({ x: event.clientX, y: event.clientY, flowX: flowPos.x });
     },
     [onOrderChange, group, screenToFlowPosition],
+  );
+
+  // Clicking a stage node selects it. A click handler is also what makes the flow give nodes pointer
+  // events in a read-only diagram, where nodes can be neither dragged nor selected.
+  const handleNodeClick = useCallback(
+    (_event: React.MouseEvent, node: FlowNode) => {
+      if (node.type === 'imageStep') onStepSelect?.(node.data.label);
+    },
+    [onStepSelect],
   );
 
   // Context menu actions
@@ -491,27 +576,25 @@ const PipelineOrderFlowInner: React.FC<PipelineOrderFlowProps> = ({ order, onOrd
 
   const handleRemoveImageAction = useCallback(() => {
     if (contextMenu?.stepIndex == null || contextMenu?.parallelIndex == null || !onOrderChange) return;
-    const newOrder = removeImageAtPosition(order, contextMenu.stepIndex, contextMenu.parallelIndex);
-    onOrderChange(newOrder);
+    // the removed stage's tool goes with it
+    const removed = removeToolStage(edit, contextMenu.stepIndex, contextMenu.parallelIndex);
+    onOrderChange(removed.order, removed.stageTools);
     setContextMenu(null);
-  }, [contextMenu, order, onOrderChange]);
+  }, [contextMenu, edit, onOrderChange]);
 
-  // Image selected from dropdown
-  const handleImageSelected = useCallback(
-    (option: SelectOption | null) => {
-      if (!option || !selectMenu || !onOrderChange) return;
-      const newOrder = insertImageAtPosition(order, option.value, selectMenu.flowX);
-      onOrderChange(newOrder);
+  // Tool selected from the dropdown: add a stage backed by it
+  const handleToolSelected = useCallback(
+    (option: StageToolOption) => {
+      if (!selectMenu || !onOrderChange) return;
+      const added = addToolStage(edit, option, selectMenu.flowX);
+      onOrderChange(added.order, added.stageTools);
       setSelectMenu(null);
     },
-    [selectMenu, order, onOrderChange],
+    [selectMenu, edit, onOrderChange],
   );
 
-  // Build select options: images in the group that are not already in the order
-  const selectOptions = useMemo(() => {
-    const inOrder = getImagesInOrder(order);
-    return groupImages.filter((name) => !inOrder.has(name)).map((name) => ({ label: name, value: name }));
-  }, [groupImages, order]);
+  // The menu's choices: the group's Image tools, each at latest and at every version
+  const toolOptions = useMemo(() => stageToolOptions(groupTools, group ?? ''), [groupTools, group]);
 
   const maxParallel = Math.max(1, ...order.map((s) => (Array.isArray(s) ? s.length : 1)));
   // Auto height grows with parallel count up to the cap; a user resize (handle) overrides it within
@@ -672,6 +755,7 @@ const PipelineOrderFlowInner: React.FC<PipelineOrderFlowProps> = ({ order, onOrd
           onPaneContextMenu={onOrderChange && group ? handlePaneContextMenu : undefined}
           onNodeContextMenu={onOrderChange && group ? handleNodeContextMenu : undefined}
           onDoubleClick={onOrderChange && group ? handlePaneDoubleClick : undefined}
+          onNodeClick={onStepSelect ? handleNodeClick : undefined}
           fitView
           fitViewOptions={FIT_VIEW_OPTIONS}
           minZoom={MIN_ZOOM}
@@ -695,11 +779,11 @@ const PipelineOrderFlowInner: React.FC<PipelineOrderFlowProps> = ({ order, onOrd
       {contextMenu && (
         <ContextMenuOverlay ref={contextMenuRef} $top={contextMenu.y} $left={contextMenu.x}>
           <ContextMenuItem onPointerDown={(e) => e.stopPropagation()} onClick={handleInsertImageAction}>
-            Insert Image
+            Insert stage
           </ContextMenuItem>
           {contextMenu.nodeLabel && (
             <ContextMenuItem onPointerDown={(e) => e.stopPropagation()} onClick={handleRemoveImageAction}>
-              Remove Image
+              Remove stage
             </ContextMenuItem>
           )}
         </ContextMenuOverlay>
@@ -707,13 +791,12 @@ const PipelineOrderFlowInner: React.FC<PipelineOrderFlowProps> = ({ order, onOrd
 
       {selectMenu && (
         <ImageSelectOverlay ref={selectMenuRef} $top={selectMenu.y} $left={selectMenu.x} onPointerDown={(e) => e.stopPropagation()}>
-          <Select<SelectOption>
-            options={selectOptions}
-            onChange={handleImageSelected}
-            styles={selectStyles}
-            placeholder="Select image..."
-            autoFocus
-            menuIsOpen
+          <StageToolPicker
+            options={toolOptions}
+            group={group ?? ''}
+            loading={toolsLoading}
+            error={toolsError}
+            onSelect={handleToolSelected}
             onBlur={() => setSelectMenu(null)}
           />
         </ImageSelectOverlay>
@@ -722,14 +805,30 @@ const PipelineOrderFlowInner: React.FC<PipelineOrderFlowProps> = ({ order, onOrd
   );
 };
 
-const PipelineOrderFlow: React.FC<PipelineOrderFlowProps> = ({ order, onOrderChange, bannedImages, group }) => {
+const PipelineOrderFlow: React.FC<PipelineOrderFlowProps> = ({
+  order,
+  stageTools,
+  onOrderChange,
+  bannedImages,
+  group,
+  decorations,
+  onStepSelect,
+}) => {
   // Nothing to show for an empty order in read-only mode; in edit mode we still render an
   // empty canvas so the first image can be added directly on the diagram.
   if ((!order || order.length === 0) && !onOrderChange) return null;
 
   return (
     <ReactFlowProvider>
-      <PipelineOrderFlowInner order={order} onOrderChange={onOrderChange} bannedImages={bannedImages} group={group} />
+      <PipelineOrderFlowInner
+        order={order}
+        stageTools={stageTools}
+        onOrderChange={onOrderChange}
+        bannedImages={bannedImages}
+        group={group}
+        decorations={decorations}
+        onStepSelect={onStepSelect}
+      />
     </ReactFlowProvider>
   );
 };

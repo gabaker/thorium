@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+// project imports
+import { getApiUrl } from '@utilities/url';
+
 // The global test setup mocks the client module; these tests exercise the real one.
 vi.unmock('@thorpi/client');
 
@@ -89,6 +92,19 @@ describe('API base URL', () => {
   it('targets the relative /api path outside a browser', async () => {
     expect(await baseURLFor(undefined)).toBe('/api');
   });
+
+  it('matches getApiUrl for every page', async () => {
+    const pages: [string, string][] = [
+      ['https://thorium.example.com:8443/files', ''],
+      ['http://localhost:3000/', ''],
+      ['http://localhost:3000/', 'http://localhost:8000///'],
+      ['http://127.0.0.1:3000/', 'http://127.0.0.1:8000'],
+      ['https://thorium.example.com/', 'http://localhost:8000'],
+    ];
+    for (const [page, apiUrl] of pages) {
+      expect(await baseURLFor(page, apiUrl)).toBe(getApiUrl());
+    }
+  });
 });
 
 describe('dev server warning', () => {
@@ -120,6 +136,13 @@ describe('dev server warning', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     await baseURLFor('http://localhost:8000/', 'http://localhost:8080');
     expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("warns when THORIUM_API_URL names the page's own origin", async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(await baseURLFor('http://localhost:8000/', 'http://localhost:8000')).toBe('http://localhost:8000/api');
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain("names the page's own origin");
   });
 
   it('stays quiet in production builds', async () => {

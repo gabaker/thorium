@@ -73,7 +73,7 @@ test.describe('File Upload', () => {
     const pipelineButton = page.locator('button', { hasText: 'strings' }).first();
     await expect(pipelineButton).toBeVisible({ timeout: 10000 });
     await pipelineButton.click();
-    await expect(pipelineButton).toHaveClass(/selected/, { timeout: 3000 });
+    await expect(pipelineButton).toHaveAttribute('aria-pressed', 'true', { timeout: 3000 });
 
     await snapshot(page, SCREENSHOT_DIR, 'upload-pipeline-selected');
 

@@ -253,4 +253,28 @@ describe('editorObjectToPipelineUpdate', () => {
       expect(Object.keys(result.data)).toHaveLength(0);
     });
   });
+  describe('stage tools', () => {
+    const BACKED = { ...ORIGINAL, stage_tools: { 'step-a': 'tool-a', 'step-b': 'tool-b' } };
+
+    test('sends a new stage with its tool as add_stage_tools', () => {
+      const obj = { ...BACKED, order: ['step-a', 'step-b', 'step-c'], stage_tools: { ...BACKED.stage_tools, 'step-c': 'tool-c' } };
+      const result = editorObjectToPipelineUpdate(obj, BACKED)!;
+      expect(result.data.order).toEqual(['step-a', 'step-b', 'step-c']);
+      expect(result.data.add_stage_tools).toEqual({ 'step-c': 'tool-c' });
+    });
+
+    test("sends a changed stage's new tool", () => {
+      const obj = { ...BACKED, stage_tools: { 'step-a': 'tool-a2', 'step-b': 'tool-b' } };
+      const result = editorObjectToPipelineUpdate(obj, BACKED)!;
+      expect(result.data.add_stage_tools).toEqual({ 'step-a': 'tool-a2' });
+      expect(result.data).not.toHaveProperty('order');
+    });
+
+    test('sends no stage tools when they are unchanged or only dropped with their stage', () => {
+      expect(editorObjectToPipelineUpdate({ ...BACKED }, BACKED)!.data).not.toHaveProperty('add_stage_tools');
+      const removed = editorObjectToPipelineUpdate({ ...BACKED, order: ['step-a'], stage_tools: { 'step-a': 'tool-a' } }, BACKED)!;
+      expect(removed.data).not.toHaveProperty('add_stage_tools');
+      expect(removed.data.order).toEqual(['step-a']);
+    });
+  });
 });

@@ -26,6 +26,15 @@ export const SectionRow = styled.div`
   }
 `;
 
+/// A section row of the inline edit form: below `scaling.xl` it stacks but keeps the full width of the
+/// accordion body, so its content starts at the same x as the item's view mode
+export const EditSectionRow = styled(SectionRow)`
+  @media (max-width: ${scaling.xl}) {
+    max-width: none;
+    margin: 0;
+  }
+`;
+
 /// The fixed-width title column used by the create form's sections
 export const TitleCol = styled.div`
   flex: 0 0 ${SECTION_TITLE_WIDTH};
@@ -52,11 +61,22 @@ export const EditSpacer = styled.div`
 /// The fixed-width title column used by the inline edit form's sections
 export const EditMiddle = styled.div`
   flex: 0 0 ${SECTION_TITLE_WIDTH};
+
+  /* SectionRow stacks as a column here, so the fixed basis would become a height */
+  @media (max-width: ${scaling.xl}) {
+    flex: 0 0 auto;
+    width: 100%;
+  }
 `;
 
 /// The flexible field column for the inline edit form
 export const EditFieldCol = styled.div`
   flex: 1;
+
+  @media (max-width: ${scaling.xl}) {
+    flex: 0 0 auto;
+    width: 100%;
+  }
 `;
 
 /// A single labeled form field group with bottom spacing

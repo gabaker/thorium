@@ -100,6 +100,12 @@ Use when you need to verify the **full data flow** — UI sends a request, the A
 
 Live tests require `minithor/expose` and a running Thorium cluster.
 
+The agentic specs (`agentic-*.spec.ts`, `legacy-tools.spec.ts`) also read the names of seeded
+fixtures (group, sample, tools, workflow, toolset, agent, model endpoints, banned endpoint and
+pipeline) from the JSON file named by `THORIUM_FIXTURES`; its shape is `LiveFixtures` in
+`e2e/agentic-fixtures.ts`. Without `THORIUM_FIXTURES` those spec files are skipped and the rest
+of the suite still runs.
+
 ### Mock API tests (route interception)
 
 Use when you're testing **UI rendering and interaction** that doesn't depend on real server state.
@@ -351,3 +357,4 @@ The file already exists (same content was uploaded before). The `uploadFile` hel
 | `THORIUM_API_URL` | `http://localhost:8080` | API URL for test helpers and Vite dev server |
 | `THORIUM_USER` | `test` | Login username |
 | `THORIUM_PASS` | `INSECURE_DEV_PASSWORD` | Login password |
+| `THORIUM_FIXTURES` | unset (agentic specs skip) | Path to the live fixture stack's FIXTURES.json |

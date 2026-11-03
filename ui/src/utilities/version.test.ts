@@ -12,6 +12,11 @@ describe('formatImageVersion', () => {
     expect(formatImageVersion({ SemVer: { major: 1, minor: 2, patch: 3, pre: '', build: '' } })).toBe('v1.2.3');
   });
 
+  it('formats the string SemVer the API sends', () => {
+    expect(formatImageVersion({ SemVer: '1.0.0' })).toBe('v1.0.0');
+    expect(formatImageVersion({ SemVer: '1.2.3-rc.1+build.9' })).toBe('v1.2.3-rc.1+build.9');
+  });
+
   it('includes the pre-release suffix', () => {
     expect(formatImageVersion({ SemVer: { major: 1, minor: 0, patch: 0, pre: 'alpha.1', build: '' } })).toBe('v1.0.0-alpha.1');
   });

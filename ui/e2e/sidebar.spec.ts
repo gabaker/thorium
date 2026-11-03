@@ -17,7 +17,8 @@ test.describe('Sidebar Navigation Visual Validation', () => {
     await expect(page.locator('text=Analyze')).toBeVisible();
     await expect(page.locator('text=Search')).toBeVisible();
     await expect(page.locator('text=Browse')).toBeVisible();
-    await expect(page.locator('text=Tools')).toBeVisible();
+    await expect(page.getByText('Tools', { exact: true }).first()).toBeVisible();
+    await expect(page.getByText('Run', { exact: true })).toBeVisible();
     await expect(page.locator('text=Groups')).toBeVisible();
     await expect(page.locator('text=Admin')).toBeVisible();
   });
@@ -96,7 +97,7 @@ test.describe('Sidebar Navigation Visual Validation', () => {
     await snapshot(page, SCREENSHOT_DIR, 'sidebar-browse-show-more');
 
     await expect(flagsLink).toBeVisible();
-    await expect(page.getByRole('link', { name: 'Folders', exact: true })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Windows Process Trees', exact: true })).toBeVisible();
     await expect(page.getByRole('link', { name: 'Network Connections', exact: true })).toBeVisible();
     await expect(page.getByRole('link', { name: 'Windows Processes', exact: true })).toBeVisible();
     await expect(page.getByRole('link', { name: 'Compiled Functions', exact: true })).toBeVisible();
@@ -159,15 +160,57 @@ test.describe('Sidebar Navigation Visual Validation', () => {
     await page.waitForLoadState('networkidle');
     await page.waitForTimeout(1000);
 
-    const toolsCategory = page.locator('text=Tools');
+    const toolsCategory = page.getByText('Tools', { exact: true }).first();
     await toolsCategory.click();
     await page.waitForTimeout(500);
 
     await snapshot(page, SCREENSHOT_DIR, 'sidebar-tools-expanded');
 
+    await expect(page.getByText('Toolsets', { exact: true })).toBeVisible();
+    await expect(page.getByText('Workflows', { exact: true })).toBeVisible();
     await expect(page.locator('text=Pipelines')).toBeVisible();
     await expect(page.locator('text=Images')).toBeVisible();
     await expect(page.locator('text=Stats')).toBeVisible();
+  });
+
+  test('tools group opens from the keyboard and marks legacy screens with a badge', async ({ page }) => {
+    await page.setViewportSize({ width: 1400, height: 900 });
+    await setupMockAuth(page);
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+    await page.waitForTimeout(1000);
+
+    // the group header is a focusable button that Enter expands
+    const toolsGroup = page.getByTestId('category-Tools').getByRole('button', { name: 'Tools', exact: true });
+    await expect(toolsGroup).toHaveAttribute('aria-expanded', 'false');
+    await toolsGroup.focus();
+    await page.keyboard.press('Enter');
+    await expect(toolsGroup).toHaveAttribute('aria-expanded', 'true');
+
+    // legacy labels stay whole and carry a separate badge
+    const imagesLink = page.getByRole('link', { name: /^Images/ });
+    await expect(imagesLink).toContainText('legacy');
+    await expect(imagesLink.getByText('Images', { exact: true })).toBeVisible();
+    await expect(imagesLink.getByText('legacy', { exact: true })).toBeVisible();
+    const label = imagesLink.getByText('Images', { exact: true });
+    const truncated = await label.evaluate((el) => el.scrollWidth > el.clientWidth);
+    expect(truncated).toBe(false);
+  });
+
+  test('icon-only sidebar links and groups keep their accessible names', async ({ page }) => {
+    await page.setViewportSize({ width: 1000, height: 900 });
+    await setupMockAuth(page);
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+    await expect(page.getByRole('link', { name: 'Search', exact: true })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Analyze', exact: true })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Groups', exact: true })).toBeVisible();
+    await expect(page.getByTestId('category-Run').getByRole('button', { name: 'Run', exact: true })).toBeVisible();
+    // an expanded group's legacy links say they are legacy even without a visible label
+    const toolsGroup = page.getByTestId('category-Tools').getByRole('button', { name: 'Tools', exact: true });
+    await toolsGroup.focus();
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('link', { name: 'Images (legacy)', exact: true })).toBeVisible();
   });
 
   test('admin category expand shows subcategories', async ({ page }) => {
@@ -196,7 +239,7 @@ test.describe('Sidebar Navigation Visual Validation', () => {
 
     await page.locator('text=Browse').click();
     await page.waitForTimeout(300);
-    await page.locator('text=Tools').click();
+    await page.getByText('Tools', { exact: true }).first().click();
     await page.waitForTimeout(300);
     await page.locator('text=Admin').click();
     await page.waitForTimeout(500);
@@ -263,12 +306,14 @@ test.describe('Sidebar Navigation Visual Validation', () => {
       if (route.request().url().includes('/users/whoami')) return route.fallback();
       return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
     });
-    await page.context().addCookies([{
-      name: 'THORIUM_TOKEN',
-      value: MOCK_USER.token,
-      domain: 'localhost',
-      path: '/',
-    }]);
+    await page.context().addCookies([
+      {
+        name: 'THORIUM_TOKEN',
+        value: MOCK_USER.token,
+        domain: 'localhost',
+        path: '/',
+      },
+    ]);
 
     await page.setViewportSize({ width: 1400, height: 900 });
     await page.goto('/');

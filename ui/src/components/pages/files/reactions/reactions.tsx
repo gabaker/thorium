@@ -1,44 +1,17 @@
 import { ReactNode } from 'react';
-import { Badge } from 'react-bootstrap';
-import { FaCircle, FaCheckCircle, FaDotCircle, FaTimesCircle, FaSpinner } from 'react-icons/fa';
 
 // project imports
+import { Badge, statusTone } from '@components/shared/badges/Badge';
 import { createReaction, deleteReaction } from '@thorpi/reactions';
 import { ReactionRequest, ReactionRunResult, ReactionSelection } from '@models/reactions';
 
 type SelectedPipelines = Record<string, Record<string, boolean>>;
 
-// get the colored badge based on the status of a given reaction/job
+// get the status badge of a given reaction/job, in the shared status tone
 const getStatusBadge = (status: string): ReactNode => {
-  switch (status) {
-    case 'Completed':
-      return <Badge bg="success">Completed</Badge>;
-    case 'Failed':
-    case 'Errored':
-      return <Badge bg="danger">Failed</Badge>;
-    case 'Created':
-      return <Badge bg="secondary">Created</Badge>;
-    case 'Running':
-      return <Badge bg="primary">Running</Badge>;
-    default:
-      return <Badge bg="secondary">{status}</Badge>;
-  }
-};
-
-// get the colored icon based on the status of a given reaction/job
-const getStatusIcon = (status: string): ReactNode => {
-  switch (status) {
-    case 'Completed':
-      return <FaCheckCircle size={18} color="green" />;
-    case 'Failed':
-      return <FaTimesCircle size={18} color="red" />;
-    case 'Created':
-      return <FaDotCircle size={18} color="lightBlue" />;
-    case 'Running':
-      return <FaSpinner size={18} color="blue" />;
-    default:
-      return <FaCircle size={18} color="grey" />;
-  }
+  // the API names a failed job either Failed or Errored; both read as Failed
+  const label = status === 'Errored' ? 'Failed' : status;
+  return <Badge tone={statusTone(label)}>{label}</Badge>;
 };
 
 // build a list of reactions from a pipelines details and selected pipelines
@@ -110,5 +83,5 @@ const submitReactions = async (sha256: string, reactionList: ReactionSelection[]
   return reactionRunResults;
 };
 
-export { buildReactionsList, submitReactions, deleteReaction, getStatusBadge, getStatusIcon };
+export { buildReactionsList, submitReactions, deleteReaction, getStatusBadge };
 export type { SelectedPipelines };

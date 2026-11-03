@@ -24,12 +24,14 @@ const SEVERITY_TOKENS: Record<Severity, { bg: string; border: string; text: stri
   error: {
     bg: 'color-mix(in srgb, var(--thorium-danger, #e74c3c) 12%, var(--thorium-panel-bg, #1e2028))',
     border: 'var(--thorium-danger, #e74c3c)',
-    text: 'var(--thorium-danger, #e74c3c)',
+    // the light themes set a darker red so the text stays readable on their pale banner background
+    text: 'var(--thorium-alert-error-text, var(--thorium-danger, #e74c3c))',
   },
   warning: {
     bg: 'color-mix(in srgb, var(--thorium-warning, #f0ad4e) 12%, var(--thorium-panel-bg, #1e2028))',
     border: 'var(--thorium-warning, #f0ad4e)',
-    text: 'var(--thorium-warning, #f0ad4e)',
+    // the light themes set a darker amber so the text stays readable on their pale banner background
+    text: 'var(--thorium-alert-warning-text, var(--thorium-warning, #f0ad4e))',
   },
   info: {
     bg: 'color-mix(in srgb, var(--thorium-info, #5bc0de) 12%, var(--thorium-panel-bg, #1e2028))',
@@ -39,7 +41,8 @@ const SEVERITY_TOKENS: Record<Severity, { bg: string; border: string; text: stri
   success: {
     bg: 'color-mix(in srgb, var(--thorium-success, #2ecc71) 12%, var(--thorium-panel-bg, #1e2028))',
     border: 'var(--thorium-success, #2ecc71)',
-    text: 'var(--thorium-success, #2ecc71)',
+    // the light themes set a darker green so the text stays readable on their pale banner background
+    text: 'var(--thorium-alert-success-text, var(--thorium-success, #2ecc71))',
   },
 };
 
@@ -53,6 +56,8 @@ const Banner = styled.div<{ $severity: Severity }>`
   line-height: 1.5;
   text-align: center;
   position: relative;
+  /* long unbroken tokens (a stage or entity name from a URL) wrap inside the banner instead of widening the page */
+  overflow-wrap: anywhere;
 
   code {
     background: color-mix(in srgb, var(--thorium-panel-border, #3a3d45) 40%, transparent);
