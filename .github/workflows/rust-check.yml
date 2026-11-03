@@ -1,19 +1,22 @@
-# Runs Thorium's Rust static checks (cargo check, clippy, and rustfmt), the
-# unit tests that need no services, and a check that the integration tests
-# compile
+# Runs Thorium's Rust static checks: cargo check, clippy, and rustfmt; the unit tests that need no
+# services along with a check that the schema pattern test series stays off main; a check that the
+# integration tests compile; and thoradm's and thorctl's unit tests
 #
-# - Failures are reported here, as failed (red) jobs on the commit and pull
-#   request. This workflow has no `needs` or `workflow_run` link to deploy.yml
-#   or tools.yml, so a failure never gates or blocks a build or image publish.
-#   Any of these jobs can be made a required status check later through branch
-#   protection.
+# - ci.yml calls this workflow on pushes and pull requests that change Rust code, after its
+#   builds and image publish, whatever they concluded, so these jobs never gate or block a build
+#   or image publish and a failed build never hides them. Its `thoradm` and `thorctl` inputs skip
+#   those crates' tests when neither the crate nor the Rust code it builds on changed; the other
+#   jobs check the whole workspace and run whenever this workflow does. It also runs weekly and
+#   on demand on its own, running every job. Any of these jobs can be made a required status
+#   check later through branch protection.
 # - Every diagnostic is written to the job log, inline annotations, the job
 #   summary, and a `<check>-report` artifact by .github/scripts/lint_report.py,
 #   so reviewers can read the results without digging through build output.
 # - Integration tests are type-checked but not run here; they need ScyllaDB,
 #   Redis, Elasticsearch, and S3. The unit tests and the integration test check
 #   are separate jobs with no `needs` between them, so a failed check never
-#   hides whether the unit tests passed. Test failures are read from the job
+#   hides whether the unit tests passed. The thoradm and thorctl jobs run the
+#   unit tests compiled into each binary. Test failures are read from the job
 #   log.
 # - The nightly toolchain is installed with the runner's preinstalled rustup,
 #   so no third-party toolchain action is used. Nightly is unpinned, so a
@@ -24,18 +27,27 @@
 #   request code can never write a cache entry that a main run restores. These
 #   jobs publish nothing, and no other workflow uses the `rust-check-` cache
 #   keys.
-# - Runs on every push to every branch, on every pull request, and weekly. A
-#   same-repo pull request is checked twice (by its push and pull request
-#   runs) so every pull request shows real results that can be made required
-#   checks; a job skipped by a condition would count as passing.
+# - A same-repo pull request is checked twice (by its push and pull request
+#   runs of ci.yml) so every pull request shows real results that can be made
+#   required checks; a job skipped by a condition would count as passing.
 name: Rust Check
 
 on:
-  # Dependabot branches are checked by their pull requests instead, so each
-  # update runs once
-  push:
-    branches: ['**', '!dependabot/**']
-  pull_request:
+  # called by ci.yml for pushes and pull requests that change Rust code
+  workflow_call:
+    # Strings rather than booleans, compared with != 'false', so a scheduled or manual run of
+    # this workflow, which has no inputs, runs both
+    inputs:
+      thoradm:
+        description: "'false' skips the thoradm tests, when neither thoradm nor the Rust code it builds on changed"
+        required: false
+        type: string
+        default: 'true'
+      thorctl:
+        description: "'false' skips the thorctl tests, when neither thorctl nor the Rust code it builds on changed"
+        required: false
+        type: string
+        default: 'true'
   schedule:
     # weekly, to catch breakage from new nightly toolchains and lints
     - cron: '23 8 * * 1'
@@ -44,9 +56,10 @@ on:
 permissions: {}
 
 # superseded runs are cancelled; runs on main always finish so they can save
-# the cache
+# the cache. A called run's github.workflow is the caller's name, so the suffix
+# keeps this group apart from the caller's own
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-rust-check-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
@@ -56,8 +69,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # cargo check of the whole workspace, reported by lint_report.py
   check:
-    name: cargo check
+    name: Check · workspace (cargo check)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -148,8 +162,9 @@ jobs:
             target
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
+  # clippy on the workspace, reported by lint_report.py; warnings report but do not fail
   clippy:
-    name: clippy
+    name: Lint · workspace (Clippy)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -243,8 +258,137 @@ jobs:
             target
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
+  # the unit tests compiled into the thoradm binary
+  thoradm-test:
+    name: Test · thoradm (no services)
+    if: inputs.thoradm != 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read # check out the repository
+    env:
+      # enable the features required by gxhash explicitly
+      RUSTFLAGS: "-C target-feature=+aes,+sse2"
+      # each test binary links the whole API, so with debug info the
+      # target dir outgrows the runner's disk
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          # APT_PACKAGES is a fixed space-separated list, so it is split into words on purpose
+          # shellcheck disable=SC2086
+          sudo apt-get install -y --no-install-recommends $APT_PACKAGES
+
+      # the toolchain hash keys the cache, since build output from another
+      # nightly cannot be reused
+      - name: Install nightly toolchain
+        id: toolchain
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustc +nightly --version
+          echo "hash=$(rustc +nightly --version --verbose | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Cargo cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-check-${{ github.job }}-${{ runner.os }}-${{ steps.toolchain.outputs.hash }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            rust-check-${{ github.job }}-${{ runner.os }}-${{ steps.toolchain.outputs.hash }}-
+
+      # thoradm is a bin-only crate, so --bins runs the unit tests compiled into
+      # the binary
+      - name: Run thoradm unit tests
+        run: cargo +nightly test --locked -p thoradm --bins
+
+      - name: Save Cargo cache
+        if: (github.event_name == 'push' || github.event_name == 'schedule') && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+  # the unit tests compiled into the thorctl binary
+  thorctl-test:
+    name: Test · thorctl (no services)
+    if: inputs.thorctl != 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read # check out the repository
+    env:
+      # enable the features required by gxhash explicitly
+      RUSTFLAGS: "-C target-feature=+aes,+sse2"
+      # each test binary links the whole API, so with debug info the
+      # target dir outgrows the runner's disk
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          # APT_PACKAGES is a fixed space-separated list, so it is split into words on purpose
+          # shellcheck disable=SC2086
+          sudo apt-get install -y --no-install-recommends $APT_PACKAGES
+
+      # the toolchain hash keys the cache, since build output from another
+      # nightly cannot be reused
+      - name: Install nightly toolchain
+        id: toolchain
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustc +nightly --version
+          echo "hash=$(rustc +nightly --version --verbose | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Cargo cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-check-${{ github.job }}-${{ runner.os }}-${{ steps.toolchain.outputs.hash }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            rust-check-${{ github.job }}-${{ runner.os }}-${{ steps.toolchain.outputs.hash }}-
+
+      # thorctl is a bin-only crate, so --bins runs the unit tests compiled into
+      # the binary
+      - name: Run thorctl unit tests
+        run: cargo +nightly test --locked -p thorctl --bins
+
+      - name: Save Cargo cache
+        if: (github.event_name == 'push' || github.event_name == 'schedule') && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+  # cargo fmt --check, with the diff in the report
   fmt:
-    name: rustfmt
+    name: Check · formatting (rustfmt)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -293,8 +437,9 @@ jobs:
             exit 1
           fi
 
+  # the unit tests that need no services and the check that the schema test series stays off main
   test:
-    name: unit tests
+    name: Test · unit tests and schema checks
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -347,6 +492,28 @@ jobs:
           cargo +nightly test --locked -p thorium-operator
           cargo +nightly test --locked -p thorium-api --no-default-features --features client --lib
 
+      # the schema pattern test series lives on its own test branch: finding it
+      # fails the job on main and warns on every other branch. The pattern is
+      # assembled so it never matches its own text, and an ordinary
+      # schema_tests module doesn't match it
+      - name: Check that the schema test series is absent
+        if: ${{ !cancelled() }}
+        env:
+          ON_MAIN: ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          word="schema"; tail="test"
+          pattern="\\b${word}[-_]${tail}(\\b|[-_.0-9])"
+          if hits=$(git grep -nE "$pattern" -- . ':!.gitlab/' ':!.github/'); then
+            echo "$hits"
+            if [ "$ON_MAIN" = "true" ]; then
+              echo "::error::The schema test series is present on main; it belongs only on its test branch"
+              exit 1
+            fi
+            echo "::warning::The schema test series is present; it must be removed before this branch reaches main"
+          else
+            echo "No schema test series content found"
+          fi
+
       # saved even when a test fails, since the build output is still valid
       - name: Save Cargo cache
         if: always() && (github.event_name == 'push' || github.event_name == 'schedule') && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true' && steps.toolchain.outcome == 'success'
@@ -358,8 +525,9 @@ jobs:
             target
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
+  # type-checks the API integration tests, which need services to run
   integration-tests-check:
-    name: integration tests check
+    name: Check · API integration tests compile
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:

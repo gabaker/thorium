@@ -19,7 +19,10 @@ To install Thorctl, follow the instructions for your specific operating system i
 
 ### Linux/Mac
 
-On a Linux or Mac machine, open a terminal window and run the following command:
+On a Linux or Mac machine, open a terminal window and run the following command. The script
+downloads the Thorctl build for the machine it runs on: Linux x86-64 or arm64 (aarch64), or macOS
+on Apple silicon or Intel. Where Thorium serves no build for the machine (an older release has no
+Linux arm64 build), the script stops with an error instead of installing anything.
 
 <script>
   let base = window.location.origin;

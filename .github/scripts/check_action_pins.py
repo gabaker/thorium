@@ -8,6 +8,10 @@ actions is checked:
 * SHA pins must carry a `# vX.Y.Z` comment naming the release they correspond to
 * that version is compared with the repo's latest GitHub release (or highest
   semver tag when the repo publishes no releases), and older pins are reported
+* with `--min-age-days N`, the latest release is the highest release published at
+  least N days ago, so a release still inside that soak period is not reported as
+  one to move to (Dependabot's `cooldown` waits the same way); tags carry no
+  date, so the highest semver tag fallback ignores it
 
 This script only reads workflow files and calls the GitHub REST API on
 api.github.com; it uses only the Python standard library so it adds no
@@ -37,6 +41,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import http_retry
@@ -109,20 +114,61 @@ def api_get(path, token):
         raise
 
 
-def latest_version(repo, token):
+def soaked_release(repo, token, min_age_days):
+    """Find the highest release of an action repository that is old enough to move to.
+
+    # Arguments
+
+    * `repo` - The `owner/repo` of the action
+    * `token` - An optional GitHub token used to raise the rate limit
+    * `min_age_days` - How many days ago a release must have been published at the latest
+
+    Returns a `(tag, version_tuple)` pair, `False` when the repository publishes releases
+    but none is old enough, or None when it publishes no versioned releases.
+    """
+    # the newest 100 releases cover any release a pin could still be moving to
+    releases = api_get(f"/repos/{repo}/releases?per_page=100", token) or []
+    cutoff = datetime.now(timezone.utc) - timedelta(days=min_age_days)
+    versioned = []
+    for release in releases:
+        if not isinstance(release, dict) or release.get("draft") or release.get("prerelease"):
+            continue
+        version = parse_version(release.get("tag_name", ""))
+        published = release.get("published_at") or ""
+        if version and published:
+            # GitHub writes UTC timestamps such as 2026-10-21T15:48:35Z
+            when = datetime.fromisoformat(published.replace("Z", "+00:00"))
+            versioned.append((release["tag_name"], version, when))
+    if not versioned:
+        return None
+    eligible = [(tag, version) for tag, version, when in versioned if when <= cutoff]
+    return max(eligible, key=lambda entry: entry[1]) if eligible else False
+
+
+def latest_version(repo, token, min_age_days=0):
     """Find the newest released version of an action repository.
 
     # Arguments
 
     * `repo` - The `owner/repo` of the action
     * `token` - An optional GitHub token used to raise the rate limit
+    * `min_age_days` - When above zero, the newest release must be at least this many days old
 
     Returns a `(tag, version_tuple)` pair, or None when no version could be found.
     """
-    # prefer the latest non-prerelease GitHub release
-    release = api_get(f"/repos/{repo}/releases/latest", token)
-    if isinstance(release, dict) and parse_version(release.get("tag_name", "")):
-        return release["tag_name"], parse_version(release["tag_name"])
+    if min_age_days > 0:
+        # the highest release outside the soak period; a repository whose every release is
+        # still inside it has no release to move to yet
+        soaked = soaked_release(repo, token, min_age_days)
+        if soaked is False:
+            return None
+        if soaked:
+            return soaked
+    else:
+        # prefer the latest non-prerelease GitHub release
+        release = api_get(f"/repos/{repo}/releases/latest", token)
+        if isinstance(release, dict) and parse_version(release.get("tag_name", "")):
+            return release["tag_name"], parse_version(release["tag_name"])
     # otherwise fall back to the highest semver tag, which may not be on the first page
     tags = []
     for page in range(1, MAX_TAG_PAGES + 1):
@@ -185,7 +231,7 @@ def collect_uses(root):
     return found
 
 
-def check(use, token, latest_cache):
+def check(use, token, latest_cache, min_age_days=0):
     """Classify one action reference.
 
     # Arguments
@@ -193,6 +239,7 @@ def check(use, token, latest_cache):
     * `use` - The reference, as collected by `collect_uses`
     * `token` - An optional GitHub token used to raise the rate limit
     * `latest_cache` - Latest releases already looked up, by repository
+    * `min_age_days` - How old a release must be to count as the latest one
 
     Returns `(status, latest_tag, message)`, where status is `up-to-date` or a rule id.
     """
@@ -205,7 +252,7 @@ def check(use, token, latest_cache):
     # look up each repository's latest release only once
     if use["repo"] not in latest_cache:
         try:
-            latest_cache[use["repo"]] = latest_version(use["repo"], token)
+            latest_cache[use["repo"]] = latest_version(use["repo"], token, min_age_days)
         except http_retry.HttpError as error:
             # an unreachable API leaves this repository's latest release unknown
             print(f"could not look up the latest release of {use['repo']}: {error}", file=sys.stderr)
@@ -258,6 +305,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--json", required=True, help="where to write every reference and its status")
     parser.add_argument("--sarif", required=True, help="where to write the problems as SARIF")
+    parser.add_argument(
+        "--min-age-days",
+        type=int,
+        default=0,
+        help="only count releases published at least this many days ago as the latest (default 0: any)",
+    )
     args = parser.parse_args()
     # GitHub Actions provides GITHUB_TOKEN and GITHUB_WORKSPACE; GitLab CI
     # provides CI_PROJECT_DIR and a GH_TOKEN project variable when configured
@@ -266,7 +319,7 @@ def main():
     latest_cache = {}
     rows = []
     for use in collect_uses(root):
-        status, latest, message = check(use, token, latest_cache)
+        status, latest, message = check(use, token, latest_cache, args.min_age_days)
         rows.append(
             {
                 "file": use["file"],

@@ -20,9 +20,11 @@
 #
 #   tool    (required) the reporter's --tool name: hadolint, trivy-config,
 #           trivy-iac, trivy-secret, trivy-deps, trivy-image, zizmor,
-#           action-pins, or tool-versions
+#           action-pins, actionlint, or tool-versions
 #   rule    (required) the rule id, such as DL3008, DS-0002, CVE-2024-1234,
-#           zizmor/unpinned-uses, or outdated; shell-style wildcards allowed
+#           zizmor/unpinned-uses, outdated, or (for actionlint) a check kind
+#           such as expression or a ShellCheck code such as SC2086;
+#           shell-style wildcards allowed
 #   paths   (optional) repo-relative path patterns; defaults to every file.
 #           Shell-style wildcards, where `*` also matches `/`, so
 #           "tools/images/*" covers everything below that directory

@@ -8,9 +8,13 @@
 # - Actions are pinned by full commit SHA.
 # - Every finding, at every severity, is written to the job log, inline
 #   annotations, the job summary, and a `<scanner>-report` artifact by
-#   .github/scripts/lint_report.py; hadolint and Trivy findings also go to code
-#   scanning. The reporter also gates each job: hadolint fails on error-level
-#   findings and Trivy on HIGH and CRITICAL ones.
+#   .github/scripts/lint_report.py, and goes to code scanning under the
+#   hadolint, trivy-config, and tool-versions categories. The reporter also
+#   gates each job: hadolint fails on error-level findings and Trivy on HIGH
+#   and CRITICAL ones.
+# - SARIF upload happens in a separate job that runs no scanner code, so the
+#   `security-events: write` token is never exposed to the scanner containers
+#   or the version check.
 # - Findings matching .github/lint-ignore.toml are left out of the reports, the
 #   gate, and code scanning. On pull requests that file is read from the base
 #   branch, so new entries take effect once merged; push runs read it from the
@@ -21,18 +25,20 @@
 #   .github/scripts/check_tool_versions.py) and reports outdated versions as
 #   warnings; only a commit that does not match its declared tag fails the job.
 #   Its `tool-versions.json` artifact lists every pin with its latest release.
+# - ci.yml calls this workflow on every push and pull request, after its builds
+#   and image publish, whatever they concluded. It also runs weekly and on
+#   demand on its own, to surface new findings in unchanged Dockerfiles and new
+#   tool releases.
 #
 # To bump a scanner, resolve the new tag's multi-arch index digest from ghcr.io
 # and update both the tag comment and the digest. The Trivy digest is shared
-# with security-scan.yml, image-rescan.yml and deploy.yml; keep them in step.
+# with security-scan.yml (and thorpal-harness.yml, in checkouts that have it);
+# keep them in step.
 name: Dockerfile Lint
 
 on:
-  # Dependabot branches are checked by their pull requests instead, so each
-  # update runs once
-  push:
-    branches: ['**', '!dependabot/**']
-  pull_request:
+  # called by ci.yml for pushes and pull requests
+  workflow_call:
   schedule:
     # weekly, to surface findings from newly added checks and new upstream releases
     - cron: '41 6 * * 1'
@@ -40,25 +46,30 @@ on:
 
 permissions: {}
 
-# superseded runs are cancelled, except on main
+# superseded runs are cancelled, except on main. A called run's github.workflow
+# is the caller's name, so the suffix keeps this group apart from the caller's own
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-dockerfile-lint-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   # hadolint v2.15.1 (scratch image containing only the static binary)
   HADOLINT_IMAGE: ghcr.io/hadolint/hadolint@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d
-  # trivy 0.74.0 (Apache-2.0 open source edition)
-  TRIVY_IMAGE: ghcr.io/aquasecurity/trivy@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
+  # trivy 0.76.1 (Apache-2.0 open source edition)
+  TRIVY_IMAGE: ghcr.io/aquasecurity/trivy@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
 
 jobs:
+  # lints the Dockerfiles with hadolint
   hadolint:
-    name: hadolint
+    name: Lint · Dockerfiles (hadolint)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
-      security-events: write # upload SARIF results to code scanning
+    # whether hadolint ran, so the upload job skips its SARIF instead of failing
+    # on a missing file when it did not
+    outputs:
+      ran: ${{ steps.hadolint.outputs.exit-code == '0' }}
     steps:
       # depth 2 includes a pull request's base commit, for the changed-file
       # breakdown and for reading the base branch's ignore file
@@ -113,25 +124,17 @@ jobs:
           path: ${{ runner.temp }}/hadolint/
           retention-days: 7
 
-      # Fork pull requests get a read-only token, so only upload for pushes,
-      # schedules, manual runs, and same-repo pull requests, and only when
-      # hadolint ran, so a hadolint failure is not buried under a missing-file
-      # error. The filtered SARIF leaves out findings ignored by
-      # .github/lint-ignore.toml.
-      - name: Upload hadolint SARIF
-        if: ${{ !cancelled() && steps.hadolint.outputs.exit-code == '0' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
-        with:
-          sarif_file: ${{ runner.temp }}/hadolint/hadolint-filtered.sarif
-          category: hadolint
-
+  # scans the Dockerfiles for misconfigurations with trivy config
   trivy:
-    name: trivy config
+    name: Lint · Dockerfile config (Trivy)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
-      security-events: write # upload SARIF results to code scanning
+    # whether Trivy ran, so the upload job skips its SARIF instead of failing on
+    # a missing file when it did not
+    outputs:
+      ran: ${{ steps.trivy.outcome == 'success' }}
     steps:
       # depth 2 includes a pull request's base commit, for the changed-file
       # breakdown and for reading the base branch's ignore file
@@ -185,22 +188,80 @@ jobs:
           path: ${{ runner.temp }}/trivy-out/
           retention-days: 7
 
-      # Fork pull requests get a read-only token, so only upload for pushes,
-      # schedules, manual runs, and same-repo pull requests. The filtered SARIF
-      # leaves out findings ignored by .github/lint-ignore.toml.
+  # uploads the hadolint, Trivy, and tool version SARIF to code scanning in a job
+  # that runs no scanner
+  upload:
+    name: Lint · upload Dockerfile lint results
+    needs: [hadolint, trivy, tool-versions]
+    # Fork pull requests get a read-only token, so only upload for pushes,
+    # schedules, manual runs, and same-repo pull requests, and only the reports
+    # of the scanners that ran, so a scanner failure is not buried under a
+    # missing-file error
+    if: ${{ !cancelled() && (needs.hadolint.outputs.ran == 'true' || needs.trivy.outputs.ran == 'true' || needs.tool-versions.outputs.ran == 'true') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      security-events: write # upload SARIF results to code scanning
+    steps:
+      - name: Download hadolint SARIF
+        if: needs.hadolint.outputs.ran == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: hadolint-report
+          path: ${{ runner.temp }}/hadolint
+
+      # the filtered SARIF leaves out findings ignored by .github/lint-ignore.toml
+      - name: Upload hadolint SARIF
+        if: needs.hadolint.outputs.ran == 'true'
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: ${{ runner.temp }}/hadolint/hadolint-filtered.sarif
+          category: hadolint
+
+      # a failed hadolint upload still leaves the Trivy upload to run
+      - name: Download Trivy SARIF
+        if: ${{ !cancelled() && needs.trivy.outputs.ran == 'true' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: trivy-config-report
+          path: ${{ runner.temp }}/trivy-out
+
+      # the filtered SARIF leaves out findings ignored by .github/lint-ignore.toml
       - name: Upload Trivy SARIF
-        if: ${{ !cancelled() && steps.trivy.outcome == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        if: ${{ !cancelled() && needs.trivy.outputs.ran == 'true' }}
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           sarif_file: ${{ runner.temp }}/trivy-out/trivy-config-filtered.sarif
           category: trivy-config
 
+      # a failed hadolint or Trivy upload still leaves the tool version upload to run
+      - name: Download tool version SARIF
+        if: ${{ !cancelled() && needs.tool-versions.outputs.ran == 'true' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: tool-versions-report
+          path: ${{ runner.temp }}/tool-versions
+
+      # the filtered SARIF leaves out findings ignored by .github/lint-ignore.toml
+      - name: Upload tool version SARIF
+        if: ${{ !cancelled() && needs.tool-versions.outputs.ran == 'true' }}
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: ${{ runner.temp }}/tool-versions/tool-versions-filtered.sarif
+          category: tool-versions
+
+  # reports pinned tool versions that have newer releases
   tool-versions:
-    name: Tool version freshness
+    name: Check · pinned tool versions
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
+    # whether the check wrote its report, so the upload job skips its SARIF
+    # instead of failing on a missing file when it did not
+    outputs:
+      ran: ${{ steps.tool-versions.outcome == 'success' }}
     steps:
       # depth 2 includes a pull request's base commit, for the changed-file
       # breakdown and for reading the base branch's ignore file
@@ -212,6 +273,7 @@ jobs:
 
       # the token only raises the GitHub API rate limit for the upstream lookups
       - name: Check pinned tool versions
+        id: tool-versions
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -225,6 +287,7 @@ jobs:
         run: |
           python3 .github/scripts/lint_report.py --tool tool-versions --format sarif \
             --input "${RUNNER_TEMP}/tool-versions/tool-versions.sarif" \
+            --sarif-output "${RUNNER_TEMP}/tool-versions/tool-versions-filtered.sarif" \
             --ignore-file .github/lint-ignore.toml \
             --output-dir "${RUNNER_TEMP}/tool-versions" --fail-level error
 

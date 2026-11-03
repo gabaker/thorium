@@ -40,12 +40,18 @@ mkdir -p "$TARGET"
 URL=$BASE_URL/api/binaries/$OS/$HARDWARE/thorctl
 
 echo
+# a platform this Thorium has no build for answers 404, which fails the download rather than
+# installing the error page as thorctl
+CURL_ARGS=(-f "$URL" -o "$TARGET/thorctl")
 if [ "$INSECURE" = true ]; then
   echo "Downloading Thorctl insecurely from \"$URL\""
-  curl -k "$URL" -o "$TARGET/thorctl"
+  CURL_ARGS=(-k "${CURL_ARGS[@]}")
 else
   echo "Downloading Thorctl from \"$URL\""
-  curl "$URL" -o "$TARGET/thorctl"
+fi
+if ! curl "${CURL_ARGS[@]}"; then
+  echo "Failed to download Thorctl for \"$OS/$HARDWARE\"; this Thorium may not serve a build for it" >&2
+  exit 1
 fi
 chmod +x "$TARGET/thorctl"
 
