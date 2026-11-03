@@ -8,7 +8,8 @@ Before running tests you need:
 
 1. **Thorium API** running on `localhost:8080` — start with `minithor/expose`
 2. **Chromium** installed — run `npx playwright install chromium` once
-3. **Vite dev server** — Playwright auto-starts it via `playwright.config.ts`, or reuse an existing one on port 8000
+3. **Vite dev server** — Playwright auto-starts it on port 8000 via `playwright.config.ts` and reuses one already
+   running there; set `THORIUM_UI_URL` to test a UI served elsewhere instead (Playwright then starts no dev server)
 
 ## Running Tests
 
@@ -38,7 +39,11 @@ THORIUM_API_URL=http://localhost:8080 npx playwright test --trace on
 npx playwright show-trace test-results/*/trace.zip
 ```
 
-The `THORIUM_API_URL` env var tells the Playwright config and the Vite dev server where the API lives. Without it the frontend defaults to `http://localhost/api` (port 80) which won't reach the API.
+The `THORIUM_API_URL` env var tells the test helpers and the Vite dev server where the API lives; both default to
+`http://localhost:8080`, and the dev server Playwright starts gets that default too. The frontend reads
+`THORIUM_API_URL` only when the page is served from `localhost` or `127.0.0.1`; otherwise it calls the API at the
+page's own origin (`<page origin>/api`). A dev server started by hand without `THORIUM_API_URL` therefore sends API
+calls to itself on port 8000, which doesn't serve the API (the browser console shows a warning saying so).
 
 ## Test Structure
 
@@ -326,7 +331,9 @@ cd minithor && ./expose
 ```
 
 **Login redirects instead of reaching the page:**
-The `THORIUM_API_URL` env var is missing. The frontend defaults to `http://localhost/api` (port 80), which doesn't reach the API on port 8080.
+A reused dev server was started without `THORIUM_API_URL`, so the frontend calls the API at the page origin
+(`http://localhost:8000/api`), which the dev server doesn't serve. Restart it with
+`THORIUM_API_URL=http://localhost:8080 npm run dev`, or stop it and let Playwright start one.
 
 **Entity creation returns 404 with "groups must exist":**
 The group name doesn't exist in this deployment. Check available groups:
@@ -355,6 +362,8 @@ The file already exists (same content was uploaded before). The `uploadFile` hel
 | Env Var | Default | Purpose |
 |---------|---------|---------|
 | `THORIUM_API_URL` | `http://localhost:8080` | API URL for test helpers and Vite dev server |
+| `THORIUM_UI_URL` | unset (Playwright starts the dev server on `http://localhost:8000`) | A UI that is already being served; the tests' base URL, and no dev server is started |
+| `THORIUM_CHROME` | unset (Playwright's bundled Chromium) | Path to another Chrome binary, launched with `--no-sandbox`, for hosts without Playwright's browser download |
 | `THORIUM_USER` | `test` | Login username |
 | `THORIUM_PASS` | `INSECURE_DEV_PASSWORD` | Login password |
 | `THORIUM_FIXTURES` | unset (agentic specs skip) | Path to the live fixture stack's FIXTURES.json |
