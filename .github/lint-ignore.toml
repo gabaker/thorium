@@ -20,9 +20,11 @@
 #
 #   tool    (required) the reporter's --tool name: hadolint, trivy-config,
 #           trivy-iac, trivy-secret, trivy-deps, trivy-image, zizmor,
-#           action-pins, or tool-versions
+#           action-pins, actionlint, or tool-versions
 #   rule    (required) the rule id, such as DL3008, DS-0002, CVE-2024-1234,
-#           zizmor/unpinned-uses, or outdated; shell-style wildcards allowed
+#           zizmor/unpinned-uses, outdated, or (for actionlint) a check kind
+#           such as expression or a ShellCheck code such as SC2086;
+#           shell-style wildcards allowed
 #   paths   (optional) repo-relative path patterns; defaults to every file.
 #           Shell-style wildcards, where `*` also matches `/`, so
 #           "tools/images/*" covers everything below that directory
@@ -73,6 +75,7 @@ reason = "cd within a single RUN is used deliberately for multi-step builds"
 tool = "hadolint"
 rule = "DL3007"
 paths = [
+  "Dockerfile",
   "base/*",
   "tools/images/github.com/OSIF/suricata/Dockerfile",
   "tools/images/github.com/cmu-sei/pharos-*/Dockerfile",
@@ -80,7 +83,7 @@ paths = [
   "tools/images/github.com/onekey-sec/unblob/Dockerfile",
   "tools/images/github.com/zeek/zeek/Dockerfile",
 ]
-reason = "The CI build images and these tool images intentionally build from the latest internal or upstream base image"
+reason = "The core image's internal GitLab base images, the CI build images, and these tool images intentionally build from the latest internal or upstream base image"
 
 [[ignore]]
 tool = "hadolint"
@@ -92,6 +95,7 @@ reason = "Must copy over pre-built layers to new image to remove volumes that ma
 tool = "trivy-config"
 rule = "DS-0001"
 paths = [
+  "Dockerfile",
   "base/*",
   "tools/images/github.com/OSIF/suricata/Dockerfile",
   "tools/images/github.com/cmu-sei/pharos-*/Dockerfile",
@@ -99,7 +103,7 @@ paths = [
   "tools/images/github.com/onekey-sec/unblob/Dockerfile",
   "tools/images/github.com/zeek/zeek/Dockerfile",
 ]
-reason = "The CI build images and these tool images intentionally build from the latest internal or upstream base image"
+reason = "The core image's internal GitLab base images, the CI build images, and these tool images intentionally build from the latest internal or upstream base image; the core image's `FROM server-${TARGETARCH}`, `os-${TARGETARCH}`, and `final-${TARGETARCH}` lines name its own build stages, which have no tag to pin"
 
 [[ignore]]
 tool = "trivy-config"

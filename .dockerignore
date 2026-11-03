@@ -14,4 +14,9 @@ target/x86_64-pc-windows-gnu/release/deps
 target/x86_64-pc-windows-gnu/release/examples
 target/x86_64-pc-windows-gnu/release/.fingerprint
 target/x86_64-pc-windows-gnu/release/incremental
+target/aarch64-unknown-linux-gnu/release/build
+target/aarch64-unknown-linux-gnu/release/deps
+target/aarch64-unknown-linux-gnu/release/examples
+target/aarch64-unknown-linux-gnu/release/.fingerprint
+target/aarch64-unknown-linux-gnu/release/incremental
 built
