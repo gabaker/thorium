@@ -19,9 +19,10 @@ Each workflow file's header comment holds the details; this page is the map.
    binaries. **Build · Linux binaries (musl)** and **Build · Linux arm64 binaries (musl)** build
    the static x86_64 and arm64 binaries the image serves, both through cross, and **Build · Linux
    arm64 server binaries (glibc)** builds the server binaries the arm64 image runs, also through
-   cross. **Build · macOS thorctl** and **Build · macOS thoradm** each build one binary for both
-   macOS targets, one target after the other, so a run asks for two of the scarce macOS runners
-   and thorctl builds thorium-api with its client features only.
+   cross. **Build · macOS binaries** builds thorctl and thoradm for both macOS targets on one
+   runner, so a run asks for a single one of the scarce macOS runners; each binary builds for each
+   target in its own cargo run, one after the other, so thorctl builds thorium-api with its client
+   features only.
 3. **Build · core container image** from the build artifacts, once for linux/amd64 and once for
    linux/arm64, each checked by `.github/scripts/check_image_arch.sh` (the image's platform and
    its binaries' ELF architecture). Every Dockerfile RUN step runs on the runner's architecture,
