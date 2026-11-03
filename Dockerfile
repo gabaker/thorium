@@ -27,13 +27,21 @@ COPY ./target/x86_64-unknown-linux-musl/release/thorium-agent binaries/linux/x86
 COPY ./target/x86_64-unknown-linux-musl/release/thorium-reactor binaries/linux/x86-64/thorium-reactor
 COPY ./target/x86_64-unknown-linux-musl/release/thoradm binaries/linux/x86-64/thoradm
 COPY ./target/x86_64-unknown-linux-musl/release/thorium-operator binaries/linux/x86-64/thorium-operator
+# copy the Linux arm64 (aarch64 musl) binaries in
+COPY ./target/aarch64-unknown-linux-musl/release/thorctl binaries/linux/arm64/thorctl
+COPY ./target/aarch64-unknown-linux-musl/release/thorium-agent binaries/linux/arm64/thorium-agent
+COPY ./target/aarch64-unknown-linux-musl/release/thorium-reactor binaries/linux/arm64/thorium-reactor
+COPY ./target/aarch64-unknown-linux-musl/release/thoradm binaries/linux/arm64/thoradm
+COPY ./target/aarch64-unknown-linux-musl/release/thorium-operator binaries/linux/arm64/thorium-operator
 # copy windows binaries to target paths
 COPY ./target/x86_64-pc-windows-gnu/release/thorctl.exe binaries/windows/x86-64/thorctl.exe
 COPY ./target/x86_64-pc-windows-gnu/release/thorium-agent.exe binaries/windows/x86-64/thorium-agent.exe
 COPY ./target/x86_64-pc-windows-gnu/release/thorium-reactor.exe binaries/windows/x86-64/thorium-reactor.exe
 # copy macos binaries to target paths
 COPY ./target/x86_64-apple-darwin/release/thorctl binaries/darwin/x86-64/thorctl
+COPY ./target/x86_64-apple-darwin/release/thoradm binaries/darwin/x86-64/thoradm
 COPY ./target/aarch64-apple-darwin/release/thorctl binaries/darwin/arm64/thorctl
+COPY ./target/aarch64-apple-darwin/release/thoradm binaries/darwin/arm64/thoradm
 # copy the thorctl install script to the right path
 COPY ./api/docs/src/scripts/install-thorctl.sh binaries/install-thorctl.sh
 # add banner to default path
@@ -44,7 +52,9 @@ COPY ./ui/src/assets/banner.txt banner.txt
 ARG CRANE_VERSION=v0.22.1
 ARG CRANE_SHA256=0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
 
-# make glibc compiled and cross compiled binaries executable, then download and verify crane
+# make glibc compiled and cross compiled binaries executable, serve the Linux arm64 binaries under
+# aarch64 too (the arch `uname -m` and the self-updaters name on Linux), then download and verify
+# crane
 RUN chmod +x thorium-api \
       thoradm \
       thorium-operator \
@@ -52,6 +62,7 @@ RUN chmod +x thorium-api \
       thorium-search-streamer \
       thorium-event-handler && \
     chmod -R +x binaries && \
+    ln -s arm64 binaries/linux/aarch64 && \
     curl -fsSL -o go-containerregistry.tar.gz "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" && \
     echo "${CRANE_SHA256}  go-containerregistry.tar.gz" | sha256sum -c - && \
     tar xzf go-containerregistry.tar.gz crane && \
