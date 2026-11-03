@@ -309,6 +309,7 @@ fn save_failure(url: &str, stderr: &str) -> String {
 ///
 /// * `tar` - The path to the (optionally gzipped) image tarball
 /// * `bar` - The progress bar to update with status
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub async fn load(tar: &Path, bar: &Bar) -> Result<(), Error> {
     // reflect the current step in the shared progress bar
     bar.set_message("Loading image");
@@ -333,6 +334,7 @@ pub async fn load(tar: &Path, bar: &Bar) -> Result<(), Error> {
 /// * `src` - The existing local image reference
 /// * `dst` - The new reference to apply
 /// * `bar` - The progress bar to update with status
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub async fn tag(src: &str, dst: &str, bar: &Bar) -> Result<(), Error> {
     // reflect the current step in the shared progress bar
     bar.set_message("Retagging image");
@@ -354,6 +356,7 @@ pub async fn tag(src: &str, dst: &str, bar: &Bar) -> Result<(), Error> {
 ///
 /// * `url` - The fully-qualified image url to push
 /// * `bar` - The progress bar to update with status
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub async fn push(url: &str, bar: &Bar) -> Result<(), Error> {
     // reflect the current step in the shared progress bar
     bar.set_message("Pushing image");

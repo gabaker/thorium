@@ -119,6 +119,7 @@ pub fn print_image_details(image: &Image, out: &mut dyn Write, ansi: bool) -> Re
 ///
 /// * `thorium` - The Thorium client
 /// * `group` - The group to list images from
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub async fn list_all_images(thorium: &Thorium, group: &str) -> Result<Vec<Image>, Error> {
     let mut images = Vec::new();
     // a single group can't realistically exceed this limit; the cursor still

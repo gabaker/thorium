@@ -12,6 +12,11 @@
 //!
 //! New resources are created in all three modes.
 
+// most of this engine serves the image and pipeline import commands, which are only compiled on
+// Linux and macOS, where its dead code is still reported; Windows builds use only the parts the
+// edit and toolbox commands share
+#![cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+
 use colored::Colorize;
 use futures::{StreamExt, TryStreamExt, stream};
 use std::collections::HashSet;

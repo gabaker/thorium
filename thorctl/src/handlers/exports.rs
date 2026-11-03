@@ -19,6 +19,11 @@
 //! remembers "all" choices), so concurrent exporters run it in a pre-flight pass
 //! rather than from their worker pool.
 
+// most of these helpers serve the image and pipeline export commands, which are only compiled on
+// Linux and macOS, where their dead code is still reported; Windows builds use only the parts
+// the toolbox commands share
+#![cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+
 use colored::Colorize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
