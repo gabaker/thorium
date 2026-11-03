@@ -6,12 +6,17 @@ Supported inputs (`--format`):
 * `sarif` - a SARIF 2.1.0 log, such as zizmor, hadolint or Trivy output
 * `cargo` - the JSON lines written by `cargo check/clippy --message-format=json`
 * `rustfmt` - the diff written by `cargo fmt --check`
+* `actionlint` - the JSON written by `actionlint -format '{{json .}}'`
 
 The same script runs in GitHub Actions, GitLab CI, and locally. Every finding,
 at every level, is reported:
 
-* in the job log, as one readable line (or rustc's rendered diagnostic) per
-  finding, in a collapsible group (GitHub) or section (GitLab)
+* in the job log, as one `path:line:col: level[rule]: message` line per
+  finding, uncapped and outside any group, since GitHub shows annotations in
+  the log without their location
+* in the job log again with full detail (rustc's rendered diagnostic for cargo
+  input, the diff hunk for rustfmt), in a collapsible group on GitHub, an open
+  section on GitLab for cargo input, and a collapsed section otherwise
 * inline: as workflow annotations on GitHub, which show on the run and on a
   pull request's changed files (GitHub keeps only 10 per level per step, so
   findings in changed files come first), and as a GitLab Code Quality report
@@ -31,7 +36,9 @@ the report is produced without that breakdown.
 
 Findings matching an entry in `--ignore-file` (see .github/lint-ignore.toml)
 are left out of all of those, out of the gate, and out of `--sarif-output`, the
-filtered SARIF uploaded to code scanning. The summary lists each ignore entry
+filtered SARIF uploaded to code scanning. For SARIF input that file is the input
+without the ignored results; for any other input it is a SARIF log built from
+the reported findings, so a tool without SARIF output can be uploaded too. The summary lists each ignore entry
 with how many findings it hid, and `<tool>-ignored.txt` lists them for audit.
 On GitHub pull requests and GitLab merge request pipelines the ignore file is
 read from the base commit, so new or changed ignore entries take effect only
@@ -113,6 +120,13 @@ CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 NULL_SHA_RE = re.compile(r"^0+$")
 # rustc's closing tallies, which are not findings themselves
 CARGO_TALLY_RE = re.compile(r"^(\d+ warnings? emitted|aborting due to)")
+# a ShellCheck finding actionlint reports for a `run:` script, with ShellCheck's own
+# code and severity
+ACTIONLINT_SHELLCHECK_RE = re.compile(r"^shellcheck reported issue in this script: (?P<code>SC\d+):(?P<severity>[a-z]+):")
+# the finding level for each ShellCheck severity; actionlint's own checks are all errors
+SHELLCHECK_LEVELS = {"error": "error", "warning": "warning", "info": "note", "style": "note"}
+# where actionlint documents its checks
+ACTIONLINT_CHECKS_URL = "https://github.com/rhysd/actionlint/blob/main/docs/checks.md"
 # the header rustfmt prints before each hunk of its diff; older releases print
 # `Diff in <path> at line <n>:` instead of `Diff in <path>:<n>:`
 RUSTFMT_HUNK_RE = re.compile(r"^Diff in (?P<path>.+?)(?::| at line )(?P<line>\d+):\s*$")
@@ -398,6 +412,55 @@ def parse_rustfmt(path, root):
     return findings, 0
 
 
+def parse_actionlint(path, root):
+    """Read the findings actionlint wrote with `-format '{{json .}}'`.
+
+    actionlint gives no severity: its own checks (syntax, expressions and their
+    types, action inputs, and so on) are errors, and the ShellCheck findings it
+    reports for `run:` scripts keep ShellCheck's severity, with `info` and
+    `style` as notes. ShellCheck findings use the ShellCheck code as their rule,
+    and every other finding actionlint's check kind, such as `expression`.
+
+    # Arguments
+
+    * `path` - The JSON file
+    * `root` - The repository root
+
+    Returns a `(findings, suppressed_count)` pair.
+    """
+    entries = json.loads(Path(path).read_text(encoding="utf-8"))
+    # anything but a list means actionlint wrote something other than its findings
+    if not isinstance(entries, list):
+        raise ValueError(f"{path} is not a JSON list of actionlint findings")
+    findings = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        message = str(entry.get("message", ""))
+        rule = str(entry.get("kind", ""))
+        level = "error"
+        # ShellCheck findings carry their own code and severity in the message
+        match = ACTIONLINT_SHELLCHECK_RE.match(message)
+        if rule == "shellcheck" and match:
+            rule = match["code"]
+            level = SHELLCHECK_LEVELS.get(match["severity"], "note")
+        findings.append(
+            {
+                "file": relative_path(str(entry.get("filepath", "")), root),
+                "line": entry.get("line", 0) if isinstance(entry.get("line"), int) else 0,
+                "column": entry.get("column", 0) if isinstance(entry.get("column"), int) else 0,
+                "level": level,
+                "severity": level,
+                "rule": rule,
+                "message": message,
+                "help": rule_link(rule) or ACTIONLINT_CHECKS_URL,
+                "description": "",
+                "rendered": str(entry.get("snippet", "")),
+            }
+        )
+    return findings, 0
+
+
 def detect_context():
     """Describe the CI system this script runs in and the change under review.
 
@@ -619,6 +682,48 @@ def write_filtered_sarif(source, destination, ignored, root):
     Path(destination).write_text(json.dumps(log, indent=2) + "\n", encoding="utf-8")
 
 
+def write_findings_sarif(tool, findings, destination):
+    """Write findings read from a non-SARIF input as a SARIF log for code scanning.
+
+    # Arguments
+
+    * `tool` - The tool name, used as the SARIF driver name
+    * `findings` - The reported findings, without the ignored ones
+    * `destination` - Where to write the SARIF
+    """
+    rules = {}
+    results = []
+    for finding in findings:
+        # each rule is described once, with the documentation link the finding carries
+        rule = finding["rule"] or tool
+        if rule not in rules:
+            rules[rule] = {"id": rule}
+            if finding["description"]:
+                rules[rule]["shortDescription"] = {"text": finding["description"]}
+            if finding["help"]:
+                rules[rule]["helpUri"] = finding["help"]
+        result = {"ruleId": rule, "level": finding["level"], "message": {"text": finding["message"] or rule}}
+        # a finding with no file has no location code scanning could show
+        if finding["file"]:
+            region = {}
+            if finding["line"]:
+                region["startLine"] = finding["line"]
+                if finding["column"]:
+                    region["startColumn"] = finding["column"]
+            location = {"artifactLocation": {"uri": finding["file"]}}
+            if region:
+                location["region"] = region
+            result["locations"] = [{"physicalLocation": location}]
+        results.append(result)
+    log = {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{"tool": {"driver": {"name": tool, "rules": list(rules.values())}}, "results": results}],
+    }
+    Path(destination).parent.mkdir(parents=True, exist_ok=True)
+    Path(destination).write_text(json.dumps(log, indent=2) + "\n", encoding="utf-8")
+
+
 def location_of(finding):
     """Format a finding's `file:line:column` location.
 
@@ -645,6 +750,39 @@ def text_line(finding):
     return f"{location_of(finding)}: {finding['severity']}{rule} {finding['message']}"
 
 
+def plain_line(finding):
+    """Format a finding as one `path:line:col: level[rule]: message` log line.
+
+    # Arguments
+
+    * `finding` - The finding
+    """
+    rule = f"[{finding['rule']}]" if finding["rule"] else ""
+    # keep each finding on one line, so a log search for a path finds all of its findings
+    message = " ".join(str(finding["message"]).split())
+    return f"{location_of(finding)}: {finding['level']}{rule}: {message}"
+
+
+def log_lines(context, lines):
+    """Print lines in the open job log, outside any group or section.
+
+    # Arguments
+
+    * `context` - The CI context from `detect_context`
+    * `lines` - The lines, which may contain tool-controlled content
+    """
+    if context["platform"] == "github":
+        # pause workflow commands so the lines cannot issue any
+        token = secrets.token_hex(16)
+        print(f"::stop-commands::{token}")
+        print("\n".join(lines))
+        print(f"::{token}::")
+    else:
+        # strip control characters so the lines cannot open or close GitLab sections
+        print("\n".join(CONTROL_RE.sub("", line) for line in lines))
+    sys.stdout.flush()
+
+
 def log_entry(finding, input_format):
     """Format a finding for the log and the text report.
 
@@ -657,8 +795,8 @@ def log_entry(finding, input_format):
     # rustc's rendered diagnostic already names the location and shows the code
     if input_format == "cargo" and rendered:
         return rendered
-    # rustfmt findings carry the diff hunk to apply
-    if input_format == "rustfmt" and rendered:
+    # rustfmt findings carry the diff hunk to apply, and actionlint findings the workflow lines
+    if input_format in ("rustfmt", "actionlint") and rendered:
         return text_line(finding) + "\n" + rendered
     return text_line(finding)
 
@@ -933,7 +1071,7 @@ def main():
     """Parse the tool output, report it everywhere, and apply the gate."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--tool", required=True, help="tool name used in titles, report file names and the ignore file")
-    parser.add_argument("--format", required=True, choices=("sarif", "cargo", "rustfmt"))
+    parser.add_argument("--format", required=True, choices=("sarif", "cargo", "rustfmt", "actionlint"))
     parser.add_argument("--input", required=True, help="the tool output to read")
     parser.add_argument("--output-dir", help="directory for the markdown and text reports")
     parser.add_argument("--fail-level", default="none", choices=LEVELS + ("none",))
@@ -949,12 +1087,10 @@ def main():
     )
     parser.add_argument("--findings-exit-code", type=int, default=1, help="exit status when findings fail the run")
     parser.add_argument("--ignore-file", help="repo-relative path of the TOML ignore file")
-    parser.add_argument("--sarif-output", help="where to write the SARIF input without ignored results")
+    parser.add_argument("--sarif-output", help="where to write the findings as SARIF, without ignored results")
     parser.add_argument("--codequality", help="where to write a GitLab Code Quality report")
     parser.add_argument("--collapse-by-rule", action="store_true", help="collapse the findings-by-rule table in the summary and report")
     args = parser.parse_args()
-    if args.sarif_output and args.format != "sarif":
-        parser.error("--sarif-output needs --format sarif")
     # an unknown severity would silently never match, so reject it
     fail_severities = {part.strip().upper() for value in args.fail_severity for part in value.split(",") if part.strip()}
     known = set(SEVERITY_TAGS) | {level.upper() for level in LEVELS}
@@ -962,7 +1098,7 @@ def main():
         parser.error(f"unknown --fail-severity {', '.join(sorted(fail_severities - known))}; use {', '.join(SEVERITY_TAGS + LEVELS)}")
     context = detect_context()
     root = Path(os.environ.get("GITHUB_WORKSPACE") or os.environ.get("CI_PROJECT_DIR") or ".").resolve()
-    parse = {"sarif": parse_sarif, "cargo": parse_cargo, "rustfmt": parse_rustfmt}[args.format]
+    parse = {"sarif": parse_sarif, "cargo": parse_cargo, "rustfmt": parse_rustfmt, "actionlint": parse_actionlint}[args.format]
     findings, suppressed = parse(args.input, root)
     changed = changed_files(root, context)
     # drop ignored findings before anything is reported or gated
@@ -978,8 +1114,11 @@ def main():
                 ci_message(context, "warning", "lint ignores", f"{args.ignore_file} entry {entry['number']} ({entry['rule']}) expired on {entry['expires']} and no longer applies")
     reported = apply_ignores(findings, entries)
     ignored = [finding for entry in entries for finding in entry["matched"]]
-    if args.sarif_output:
+    # SARIF input keeps everything the tool wrote; other input is converted from the findings
+    if args.sarif_output and args.format == "sarif":
         write_filtered_sarif(args.input, args.sarif_output, ignored, root)
+    elif args.sarif_output:
+        write_findings_sarif(args.tool, reported, args.sarif_output)
     # order by relevance to the change under review, then severity, then location
     reported.sort(
         key=lambda finding: (
@@ -994,11 +1133,16 @@ def main():
         or finding["severity"].upper() in fail_severities
         for finding in reported
     )
-    # multi-line cargo and rustfmt entries are separated by a blank line
+    # multi-line cargo, rustfmt and actionlint entries are separated by a blank line
     separator = "\n" if args.format == "sarif" else "\n\n"
     text = separator.join(log_entry(finding, args.format) for finding in reported)
     section = re.sub(r"[^a-z0-9_]", "_", args.tool.lower())
-    log_section(context, f"{section}_findings", f"{args.tool} findings ({len(reported)})", text or "No findings.")
+    # every finding's location in the open log, uncapped, since GitHub prints an annotation in the
+    # log as just its level and message and keeps only MAX_ANNOTATIONS_PER_LEVEL of each level
+    if reported:
+        log_lines(context, [plain_line(finding) for finding in reported])
+    # the full detail follows; GitLab shows rustc's rendered diagnostics open, since it has no annotations
+    log_section(context, f"{section}_findings", f"{args.tool} findings ({len(reported)})", text or "No findings.", collapsed=args.format != "cargo")
     # GitHub shows annotations inline; GitLab shows the Code Quality report instead
     omitted = annotate(reported, args.tool) if context["platform"] == "github" else Counter()
     if args.codequality:
