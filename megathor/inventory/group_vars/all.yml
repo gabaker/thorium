@@ -13,7 +13,7 @@ vault_password_file: "artifacts/vault_pass"
 # thorium_chart / infra_operators_chart override either with a chart directory, packaged .tgz,
 # or oci:// reference (e.g. to test unpublished charts from ../deploy/charts).
 thorium_chart_repo: "oci://ghcr.io/cisagov/thorium/charts"
-thorium_chart_version: "1.8.1"
+thorium_chart_version: "1.10.0"
 # thorium_chart: ""
 # infra_operators_chart: ""
 # Extra values files for the thorium chart, applied after the values megathor generates

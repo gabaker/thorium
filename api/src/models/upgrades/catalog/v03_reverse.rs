@@ -32,7 +32,7 @@ pub(super) const STEPS: &[StepDef] = &[StepDef {
 pub(super) const ENTRY: CatalogEntry = CatalogEntry {
     from: Some("2026-10-v03"),
     id: "2026-10-v02",
-    released_with: "1.8.1",
+    released_with: "1.10.0",
     description: "Revert the revision that applies the schema first",
     schema: Some("34f954f5941b0d85cab0e897236f57ff201724c443e8e6dc61f00e55e40e306c"),
     prerelease: false,

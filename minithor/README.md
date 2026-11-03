@@ -24,7 +24,7 @@ packaged chart:
 ```bash
 minithor deploy --chart deploy/charts/thorium                 # from a checkout
 deploy/charts/scripts/package.sh -d /tmp/charts               # or package both charts first
-minithor deploy --chart /tmp/charts/thorium-1.8.1.tgz         # infra-operators-*.tgz is found alongside
+minithor deploy --chart /tmp/charts/thorium-1.10.0.tgz         # infra-operators-*.tgz is found alongside
 ```
 
 `deploy/charts/scripts/package.sh` is what the Helm Charts workflow runs. Its `--image-repository`,
@@ -34,7 +34,7 @@ image (see `--help`), for example a branch image a fork has published:
 ```bash
 deploy/charts/scripts/package.sh -d /tmp/charts \
   --image-repository ghcr.io/<owner>/<repo>/infrastructure/thorium --image-tag <branch> --pull-policy Always
-minithor deploy --chart /tmp/charts/thorium-1.8.1.tgz
+minithor deploy --chart /tmp/charts/thorium-1.10.0.tgz
 ```
 
 Every branch pushed to a fork publishes prerelease charts to that fork's registry, and they
@@ -43,7 +43,7 @@ deploy the fork's image for that branch (see `deploy/README.md`). Install one wi
 
 ```bash
 MINITHOR_CHART_REPO=oci://ghcr.io/<owner>/<repo>/charts \
-  minithor deploy --chart-version 1.8.1-<branch>.<run number>.g<short sha>
+  minithor deploy --chart-version 1.10.0-<branch>.<run number>.g<short sha>
 ```
 
 Packages a public repository's workflows publish are linked to that repository and public like

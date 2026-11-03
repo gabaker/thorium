@@ -11,7 +11,7 @@ namespace_prefix_dashed: "{{ namespace_prefix ~ '-' if namespace_prefix else '' 
 # offline-stage.yml saved to files/. Set thorium_chart or infra_operators_chart
 # to a chart directory, a packaged .tgz, or an oci:// reference to override.
 thorium_chart_repo: "oci://ghcr.io/cisagov/thorium/charts"
-thorium_chart_version: "1.8.1"
+thorium_chart_version: "1.10.0"
 
 # The S3 backend served by the thorium chart's SeaweedFS (single node only)
 seaweedfs_enabled: false

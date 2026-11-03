@@ -119,7 +119,7 @@ fn the_support_window_is_the_released_revisions_above_the_floor() {
     let floors: &'static [SupportFloor] = Box::leak(Box::new([SupportFloor {
         minimum: "2026-10-v02",
         intermediate: "1.8.0",
-        since_version: "1.8.1",
+        since_version: "1.10.0",
     }]));
     let raised = Catalog {
         edges: CATALOG,

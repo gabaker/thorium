@@ -2,19 +2,19 @@ apiVersion: v2
 name: thorium
 description: Thorium and the backing services it needs (install into <prefix>thorium; needs the infra-operators chart)
 type: application
-version: 1.8.1
-appVersion: "1.8.1"
+version: 1.10.0
+appVersion: "1.10.0"
 home: https://github.com/cisagov/thorium
 # The operator runs schema changes as Jobs that need pod failure policy and job-completion pod labels
 kubeVersion: ">=1.27.0-0"
 # The subcharts are vendored in charts/; each top-level values key configures one of them
 dependencies:
   - name: secrets
-    version: 1.8.1
+    version: 1.10.0
   - name: infra
-    version: 1.8.1
+    version: 1.10.0
   - name: quickwit
     version: 0.8.17
     condition: global.quickwit.enabled
   - name: operator
-    version: 1.8.1
+    version: 1.10.0

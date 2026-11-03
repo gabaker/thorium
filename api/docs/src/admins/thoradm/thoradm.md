@@ -866,16 +866,16 @@ reaches, which `auto_target_dev` never targets); the shipped catalog has none. A
 changes data, the component it `scales down`, and the `migration` it runs:
 
 ```
-2026-10-v01 (released with Thorium 1.8.1): Thorium deployed by the minithor or megathor scripts before the Helm charts (the baseline every converted cluster starts from)
-2026-10-v02 (released with Thorium 1.8.1; from 2026-10-v01; one-way): Thorium deployed by the Helm charts with the chart-managed operator
+2026-10-v01 (released with Thorium 1.10.0): Thorium deployed by the minithor or megathor scripts before the Helm charts (the baseline every converted cluster starts from)
+2026-10-v02 (released with Thorium 1.10.0; from 2026-10-v01; one-way): Thorium deployed by the Helm charts with the chart-managed operator
   - scylla-role [Infra]: Check that Thorium's Scylla role logs in with the configured credentials
   - elastic-identity [Infra]: Check that Thorium's Elastic user authenticates and holds the index privileges Thorium needs
   - elastic-reindex-keyword-mappings [Data, needs approval + backup, scales down search-streamer, migration elastic-rebuild]: Reindex Elastic indexes created without mappings, whose group field is not a keyword (megathor deployments before the indexes were left to the search-streamer); skipped when every index is already correct
   - finalize [Config]: Record the new revision
-2026-10-v03 (released with Thorium 1.8.1; from 2026-10-v02): Schema apply runs before any step that changes data
+2026-10-v03 (released with Thorium 1.10.0; from 2026-10-v02): Schema apply runs before any step that changes data
   - schema-apply [Infra]: Apply the schema in a Job before any step that changes data, creating missing tables, columns, and views and recording what was applied
   - users-settings-theme [Data, needs approval + backup, scales down api, migration users-settings-theme]: Move each user's theme from its own field into the user's settings
-2026-10-v02 (released with Thorium 1.8.1; from 2026-10-v03; revert): Revert the revision that applies the schema first
+2026-10-v02 (released with Thorium 1.10.0; from 2026-10-v03; revert): Revert the revision that applies the schema first
   - users-settings-theme-reverse [Data, needs approval + backup, scales down api, migration users-settings-theme-reverse]: Move the theme of any user stored in its own field into the user's settings, the layout the first Helm revision reads; users already there are skipped
 ```
 
