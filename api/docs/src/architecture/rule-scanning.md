@@ -175,8 +175,8 @@ Every replica's heartbeat invokes the server-side reaper, which is concurrent-sa
 it drains owners whose last heartbeat is older than `thorium.events.worker_expiry_secs` (default 90 s) back to the
 pending queues, reclaims leases of live-but-wedged owners past `thorium.events.in_flight_backstop_secs` (default
 3600 s), and age-gates the legacy un-owned in-flight keys. Restored events keep their original scores, so order holds.
-On SIGTERM the controller aborts the heartbeat, asks workers to stop between pages, waits a 20 second quiesce
-grace, then drains its own in-flight entries back to pending — a rolling update replays at most mid-page work.
+On SIGTERM the controller aborts the heartbeat, asks workers to stop between pages, waits up to 20 seconds
+for them to stop, then drains its own in-flight entries back to pending — a rolling update replays at most mid-page work.
 Duplicate processing is accepted and bounded: hit writes converge on their deterministic identity and duplicate
 clears no-op, but duplicate *reactions* can be created — the same class of duplicate as any crash replay.
 

@@ -920,7 +920,7 @@ mod tests {
     /// A lone snapshot hit is not relabeled as a process walk.
     #[test]
     fn lone_snapshot_hit_passes_through_unchanged() {
-        // fn-68d61be0's snapshot leads were Thread32 quiesce loops
+        // fn-68d61be0's snapshot leads were Thread32 suspend loops
         // (TH32CS_SNAPTHREAD, no name compares), so a lone snapshot must keep
         // its own hypothesis template rather than gain a process-walk label
         let hit = api_hit("CreateToolhelp32Snapshot", Some(0x68d6_1be0), 0x68d6_1c00);
