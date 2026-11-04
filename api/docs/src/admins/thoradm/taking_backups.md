@@ -75,11 +75,51 @@ tables. Table data is
 written in archive files of up to 10 GiB each.
 
 A backup holds every password hash and API token in Thorium, so anyone who can read it holds admin
-credentials. Thoradm keeps it private to the user running it: the backup directory and every
-directory in it are mode `0700`, and every file is mode `0600`. A directory that already exists and
-that other users can read or enter is changed to `0700` before anything is written; if its mode
-can't be changed (it belongs to another user, for example), the backup is refused. Keep backups on
-private, access-controlled storage. Backups are not encrypted.
+credentials. Thoradm never lets other users (the "other" permission bits) read or enter it, but a
+backup directory with the setgid bit may be shared with its group, such as an admin group:
+
+- A directory thoradm creates is private to the user running it: mode `0700`, and every directory
+  in it `0700` and every file `0600`.
+- An existing directory without the setgid bit is made `0700` before anything is written, whatever
+  its group bits, and everything the backup writes in it is private as above. The log names the old
+  and new modes (for example `0755` becomes `0700`).
+- An existing directory with the setgid bit keeps its group bits and its setgid bit. If other users
+  have any access to it, only their bits are removed (for example `2775` becomes `2770`) before
+  anything is written, and the log names the old and new modes.
+- If the mode can't be changed (the directory belongs to another user, for example), the backup is
+  refused.
+- Everything the backup writes in a setgid directory mirrors its group access and gives other
+  users nothing: each directory gets the backup directory's group bits (`0700` plus them), and each
+  file gets its group read and write bits but never execute (`0600` plus them). Thoradm sets these
+  modes after creating each file and directory, so a umask such as `022` or `027` doesn't take the
+  group's access away.
+
+To share backups with a group, create the backup directory beforehand, owned by that group, with
+the setgid bit: mode `2770` (the group may read and write the backup) or `2750` (the group may only
+read it). The setgid bit (`2`) is what marks the directory as shared, and it makes everything
+created in it belong to the directory's group. A setgid directory whose group has no search bit
+(`x`), such as `2760`, is accepted with a warning, since group members can't enter it. For example:
+
+```bash
+install -d -m 2770 -g thorium-admins /backups/thorium-2026-10-17
+thoradm backup new -o /backups/thorium-2026-10-17
+```
+
+or, for a directory that already exists, `chgrp thorium-admins DIR && chmod 2770 DIR`.
+
+Restore, verify, and scrub write their reports under `reports/` in the backup. `reports/` gets the
+backup directory's group access like the rest of the backup, so in a `2770` directory every group
+member can run them; each run's own `reports/<operation>-<time>/` directory is private to the user
+who ran it. In a `2750` directory group members can't write there: their `backup verify` and
+`backup restore` need `--report-dir` pointing outside the backup, and they can't run `backup
+scrub`.
+
+Group members share the directory with the user running thoradm, so they are trusted with that
+user's account: thoradm refuses symlinks at the files it writes and at its lock file, but a
+symlinked directory a member puts inside an interrupted backup is followed when the backup
+resumes.
+
+Keep backups on private, access-controlled storage. Backups are not encrypted.
 
 ## Taking a Backup
 
@@ -173,7 +213,7 @@ Each backup goes in its own directory. What `--output` holds decides what the ru
 
 | The directory | What `backup new` does |
 |---|---|
-| Doesn't exist, or holds no files (empty directories at most) | Starts a new backup, creating the directory (and its parents) with mode `0700` |
+| Doesn't exist, or holds no files (empty directories at most) | Starts a new backup, creating the directory (and its parents) with mode `0700`, or keeping an existing directory's group access (see [Disk space and permissions](#disk-space-and-permissions)) |
 | Holds a finished backup (`manifest.json`) | Refuses: a finished backup is never changed. Back up into a new directory |
 | Holds an interrupted backup (`backup-in-progress.json` and no `manifest.json`) | Resumes it (see [Interrupted backups](#interrupted-backups)) |
 | Holds other files (neither file above) | Refuses: the files belong to no backup this run can resume. Use a new or empty directory |
@@ -601,7 +641,8 @@ the backup's `redis.json` and then fails on the Scylla data, leaving the tables 
 
 ### An example
 
-A finished backup of every component, after one `backup scrub` and one `backup verify`:
+A finished backup of every component in a directory thoradm created, after one `backup scrub` and
+one `backup verify`:
 
 ```text
 thorium-2026-10-17/                           0700  the backup directory
@@ -669,6 +710,11 @@ The paths below start at the backup directory, `<backup>`. Placeholders:
 - `<key>`: a graphics object's key, which may contain `/`.
 - `<path>`: one or more path segments.
 - `<operation>`: `backup`, `restore`, `scrub`, or `verify`; `<time>` is the UTC time the run started.
+
+The modes are those of a backup directory thoradm created. In a backup directory shared with its
+group, `backup new` adds the directory's group bits to every directory it writes and the group's
+read and write bits to every file (in a `2770` directory, `0770` and `0660`), while the reports of
+`backup restore`, `backup scrub`, and `backup verify` stay private to the user running them.
 
 | Path | Kind | Mode | Written by | What it holds |
 |---|---|---|---|---|

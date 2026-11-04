@@ -33,7 +33,7 @@ use crate::shared::workers::Orders;
 
 use super::failures::{FailureLog, FailureRecord, Operation, OrderKey};
 use super::manifest::{ObjectIndexLine, file_sha256, read_index};
-use super::sink::{FileSink, PRIVATE_FILE_MODE, SinkFactory, create_private_dir};
+use super::sink::{FileSink, PRIVATE_FILE_MODE, SinkFactory};
 use super::{ArchiveReader, MonitorUpdate, Utils};
 
 /// How many characters of an object's key name the directory that spreads a backup's objects
@@ -404,10 +404,11 @@ fn object_digest(bucket: &str, key: &str) -> [u8; 32] {
 /// # Arguments
 ///
 /// * `staging` - The component's staging directory
-pub async fn clear_staging(staging: &Path) -> Result<(), Error> {
+/// * `sinks` - The file-system seam that creates it with the backup's access
+pub async fn clear_staging(staging: &Path, sinks: &dyn SinkFactory) -> Result<(), Error> {
     // a missing directory is already empty
     remove_staging(staging).await?;
-    create_private_dir(staging).await?;
+    sinks.create_dir(staging).await?;
     Ok(())
 }
 
@@ -841,7 +842,7 @@ async fn download_file(
     } = download;
     // make the object's directory, recording a disk that refuses it
     let prepared = match path.parent() {
-        Some(parent) => create_object_dir(&ctx.index, parent).await,
+        Some(parent) => create_object_dir(&ctx.index, ctx.sinks.as_ref(), parent).await,
         None => Ok(()),
     };
     // download the object, retrying transient failures; disk errors and missing objects are
@@ -892,8 +893,13 @@ async fn download_file(
 /// # Arguments
 ///
 /// * `index` - The component's object index, which collects the directories to sync
+/// * `sinks` - The file-system seam that creates directories with the backup's access
 /// * `dir` - The object's directory
-async fn create_object_dir(index: &ComponentIndex, dir: &Path) -> Result<(), Error> {
+async fn create_object_dir(
+    index: &ComponentIndex,
+    sinks: &dyn SinkFactory,
+    dir: &Path,
+) -> Result<(), Error> {
     // find the directories on the path that don't exist yet, deepest first
     let mut missing = Vec::new();
     let mut next = Some(dir);
@@ -908,7 +914,7 @@ async fn create_object_dir(index: &ComponentIndex, dir: &Path) -> Result<(), Err
     if missing.is_empty() {
         return Ok(());
     }
-    create_private_dir(dir).await?;
+    sinks.create_dir(dir).await?;
     // each new directory's entry lives in its parent
     index.note_parents(
         missing

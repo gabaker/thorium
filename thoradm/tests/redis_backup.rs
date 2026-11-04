@@ -1,4 +1,5 @@
-//! The Redis half of a backup: `redis.json` is private and lands whole or not at all
+//! The Redis half of a backup: `redis.json` is kept from other users and lands whole or not at all,
+//! and a backup's directories and files share only what the root gives its group
 
 mod common;
 
@@ -6,8 +7,8 @@ use axum::http::Method;
 use common::faulty_sink::{FaultySink, SinkFault};
 use common::harness::{Harness, redis_pool, write_ctl_conf};
 use common::mock_s3::{MockS3, S3Behavior, S3Rule};
-use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thoradm::args::{BackupComponents, NewBackup, RestoreBackup};
 use thoradm::backup::controllers::{backup, restore};
@@ -342,26 +343,20 @@ fn walk(root: &Path) -> Vec<std::path::PathBuf> {
     found
 }
 
-/// A backup into a directory created beforehand readable by everyone makes it private, and
-/// every directory and file the backup writes in it is private to this user
-#[tokio::test]
-async fn a_backup_into_a_readable_directory_makes_everything_private() {
-    let harness = Harness::get().await;
-    let _guard = harness.shared_guard().await;
+/// Backs up a sample's table, its object, and the Redis state into a directory with thoradm,
+/// returning thoradm's stderr and every path it wrote
+///
+/// # Arguments
+///
+/// * `harness` - The harness naming the cluster
+/// * `out` - The backup directory, which exists
+/// * `name` - The group's name to seed the sample in
+async fn back_up_a_sample(harness: &Harness, out: &Path, name: &str) -> (String, Vec<PathBuf>) {
     // a sample, so the backup holds archives and an object as well as redis.json
     let client = harness.client().await;
-    let group = common::names::Names::new().group("vesta");
+    let group = common::names::Names::new().group(name);
     common::seed::group(&client, &group).await;
-    common::seed::sample(
-        &client,
-        &group,
-        "hearth.bin",
-        b"a sample to back up privately",
-    )
-    .await;
-    // an empty directory made beforehand that everyone can read
-    let out = harness.scratch("readable");
-    std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o755)).unwrap();
+    common::seed::sample(&client, &group, "hearth.bin", b"a sample to back up").await;
     let output = harness
         .thoradm()
         .args([
@@ -370,21 +365,33 @@ async fn a_backup_into_a_readable_directory_makes_everything_private() {
             "samples-list,s3-ids,s3-ids-objects,redis",
             "-o",
         ])
-        .arg(&out)
+        .arg(out)
         .output()
         .expect("failed to run thoradm");
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert_eq!(output.status.code(), Some(0), "{stderr}");
-    // the root and everything in it is private to this user
-    let paths = walk(&out);
+    // the backup holds an object as well as archives
+    let paths = walk(out);
     assert!(
         paths
             .iter()
             .any(|path| path.ends_with("objects.index.jsonl")),
         "{paths:?}"
     );
-    for path in &paths {
-        let expected = if path.is_dir() { 0o700 } else { 0o600 };
+    (stderr, paths)
+}
+
+/// Checks every directory and file under a backup root has a mode
+///
+/// # Arguments
+///
+/// * `paths` - Every path the backup wrote
+/// * `dir_mode` - The permission bits every directory has
+/// * `file_mode` - The permission bits every file has
+fn assert_modes(paths: &[PathBuf], dir_mode: u32, file_mode: u32) {
+    // directories and files each have their one mode
+    for path in paths {
+        let expected = if path.is_dir() { dir_mode } else { file_mode };
         assert_eq!(
             mode(path),
             expected,
@@ -395,10 +402,28 @@ async fn a_backup_into_a_readable_directory_makes_everything_private() {
     }
 }
 
-/// Making a group-shared root private logs its whole former mode, so the setgid bit it drops is
-/// visible as well as the group's access
+/// A backup into a directory created beforehand readable by everyone, but not setgid, makes it
+/// private to the user running thoradm, and every directory and file the backup writes in it is
+/// private too
 #[tokio::test]
-async fn making_a_setgid_root_private_logs_its_whole_mode() {
+async fn a_backup_into_a_readable_directory_keeps_it_from_other_users() {
+    let harness = Harness::get().await;
+    let _guard = harness.shared_guard().await;
+    // an empty directory made beforehand that everyone can read
+    let out = harness.scratch("readable");
+    std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (stderr, paths) = back_up_a_sample(harness, &out, "vesta").await;
+    // without the setgid bit the root shares nothing, and the log names both modes
+    assert_eq!(mode(&out), 0o700);
+    assert!(stderr.contains("(it was 755, now 700)"), "{stderr}");
+    // directories and files only their owner may use
+    assert_modes(&paths, 0o700, 0o600);
+}
+
+/// Taking other users' access from a setgid root keeps its setgid bit and its group's access, and
+/// logs its whole former and new modes
+#[tokio::test]
+async fn a_setgid_root_keeps_its_group_and_setgid_bit() {
     let harness = Harness::get().await;
     let _guard = harness.shared_guard().await;
     // an empty group directory made beforehand that new files inherit the group of
@@ -417,10 +442,34 @@ async fn making_a_setgid_root_private_logs_its_whole_mode() {
         .expect("failed to run thoradm");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
-    // the root is private without its setgid bit, and the log names the whole mode it had
+    // the root lost only other users' bits, and the log names the whole mode before and after
     let after = std::fs::metadata(&out).unwrap().permissions().mode() & 0o7777;
-    assert_eq!(after, 0o700, "the root is {after:o}");
-    assert!(stderr.contains("(it was 2775)"), "{stderr}");
+    assert_eq!(after, 0o2770, "the root is {after:o}");
+    assert!(stderr.contains("(it was 2775, now 2770)"), "{stderr}");
+}
+
+/// A backup into a setgid directory shared with its group keeps the root as it is, and every
+/// directory it writes is 0770 and every file 0660, all in the root's group
+#[tokio::test]
+async fn a_group_shared_root_shares_every_file_with_its_group() {
+    let harness = Harness::get().await;
+    let _guard = harness.shared_guard().await;
+    // an empty setgid directory its group may read, write, and enter
+    let out = harness.scratch("group-shared");
+    std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o2770)).unwrap();
+    let (stderr, paths) = back_up_a_sample(harness, &out, "minerva").await;
+    // the root is left as it was, and nothing was taken away from it
+    let after = std::fs::metadata(&out).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(after, 0o2770, "the root is {after:o}");
+    assert!(!stderr.contains("Removed other users' access"), "{stderr}");
+    // the group may use every directory and file, and other users none
+    assert_modes(&paths, 0o770, 0o660);
+    // every path is in the root's group, which its setgid bit passes down
+    let group = std::fs::metadata(&out).unwrap().gid();
+    for path in &paths {
+        let gid = std::fs::metadata(path).unwrap().gid();
+        assert_eq!(gid, group, "{} is in group {gid}", path.display());
+    }
 }
 
 /// A restore whose Redis step fails records it and exits 2, and its summary doesn't claim the

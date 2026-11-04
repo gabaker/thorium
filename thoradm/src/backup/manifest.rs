@@ -43,7 +43,8 @@ pub const PRUNED_FILE: &str = "pruned.jsonl";
 /// Files other features write into a backup root, which the manifest lists when present
 pub const SIBLINGS: &[&str] = &["schema.json"];
 
-/// The mode the manifest and the marker are created with
+/// The mode the manifest and the marker are created with, to which a backup's seam adds the group's
+/// bits when the root is shared with its group
 const MODE: u32 = 0o600;
 
 /// The size of the buffer a file is read through to hash it
@@ -336,7 +337,8 @@ pub enum Layout {
 
 /// Returns whether a directory holds any file other than directories, at any depth
 ///
-/// The lock file a run takes in the directory itself doesn't count.
+/// The lock file a run takes in the directory itself doesn't count, unless it isn't a regular
+/// file (a symlink, for example), which no run makes.
 ///
 /// # Arguments
 ///
@@ -348,9 +350,11 @@ async fn holds_files(dir: &Path) -> Result<bool, Error> {
     while let Some(next) = pending.pop() {
         let mut listing = tokio::fs::read_dir(&next).await?;
         while let Some(entry) = listing.next_entry().await? {
-            if entry.file_type().await?.is_dir() {
+            // the entry's own type, which for a symlink is the link and not what it names
+            let kind = entry.file_type().await?;
+            if kind.is_dir() {
                 pending.push(entry.path());
-            } else if entry.path() != lock {
+            } else if entry.path() != lock || !kind.is_file() {
                 return Ok(true);
             }
         }
@@ -411,8 +415,9 @@ pub async fn write_json_atomic<T: Serialize>(
     Ok(write_atomic(dir, name, &bytes, sinks).await?)
 }
 
-/// Writes a file into a directory atomically: a temporary file created 0600 is written, synced,
-/// and renamed into place, and the directory is synced
+/// Writes a file into a directory atomically: a temporary file created 0600 (with the group's bits
+/// when a backup's seam shares it with the root's group) is written, synced, and renamed into
+/// place, and the directory is synced
 ///
 /// A stale temporary file is removed first, so the new one is created with the mode, and the
 /// temporary file is removed again if any step fails, so the file is either whole or absent.

@@ -353,7 +353,7 @@ impl BackupSchemaRecord {
     /// * `root` - The backup root
     /// * `sinks` - The file-system seam to write through
     pub async fn write(&self, root: &Path, sinks: &dyn SinkFactory) -> Result<(), Error> {
-        // the file holds the settings' password hash, so it is written as private as the rest
+        // the file holds the settings' password hash, so it gets the same mode as the rest
         write_json_atomic(root, SCHEMA_FILE, self, sinks).await
     }
 

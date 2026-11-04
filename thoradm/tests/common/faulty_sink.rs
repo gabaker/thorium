@@ -264,6 +264,16 @@ impl FileSink for FaultyFile {
         self.written = self.written.min(len);
         self.inner.truncate(len).await
     }
+
+    /// Gives the real file a mode, which is never faulted
+    ///
+    /// # Arguments
+    ///
+    /// * `mode` - The permission bits the file must have
+    async fn set_mode(&mut self, mode: u32) -> std::io::Result<()> {
+        // mode changes aren't recorded; pass them through
+        self.inner.set_mode(mode).await
+    }
 }
 
 #[async_trait::async_trait]
