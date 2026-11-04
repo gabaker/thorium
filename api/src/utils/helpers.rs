@@ -328,9 +328,63 @@ pub fn redact_url(url: &str) -> String {
     }
 }
 
+/// Redact the user info of every URL inside a piece of text
+///
+/// A URL is found by its `://` and runs from the start of its scheme to the next whitespace,
+/// quote, `)`, or `>`, the characters error messages wrap URLs in.
+///
+/// # Arguments
+///
+/// * `text` - The text whose URLs to redact
+fn redact_urls_in(text: &str) -> String {
+    // copy the text, replacing each URL with its redacted form
+    let mut redacted = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(marker) = rest.find("://") {
+        // the scheme runs back from the marker over the characters a scheme may hold
+        let start = rest[..marker]
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
+            .map_or(0, |before| before + 1);
+        // the URL ends at the first character messages wrap URLs in
+        let end = rest[marker..]
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ')' | '>'))
+            .map_or(rest.len(), |after| marker + after);
+        redacted.push_str(&rest[..start]);
+        redacted.push_str(&redact_url(&rest[start..end]));
+        rest = &rest[end..];
+    }
+    redacted.push_str(rest);
+    redacted
+}
+
+/// Describe an error along with every error that caused it, joined with `": "`
+///
+/// Many errors, such as reqwest's, leave their cause out of their own message, so "error sending
+/// request" alone can't tell a refused connection from a TLS failure or a DNS miss. A cause whose
+/// message repeats one already shown, as wrappers that print their inner error do, is skipped,
+/// and the user info of any URL in a message is redacted.
+///
+/// # Arguments
+///
+/// * `error` - The error to describe
+#[must_use]
+pub fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    // walk the error and its sources, keeping each message not already shown
+    let mut messages: Vec<String> = Vec::new();
+    let mut current = Some(error);
+    while let Some(link) = current {
+        let message = redact_urls_in(&link.to_string());
+        if !message.is_empty() && !messages.contains(&message) {
+            messages.push(message);
+        }
+        current = link.source();
+    }
+    messages.join(": ")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::redact_url;
+    use super::{error_chain, redact_url};
     use super::{intersection, is_superset, missing_groups};
 
     /// User info is stripped from https, ssh, and git URLs, with or without a password, and from
@@ -488,6 +542,84 @@ mod tests {
         assert_eq!(
             intersection(&groups(&["a", "a"]), &groups(&["a"])),
             groups(&["a"])
+        );
+    }
+
+    /// A test error with a message and an optional cause
+    #[derive(Debug)]
+    struct Link {
+        /// The error's own message
+        message: &'static str,
+        /// The error that caused it
+        cause: Option<Box<Link>>,
+    }
+
+    impl std::fmt::Display for Link {
+        /// Write the error's own message
+        ///
+        /// # Arguments
+        ///
+        /// * `f` - The formatter to write to
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.message)
+        }
+    }
+
+    impl std::error::Error for Link {
+        /// The error that caused this one
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.cause
+                .as_deref()
+                .map(|cause| cause as &(dyn std::error::Error + 'static))
+        }
+    }
+
+    /// Build a chain of test errors, outermost first
+    ///
+    /// # Arguments
+    ///
+    /// * `messages` - Each error's message, outermost first
+    fn chain(messages: &[&'static str]) -> Link {
+        // wrap each cause in the error before it
+        let mut iter = messages.iter().rev();
+        let mut link = Link {
+            message: iter.next().expect("a message"),
+            cause: None,
+        };
+        for message in iter {
+            link = Link {
+                message,
+                cause: Some(Box::new(link)),
+            };
+        }
+        link
+    }
+
+    /// The chain names every cause once, in order, and redacts URL user info
+    #[test]
+    fn error_chain_names_causes() {
+        // a lone error is just its message
+        assert_eq!(error_chain(&chain(&["boom"])), "boom");
+        // causes follow in order, and a wrapper repeating its cause's message is shown once
+        let error = chain(&[
+            "error sending request for url (https://es:9200/_mapping)",
+            "error sending request for url (https://es:9200/_mapping)",
+            "client error (Connect)",
+            "Connection refused (os error 111)",
+        ]);
+        assert_eq!(
+            error_chain(&error),
+            "error sending request for url (https://es:9200/_mapping): client error (Connect): \
+             Connection refused (os error 111)"
+        );
+        // credentials in a URL inside a message are dropped
+        let error = chain(&[
+            "error for url (https://elastic:Secret1@es:9200/x)",
+            "refused",
+        ]);
+        assert_eq!(
+            error_chain(&error),
+            "error for url (https://es:9200/x): refused"
         );
     }
 }

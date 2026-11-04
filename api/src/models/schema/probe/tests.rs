@@ -444,3 +444,33 @@ fn observed_schemas_fingerprint_the_probed_backends() {
         RevisionSnapshot::deployment_fingerprint(&observed.backends)
     );
 }
+
+/// A probe that can't connect to Elastic names the refused connection, not just reqwest's
+/// "error sending request"
+#[cfg(feature = "client")]
+#[tokio::test]
+async fn probe_names_refused_connection() {
+    // find a local port nothing listens on by binding one and letting it go
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a local port");
+        listener.local_addr().expect("local address").port()
+    };
+    // point the probe's Elastic client at that port, with credentials in the node URL too
+    let conf: crate::conf::Elastic = serde_json::from_value(json!({
+        "node": format!("http://elastic:Secret1@127.0.0.1:{port}"),
+        "username": "elastic",
+        "password": "Secret1",
+    }))
+    .expect("an Elastic config");
+    let client = super::elastic_client(&conf)
+        .await
+        .expect("an Elastic client");
+    // probing fails, and the message carries the cause and no credentials
+    let error = super::probe_elastic(&client, &conf)
+        .await
+        .expect_err("nothing listens on the port")
+        .to_string();
+    assert!(error.contains("error sending request"), "{error}");
+    assert!(error.contains("Connection refused"), "{error}");
+    assert!(!error.contains("Secret1"), "{error}");
+}

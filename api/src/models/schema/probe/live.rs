@@ -59,7 +59,7 @@ pub async fn elastic_client(
         .cert_validation(validation)
         .timeout(Duration::from_secs(ELASTIC_TIMEOUT_SECS))
         .build()
-        .map_err(|error| failed(error.to_string()))?;
+        .map_err(|error| failed(crate::utils::helpers::error_chain(&error)))?;
     Ok(elasticsearch::Elasticsearch::new(transport))
 }
 
