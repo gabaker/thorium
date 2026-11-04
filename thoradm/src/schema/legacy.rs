@@ -88,7 +88,13 @@ fn render_status(text: &mut String, status: &LegacyStatus) {
     let present = if status.present { "yes" } else { "no" };
     let _ = writeln!(text, "    present:     {present}");
     let _ = writeln!(text, "    rows:        {}", status.rows);
-    let _ = writeln!(text, "    created by:  {}", status.created_by.join(", "));
+    // an object no revision created came from a release before the first revision
+    let created_by = if status.created_by.is_empty() {
+        "a release before the first revision".to_owned()
+    } else {
+        status.created_by.join(", ")
+    };
+    let _ = writeln!(text, "    created by:  {created_by}");
     let _ = writeln!(text, "    used by:     {}", used_by(status));
     // one line per downgrade target
     for target in &status.downgrades {
@@ -194,8 +200,10 @@ mod tests {
     /// Build a listing over the real registry for a keyspace holding the exemplar, the
     /// re-declared view, a table a past snapshot names, and one table no snapshot names
     fn listing() -> LegacyListing {
-        // the exemplar lives with rows, the declared view is skipped, and one table is extra
-        let sources = LegacySources::production();
+        // the exemplar lives with rows, the declared view is skipped, and one table is extra; the
+        // objects of releases before the first revision are left to their own test
+        let mut sources = LegacySources::production();
+        sources.registry.truncate(1);
         let live = [
             ("events", "table"),
             ("entities_by_name", "view"),
@@ -214,6 +222,28 @@ mod tests {
             snapshots: vec!["2026-10-v01".to_owned(), "2026-10-v02".to_owned()],
         });
         listing
+    }
+
+    /// An object only releases before the first revision created names no creating revision and
+    /// has no downgrade lines
+    #[test]
+    fn a_pre_revision_object_names_no_revision_and_no_downgrade() {
+        // the real registry over a keyspace holding the commits table
+        let sources = LegacySources::production();
+        let live = BTreeMap::from([("commits".to_owned(), "table".to_owned())]);
+        let rows = BTreeMap::from([("commits".to_owned(), 3)]);
+        let text = render(&classify(&sources, &live, &rows));
+        let expected = [
+            "  scylla:commits  (table, class Core)",
+            "    present:     yes",
+            "    rows:        3",
+            "    created by:  a release before the first revision",
+            "    used by:     none",
+            "    droppable:   yes",
+            "",
+        ]
+        .join("\n");
+        assert!(text.contains(&expected), "{text}");
     }
 
     /// The text has the two sections, a block per registered object, and the count line

@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use super::scylla::{NetworkPoliciesDefaultView, ThoriumKeyspace};
+use super::scylla::{MIGRATION_STATE_TABLES, NetworkPoliciesDefaultView, ThoriumKeyspace};
 use super::{
     ClusterOrder, ColumnDef, ColumnRole, CqlDesc, CqlNative, Keyspace, ObjectDef, RegistryError,
     ScyllaObject, TableDef, ViewDef, validate,
@@ -416,10 +416,6 @@ fn golden(name: &str, actual: &str) -> String {
         .unwrap_or_else(|err| panic!("{} can't be read: {err}", path.display()))
 }
 
-/// The migration-state tables, declared after the setup statements were replaced, so they have no
-/// setup statement to match
-const STATE_TABLES: [&str; 2] = ["schema_migrations", "schema_migration_issues"];
-
 /// The objects declared after the setup statements were retired, which no setup statement
 /// created: yara scanning's scan stats table and the re-declared exact-name entities view
 const DECLARED_ONLY: [&str; 2] = ["scan_stats", "entities_by_name"];
@@ -435,7 +431,7 @@ fn declared_schema_matches_setup_statements() {
     let legacy = parse_all(&std::fs::read_to_string(legacy_path).expect("legacy DDL reads"));
     let mut generated = parse_all(&declared_ddl());
     // the migration-state tables have no setup statement: only `schema apply` creates them
-    for name in STATE_TABLES {
+    for name in MIGRATION_STATE_TABLES {
         assert!(generated.remove(name).is_some(), "{name} isn't declared");
     }
     // objects declared after the setup statements were retired have none to match either
@@ -445,7 +441,8 @@ fn declared_schema_matches_setup_statements() {
     let objects = <ThoriumKeyspace as Keyspace>::OBJECTS
         .iter()
         .filter(|object| {
-            !STATE_TABLES.contains(&object.name()) && !DECLARED_ONLY.contains(&object.name())
+            !MIGRATION_STATE_TABLES.contains(&object.name())
+                && !DECLARED_ONLY.contains(&object.name())
         })
         .collect::<Vec<_>>();
     // the same 16 tables and 12 views on both sides

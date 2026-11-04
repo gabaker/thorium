@@ -15,11 +15,35 @@ use crate::models::schema::{CLASSES, DataClass, RevisionSnapshot, SchemaObject, 
 /// The one exception is an object the build starts declaring again, whose guard entry leaves
 /// with the change that declares it: the `entities_by_name` view left when exact-name entity
 /// reads brought it back.
-const GUARD: &[&str] = &["scylla:events"];
+const GUARD: &[&str] = &[
+    "scylla:events",
+    "scylla:commits",
+    "scylla:commits_list",
+    "scylla:cursors",
+    "scylla:simple_cursors",
+    "scylla:workers",
+    "scylla:exports",
+    "scylla:export_errors",
+    "scylla:export_error_ids",
+];
+
+/// The objects only releases from before the first revision created, with their kinds and
+/// classes: the tables and view those releases' setup made that later code stopped using
+const PRE_REVISION: &[(&str, LegacyKind, DataClass)] = &[
+    ("commits", LegacyKind::Table, DataClass::Core),
+    ("commits_list", LegacyKind::Table, DataClass::Core),
+    ("cursors", LegacyKind::Table, DataClass::Runtime),
+    ("simple_cursors", LegacyKind::Table, DataClass::Runtime),
+    ("workers", LegacyKind::Table, DataClass::Runtime),
+    ("exports", LegacyKind::Table, DataClass::Runtime),
+    ("export_errors", LegacyKind::Table, DataClass::Runtime),
+    ("export_error_ids", LegacyKind::View, DataClass::Derived),
+];
 
 /// Every entry's id is unique and none is a declared object; each revision that created it has a
-/// snapshot listing it as the entry's kind, each revision that uses it exists, was one that
-/// created it, and the entry's note is not blank
+/// snapshot listing it as the entry's kind, an entry no revision created is in no revision's
+/// snapshot and no revision uses it, each revision that uses it exists, was one that created it,
+/// and the entry's note is not blank
 #[test]
 fn legacy_registry_is_valid() {
     // ids are unique
@@ -40,7 +64,24 @@ fn legacy_registry_is_valid() {
             entry.id()
         );
         assert!(!entry.retirement.trim().is_empty(), "{}", entry.id());
-        assert!(!entry.created_by.is_empty(), "{}", entry.id());
+        // an object only releases before the first revision created is in no revision's snapshot
+        if entry.created_by.is_empty() {
+            for revision in Catalog::PRODUCTION.edges.iter().map(|edge| edge.id) {
+                let Some(snapshot) = RevisionSnapshot::committed(revision) else {
+                    continue;
+                };
+                let snapshot = snapshot.expect("the snapshot is valid");
+                assert!(
+                    !snapshot
+                        .objects
+                        .iter()
+                        .any(|object| object.backend == entry.backend && object.name == entry.name),
+                    "{revision}'s snapshot lists {}, so a revision created it",
+                    entry.id()
+                );
+            }
+            assert!(entry.used_by.is_empty(), "{}", entry.id());
+        }
         // every revision that created it has a snapshot listing it with the entry's kind
         for revision in entry.created_by {
             let snapshot = RevisionSnapshot::committed(revision)
@@ -96,8 +137,8 @@ fn the_exemplars_carry_their_classes() {
     assert_eq!(events.created_by, ["2026-10-v01", "2026-10-v02"]);
     assert_eq!(events.used_by, []);
     assert_eq!(events.id(), "scylla:events");
-    // nothing else is registered, and lookups agree with the list
-    assert_eq!(LEGACY.len(), 1);
+    // the rest are the objects of releases before the first revision, and lookups agree
+    assert_eq!(LEGACY.len(), 1 + PRE_REVISION.len());
     assert!(is_legacy(SchemaBackend::Scylla, "events"));
     assert!(!is_legacy(SchemaBackend::Redis, "events"));
     assert!(!is_legacy(SchemaBackend::Scylla, "samples_list"));
@@ -119,5 +160,31 @@ fn the_exemplars_carry_their_classes() {
     // and every legacy entry of the class table is registered
     for row in CLASSES.iter().filter(|row| row.legacy) {
         assert!(is_legacy(row.store.backend(), row.name), "{}", row.name);
+    }
+}
+
+/// The tables and view only releases before the first revision created are registered with their
+/// kinds and classes, created and used by no revision, each with a note naming the release that
+/// retired it, while leftovers no release shipped stay unregistered
+#[test]
+fn objects_of_releases_before_the_first_revision_are_registered() {
+    // each pre-revision object is registered as its kind and class
+    for (name, kind, class) in PRE_REVISION {
+        let entry = legacy_def(SchemaBackend::Scylla, name)
+            .unwrap_or_else(|| panic!("{name} isn't registered"));
+        assert_eq!(entry.kind, *kind, "{name}");
+        assert_eq!(entry.class, *class, "{name}");
+        assert_eq!(entry.created_by, [] as [&str; 0], "{name}");
+        assert_eq!(entry.used_by, [], "{name}");
+        // the note names the release that retired it
+        assert!(
+            entry.retirement.contains("1.0.0") || entry.retirement.contains("1.1.0"),
+            "{name}: {}",
+            entry.retirement
+        );
+    }
+    // tables of development-only builds and feature branches are not registered
+    for name in ["tools", "tools_list", "associations_by_kind", "commitish"] {
+        assert!(!is_legacy(SchemaBackend::Scylla, name), "{name}");
     }
 }

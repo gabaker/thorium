@@ -7,7 +7,7 @@ use super::{
     BackupCoverage, CLASSES, ClassEntry, DataClass, Keyspace, ObjectDef, REDIS_FAMILIES,
     RevisionSnapshot, SchemaBackend, Store,
 };
-use crate::models::upgrades::{CATALOG, LAYOUTS};
+use crate::models::upgrades::{CATALOG, LAYOUTS, legacy_def};
 
 /// Lists the objects that don't have exactly one class table entry of their store
 ///
@@ -91,8 +91,12 @@ fn every_declared_object_has_one_class() {
                     "{} is declared, so it isn't legacy",
                     entry.name
                 );
+                // a release before the first revision created it when its registry entry has
+                // no creating revision
+                let pre_revision = legacy_def(entry.store.backend(), entry.name)
+                    .is_some_and(|def| def.created_by.is_empty());
                 assert!(
-                    released.contains(entry.name),
+                    released.contains(entry.name) || pre_revision,
                     "{} is legacy but no older release created it",
                     entry.name
                 );
@@ -288,6 +292,13 @@ const EXPECTED_CLASSES: &[(Store, &str, DataClass)] = &[
     (Store::ScyllaTable, "logs", DataClass::Runtime),
     (Store::ScyllaTable, "scan_stats", DataClass::Runtime),
     (Store::ScyllaTable, "events", DataClass::Runtime),
+    (Store::ScyllaTable, "commits", DataClass::Core),
+    (Store::ScyllaTable, "commits_list", DataClass::Core),
+    (Store::ScyllaTable, "cursors", DataClass::Runtime),
+    (Store::ScyllaTable, "simple_cursors", DataClass::Runtime),
+    (Store::ScyllaTable, "workers", DataClass::Runtime),
+    (Store::ScyllaTable, "exports", DataClass::Runtime),
+    (Store::ScyllaTable, "export_errors", DataClass::Runtime),
     (Store::ScyllaTable, "schema_migrations", DataClass::Core),
     (
         Store::ScyllaTable,
@@ -319,6 +330,7 @@ const EXPECTED_CLASSES: &[(Store, &str, DataClass)] = &[
     ),
     (Store::ScyllaView, "entities_by_id", DataClass::Derived),
     (Store::ScyllaView, "entities_by_name", DataClass::Derived),
+    (Store::ScyllaView, "export_error_ids", DataClass::Derived),
     (Store::Redis, "users", DataClass::Core),
     (Store::Redis, "user_data:*", DataClass::Core),
     (Store::Redis, "user_groups:*", DataClass::Core),

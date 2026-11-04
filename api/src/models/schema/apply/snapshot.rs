@@ -14,11 +14,10 @@ use super::{
     redact_trigger_key, scylla_objects, wait_for_changed_views,
 };
 use crate::Conf;
+use crate::models::schema::scylla::MIGRATION_STATE_TABLES;
 use crate::models::schema::scylla::ThoriumKeyspace;
-use crate::models::schema::scylla::{SchemaMigrationIssuesTable, SchemaMigrationsTable};
 use crate::models::schema::{
     ApplyError, ApplyReport, ConfigChange, Keyspace, ObjectDef, RevisionSnapshot, SchemaObject,
-    ScyllaObject,
 };
 use crate::models::upgrades::SchemaBackend;
 use scylla::client::session::Session;
@@ -258,15 +257,13 @@ fn configured_ttl(conf: &Conf, table: &str) -> Option<u64> {
 /// * `skip` - The names to leave out
 fn scylla_of<'a>(snapshot: &'a RevisionSnapshot, skip: &BTreeSet<String>) -> Vec<Rendered<'a>> {
     // the state tables are converged from the declaration, never from a snapshot
-    let state = [
-        <SchemaMigrationsTable as ScyllaObject>::NAME,
-        <SchemaMigrationIssuesTable as ScyllaObject>::NAME,
-    ];
     let mut objects = snapshot
         .objects
         .iter()
         .filter(|object| object.backend == SchemaBackend::Scylla)
-        .filter(|object| !state.contains(&object.name.as_str()) && !skip.contains(&object.name))
+        .filter(|object| {
+            !MIGRATION_STATE_TABLES.contains(&object.name.as_str()) && !skip.contains(&object.name)
+        })
         .map(|object| Rendered {
             name: &object.name,
             view: text(&object.canonical, "kind") == "view",
@@ -384,13 +381,7 @@ pub async fn apply_snapshot(
     // the record tables come from the declaration, then the snapshot's own objects
     let record_tables = declared
         .iter()
-        .filter(|def| {
-            [
-                <SchemaMigrationsTable as ScyllaObject>::NAME,
-                <SchemaMigrationIssuesTable as ScyllaObject>::NAME,
-            ]
-            .contains(&def.name())
-        })
+        .filter(|def| MIGRATION_STATE_TABLES.contains(&def.name()))
         .copied()
         .collect::<Vec<_>>();
     let objects = scylla_of(snapshot, &run.skip);

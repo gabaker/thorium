@@ -507,11 +507,13 @@ pub struct LegacyDef {
     pub name: &'static str,
     /// The object's data class, the same one the class table gives it
     pub class: crate::models::schema::DataClass,
-    /// The revisions whose setup created it
+    /// The revisions whose setup created it; empty for an object only releases from before the
+    /// first revision created
     pub created_by: &'static [&'static str],
     /// The revisions that read it, each marked rebuildable or required
     pub used_by: &'static [LegacyUse],
-    /// A short note on why it was retired
+    /// A short note on why it was retired, naming the release that retired it when that was
+    /// before the first revision
     pub retirement: &'static str,
 }
 
@@ -544,21 +546,103 @@ pub fn backend_name(backend: SchemaBackend) -> &'static str {
 }
 
 /// Every object an older release created that this build no longer declares, in the order they
-/// were retired (append-only)
+/// were registered (append-only)
 ///
 /// A developer who stops creating an object adds its entry in the same change. The class
 /// table's entry for the object carries the same data class.
 #[cfg(feature = "scylla-utils")]
-pub const LEGACY: &[LegacyDef] = &[LegacyDef {
-    backend: SchemaBackend::Scylla,
-    kind: LegacyKind::Table,
-    name: "events",
-    class: crate::models::schema::DataClass::Runtime,
-    created_by: &["2026-10-v01", "2026-10-v02"],
-    used_by: &[],
-    retirement: "a table of trigger events that nothing reads or writes; setup no longer \
+pub const LEGACY: &[LegacyDef] = &[
+    LegacyDef {
+        backend: SchemaBackend::Scylla,
+        kind: LegacyKind::Table,
+        name: "events",
+        class: crate::models::schema::DataClass::Runtime,
+        created_by: &["2026-10-v01", "2026-10-v02"],
+        used_by: &[],
+        retirement: "a table of trigger events that nothing reads or writes; setup no longer \
                      creates it",
-}];
+    },
+    LegacyDef {
+        backend: SchemaBackend::Scylla,
+        kind: LegacyKind::Table,
+        name: "commits",
+        class: crate::models::schema::DataClass::Core,
+        created_by: &[],
+        used_by: &[],
+        retirement: "git commits of repos, replaced by the commitishes table in development \
+                     release 1.99.2-0.12.0 (2024), before 1.0.0",
+    },
+    LegacyDef {
+        backend: SchemaBackend::Scylla,
+        kind: LegacyKind::Table,
+        name: "commits_list",
+        class: crate::models::schema::DataClass::Core,
+        created_by: &[],
+        used_by: &[],
+        retirement: "the listing of git commits of repos, replaced by the commitish_list \
+                     table in development release 1.99.2-0.12.0 (2024), before 1.0.0",
+    },
+    LegacyDef {
+        backend: SchemaBackend::Scylla,
+        kind: LegacyKind::Table,
+        name: "cursors",
+        class: crate::models::schema::DataClass::Runtime,
+        created_by: &[],
+        used_by: &[],
+        retirement: "saved cursors, moved to Redis in development release 1.102.0-0.16.0 \
+                     (2024), before 1.0.0",
+    },
+    LegacyDef {
+        backend: SchemaBackend::Scylla,
+        kind: LegacyKind::Table,
+        name: "simple_cursors",
+        class: crate::models::schema::DataClass::Runtime,
+        created_by: &[],
+        used_by: &[],
+        retirement: "saved simple cursors, moved to Redis in development release \
+                     1.102.0-0.16.0 (2024), before 1.0.0",
+    },
+    LegacyDef {
+        backend: SchemaBackend::Scylla,
+        kind: LegacyKind::Table,
+        name: "workers",
+        class: crate::models::schema::DataClass::Runtime,
+        created_by: &[],
+        used_by: &[],
+        retirement: "worker state, moved to Redis in development release 1.102.0-0.13.1 \
+                     (2024), before 1.0.0, because frequent deletes left too many tombstones",
+    },
+    LegacyDef {
+        backend: SchemaBackend::Scylla,
+        kind: LegacyKind::Table,
+        name: "exports",
+        class: crate::models::schema::DataClass::Runtime,
+        created_by: &[],
+        used_by: &[],
+        retirement: "export operations that streamed data to other systems, removed in \
+                     release 1.1.0 with the exports feature",
+    },
+    LegacyDef {
+        backend: SchemaBackend::Scylla,
+        kind: LegacyKind::Table,
+        name: "export_errors",
+        class: crate::models::schema::DataClass::Runtime,
+        created_by: &[],
+        used_by: &[],
+        retirement: "the errors of export operations, removed in release 1.1.0 with the \
+                     exports feature",
+    },
+    LegacyDef {
+        backend: SchemaBackend::Scylla,
+        kind: LegacyKind::View,
+        name: "export_error_ids",
+        class: crate::models::schema::DataClass::Derived,
+        created_by: &[],
+        used_by: &[],
+        retirement: "a view of the export_errors table, removed in release 1.1.0 with \
+                     the exports feature",
+    },
+];
 
 /// Look up the legacy entry for an object
 ///

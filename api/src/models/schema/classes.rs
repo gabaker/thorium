@@ -236,6 +236,11 @@ const fn excluded(
     }
 }
 
+/// The reason the export errors that releases before 1.1.0 kept, and the view over them, aren't
+/// backed up; a view and its base table share one coverage
+const EXPORT_ERRORS: &str =
+    "the errors of export operations of releases before 1.1.0, which removed the exports feature";
+
 /// The reason runtime Redis state of reactions and jobs isn't backed up
 const RUNTIME: &str =
     "runtime state of reactions, jobs, workers, or services, invalid after a restore";
@@ -460,6 +465,78 @@ pub const CLASSES: &[ClassEntry] = &[
             None,
         )
     },
+    ClassEntry {
+        legacy: true,
+        ..excluded(
+            Store::ScyllaTable,
+            "commits",
+            DataClass::Core,
+            "git commits of repos that development builds before 1.0.0 wrote; the commitishes \
+             table replaced it",
+            None,
+        )
+    },
+    ClassEntry {
+        legacy: true,
+        ..excluded(
+            Store::ScyllaTable,
+            "commits_list",
+            DataClass::Core,
+            "the listing of git commits of repos that development builds before 1.0.0 wrote; the \
+             commitish_list table replaced it",
+            None,
+        )
+    },
+    ClassEntry {
+        legacy: true,
+        ..excluded(
+            Store::ScyllaTable,
+            "cursors",
+            DataClass::Runtime,
+            "saved cursors of development builds before 1.0.0, which Redis holds since",
+            None,
+        )
+    },
+    ClassEntry {
+        legacy: true,
+        ..excluded(
+            Store::ScyllaTable,
+            "simple_cursors",
+            DataClass::Runtime,
+            "saved simple cursors of development builds before 1.0.0, which Redis holds since",
+            None,
+        )
+    },
+    ClassEntry {
+        legacy: true,
+        ..excluded(
+            Store::ScyllaTable,
+            "workers",
+            DataClass::Runtime,
+            "worker state of development builds before 1.0.0, which Redis holds since",
+            None,
+        )
+    },
+    ClassEntry {
+        legacy: true,
+        ..excluded(
+            Store::ScyllaTable,
+            "exports",
+            DataClass::Runtime,
+            "export operations of releases before 1.1.0, which removed the exports feature",
+            None,
+        )
+    },
+    ClassEntry {
+        legacy: true,
+        ..excluded(
+            Store::ScyllaTable,
+            "export_errors",
+            DataClass::Runtime,
+            EXPORT_ERRORS,
+            None,
+        )
+    },
     excluded(
         Store::ScyllaTable,
         "schema_migrations",
@@ -493,6 +570,17 @@ pub const CLASSES: &[ClassEntry] = &[
     view("network_policies_default", "network_policies"),
     view("entities_by_id", "entities"),
     view("entities_by_name", "entities"),
+    ClassEntry {
+        legacy: true,
+        base_table: Some("export_errors"),
+        ..excluded(
+            Store::ScyllaView,
+            "export_error_ids",
+            DataClass::Derived,
+            EXPORT_ERRORS,
+            None,
+        )
+    },
     // Redis families in the Redis backup
     backed_up(Store::Redis, "users", None),
     backed_up(Store::Redis, "user_data:*", None),

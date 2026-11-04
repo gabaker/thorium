@@ -490,12 +490,15 @@ fingerprint, and the object is reported again, with a note that its acknowledgem
 changes. One without a fingerprint covers whatever the object becomes, so the status counts those
 separately as `unfingerprinted`. The fingerprint of a single column is a hash of the column and its
 type, so an acknowledgement of `samples_list.preview` lapses when that column's type changes but not
-when another column of the table does. Only `unexpected` objects can be acknowledged. The `events`
-table that older releases created is acknowledged for you as a registered legacy object, and
-`thoradm schema drop-legacy` can remove it (see
-[Legacy Schema Objects](../thoradm/thoradm.md#legacy-schema-objects)). The `entities_by_name`
+when another column of the table does. Only `unexpected` objects can be acknowledged. The tables
+and views older releases created and Thorium no longer uses (such as the `events` table) are
+acknowledged for you as registered legacy objects, and `thoradm schema drop-legacy` can remove them
+(see [Legacy Schema Objects](../thoradm/thoradm.md#legacy-schema-objects)). The `entities_by_name`
 view those releases also created is declared again as of `2026-10-v05`, so a keyspace that
-already holds it simply matches the declared schema and needs no acknowledgement.
+already holds it simply matches the declared schema and needs no acknowledgement. The
+`schema_migrations` and `schema_migration_issues` tables, which `thoradm schema record`,
+`thoradm migrate`, and every schema apply create, are never reported, whatever revision the
+deployment records.
 
 While a schema apply is the first step of an upgrade, the live schema holds the objects of the
 revision being applied before the record moves to it. Drift is compared with the revision the

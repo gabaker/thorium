@@ -441,7 +441,9 @@ async fn count_rows(session: &Session, keyspace: &str, name: &str) -> Result<u64
     Ok(u64::try_from(count).unwrap_or_default())
 }
 
-/// Work out what a downgrade to each revision of the window does to a legacy object
+/// Work out what a downgrade to each revision of the window does to a legacy object; an object
+/// only releases before the first revision created gets no lines, since no revision creates it
+/// again
 ///
 /// # Arguments
 ///
@@ -450,6 +452,10 @@ async fn count_rows(session: &Session, keyspace: &str, name: &str) -> Result<u64
 /// * `window` - The revisions a deployment can still downgrade to
 #[must_use]
 pub fn downgrades(entry: &LegacyDef, rows: u64, window: &[RevisionId]) -> Vec<DowngradeTarget> {
+    // no revision creates an object only releases before the first revision created
+    if entry.created_by.is_empty() {
+        return Vec::new();
+    }
     // each revision either doesn't use the object, or uses it with data that can or can't be
     // recreated
     window

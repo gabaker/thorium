@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::models::schema::{
     AppliedReport, JsonText, MigrationRecordKind, MigrationRunStatus, ObjectClass, PassCheckpoint,
-    PassCounts, ScyllaProjection, ScyllaTable,
+    PassCounts, ScyllaObject, ScyllaProjection, ScyllaTable,
 };
 use crate::models::upgrades::AppliedStep;
 
@@ -221,3 +221,13 @@ pub struct SchemaMigrationIssueRow {
     /// When the row was last written
     pub updated: Option<DateTime<Utc>>,
 }
+
+/// The migration-state tables, which `schema record`, `migrate`, and every apply create from this
+/// build's declaration whatever revision the deployment records
+///
+/// A revision's snapshot may or may not list them (only later snapshots do), so applying a
+/// snapshot and comparing the live schema with one both leave them out.
+pub const MIGRATION_STATE_TABLES: [&str; 2] = [
+    <SchemaMigrationsTable as ScyllaObject>::NAME,
+    <SchemaMigrationIssuesTable as ScyllaObject>::NAME,
+];

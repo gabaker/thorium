@@ -565,6 +565,13 @@ lists what today's backup or restore doesn't carry yet. The Thoradm guide's
 | Scylla table | `logs` | Excluded | stage logs of reactions, which are runtime state and expire by TTL | EPHEMERAL |  |
 | Scylla table | `scan_stats` | Excluded | disposable scan-rate telemetry snapshots, which expire by TTL and are replaced by new snapshots | EPHEMERAL |  |
 | Scylla table | `events`, only in keyspaces older releases created | Excluded | a table of trigger events nothing reads or writes | EPHEMERAL |  |
+| Scylla table | `commits`, only in keyspaces older releases created | Excluded | git commits of repos that development builds before 1.0.0 wrote; the commitishes table replaced it | CORE |  |
+| Scylla table | `commits_list`, only in keyspaces older releases created | Excluded | the listing of git commits of repos that development builds before 1.0.0 wrote; the commitish_list table replaced it | CORE |  |
+| Scylla table | `cursors`, only in keyspaces older releases created | Excluded | saved cursors of development builds before 1.0.0, which Redis holds since | EPHEMERAL |  |
+| Scylla table | `simple_cursors`, only in keyspaces older releases created | Excluded | saved simple cursors of development builds before 1.0.0, which Redis holds since | EPHEMERAL |  |
+| Scylla table | `workers`, only in keyspaces older releases created | Excluded | worker state of development builds before 1.0.0, which Redis holds since | EPHEMERAL |  |
+| Scylla table | `exports`, only in keyspaces older releases created | Excluded | export operations of releases before 1.1.0, which removed the exports feature | EPHEMERAL |  |
+| Scylla table | `export_errors`, only in keyspaces older releases created | Excluded | the errors of export operations of releases before 1.1.0, which removed the exports feature | EPHEMERAL |  |
 | Scylla table | `schema_migrations` | Excluded | the deployment's schema record: its applied fingerprints, layout versions, revision and applied history (one row per entry, uncapped), and the settings that shape stored data; carried in the backup's schema record, `schema.json`, instead of a table archive, and written back by restore, which keeps the restoring cluster's data-shaping settings and leaves out the Job results, which expire | CORE |  |
 | Scylla table | `schema_migration_issues` | Excluded | the checkpoints and issue groups of data migration passes; carried in the backup's schema record, `schema.json`, instead of a table archive, and written back by restore | CORE |  |
 | Scylla view | `samples` (view of `samples_list`) | Backed up | `samples-list` | DERIVED |  |
@@ -580,6 +587,7 @@ lists what today's backup or restore doesn't carry yet. The Thoradm guide's
 | Scylla view | `network_policies_default` (view of `network_policies`) | Backed up | `network-policies` | DERIVED |  |
 | Scylla view | `entities_by_id` (view of `entities`) | Backed up | `entities` | DERIVED |  |
 | Scylla view | `entities_by_name` (view of `entities`) | Backed up | `entities` | DERIVED |  |
+| Scylla view | `export_error_ids` (view of `export_errors`), only in keyspaces older releases created | Excluded | the errors of export operations of releases before 1.1.0, which removed the exports feature | DERIVED |  |
 | Redis | `users` | Backed up | `redis` | CORE |  |
 | Redis | `user_data:*` | Backed up | `redis` | CORE |  |
 | Redis | `user_groups:*` | Backed up | `redis` | CORE |  |

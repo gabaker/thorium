@@ -128,6 +128,7 @@ A backup doesn't hold runtime state, which is invalid after a restore, or data a
 |---|---|
 | The `logs` and `events` Scylla tables | Stage logs of reactions, which expire by TTL, and a table of trigger events that nothing reads or writes, which only keyspaces older releases created hold |
 | The `scan_stats` Scylla table | Disposable scan-rate telemetry snapshots, which expire by TTL and are replaced by new snapshots |
+| The `commits`, `commits_list`, `cursors`, `simple_cursors`, `workers`, `exports`, and `export_errors` Scylla tables and the `export_error_ids` view | Tables releases before 1.1.0 created and Thorium no longer uses, which only keyspaces those releases created hold (see [Legacy Schema Objects](#legacy-schema-objects)) |
 | The `job_result` rows of the `schema_migrations` Scylla table | The results of upgrade Jobs, which expire after seven days; a restore would make them permanent |
 | Run-scoped tokens | Each belongs to a run whose reaction and jobs aren't backed up, and expires with the run; a backup leaves them out, and a restore skips any that a backup holds |
 | The Redis keys of reactions, jobs, workers, and services: `reactions:*`, `reactions_group:*`, `reaction_data:*`, `reaction_jobs:*`, `reaction_tags:*`, `reaction_cache:*`, `sub_reactions:*`, `generators:*`, `stage_logs:*`, `logs:*`, `job_queue:*`, `job_data:*`, `workers:*`, `worker_data:*`, `streams:*`, `event-handler:*`, `search-streamer:*`, `cursors:*`, `schema-writer`, `rebucket:*`, `image_ttc:*`, `run_queue:*`, `workload_queue:*`, `workload_ttc:*`, `workloads:*`, and `entities:instance_lock:*` | Runtime state, invalid after a restore |
@@ -1160,13 +1161,18 @@ show its own new objects as `unexpected`. `--acknowledged <file>` takes a JSON l
 
 ## Legacy Schema Objects
 
-Older releases created one Scylla object that Thorium no longer uses: the `events` table. Thorium
-no longer creates it, a keyspace an older release created keeps it with its rows, and starting
-Thorium against that keyspace leaves it alone. It costs disk, and an admin can remove it on
-purpose. Two commands list and drop legacy objects. Neither runs unless you type it, and
-`thoradm schema apply` never drops anything.
+Older releases created Scylla objects that Thorium no longer uses: the `events` table, which the
+`2026-10-v01` and `2026-10-v02` revisions created, and the tables and view releases from before
+the first revision created: `commits` and `commits_list` (replaced by `commitishes` and
+`commitish_list` before 1.0.0), `cursors`, `simple_cursors`, and `workers` (moved to Redis before
+1.0.0), and `exports`, `export_errors`, and the `export_error_ids` view (removed in 1.1.0). Thorium
+no longer creates them, a keyspace an older release created keeps them with their rows, and
+starting Thorium against that keyspace leaves them alone. `thoradm schema diff` reports a live one
+as an acknowledged `unexpected` object, so it raises no drift. They cost disk and, for the view,
+write work, and an admin can remove them on purpose. Two commands list and drop legacy objects.
+Neither runs unless you type it, and `thoradm schema apply` never drops anything.
 
-Each object is named `<backend>:<name>`, here `scylla:events`. A legacy object is one Thorium's
+Each object is named `<backend>:<name>`, such as `scylla:events`. A legacy object is one Thorium's
 registry of retired objects lists; only those can be dropped. (The `entities_by_name` view was
 retired for a time too, but `2026-10-v05` declares it again, so it is part of the declared schema
 and no longer a legacy object.)
@@ -1202,7 +1208,9 @@ no unmanaged extra objects
 
 The first section has one block per registered object: whether the keyspace holds it, its row count,
 the revisions that created it and the revisions that read it, what a downgrade to each revision you
-can still move to does to it, and whether it can be dropped. A downgrade line says one of:
+can still move to does to it, and whether it can be dropped. An object only releases from before
+the first revision created has no downgrade lines, since no revision creates it again. A downgrade
+line says one of:
 
 | Line | Meaning |
 |---|---|
@@ -1241,7 +1249,7 @@ The command refuses, exits 1, and drops nothing in the whole list when any objec
 
 ```
 scylla:entities_by_name is a declared object; refusing.
-scylla:tools is not a registered legacy object. Registered: scylla:events.
+scylla:tools is not a registered legacy object. Registered: scylla:events, scylla:commits, ...
 refused: scylla:foo is used by 2026-10-v02 (required data, 42 rows); a downgrade would lose it.
 ```
 

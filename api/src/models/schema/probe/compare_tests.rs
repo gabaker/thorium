@@ -359,6 +359,130 @@ fn the_dead_objects_are_acknowledged_extras_and_never_declared() {
     );
 }
 
+/// A Scylla table entry with one key column, standing in for a table an older release created
+///
+/// # Arguments
+///
+/// * `name` - The table's name
+fn retired_table(name: &str) -> SnapshotObject {
+    // only the name matters to the comparison of an object the snapshot doesn't list
+    let canonical = json!({
+        "kind": "table", "name": name, "columns": [{ "name": "id", "type": "uuid" }],
+        "partition_key": ["id"], "clustering_key": [], "static": []
+    });
+    SnapshotObject {
+        backend: SchemaBackend::Scylla,
+        name: name.to_owned(),
+        fingerprint: Fingerprint::of(&canonical),
+        canonical,
+    }
+}
+
+/// A keyspace an older release's setup created, converted by `thoradm schema record` and recorded
+/// at `2026-10-v01`, holds the migration-state tables and the tables and view releases before the
+/// first revision created; against the `2026-10-v01` snapshot, which lists none of them, the
+/// state tables aren't reported and the retired objects are acknowledged legacy, so the keyspace
+/// drifts only when it holds a table nothing registers
+#[test]
+fn a_converted_keyspace_drifts_only_for_unregistered_tables() {
+    // the objects the setup statements created are what the v01 snapshot lists
+    let v01 = RevisionSnapshot::committed("2026-10-v01")
+        .expect("the revision has a snapshot")
+        .expect("the snapshot is valid");
+    let mut live = v01.objects.clone();
+    // `schema record` creates the migration-state tables as this build declares them
+    live.extend(
+        SnapshotObject::declared()
+            .iter()
+            .filter(|object| {
+                matches!(
+                    object.name.as_str(),
+                    "schema_migrations" | "schema_migration_issues"
+                )
+            })
+            .cloned(),
+    );
+    assert!(
+        !v01.objects
+            .iter()
+            .any(|object| object.name.starts_with("schema_migration"))
+    );
+    // the tables and view releases before the first revision created
+    let retired = [
+        "commits",
+        "commits_list",
+        "cursors",
+        "simple_cursors",
+        "workers",
+        "exports",
+        "export_errors",
+        "export_error_ids",
+    ];
+    live.extend(retired.iter().map(|name| retired_table(name)));
+    // compared with the v01 snapshot, nothing drifts
+    let legacy = &crate::models::upgrades::is_legacy;
+    let report = DriftReport::compare(&v01, &observe(live.clone()), legacy);
+    let scylla = &report.backends[&SchemaBackend::Scylla];
+    assert_eq!(
+        scylla.status,
+        BackendSchemaStatus::Ok,
+        "{:?}",
+        scylla.objects
+    );
+    let mut found = scylla
+        .objects
+        .iter()
+        .map(|object| (object.object.as_str(), object.kind, object.acknowledged))
+        .collect::<Vec<_>>();
+    found.sort_unstable_by_key(|(name, _, _)| *name);
+    let mut expected = retired
+        .iter()
+        .map(|name| (*name, DriftKind::Unexpected, true))
+        .collect::<Vec<_>>();
+    expected.sort_unstable_by_key(|(name, _, _)| *name);
+    assert_eq!(found, expected);
+    // a table nothing registers still drifts
+    live.push(retired_table("tools"));
+    let report = DriftReport::compare(&v01, &observe(live), legacy);
+    let scylla = &report.backends[&SchemaBackend::Scylla];
+    assert_eq!(scylla.status, BackendSchemaStatus::Drift);
+    let unacknowledged = scylla
+        .objects
+        .iter()
+        .filter(|object| !object.acknowledged)
+        .map(|object| (object.object.as_str(), object.kind))
+        .collect::<Vec<_>>();
+    assert_eq!(unacknowledged, [("tools", DriftKind::Unexpected)]);
+}
+
+/// The migration-state tables are never drift, whether the snapshot lists them and the keyspace
+/// lacks them or the keyspace holds them in another form than the snapshot's
+#[test]
+fn the_migration_state_tables_are_never_drift() {
+    // a snapshot that lists the state tables, against a keyspace without them
+    let declared = snapshot();
+    let without = SnapshotObject::declared()
+        .iter()
+        .filter(|object| !object.name.starts_with("schema_migration"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let report = DriftReport::compare(&declared, &observe(without), &|_, _: &str| false);
+    assert_eq!(report.backends[&SchemaBackend::Scylla].objects, []);
+    // and against a keyspace whose record table has an extra column
+    let changed = SnapshotObject::declared()
+        .iter()
+        .map(|object| match object.name.as_str() {
+            "schema_migrations" => edited(object, |form| {
+                let columns = form["columns"].as_array_mut().unwrap();
+                columns.push(json!({ "name": "extra", "type": "text" }));
+            }),
+            _ => object.clone(),
+        })
+        .collect::<Vec<_>>();
+    let report = DriftReport::compare(&declared, &observe(changed), &|_, _: &str| false);
+    assert_eq!(report.backends[&SchemaBackend::Scylla].objects, []);
+}
+
 /// A fingerprint for a fixture revision
 ///
 /// # Arguments
