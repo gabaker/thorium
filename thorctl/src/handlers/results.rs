@@ -99,6 +99,9 @@ async fn create_unique_file(file_path: &Path) -> Result<File, Error> {
 
 /// Get an individual results file from a result
 ///
+/// A file whose name would be written outside of `root` (an absolute name or one with a `..`
+/// part) is refused before it is downloaded.
+///
 /// # Arguments
 ///
 /// * `client` - The client to use to get the results
@@ -115,8 +118,8 @@ async fn get_results_file(
     tool: &str,
     root: &Path,
 ) -> Result<(), Error> {
-    // build the path to write this file too
-    let file_path = root.join(sub_path);
+    // build the path to write this file to, refusing names from the server that would leave root
+    let file_path = utils::run_wait::safe_join(root, sub_path)?;
     // skip any files with invalid parents
     if let Some(parent) = file_path.parent() {
         // download our result file
@@ -667,5 +670,41 @@ pub async fn handle(args: &Args, cmd: &Results) -> Result<(), Error> {
                 Some(_) => Error::new(err.to_string()),
                 None => err,
             }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::get_results_file;
+    use crate::utils::run_wait::testing::{client, mock};
+
+    /// Result files named to leave the output directory are refused before they are downloaded
+    #[tokio::test]
+    async fn result_files_that_escape_the_output_dir_are_refused() {
+        // a server that answers every download with file contents
+        let (host, requests) = mock(|_, _| (200, "escaped".to_owned())).await;
+        let thorium = client(&host).await;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("out");
+        let outside = dir.path().join("escaped.txt");
+        // absolute and parent names are refused with an error naming the file
+        for name in [
+            outside.to_string_lossy().into_owned(),
+            "../escaped.txt".to_owned(),
+            "d/../../escaped.txt".to_owned(),
+        ] {
+            let err = get_results_file(&thorium.files, "sha", &Uuid::new_v4(), &name, "t", &root)
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains(&name),
+                "{err} does not name {name}"
+            );
+        }
+        // nothing was downloaded or written outside of the output directory
+        assert!(requests.lock().unwrap().is_empty());
+        assert!(!outside.exists());
     }
 }

@@ -161,6 +161,9 @@ async fn log(mut log_rx: mpsc::Receiver<(String, String)>) -> HashMap<String, Co
 
 /// Write all attachments connected to a result to disk
 ///
+/// An attachment whose name would be written outside of `out_path` (an absolute name or one with
+/// a `..` part) is refused with an error naming it before it is downloaded.
+///
 /// # Arguments
 ///
 /// * `attachments` - The attachments to retrieve and write to disk
@@ -180,6 +183,8 @@ async fn write_all_attachments(
     run_mode: &Mode,
 ) -> Result<(), Error> {
     for attachment_name in attachments {
+        // build the path to write this result file to, refusing names that would leave out_path
+        let target_path = utils::run_wait::safe_join(out_path, attachment_name)?;
         // download this result file
         let attachment = match run_mode {
             Mode::File => {
@@ -195,12 +200,10 @@ async fn write_all_attachments(
                     .await?
             }
         };
-        let attachment_path = PathBuf::from(attachment_name);
-        if let Some(attachment_parent) = attachment_path.parent() {
-            tokio::fs::create_dir_all(out_path.join(attachment_parent)).await?;
+        // create the directory this result file is written into
+        if let Some(parent) = target_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
         }
-        // build the path to write this result file off to disk at
-        let target_path = out_path.join(attachment_name);
         // create a file handle for this file
         let mut file = tokio::fs::File::create(&target_path).await?;
         // write our response body to disk
@@ -499,4 +502,44 @@ older thorctl run <PIPELINE> <SHA256|REPO>",
     }
     // call the run handler
     run(Arc::new(thorium), legacy).await
+}
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::write_all_attachments;
+    use crate::args::Mode;
+    use crate::utils::run_wait::testing::{client, mock};
+
+    /// Attachments named to leave the output directory are refused before they are downloaded
+    #[tokio::test]
+    async fn attachments_that_escape_the_output_dir_are_refused() {
+        // a server that answers every download with file contents
+        let (host, requests) = mock(|_, _| (200, "escaped".to_owned())).await;
+        let thorium = client(&host).await;
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out");
+        let outside = dir.path().join("escaped.txt");
+        // absolute and parent names are refused with an error naming the file
+        for name in [
+            outside.to_string_lossy().into_owned(),
+            "../escaped.txt".to_owned(),
+            "d/../../escaped.txt".to_owned(),
+        ] {
+            let attachments = [name.clone()];
+            let id = Uuid::new_v4();
+            let err =
+                write_all_attachments(&attachments, &id, "t", "sha", &out, &thorium, &Mode::File)
+                    .await
+                    .unwrap_err();
+            assert!(
+                err.to_string().contains(&name),
+                "{err} does not name {name}"
+            );
+        }
+        // nothing was downloaded or written outside of the output directory
+        assert!(requests.lock().unwrap().is_empty());
+        assert!(!outside.exists());
+    }
 }
