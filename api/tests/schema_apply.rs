@@ -536,7 +536,8 @@ fn legacy_ddl_without_new_columns(keyspace: &str) -> Vec<String> {
 /// A keyspace created by the legacy setup statements before their three newest columns, seeded
 /// with rows, converges under `schema apply`: the three missing columns are added with
 /// `ALTER … ADD`, the two tables whose legacy TTL differs from the config get the configured one,
-/// every seeded row reads back unchanged, a second apply issues no DDL, and the API then starts
+/// the objects the legacy statements never created are created, every seeded row reads back
+/// unchanged, a second apply issues no DDL, and the API then starts
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn a_legacy_keyspace_without_the_new_columns_converges() -> Result<(), Error> {
@@ -592,12 +593,17 @@ async fn a_legacy_keyspace_without_the_new_columns_converges() -> Result<(), Err
         format!("SELECT tool, cmd, result, entities FROM {keyspace}.results"),
         format!("SELECT cluster, node, health, resources FROM {keyspace}.nodes"),
     ];
-    // apply: the state tables are created, the three columns added, and the two TTLs set from the
-    // config, nothing else
+    // apply: the state tables and the objects the yara scanning revision added are created, the
+    // three columns added, and the two TTLs set from the config, nothing else
     let report = apply_declared(&session, &conf, "key-legacy").await?;
     assert_eq!(
         report.created,
-        ["schema_migrations", "schema_migration_issues"]
+        [
+            "schema_migrations",
+            "schema_migration_issues",
+            "entities_by_name",
+            "scan_stats"
+        ]
     );
     assert_eq!(
         report.added,
@@ -635,7 +641,7 @@ async fn a_legacy_keyspace_without_the_new_columns_converges() -> Result<(), Err
             ttl("notifications", conf.thorium.retention.notifications)
         ]
     );
-    assert_eq!(report.statements.len(), 7, "{:?}", report.statements);
+    assert_eq!(report.statements.len(), 9, "{:?}", report.statements);
     // every seeded row reads back unchanged, with the new columns null
     let rows = [
         texts::<4>(&session, &reads[0], &[]).await?,
@@ -1049,7 +1055,7 @@ async fn live_ttl(session: &Session, keyspace: &str, table: &str) -> Result<i32,
 
 /// On a Scylla with tablets enabled, `schema apply` creates the keyspace with the statement every
 /// release has used (no `tablets` option), the keyspace uses tablets, every declared table and
-/// all 12 declared views exist and serve reads after writes to their base tables, and a second
+/// all 13 declared views exist and serve reads after writes to their base tables, and a second
 /// apply against the existing tablet keyspace issues no DDL
 #[tokio::test]
 async fn apply_converges_on_a_tablet_keyspace_with_every_view() -> Result<(), Error> {
@@ -1080,7 +1086,7 @@ async fn apply_converges_on_a_tablet_keyspace_with_every_view() -> Result<(), Er
         .into_rows_result()
         .map_err(|err| Error::new(err.to_string()))?;
     assert_eq!(tablets.rows_num(), 1, "{keyspace} isn't on tablets");
-    // every declared table and all 12 declared views exist
+    // every declared table and all 13 declared views exist
     let live = objects(&session, &keyspace).await?;
     let views = texts::<1>(
         &session,
@@ -1088,7 +1094,7 @@ async fn apply_converges_on_a_tablet_keyspace_with_every_view() -> Result<(), Er
         &[&keyspace],
     )
     .await?;
-    assert_eq!(views.len(), 12, "{views:?}");
+    assert_eq!(views.len(), 13, "{views:?}");
     for name in declared_names() {
         assert!(live.contains(name), "{name} wasn't created");
     }
@@ -1235,6 +1241,7 @@ async fn every_ttl_source_is_altered_once_when_its_setting_changes() -> Result<(
             "thorium.retention.logs" => &mut conf.thorium.retention.logs,
             "thorium.retention.notifications" => &mut conf.thorium.retention.notifications,
             "thorium.events.retention" => &mut conf.thorium.events.retention,
+            "thorium.events.stats_retention" => &mut conf.thorium.events.stats_retention,
             other => panic!("{other} has no case in this test"),
         };
         let from = *setting;

@@ -1177,8 +1177,9 @@ pub async fn worker_stats_report(
 pub async fn cursor_keys(username: &str) -> Result<Vec<String>, Error> {
     // build the pattern this users scylla cursor keys live under
     let pattern = format!(
-        "{ns}:cursors:Scylla:{username}:*",
-        ns = CONF.thorium.namespace
+        "{ns}:cursors:Scylla:v{version}:{username}:*",
+        ns = CONF.thorium.namespace,
+        version = crate::models::backends::db::keys::cursors::LAYOUT_VERSION
     );
     // connect to the test redis instance
     let redis = get_redis_client(&CONF).await;
