@@ -13,10 +13,8 @@ async fn main() {
     let conf = thorium::Conf::new(&args.config).expect("Failed to load config");
     // setup our tracer
     let trace_provider = thorium::utils::trace::setup("ThoriumEventHandler", &conf.thorium.tracing);
-    // build our event controller
-    let controller = EventWorkerController::new(args, conf)
-        .await
-        .expect("Failed to start event controller");
+    // build our event controller, retrying until the API can serve its caches
+    let controller = Box::pin(EventWorkerController::new_with_retry(args, conf)).await;
     // start our event handler workers
     controller.start().await.expect("Event controller failed!");
     // export any remaining traces and shutdown this provider
