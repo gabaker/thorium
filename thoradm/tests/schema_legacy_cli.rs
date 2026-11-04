@@ -436,7 +436,10 @@ async fn refusals_exit_1_and_drop_nothing() {
     assert_eq!(output.status.code(), Some(1));
     assert!(
         stderr(&output).contains(
-            "scylla:tools is not a registered legacy object. Registered: scylla:events, scylla:entities_by_name."
+            "scylla:tools is not a registered legacy object. Registered: scylla:events, \
+             scylla:entities_by_name, scylla:commits, scylla:commits_list, scylla:cursors, \
+             scylla:simple_cursors, scylla:workers, scylla:exports, scylla:export_errors, \
+             scylla:export_error_ids."
         ),
         "{}",
         stderr(&output)

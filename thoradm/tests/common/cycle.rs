@@ -149,13 +149,18 @@ pub fn census(harness: &Harness) -> Output {
     )
 }
 
-/// Returns the tables a wipe empties: every registry table that isn't EPHEMERAL
+/// Returns the tables a wipe empties: every registry table that isn't EPHEMERAL or legacy
 #[must_use]
 pub fn wiped_tables() -> Vec<&'static str> {
-    // excluded runtime tables are never wiped
+    // excluded runtime tables are never wiped, and neither are the legacy tables only keyspaces
+    // older releases created, which a fresh keyspace lacks
     COVERAGE
         .iter()
-        .filter(|entry| entry.store == Store::ScyllaTable && entry.category != Category::Ephemeral)
+        .filter(|entry| {
+            entry.store == Store::ScyllaTable
+                && entry.category != Category::Ephemeral
+                && !entry.legacy
+        })
         .map(|entry| entry.name)
         .collect()
 }

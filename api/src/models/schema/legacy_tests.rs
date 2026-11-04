@@ -53,8 +53,9 @@ fn window() -> Vec<RevisionId> {
 
 /// Build sources over the two real exemplars plus the fixture objects
 fn sources() -> LegacySources {
-    // the production sources with the fixtures appended to its registry
+    // the production sources, keeping the two exemplars, with the fixtures appended
     let mut sources = LegacySources::production();
+    sources.registry.truncate(2);
     sources.registry.extend([FOO, BAR]);
     sources
 }
@@ -134,12 +135,13 @@ fn the_support_window_is_the_released_revisions_above_the_floor() {
 }
 
 /// The three downgrade outcomes follow the object's use: unused is recreated, rebuildable
-/// is rebuilt, and required is data loss with the row count
+/// is rebuilt, and required is data loss with the row count; an object no revision created has
+/// no outcome
 #[test]
 fn downgrade_lines_follow_the_objects_use() {
     let window = window();
     // the exemplars use nothing
-    for entry in LEGACY {
+    for entry in &LEGACY[..2] {
         let lines = super::downgrades(entry, 7, &window);
         assert_eq!(lines.len(), 2);
         assert!(
@@ -151,6 +153,10 @@ fn downgrade_lines_follow_the_objects_use() {
             lines[0].outcome.describe(entry.kind),
             "recreated (it does not use this object)"
         );
+    }
+    // no revision creates an object only releases before the first revision created
+    for entry in LEGACY.iter().filter(|entry| entry.created_by.is_empty()) {
+        assert_eq!(super::downgrades(entry, 7, &window), [], "{}", entry.id());
     }
     // a required use loses its rows on that revision only
     let lines = super::downgrades(&FOO, 42, &window);
@@ -310,7 +316,7 @@ fn planning_refuses_required_data_and_renders_the_statements() {
     let rows = BTreeMap::from([("events".to_owned(), 5), ("foo".to_owned(), 42)]);
     let listing = classify(&sources, &live(), &rows);
     // the two exemplars plan, a table and a view each with its own statement
-    let entries = LEGACY.to_vec();
+    let entries = LEGACY[..2].to_vec();
     let plan = plan_drops("ks", &entries, &listing).expect("droppable");
     assert_eq!(plan.drops.len(), 2);
     assert_eq!(plan.drops[0].statement, "DROP TABLE IF EXISTS ks.events");

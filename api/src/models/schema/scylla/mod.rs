@@ -16,8 +16,9 @@ pub use associations::{AssociationsTable, AssociationsTableRef};
 pub use entities::{EntitiesByIdView, EntitiesTable, EntitiesTableRef};
 pub use logs::{LogsTable, LogsTableRef};
 pub use migrations::{
-    SchemaMigrationIssueRow, SchemaMigrationIssuesTable, SchemaMigrationIssuesTableRef,
-    SchemaMigrationRow, SchemaMigrationsTable, SchemaMigrationsTableRef,
+    MIGRATION_STATE_TABLES, SchemaMigrationIssueRow, SchemaMigrationIssuesTable,
+    SchemaMigrationIssuesTableRef, SchemaMigrationRow, SchemaMigrationsTable,
+    SchemaMigrationsTableRef,
 };
 pub use network_policies::{
     NetworkPoliciesByNameView, NetworkPoliciesDefaultView, NetworkPoliciesTable,

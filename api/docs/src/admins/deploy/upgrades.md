@@ -423,8 +423,11 @@ Drift is the live schema differing from the schema of the revision the deploymen
 table or column dropped by hand, an Elasticsearch index created with other mappings, an object a
 newer or feature-branch image applied before the deployment went back. The operator reads it
 through a `thoradm schema status` Job (probing Scylla, Redis, S3, and Elasticsearch, read-only)
-when it plans an upgrade, after every schema apply, whenever the acknowledgements change, and at
-most once an hour otherwise. A read that fails leaves the status as it was and is tried again after
+when it plans an upgrade, and at a reconcile when a read is due: the last read (kept in the
+`thorium-upgrade-state` ConfigMap) is over an hour old, the acknowledgements changed, or a schema
+apply finished since it. A `Ready` cluster reconciles about once a day unless its spec changes, so
+an hourly read happens only at such a reconcile; restarting the operator triggers a reconcile,
+which reads only if a read is due. A read that fails leaves the status as it was and is tried again after
 five minutes; while an upgrade is being planned it holds the plan until a read succeeds. Drift
 never holds a normal reconcile.
 
@@ -477,10 +480,13 @@ fingerprint, and the object is reported again, with a note that its acknowledgem
 changes. One without a fingerprint covers whatever the object becomes, so the status counts those
 separately as `unfingerprinted`. The fingerprint of a single column is a hash of the column and its
 type, so an acknowledgement of `samples_list.preview` lapses when that column's type changes but not
-when another column of the table does. Only `unexpected` objects can be acknowledged. The `events`
-table and `entities_by_name` view that older releases created are acknowledged for you, and
-`thoradm schema drop-legacy` can remove them (see
-[Legacy Schema Objects](../thoradm/thoradm.md#legacy-schema-objects)).
+when another column of the table does. Only `unexpected` objects can be acknowledged. The tables
+and views older releases created and Thorium no longer uses (such as the `events` table and the
+`entities_by_name` view) are acknowledged for you, and `thoradm schema drop-legacy` can remove them
+(see [Legacy Schema Objects](../thoradm/thoradm.md#legacy-schema-objects)). The
+`schema_migrations` and `schema_migration_issues` tables, which `thoradm schema record`,
+`thoradm migrate`, and every schema apply create, are never reported, whatever revision the
+deployment records.
 
 While a schema apply is the first step of an upgrade, the live schema holds the objects of the
 revision being applied before the record moves to it. Drift is compared with the revision the

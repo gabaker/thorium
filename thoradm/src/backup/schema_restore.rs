@@ -1296,13 +1296,27 @@ mod tests {
         assert_eq!(plan.migrations.len(), 1);
     }
 
-    /// The objects a restore leaves uncreated are the two only older releases created
+    /// The objects a restore leaves uncreated are the tables and views only older releases created
     #[test]
     fn the_skipped_objects_are_the_legacy_ones() {
-        // the class table's legacy table and view
+        // the class table's legacy tables and views
         assert_eq!(
             skipped_objects(),
-            BTreeSet::from(["events".to_owned(), "entities_by_name".to_owned()])
+            [
+                "events",
+                "entities_by_name",
+                "commits",
+                "commits_list",
+                "cursors",
+                "simple_cursors",
+                "workers",
+                "exports",
+                "export_errors",
+                "export_error_ids",
+            ]
+            .into_iter()
+            .map(ToOwned::to_owned)
+            .collect::<BTreeSet<_>>()
         );
     }
     /// The plan writes back the rows of kinds this thoradm doesn't know and deletes none of the

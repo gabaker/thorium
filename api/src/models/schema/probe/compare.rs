@@ -3,6 +3,7 @@
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::super::scylla::MIGRATION_STATE_TABLES;
 use super::super::{
     ChangeKind, Fingerprint, RevisionSnapshot, SchemaChange, SnapshotObject, canonical_json,
 };
@@ -80,6 +81,19 @@ pub fn converged_revision(
         .map(CatalogEntry::revision)
         .find(|revision| revision != recorded && catalog.at_or_below(recorded, revision))
         .unwrap_or_else(|| recorded.clone())
+}
+
+/// Whether an object is one of the migration-state tables, which `schema record`, `migrate`, and
+/// every apply create from this build's declaration, so no revision's snapshot decides whether
+/// they belong
+///
+/// # Arguments
+///
+/// * `object` - A snapshot or observed entry
+fn is_state_table(object: &SnapshotObject) -> bool {
+    // only Scylla holds them
+    object.backend == SchemaBackend::Scylla
+        && MIGRATION_STATE_TABLES.contains(&object.name.as_str())
 }
 
 /// Rewrite a view's filter as its sorted set of conjuncts, so two filters with the same conjuncts
@@ -342,7 +356,9 @@ impl DriftReport {
     /// out of the report), `missing`, `unexpected`, or `changed`; a difference within an object is
     /// reported per field, named `<object>.<field>`, and a difference in the object as a whole
     /// (a Scylla object's kind, base, or filter, an index's mapping settings, a layout's version)
-    /// under the object's own name. View filters are compared as sets of conjuncts. A registered
+    /// under the object's own name. View filters are compared as sets of conjuncts. The
+    /// migration-state tables are left out on both sides, since this build creates them whatever
+    /// revision the deployment records and only later snapshots list them. A registered
     /// legacy object absent from the live schema isn't missing, and one present where the snapshot
     /// doesn't list it is unexpected but acknowledged. Admins' acknowledgements aren't applied here.
     ///
@@ -357,17 +373,19 @@ impl DriftReport {
         observed: &ObservedSchema,
         legacy: &dyn LegacyObjects,
     ) -> DriftReport {
-        // compare only the probed backends, with view filters as sets
+        // compare only the probed backends, with view filters as sets, leaving out the
+        // migration-state tables, which this build creates whatever revision is recorded
         let probed = observed.backends.keys().copied().collect::<BTreeSet<_>>();
         let expected_objects = expected
             .objects
             .iter()
-            .filter(|object| probed.contains(&object.backend))
+            .filter(|object| probed.contains(&object.backend) && !is_state_table(object))
             .map(with_filter_set)
             .collect::<Vec<_>>();
         let observed_objects = observed
             .objects
             .iter()
+            .filter(|object| !is_state_table(object))
             .map(with_filter_set)
             .collect::<Vec<_>>();
         let index = |objects: &[SnapshotObject]| {
