@@ -150,6 +150,25 @@ test.describe('File results and reactions', () => {
     await expect(page.locator('a[href="/reaction/system/22222222-2222-4222-8222-222222222222"]').first()).toBeVisible();
   });
 
+  test('the file details tabs start at the left edge of their bar', async ({ page }) => {
+    await page.setViewportSize({ width: 1600, height: 900 });
+    await mockAuth(page);
+    await mockSample(page);
+    await page.route(`**/api/files/results/${SHA}**`, (route) => json(route, { results: {} }));
+    await page.goto(`/file/${SHA}`);
+    const tabList = page.getByRole('tablist', { name: 'File details sections' });
+    await expect(tabList).toBeVisible();
+    // an optional screenshot of the page for visual review
+    if (process.env.TABS_SCREENSHOT) await page.screenshot({ path: process.env.TABS_SCREENSHOT });
+    await expect(tabList).toHaveCSS('justify-content', 'flex-start');
+    const bar = await tabList.boundingBox();
+    const first = await tabList.getByRole('tab').first().boundingBox();
+    expect(bar).not.toBeNull();
+    expect(first).not.toBeNull();
+    // the first tab sits against the bar's left edge rather than being pushed in by centring
+    expect(first!.x - bar!.x).toBeLessThan(2);
+  });
+
   test('below 1200 the results take the full width because the hidden table of contents reserves no column', async ({ page }) => {
     await page.setViewportSize({ width: 1024, height: 900 });
     await mockAuth(page);
