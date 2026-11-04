@@ -93,9 +93,11 @@ pub struct ApplySchema {
     /// workers stop at their next batch
     #[clap(long)]
     pub force_break_lease: bool,
-    /// Wait up to this many seconds for materialized views to build on every Scylla node, then
-    /// fail naming the views and the nodes that haven't built them, recording nothing; a node
-    /// that is down never reports, so the apply can't finish while one is down (the default of
+    /// Wait up to this many seconds for the materialized views this apply creates or recreates,
+    /// and any an earlier apply left building, to build on every Scylla node, then fail naming the
+    /// views and the nodes that haven't built them, recording nothing; a node that is down still
+    /// counts for views it built before it went down, but can't report a view created since, so
+    /// an apply that creates or recreates a view can't finish while one is down (the default of
     /// five hours is under the operator's six hour Job limit)
     #[clap(long, default_value_t = DEFAULT_VIEW_WAIT_SECS, value_parser = clap::value_parser!(u64).range(1..))]
     pub view_wait_secs: u64,

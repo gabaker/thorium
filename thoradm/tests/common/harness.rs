@@ -859,7 +859,7 @@ impl Harness {
     }
 
     /// Makes a fresh scratch directory for one test, private to this user like a backup directory
-    /// thoradm creates, so a backup into it doesn't take its group bits from the umask
+    /// thoradm creates, so no test sees its root change mode
     ///
     /// # Arguments
     ///
