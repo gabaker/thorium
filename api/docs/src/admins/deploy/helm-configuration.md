@@ -450,7 +450,13 @@ namespace instead of granted cluster-wide. Turn it off only if the operator must
 
 ## Ingress
 
-`operator.ingress` exposes the Thorium API and UI (Service `thorium-api`, port 80):
+`operator.ingress` exposes the Thorium API and UI (Service `thorium-api`, port 80). It sends
+`/api/mcp` on the same host to the `thorium-mcp` Service (port 80) instead, because the MCP server
+keeps its sessions in the memory of the one API pod that Service selects, and MCP clients sent to
+any other API pod lose their sessions when the API has more than one replica. The nginx Ingress has
+a `/api/mcp` path beside its `/` path; the Traefik `IngressRoute` has a
+``PathPrefix(`/api/mcp`)`` route that wins over its catch-all route by Traefik's default
+(rule-length) priority:
 
 | Value | Effect |
 |-------|--------|

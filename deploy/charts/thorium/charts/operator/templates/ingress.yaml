@@ -39,6 +39,15 @@ spec:
       {{- end }}
       http:
         paths:
+          # the MCP server keeps its sessions in one API pod's memory, so MCP requests go to the
+          # thorium-mcp Service (that pod alone); nginx prefers the longest matching prefix
+          - path: /api/mcp
+            pathType: Prefix
+            backend:
+              service:
+                name: thorium-mcp
+                port:
+                  number: 80
           - path: /
             pathType: Prefix
             backend:
@@ -97,8 +106,17 @@ spec:
   entryPoints:
     - websecure
   routes:
+    {{- $hostMatch := ternary (printf "Host(`%s`)" $i.host) "" (not (empty $i.host)) }}
+    # the MCP server keeps its sessions in one API pod's memory, so MCP requests go to the
+    # thorium-mcp Service (that pod alone); Traefik's default priority is the rule's length, and
+    # this rule extends the catch-all below, so it always wins over it
+    - match: {{ list $hostMatch "PathPrefix(`/api/mcp`)" | compact | join " && " | quote }}
+      kind: Rule
+      services:
+        - name: thorium-mcp
+          port: 80
     # without a host every request reaching the websecure entrypoint goes to Thorium
-    - match: {{ ternary (printf "Host(`%s`)" $i.host) "PathPrefix(`/`)" (not (empty $i.host)) | quote }}
+    - match: {{ $hostMatch | default "PathPrefix(`/`)" | quote }}
       kind: Rule
       services:
         - name: thorium-api
