@@ -100,7 +100,8 @@ fn api(
                                 "limits": crds::Resources::request_conv(&api_spec.resources),
                                 "requests": crds::Resources::request_conv(&api_spec.resources),
                             },
-                            "env": api_spec.env.clone(),
+                            // both cases of each proxy, so an image's value can't shadow it
+                            "env": crds::mirror_proxy_cases(&api_spec.env),
                             "livenessProbe": {
                                 "httpGet": {
                                     "path": "/health",
@@ -292,7 +293,8 @@ fn scaler_template_value(
                                 "limits": crds::Resources::request_conv(&scaler_spec.resources),
                                 "requests": crds::Resources::request_conv(&scaler_spec.resources),
                             },
-                            "env": env,
+                            // both cases of each proxy, so an image's value can't shadow it
+                            "env": crds::mirror_proxy_cases(&env),
                             "volumeMounts": volume_mounts
                         }
                     ],
@@ -378,7 +380,8 @@ fn baremetal_scaler_template_value(
                                 "limits": crds::Resources::request_conv(&scaler_spec.resources),
                                 "requests": crds::Resources::request_conv(&scaler_spec.resources),
                             },
-                            "env": scaler_spec.env.clone(),
+                            // both cases of each proxy, so an image's value can't shadow it
+                            "env": crds::mirror_proxy_cases(&scaler_spec.env),
                             "volumeMounts": [
                                 {
                                     "name": "config",
@@ -468,7 +471,8 @@ fn event_handler_template(meta: &ClusterMeta, host_aliases: &Vec<K8sHostAliases>
                                 "limits": crds::Resources::request_conv(&handler_spec.resources),
                                 "requests": crds::Resources::request_conv(&handler_spec.resources),
                             },
-                            "env": handler_spec.env.clone(),
+                            // both cases of each proxy, so an image's value can't shadow it
+                            "env": crds::mirror_proxy_cases(&handler_spec.env),
                             "volumeMounts": [
                                 {
                                     "name": "config",
@@ -578,7 +582,8 @@ fn search_streamer_template_value(
                                 "limits": crds::Resources::request_conv(&streamer_spec.resources),
                                 "requests": crds::Resources::request_conv(&streamer_spec.resources),
                             },
-                            "env": streamer_spec.env.clone(),
+                            // both cases of each proxy, so an image's value can't shadow it
+                            "env": crds::mirror_proxy_cases(&streamer_spec.env),
                             "volumeMounts": [
                                 {
                                     "name": "config",
@@ -2306,12 +2311,14 @@ mod tests {
                 .map(|var| (var.name, var.value.unwrap_or_default()))
                 .collect::<Vec<_>>()
         };
-        // other variables are kept and HOME/KUBECONFIG name the thorium user's mounts
+        // other variables are kept (the proxy in both cases) and HOME/KUBECONFIG name the
+        // thorium user's mounts
         let scaler = &component_templates(spec.clone())[1];
         assert_eq!(
             env(scaler),
             [
                 ("https_proxy".to_owned(), "http://proxy:3128".to_owned()),
+                ("HTTPS_PROXY".to_owned(), "http://proxy:3128".to_owned()),
                 ("HOME".to_owned(), "/home/thorium".to_owned()),
                 (
                     "KUBECONFIG".to_owned(),
@@ -2326,9 +2333,54 @@ mod tests {
             env(scaler),
             [
                 ("https_proxy".to_owned(), "http://proxy:3128".to_owned()),
+                ("HTTPS_PROXY".to_owned(), "http://proxy:3128".to_owned()),
                 ("HOME".to_owned(), "/home/thorium".to_owned()),
             ]
         );
+    }
+
+    /// Every component's container gets a proxy its spec's env sets in one case alone in both
+    /// cases, since reqwest and curl each read a different case first
+    #[tokio::test]
+    async fn component_proxy_env_sets_both_cases() {
+        // give every component a lower-case proxy and an upper-case no_proxy alone
+        let mut spec = full_spec();
+        let env = serde_json::json!([
+            {"name": "https_proxy", "value": "http://proxy:3128"},
+            {"name": "NO_PROXY", "value": ".svc"}
+        ]);
+        for component in [
+            "api",
+            "scaler",
+            "baremetal_scaler",
+            "event_handler",
+            "search_streamer",
+        ] {
+            spec["components"][component]["env"] = env.clone();
+        }
+        // every component's container sets both cases of each
+        for deployment in component_templates(spec) {
+            let name = deployment.metadata.name.clone().unwrap_or_default();
+            let vars = deployment
+                .spec
+                .and_then(|spec| spec.template.spec)
+                .and_then(|pod| pod.containers[0].env.clone())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|var| (var.name, var.value.unwrap_or_default()))
+                .collect::<Vec<_>>();
+            for (var, value) in [
+                ("https_proxy", "http://proxy:3128"),
+                ("HTTPS_PROXY", "http://proxy:3128"),
+                ("NO_PROXY", ".svc"),
+                ("no_proxy", ".svc"),
+            ] {
+                assert!(
+                    vars.contains(&(var.to_owned(), value.to_owned())),
+                    "{name}: {vars:?}"
+                );
+            }
+        }
     }
 
     /// Every component's container gets its spec's cpu and memory as both limits and requests,
