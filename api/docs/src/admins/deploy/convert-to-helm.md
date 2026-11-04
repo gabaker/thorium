@@ -90,10 +90,8 @@ dev, which Helm doesn't manage. ..."), and minithor and megathor refuse to deplo
      -n thorium -f site.yaml -f thorium-converted-values.yaml --skip-crds
    ```
 
-   `--skip-crds` leaves the `ThoriumCluster` CRD as the conversion applied it (the chart's own).
-   Helm 3 skips an existing CRD anyway, but Helm 4 applies the chart's CRDs server-side and fails
-   with `conflicts with "thorium_cluster_apply"` on the fields the operator's field manager owns
-   (see [Troubleshooting](./troubleshooting.md#helm-install-conflicts)).
+   `--skip-crds` leaves the `ThoriumCluster` CRD as the conversion applied it (the chart's own;
+   see [Helm 4](#helm-4)).
 
    With minithor or megathor, see [minithor](#minithor) and [megathor](#megathor) below.
 
@@ -121,6 +119,26 @@ Never recover from a failed chart install with `helm uninstall` (without `--no-h
 has finished the upgrade its cleanup removes every component (a cluster still waiting in
 `UpgradeRequired` has no finalizer yet, so deleting it leaves the components running unmanaged).
 Fix the problem and run `helm upgrade --install` again instead.
+
+### Helm 4
+
+Helm 4 applies charts with server-side apply, which fails with `Apply failed with ... conflict`
+when another field manager owns a field the chart sets to another value. A converted deployment
+would hit this twice, and the conversion handles both:
+
+- The `ThoriumCluster` CRD the conversion applies is owned by the operator's field manager
+  (`thorium_cluster_apply`), and Helm 4 applies a chart's `crds/` on install. The install skips
+  them with `--skip-crds`, since the CRD is already the chart's (minithor and megathor pass it
+  whenever the CRD exists).
+- The objects handed to the release were created by the pre-Helm scripts (field managers such as
+  `kubectl-create`). The conversion replaces their `managedFields` with one entry, for
+  `convert-to-helm`, owning only the release annotations and `managed-by` label it sets, so Helm
+  takes the other fields over on its first apply and on every later one. It also carries the
+  login banner over byte for byte, trailing newlines included.
+
+Helm 3 creates and patches objects client-side without checking field ownership, so neither
+applies to it. A deployment converted by an earlier `convert-to-helm.sh` can still hit both; see
+[Helm install conflicts](./troubleshooting.md#helm-install-conflicts).
 
 ### Options
 
@@ -197,8 +215,8 @@ secret left in `operator.cluster.config` (such as an LDAP bind password) into a
    rebinding its subjects) when the chart renders a ClusterRole with the same name, so the old
    scaler keeps its permissions until it is replaced.
 4. Hands the objects the chart renders identically (the namespaces, the `thorium` service
-   account, and the `banner` ConfigMap) to the Helm release, and deletes the ones the chart
-   replaces: the old operator, the legacy ingress objects (`thorium-default-ingress`,
+   account, and the `banner` ConfigMap) to the Helm release, along with the ownership of their
+   fields (see [Helm 4](#helm-4)), and deletes the ones the chart replaces: the old operator, the legacy ingress objects (`thorium-default-ingress`,
    `thorium-ingress`, `ui-prefix-prepend`, and a `default` TLSStore and a `tls12` TLSOption no
    Helm release owns), and the `thorium-account-token` Secret, which nothing uses. Jaeger keeps
    running, since the converted values turn the chart's own tracing off.

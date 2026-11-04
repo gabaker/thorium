@@ -44,10 +44,11 @@
 #      ThoriumCluster CRD (Helm never updates an existing one), and records upgrade revision
 #      2026-10-v01 in the thorium-upgrade-state ConfigMap
 #   3. moves the old scaler's ClusterRole aside when the chart renders one with the same name
-#   4. hands objects the chart renders identically to the Helm release and deletes the ones the
-#      chart replaces: the old operator, the legacy ingress, and the thorium account's
-#      non-expiring token Secret, which nothing uses (Jaeger keeps running, since the converted
-#      values turn the chart's own tracing off)
+#   4. hands objects the chart renders identically to the Helm release, with the ownership of
+#      their fields so Helm 4's server-side apply doesn't conflict with their creators, and
+#      deletes the ones the chart replaces: the old operator, the legacy ingress, and the thorium
+#      account's non-expiring token Secret, which nothing uses (Jaeger keeps running, since the
+#      converted values turn the chart's own tracing off)
 #   5. deletes the ThoriumCluster without letting anything clean up after it, so the chart
 #      creates it again from the values (its components keep running and are adopted)
 # Every step checks whether it already ran, so a failed run can simply be run again; once the
@@ -193,6 +194,36 @@ get_json() {
     kc get "$1" "$2" ${3:+-n "$3"} -o json 2>/dev/null || true
 }
 
+# print the login banner the UI shows as a JSON string, or null when there is no ConfigMap banner.
+# JSON keeps the banner's trailing newlines, which a command substitution of the raw text strips,
+# so the chart renders it byte for byte and Helm finds nothing to change in the adopted ConfigMap
+#
+#   read_banner <namespace>
+read_banner() {
+    local live
+    live=$(get_json configmap banner "$1")
+    if [ -n "$live" ]; then
+        jq -c '.data["banner.txt"] // null' <<< "$live"
+    else
+        echo null
+    fi
+}
+
+# print the merge patch that hands an adopted object's fields to Helm: its managedFields become a
+# single entry, for this script, owning only the release annotations and managed-by label it sets.
+# Helm 4 applies server-side and fails on any field it changes that another field manager (such as
+# kubectl-create from the pre-Helm scripts) owns. An empty managedFields list isn't enough: Helm's
+# first apply would give every field to before-first-apply, which conflicts the same way
+#
+#   ownership_patch <api version>
+ownership_patch() {
+    jq -nc --arg api "$1" '{metadata: {managedFields: [{manager: "convert-to-helm",
+        operation: "Update", apiVersion: $api, fieldsType: "FieldsV1", fieldsV1: {"f:metadata": {
+          "f:annotations": {"f:meta.helm.sh/release-name": {},
+            "f:meta.helm.sh/release-namespace": {}},
+          "f:labels": {"f:app.kubernetes.io/managed-by": {}}}}}]}}'
+}
+
 for tool in kubectl helm jq; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "ERROR: $tool is required" >&2
@@ -323,9 +354,8 @@ if [ -z "$admin_user" ] || [ -z "$admin_password" ]; then
     admin_password=""
     echo "    no admin login given or saved, so the chart's admin bootstrap is turned off"
 fi
-# the login banner the UI shows
-banner=$(kc get configmap banner -n "$namespace" \
-    -o go-template='{{with .data}}{{with index . "banner.txt"}}{{.}}{{end}}{{end}}' 2>/dev/null || true)
+# the login banner the UI shows, as JSON
+banner=$(read_banner "$namespace")
 
 ########################################
 # Build the chart values
@@ -386,7 +416,7 @@ fi
 # the password reaches jq through its environment, which other users can't read, rather than as
 # an argument visible in the process list
 values=$(ADMIN_PASSWORD="$admin_password" PULL_CONFIG="$legacy_pull" jq --arg admin_user "$admin_user" \
-    --arg banner "$banner" --argjson ingress "$ingress" '
+    --argjson banner "$banner" --argjson ingress "$ingress" '
     .spec as $s | $s.config as $c
     # the scaler cluster the chart renders: the primary cluster when it is listed, else the first
     | ($c.thorium.scaler.k8s.clusters // {} | to_entries) as $all_clusters
@@ -474,7 +504,7 @@ values=$(ADMIN_PASSWORD="$admin_password" PULL_CONFIG="$legacy_pull" jq --arg ad
             tracing: {grpcEndpoint: $tracing}
           },
           toolbox: {enabled: false, url: "", json: ""}
-        } + (if $banner != "" then {banner: $banner} else {} end)
+        } + (if $banner != null then {banner: $banner} else {} end)
           + (if $s.registry then {image: {repository: $s.registry}} else {} end)
           + (if $pull_secrets != [] then {imagePullSecrets: $pull_secrets} else {} end)
           + (if $ENV.PULL_CONFIG != "" then {createImagePullSecret: true,
@@ -523,7 +553,14 @@ while read -r kind ns name; do
         esac
     fi
     live=$(get_json "$kind" "$name" "$ns")
-    if [ -z "$live" ] || helm_owned "$live"; then
+    if [ -z "$live" ]; then
+        continue
+    fi
+    if helm_owned "$live"; then
+        # adopted by an earlier run, which may not have handed its field ownership to Helm yet
+        case "$kind/$name" in
+            Namespace/*|ServiceAccount/thorium|ConfigMap/banner) adopt+=("$kind ${ns:--} $name") ;;
+        esac
         continue
     fi
     case "$kind/$name" in
@@ -769,6 +806,9 @@ for entry in ${adopt[@]+"${adopt[@]}"}; do
         "meta.helm.sh/release-name=$release" "meta.helm.sh/release-namespace=$namespace"
     change "label $kind ${ns:+$ns/}$name as managed by Helm" kc label --overwrite "$kind" "$name" \
         ${ns:+-n "$ns"} app.kubernetes.io/managed-by=Helm
+    api=$(jq -r .apiVersion <<< "$(get_json "$kind" "$name" "$ns")")
+    change "hand the fields of $kind ${ns:+$ns/}$name to Helm" kc patch "$kind" "$name" ${ns:+-n "$ns"} \
+        --type merge -p "$(ownership_patch "$api")"
 done
 step "Deleting what the chart replaces"
 for entry in ${replace[@]+"${replace[@]}"}; do
