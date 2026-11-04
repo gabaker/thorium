@@ -3,7 +3,10 @@
 Thorium's API serves a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server at
 `/api/mcp`, so models and MCP clients can read Thorium data and run tools with a user's token. On a
 Kubernetes deployment one API pod at a time serves it, through the `thorium-mcp` Service (see
-[ThoriumCluster and Operator Reference](../deploy/thoriumcluster.md)).
+[ThoriumCluster and Operator Reference](../deploy/thoriumcluster.md)). The Helm chart's ingress
+sends `/api/mcp` to that Service; an ingress made by hand must do the same (see
+[Ingress](../deploy/deploy-thorium.md#ingress)), or clients that negotiate a session lose it
+whenever the API has more than one replica.
 
 The server speaks the MCP 2026-07-28 revision over Streamable HTTP only (there is no SSE transport).
 Clients on that revision call tools without a session; older clients still negotiate a session.
