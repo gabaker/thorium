@@ -1,4 +1,5 @@
-//! Tests that stored password hashes can't choose their own Argon2 cost
+//! Tests that stored password hashes can't choose their own Argon2 cost, and that the hashes
+//! older releases wrote are upgraded at login
 
 use std::time::{Duration, Instant};
 
@@ -77,6 +78,54 @@ async fn plant(name: &str, hash: &str) -> Result<(), Error> {
     Ok(())
 }
 
+/// Hash a password the way argonautica 0.2's `Hasher::default()` did for releases through 1.105.4
+///
+/// That is argon2id v19 with m=4096, t=192, one lane per logical CPU of the API host, a 32 byte
+/// output, a 32 byte salt, and Thorium's secret key as the Argon2 secret.
+///
+/// # Arguments
+///
+/// * `password` - The password to hash
+/// * `lanes` - The logical CPU count of the API host that hashed it
+fn argonautica_hash(password: &str, lanes: u32) -> String {
+    // use argonautica's default costs, output length, and salt length
+    let params = Params::new(4096, 192, lanes, Some(32)).unwrap();
+    let salt = SaltString::encode_b64(&[7u8; 32]).unwrap();
+    // hash with Thorium's secret key as the Argon2 secret
+    Argon2::new_with_secret(
+        CONF.thorium.secret_key.as_bytes(),
+        Algorithm::Argon2id,
+        Version::V0x13,
+        params,
+    )
+    .unwrap()
+    .hash_password(password.as_bytes(), &salt)
+    .unwrap()
+    .to_string()
+}
+
+/// Read a field of a user's data directly from Redis
+///
+/// # Arguments
+///
+/// * `name` - The user whose data to read
+/// * `field` - The field to read
+async fn stored(name: &str, field: &str) -> Result<String, Error> {
+    // read the field where the API stores user data
+    let key = format!("{}:user_data:{name}", CONF.thorium.namespace);
+    let redis = test_utilities::redis_pool().await;
+    let mut conn = redis
+        .get()
+        .await
+        .map_err(|err| Error::new(err.to_string()))?;
+    bb8_redis::redis::cmd("HGET")
+        .arg(key)
+        .arg(field)
+        .query_async(&mut *conn)
+        .await
+        .map_err(|err| Error::new(err.to_string()))
+}
+
 /// Log in with basic auth
 ///
 /// # Arguments
@@ -135,6 +184,11 @@ async fn login_refuses_foreign_hashes() -> Result<(), Error> {
             Algorithm::Argon2id,
             Params::new(19_456, 3, 1, None).unwrap(),
         ),
+        hash(
+            password,
+            Algorithm::Argon2id,
+            Params::new(65_536, 10, 4, None).unwrap(),
+        ),
     ];
     for (index, planted) in foreign.iter().enumerate() {
         plant(&name, planted).await?;
@@ -159,6 +213,38 @@ async fn login_refuses_foreign_hashes() -> Result<(), Error> {
     // the API keeps serving and other users still log in
     let other = user(&client, password).await?;
     login(&client, &other, password).await?;
+    Ok(())
+}
+
+/// Logging in as a user whose hash an argonautica-era release wrote works with the right
+/// password and replaces the hash with a current one, while a wrong password changes nothing
+#[serial_test::serial]
+#[tokio::test]
+async fn login_upgrades_argonautica_hashes() -> Result<(), Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    let password = "CornSilkPw7Q9z";
+    let name = user(&client, password).await?;
+    // give the user the hash a 56 CPU API host wrote before 1.105.4-0.1.0
+    let legacy = argonautica_hash(password, 56);
+    plant(&name, &legacy).await?;
+    let token = stored(&name, "token").await?;
+    // a wrong password is refused and leaves the legacy hash in place
+    let attempt = login(&client, &name, "NotThePassword").await;
+    assert_unauthorized(attempt, "a wrong password against a legacy hash");
+    assert_eq!(stored(&name, "password").await?, legacy);
+    // the right password logs in and the stored hash is now a current one
+    login(&client, &name, password).await?;
+    let upgraded = stored(&name, "password").await?;
+    assert!(
+        upgraded.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"),
+        "the legacy hash wasn't upgraded: {upgraded}"
+    );
+    // the upgrade leaves the user's token alone
+    assert_eq!(stored(&name, "token").await?, token);
+    // the upgraded hash keeps working and is left as is
+    login(&client, &name, password).await?;
+    assert_eq!(stored(&name, "password").await?, upgraded);
     Ok(())
 }
 

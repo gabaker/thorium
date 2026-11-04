@@ -188,6 +188,19 @@ one of these messages.
 | `<setting>` differs from the value recorded for this deployment while data shaped by it exists; set it back to the recorded value | A data-shaping setting (such as a partition size) changed. Put the old value back, or let the operator move the data (see [Changing a partition size](./upgrades.md#changing-a-partition-size)) |
 | the schema record couldn't be read: ... | Scylla failed the read; the API tries again. See the Scylla pods |
 
+### Logins refused after an upgrade
+
+Releases through 1.105.4 hashed passwords with argonautica's settings (argon2id with other costs
+and one lane per CPU of the API host). The API verifies such a hash, replaces it with a hash of
+the current settings on the next successful login, and leaves the user's tokens alone; restores of
+backups holding such hashes are accepted too. An API image built without this refuses those hashes
+with a `401`, although the password is right.
+
+| Symptom | Cause and fix |
+|---------|---------------|
+| A local account created by an older release gets a `401` although its password is right | The API pods run an image that refuses older hash settings. Restart them onto this release's image (`kubectl -n thorium rollout restart deployment/api`); pods that weren't restarted after a rebuilt image was pushed under the same tag keep the image they pulled |
+| The operator logs a `401` for its `thorium-operator` user in a loop, and the cluster never reaches `Ready` | The operator logs in through the API, so either the API pods run an image that refuses older hashes (restart them as above), or the password in the `thorium-operator-pass` Secret doesn't verify for the user in Redis (the Secret was kept from another deployment, or the data was restored or replaced); then set the user's password from the Secret with another admin's token (`PATCH /api/users/user/thorium-operator` with `{"password": "<password>"}`). Restart the operator afterwards (`kubectl -n thorium rollout restart deployment/operator`); the first login replaces an older hash. After a restore into another `secret_key`, see [A Restore into Another secret_key](../thoradm/thoradm.md#a-restore-into-another-secret_key) |
+
 ## Config errors
 
 | Message | Cause and fix |
