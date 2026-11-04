@@ -465,6 +465,10 @@ a fresh deployment.
 - **Scylla or Elasticsearch pods crash right after a host reboot.** `minithor start` (and every
   `deploy`) raises the node kernel limits they need (`fs.aio-max-nr`, `vm.max_map_count`, ...);
   run it rather than plain `minikube start`.
+- **`deploy` fails with `failed to install CRD crds/thoriumcluster.yaml: conflict occurred`.**
+  Helm 4 applies the chart's CRDs server-side, which conflicts with the fields the operator owns on
+  an existing `ThoriumCluster` CRD. `deploy` passes Helm `--skip-crds` when the cluster already has
+  the CRD; see [Helm install conflicts](./troubleshooting.md#helm-install-conflicts).
 - **`expose` reports a forward as failed.** Each forward logs to `~/.cache/minithor/expose-logs/`.
   A port held by another program is left alone; pick other ports with `--port` or
   `--port-offset`.

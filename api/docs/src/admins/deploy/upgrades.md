@@ -14,7 +14,11 @@ An upgrade has two parts:
    before Helm changes the `ThoriumCluster`; otherwise the API server would drop any field the
    new CRD adds. Without Helm (or with the hook off), apply the CRD first yourself
    (`thorium-operator crd --apply`, or `kubectl apply` of the chart's
-   `crds/thoriumcluster.yaml`); the new operator also applies it when it starts.
+   `crds/thoriumcluster.yaml`); the new operator also applies it when it starts. The hook runs
+   from the image the values name (`operator.image.tag`, the chart's `appVersion` when unset), so
+   a values file that still pins the previous release's image tag makes it apply the previous CRD,
+   and Helm then fails with `field not declared in schema`: update or remove an image tag
+   override with every chart upgrade.
 2. **A new revision, when there is one.** A [revision](./concepts.md#revisions) names a point in
    Thorium's deployment history. When the new operator knows a newer revision than the one the
    deployment is at, it changes nothing until you set a target revision, and then runs the steps

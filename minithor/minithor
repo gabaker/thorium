@@ -1821,6 +1821,17 @@ infra:
 EOF
 }
 
+# Print --skip-crds when the ThoriumCluster CRD already exists (applied by the operator, an earlier
+# install, or convert-to-helm.sh). Helm 3 leaves an existing CRD from crds/ alone, but Helm 4
+# applies it server-side and fails on the fields the operator's field manager owns; the pre-upgrade
+# CRD hook and the operator keep it current. A cluster without it still gets it from the chart,
+# which the ThoriumCluster the chart renders needs
+thorium_crd_args() {
+    if kctl get crd thoriumclusters.sandia.gov &>/dev/null; then
+        echo --skip-crds
+    fi
+}
+
 # The thorctl config deploy logs in to: thorctl's default config for the default profile,
 # and a separate one for any other profile so a deploy never replaces another cluster's login
 thorctl_config_path() {
@@ -2276,8 +2287,14 @@ cmd_deploy() {
     fi
 
     log "Deploying Thorium into $THORIUM_NAMESPACE"
+    local -a crd_args=()
+    local crd_arg
+    while IFS= read -r crd_arg; do
+        crd_args+=("$crd_arg")
+    done < <(thorium_crd_args)
     helm_cmd upgrade --install "$THORIUM_RELEASE" "$THORIUM_CHART" ${THORIUM_CHART_ARGS[@]+"${THORIUM_CHART_ARGS[@]}"} \
-        -n "$THORIUM_NAMESPACE" --create-namespace "${values_args[@]}" --reset-values --timeout "${timeout}s"
+        -n "$THORIUM_NAMESPACE" --create-namespace "${values_args[@]}" --reset-values --timeout "${timeout}s" \
+        ${crd_args[@]+"${crd_args[@]}"}
     label_dev_namespace
     # the previous operator keeps reconciling until its replacement is ready, and it can report a
     # phase for the new spec (such as Error for a revision it doesn't know) that the new operator
