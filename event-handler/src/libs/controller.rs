@@ -245,6 +245,24 @@ impl EventWorkerCache {
     }
 }
 
+/// The longest wait between attempts to start the event controller
+const STARTUP_MAX_BACKOFF: Duration = Duration::from_secs(60);
+
+/// How long to wait before retrying a failed start of the event controller
+///
+/// The wait starts at one second and doubles with each failed attempt, up to
+/// [`STARTUP_MAX_BACKOFF`].
+///
+/// # Arguments
+///
+/// * `attempt` - How many attempts have failed before this one, starting at 0
+fn startup_backoff(attempt: u32) -> Duration {
+    // double the wait each attempt, saturating once the shift overflows
+    let secs = 1_u64.checked_shl(attempt).unwrap_or(u64::MAX);
+    // never wait longer than the cap
+    Duration::from_secs(secs).min(STARTUP_MAX_BACKOFF)
+}
+
 /// A channel and task join handle
 type ChannelAndHandle = (AsyncSender<WorkerMsg>, JoinHandle<Result<(), Error>>);
 
@@ -293,6 +311,42 @@ impl EventWorkerController {
             heartbeat: None,
         };
         Ok(controller)
+    }
+
+    /// Create a new controller, retrying with backoff until it starts
+    ///
+    /// Building the controller reads its caches (triggers, sigma and yara rules,
+    /// users, groups) from the API, so an API that is down or can't serve one of
+    /// them is logged and retried instead of crashing the process.
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - The command line args passed to the event handler
+    /// * `conf` - The Thorium Config
+    pub async fn new_with_retry(args: Args, conf: Conf) -> Self {
+        // count the failed attempts to size the next wait
+        let mut attempt = 0_u32;
+        loop {
+            // try to build the controller
+            match Self::new(args.clone(), conf.clone()).await {
+                Ok(controller) => return controller,
+                Err(error) => {
+                    // get how long to wait before the next attempt
+                    let wait = startup_backoff(attempt);
+                    // log why this attempt failed and when the next one runs
+                    event!(
+                        Level::ERROR,
+                        msg = "Failed to start event controller; retrying",
+                        error = error.to_string(),
+                        attempt = attempt,
+                        retry_in_secs = wait.as_secs(),
+                    );
+                    // wait before trying again
+                    tokio::time::sleep(wait).await;
+                    attempt = attempt.saturating_add(1);
+                }
+            }
+        }
     }
 
     /// Spawn a stat worker for each kind
@@ -629,5 +683,22 @@ impl EventWorkerController {
                 Some(Ok(())) => (),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{STARTUP_MAX_BACKOFF, startup_backoff};
+    use std::time::Duration;
+
+    /// The startup retry wait doubles from one second and stops at the cap
+    #[test]
+    fn startup_backoff_doubles_up_to_the_cap() {
+        assert_eq!(startup_backoff(0), Duration::from_secs(1));
+        assert_eq!(startup_backoff(1), Duration::from_secs(2));
+        assert_eq!(startup_backoff(5), Duration::from_secs(32));
+        assert_eq!(startup_backoff(6), STARTUP_MAX_BACKOFF);
+        assert_eq!(startup_backoff(64), STARTUP_MAX_BACKOFF);
+        assert_eq!(startup_backoff(u32::MAX), STARTUP_MAX_BACKOFF);
     }
 }
