@@ -2,7 +2,9 @@
 
 This page explains how to upgrade a Kubernetes deployment of Thorium: moving to a new Thorium
 version, and the revision upgrades the operator runs when a new version changes how Thorium is
-deployed. It is the reference for every revision's upgrade steps.
+deployed. It is the reference for every revision's upgrade steps. For the route from an older
+deployment (including a pre-Helm one) to the current release, stage by stage, and the known
+problems on the way with their fixes, see [Upgrade Paths](./upgrade-paths.md).
 
 ## Overview
 
@@ -38,9 +40,11 @@ If the phase is `Ready`, the upgrade is done. If it is `UpgradeRequired`, contin
 
 ## Before you upgrade
 
-- Back up Redis, Scylla, and S3 with `thoradm backup new`, and keep the `thorium-credentials`
-  Secret and your values files (see [Backups](./operate.md#backups)). Elasticsearch is rebuilt
-  from Scylla by the search streamer, so it needs no backup of its own.
+- Back up Redis, Scylla, and S3 with `thoradm backup new` right before you set the target, check
+  the backup with `thoradm backup verify`, and keep the `thorium-credentials` Secret and your
+  values files (see [Backups](./operate.md#backups) and [Taking a verified
+  backup](./upgrade-paths.md#taking-a-verified-backup)). Elasticsearch is rebuilt from Scylla by
+  the search streamer, so it needs no backup of its own.
 - Read the notes for every revision between the deployment's and the new one (see
   [Revisions](#revisions)), and list the steps that will run:
 
@@ -149,7 +153,7 @@ kubectl -n thorium get thoriumcluster thorium \
 | Helm | `operator.cluster.upgrade.targetRevision` |
 | megathor | `thorium_upgrade_target_revision` |
 | Without Helm | `spec.upgrade.target_revision` |
-| minithor and other development clusters | `operator.cluster.upgrade.autoTargetDev: true` (minithor sets it) targets the operator's latest revision whenever no target is set |
+| minithor and other development clusters | `operator.cluster.upgrade.autoTargetDev: true` (minithor sets it) targets the operator's latest revision whenever no target is set; never set it on a deployment you want to hold at a revision |
 
 ```bash
 helm upgrade thorium oci://ghcr.io/cisagov/thorium/charts/thorium --version $VERSION \
@@ -445,13 +449,17 @@ Drift is the live schema differing from the schema of the revision the deploymen
 table or column dropped by hand, an Elasticsearch index created with other mappings, an object a
 newer or feature-branch image applied before the deployment went back. The operator reads it
 through a `thoradm schema status` Job (probing Scylla, Redis, S3, and Elasticsearch, read-only)
-when it plans an upgrade, and at a reconcile when a read is due: the last read (kept in the
-`thorium-upgrade-state` ConfigMap) is over an hour old, the acknowledgements changed, or a schema
-apply finished since it. A `Ready` cluster reconciles about once a day unless its spec changes, so
-an hourly read happens only at such a reconcile; restarting the operator triggers a reconcile,
-which reads only if a read is due. A read that fails leaves the status as it was and is tried again after
-five minutes; while an upgrade is being planned it holds the plan until a read succeeds. Drift
-never holds a normal reconcile.
+when it plans an upgrade, after every schema apply, whenever the acknowledgements change, and
+otherwise at a reconcile once its last read is an hour old. A `Ready` cluster reconciles only on the
+events listed under [Where a deployment starts](#where-a-deployment-starts) (a spec change, a
+component Deployment's change, an operator restart, or once a day), and annotations other than
+`thorium.sandia.gov/retry-schema-apply` and `thorium.sandia.gov/allow-inline-config` start none, so
+`status.upgrade.drift` and the `SchemaDrift` condition can be up to a day old. Restarting the
+operator triggers a reconcile, which reads the drift only when a read is due: the last read (kept in
+the `thorium-upgrade-state` ConfigMap) is over an hour old, the acknowledgements changed, or a
+schema apply finished since it. A read that fails leaves the status as it was and is tried again
+after five minutes; while an upgrade is being planned it holds the plan until a read succeeds.
+Drift never holds a normal reconcile.
 
 Each object is `missing` (expected and absent), `changed` (present but different: a column type, a
 key, a view's columns, a mapping), or `unexpected` (present and unknown to the revision).
@@ -676,7 +684,7 @@ with which image (see the messages in [Setting a target](#setting-a-target)).
 | `LossySettingRefused` | `dangerousDowngradeLossy` is set on a cluster that isn't a development cluster, so it is ignored |
 | `CatalogSkew` | The image's thoradm knows a different catalog than the operator (the message names both), so no data-changing step is planned until the operator and the image are of the same release |
 | `SchemaSkew` | The schema-apply Job reported a deployment fingerprint different from the one the operator's build declares, so the operator and the image were built from different schemas; the rollout continues, and deploying an operator and image of the same release clears it |
-| `MutableImageTag` | The cluster runs a mutable image tag such as `latest`, so a new image under the same tag changes nothing that triggers the schema apply; use a version tag, or set the `thorium.sandia.gov/retry-schema-apply` annotation on the `ThoriumCluster` to a new value after pulling a new image |
+| `MutableImageTag` | The cluster runs a mutable image tag such as `latest`, so a new image under the same tag changes nothing that triggers the schema apply; use a version tag, or restart the operator and the components to pull the new image and set the `thorium.sandia.gov/retry-schema-apply` annotation on the `ThoriumCluster` to a new value (see [Schema apply and drift](./upgrade-paths.md#schema-apply-and-drift)) |
 
 ## Limitations
 
@@ -785,6 +793,8 @@ kubectl -n thorium get configmap thorium-upgrade-state \
 The table lists each Thorium version that brought a new revision; a version without one deploys
 the revision of the newest version listed before it. A pre-Helm deployment of any version records
 its revision when it is converted (see [Converting a Pre-Helm Deployment](./convert-to-helm.md)).
+[Upgrade Paths](./upgrade-paths.md) walks through each path stage by stage, with the checks,
+rollback points, and known issues of each.
 
 <!-- upgrade-paths:begin (generated from the catalog's support floors) -->
 | Thorium version | Revision | Oldest revision it upgrades from | From an older revision |
@@ -907,15 +917,16 @@ image applies is not undone: the previous release ignores the columns it doesn't
 Applies the yara scanning schema: the `scan_stats` table yara scan telemetry is kept in (every
 write sets a TTL), the `entities_by_name` view Scylla fills from the `entities` table for
 exact-name entity reads, and the `yara_rulesets` S3 bucket role compiled yara rulesets are cached
-under. It holds no schema step of its own: the operator applies the schema of the image it deploys
-before it rolls anything out (see `2026-10-v03`), which creates the table and the view, and its
-reconcile creates the missing bucket. No step changes data, since every added object starts empty.
-Deployments at `2026-10-v04` run this step when a target is set, and a deployment at an older
-revision runs it after the steps of the revisions before it:
+under. It holds no schema step of its own: its step records the revision, and the operator then
+applies the schema of the image it deploys as it reconciles that image, before it rolls anything
+out (see `2026-10-v03`), which creates the table and the view, and creates the missing bucket. No
+step changes data, since every added object starts empty. Deployments at `2026-10-v04` run this
+step when a target is set, and a deployment at an older revision runs it after the steps of the
+revisions before it:
 
 | Step | Kind | What it does |
 |------|------|--------------|
-| `finalize-yara-scanning` | Config | Records the revision once the yara scanning schema is applied |
+| `finalize-yara-scanning` | Config | Records the revision; the operator applies the yara scanning schema after it |
 
 Downgrading to `2026-10-v04` runs `finalize-yara-scanning-reverse`, a Config step that only undoes
 the record. Nothing is dropped on the way down: `2026-10-v04` ignores the objects it doesn't read,

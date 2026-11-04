@@ -928,7 +928,7 @@ changes data, the component it `scales down`, and the `migration` it runs:
 2026-10-v03 (released with Thorium 1.8.1; from 2026-10-v04; revert): Revert the revision that converts images, pipelines, and provenance
   - finalize-tool-only-reverse [Config]: Undo the record of the end of the revision that converts images, pipelines, and provenance; a revert that gets this far has no conversion to undo
 2026-10-v05 (released with Thorium 1.8.1; from 2026-10-v04): The yara scanning schema: scan stats, exact-name entity reads, and the yara ruleset cache
-  - finalize-yara-scanning [Config]: Record the revision once the yara scanning schema is applied
+  - finalize-yara-scanning [Config]: Record the revision; the operator applies the yara scanning schema after it
 2026-10-v04 (released with Thorium 1.8.1; from 2026-10-v05; revert): Revert the revision that applies the yara scanning schema
   - finalize-yara-scanning-reverse [Config]: Undo the record of the end of the revision that applies the yara scanning schema; the objects it added expire by TTL or are rebuilt, so nothing is dropped
 ```

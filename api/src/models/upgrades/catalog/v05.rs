@@ -2,7 +2,8 @@
 
 use crate::models::upgrades::{CatalogEntry, StepDef, StepKind};
 
-/// The id of the step that records the revision once the yara scanning schema is applied
+/// The id of the step that records the revision, after which the operator applies the yara
+/// scanning schema
 pub const FINALIZE_YARA_SCANNING_STEP: &str = "finalize-yara-scanning";
 
 /// The steps of revision `2026-10-v05`, in the order they run
@@ -12,14 +13,16 @@ pub const FINALIZE_YARA_SCANNING_STEP: &str = "finalize-yara-scanning";
 /// The append only rule applies once a revision is released.
 /// The revision has no schema-apply step of its own: its schema differs from the previous
 /// revision's only additively (the `scan_stats` table, the `entities_by_name` view Scylla fills
-/// from the `entities` table, and the `yara_rulesets` S3 bucket role at layout 1), and the
-/// operator applies the schema for the image it deploys before it rolls anything out (see
-/// `2026-10-v03`) and creates a missing bucket on every reconcile. No step changes data: the new
-/// objects start empty, so the record step is the whole edge.
+/// from the `entities` table, and the `yara_rulesets` S3 bucket role at layout 1). The upgrade
+/// runs before the reconcile that deploys the new image, so the record step runs first, and that
+/// reconcile then applies the image's schema before it rolls anything out (see `2026-10-v03`) and
+/// creates a missing bucket, so the steps of earlier revisions in the same upgrade run without
+/// these objects. No step changes data: the new objects start empty, so the record step is the
+/// whole edge.
 pub(super) const STEPS: &[StepDef] = &[StepDef {
     id: FINALIZE_YARA_SCANNING_STEP,
     kind: StepKind::Config,
-    description: "Record the revision once the yara scanning schema is applied",
+    description: "Record the revision; the operator applies the yara scanning schema after it",
     ..StepDef::BASE
 }];
 

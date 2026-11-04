@@ -3,7 +3,9 @@
 A deployment made by the minithor or megathor scripts before the Helm charts must be converted
 once before a current operator, chart, minithor, or megathor manages it. This page explains how to
 recognize such a deployment and convert it with `convert-to-helm.sh` so the Helm charts take it
-over, keeping every database, credential, and running component. To keep the deployment outside
+over, keeping every database, credential, and running component. [Upgrade Paths](./upgrade-paths.md)
+places the conversion in the whole route from a pre-Helm deployment to the current release, with
+the backups, checks, rollback points, and known issues of each stage. To keep the deployment outside
 Helm instead, see
 [Moving a pre-Helm deployment without Helm](./deploy-thorium.md#moving-a-pre-helm-deployment-without-helm).
 
@@ -39,15 +41,23 @@ dev, which Helm doesn't manage. ..."), and minithor and megathor refuse to deplo
 
 ## Before you start
 
-- **Tools**: `kubectl` (with the cluster's context), `helm` 3.8 or newer, and `jq`.
+- **Tools**: `kubectl` (with the cluster's context), `helm` 3.8 or newer (Helm 4 works; see
+  [Helm 4](#helm-4)), and `jq` 1.6 or newer.
 - **The script and the chart**: `deploy/charts/scripts/convert-to-helm.sh` from the Thorium
   source repository at the release you will deploy. It renders the thorium chart to find
   collisions and applies the chart's `ThoriumCluster` CRD, so give it the same chart you will
   install: by default the chart next to the script in the checkout, or
   `--chart oci://ghcr.io/cisagov/thorium/charts/thorium --chart-version $VERSION`.
-- **Backups**: back up Redis, Scylla, and S3 with `thoradm backup new` (see
-  [Backups](./operate.md#backups)). Elasticsearch is rebuilt from Scylla by the search streamer,
-  so it needs no backup of its own.
+- **Backups**: right before converting, with writers paused, back up Redis, Scylla, and S3 with
+  `thoradm backup new` and check the backup with `thoradm backup verify`, using the thoradm of the
+  release the deployment runs (see [Taking a verified
+  backup](./upgrade-paths.md#taking-a-verified-backup)). It is the way back once upgrade steps have
+  run. Elasticsearch is rebuilt from Scylla by the search streamer, so it needs no backup of its
+  own.
+- **Proxy settings**: the Thorium image carries no proxy variables. A component that needs a proxy
+  sets `http_proxy`, `https_proxy`, and a `no_proxy` covering `.svc`, `.cluster.local`, the
+  cluster's service and pod CIDRs, and internal registries in its `env`; the operator's thoradm
+  Jobs take the API's proxy settings (see [Proxies](./helm-configuration.md#proxies)).
 - **One deployment per cluster**: a Kubernetes cluster runs one Thorium deployment. If the
   cluster holds several pre-Helm instances (minithor's `--instance` or several megathor
   `namespace_prefix` deployments), choose the one to keep and
@@ -126,6 +136,12 @@ dev, which Helm doesn't manage. ..."), and minithor and megathor refuse to deplo
    `--skip-crds` leaves the `ThoriumCluster` CRD as the conversion applied it (the chart's own;
    see [Helm 4](#helm-4)).
 
+   Helm replaces lists rather than merging them, so a list in the converted values (a component's
+   `env`, for example) replaces the same list from `site.yaml`: put the complete list in the file
+   passed last. From now on the Helm release owns the `ThoriumCluster`; change it through the
+   values, not with `kubectl edit`, which Helm 4's next upgrade refuses as a field conflict (see
+   [Conversion and Helm](./upgrade-paths.md#conversion-and-helm)).
+
    With minithor or megathor, see [minithor](#minithor) and [megathor](#megathor) below.
 
 4. **Upgrade**: the operator records revision `2026-10-v01` and waits in `UpgradeRequired` until
@@ -135,7 +151,9 @@ dev, which Helm doesn't manage. ..."), and minithor and megathor refuse to deplo
    A target at or above `2026-10-v04` also converts every image to a tool, which needs an approval
    naming a backup and can't be undone, and waits for in-flight reactions first (see
    [Upgrading to Agentic Workflows](../agentic/upgrading.md)).
-   The operator then checks the backends and deploys the new components.
+   The operator then checks the backends and deploys the new components. Problems seen at this
+   point on long-lived deployments (schema drift, stale views, proxies, logins) and their fixes
+   are listed in [Known issues and remediation](./upgrade-paths.md#known-issues-and-remediation).
 
 5. **Clean up** once the `ThoriumCluster` reports `Ready`: remove the RBAC kept for the old
    scaler.
@@ -390,7 +408,8 @@ in place of `thorium` in the `jq` filter if you passed `--release`.
 account, the operator, and the `ThoriumCluster`, so the old tools can't take them back. Fix
 problems by running `helm upgrade --install` again; before a target revision is set nothing in the
 databases has changed and the old components keep running. Once upgrade steps have run and the
-new components rolled out, the way back is restoring your backups.
+new components rolled out, the way back is restoring the pre-conversion backup into a fresh
+pre-Helm install (see [Rolling back a stage](./upgrade-paths.md#rolling-back-a-stage)).
 
 ## Removing a native-realm Elasticsearch user
 

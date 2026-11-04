@@ -12,6 +12,16 @@ behave. A deployment at `2026-10-v02` also runs the two steps of the revision be
 (setting a target revision, approvals, and how steps run) is in
 [Upgrading Thorium](../deploy/upgrades.md). A fresh install needs none of this.
 
+The release's newest revision is `2026-10-v05`, which follows `2026-10-v04` and adds the yara
+scanning schema: the `scan_stats` table, the `entities_by_name` view for exact-name entity reads,
+and the bucket compiled yara rulesets are cached in (`thorium.yara.cache_bucket`,
+`thorium-yara-rulesets` by default). Its one step, `finalize-yara-scanning` (Config), records the
+revision and changes no data; the operator then applies the image's schema (the table and the
+view) and creates the bucket as it reconciles the new image (see
+[2026-10-v05](../deploy/upgrades.md#2026-10-v05)). A target of `2026-10-v05` runs the conversion
+and then that step in one upgrade; a target of `2026-10-v04` stops after the conversion, and
+`2026-10-v05` can be targeted later.
+
 ## What changes for existing data
 
 | Data | What the upgrade does |

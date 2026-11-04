@@ -209,19 +209,6 @@ behind a newer build, the same way the API refuses to start on a schema it doesn
 | This thoradm can't run a migration: revision `<revision>` is later than this build knows (...) | Any `migrate run` over a newer build's record. The same fixes apply |
 | This thoradm can't run step `<revision>/<step>`: ... the plan from revision `<revision>` doesn't include it | The step belongs to a revision the deployment already moved past, the record shows it finished, or the planner refuses its path. Re-run a finished step's issue groups with `--reason <code>` or `--objects <keys>`, and move the deployment with its target revision (see [Data migrations](./upgrades.md#data-migrations)) |
 
-### Logins refused after an upgrade
-
-Releases through 1.105.4 hashed passwords with argonautica's settings (argon2id with other costs
-and one lane per CPU of the API host). The API verifies such a hash, replaces it with a hash of
-the current settings on the next successful login, and leaves the user's tokens alone; restores of
-backups holding such hashes are accepted too. An API image built without this refuses those hashes
-with a `401`, although the password is right.
-
-| Symptom | Cause and fix |
-|---------|---------------|
-| A local account created by an older release gets a `401` although its password is right | The API pods run an image that refuses older hash settings. Restart them onto this release's image (`kubectl -n thorium rollout restart deployment/api`); pods that weren't restarted after a rebuilt image was pushed under the same tag keep the image they pulled |
-| The operator logs a `401` for its `thorium-operator` user in a loop, and the cluster never reaches `Ready` | The operator logs in through the API, so either the API pods run an image that refuses older hashes (restart them as above), or the password in the `thorium-operator-pass` Secret doesn't verify for the user in Redis (the Secret was kept from another deployment, or the data was restored or replaced); then set the user's password from the Secret with another admin's token (`PATCH /api/users/user/thorium-operator` with `{"password": "<password>"}`). Restart the operator afterwards (`kubectl -n thorium rollout restart deployment/operator`); the first login replaces an older hash. After a restore into another `secret_key`, see [A Restore into Another secret_key](../thoradm/thoradm.md#a-restore-into-another-secret_key) |
-
 ## Config errors
 
 | Message | Cause and fix |
@@ -279,6 +266,7 @@ text after the URL names the cause:
 | `Connection refused` | The name resolves but nothing listens on the port: Elasticsearch is down, or the port is wrong |
 | `timed out` | Packets are dropped on the way, most often by a NetworkPolicy in the backend's namespace (a CNI that rejects instead of dropping shows `Connection refused`) |
 | `invalid peer certificate` or another certificate error | TLS verification failed; see the `certificate` row in [Backends](#backends) |
+| A proxy's error, or the request reaches a proxy host | The Job's request went through a proxy: set `no_proxy` in the API's `env` (the Jobs take the API's proxy settings); see [Proxies](./helm-configuration.md#proxies) and [Upgrade Paths](./upgrade-paths.md#proxies-and-network-policies) |
 
 These Jobs run in the Thorium namespace with the labels `app.kubernetes.io/managed-by:
 thorium-operator` and `thorium.sandia.gov/job-kind: <kind>`, not `app: api`, so a NetworkPolicy
@@ -313,6 +301,25 @@ policies guarding Scylla, Redis, or S3. A `401` from `curl` means the network pa
 
 A new image pushed under the same tag doesn't roll anything out; restart the components with
 `kubectl -n thorium rollout restart deployment`. See [Rollouts](./helm-configuration.md#rollouts).
+Nor does it run the schema apply again: set the `thorium.sandia.gov/retry-schema-apply`
+annotation on the `ThoriumCluster` to a new value after the restart (see [Schema apply and
+drift](./upgrade-paths.md#schema-apply-and-drift)).
+
+## After an upgrade or conversion
+
+Problems seen when converting and upgrading long-lived deployments are listed with their causes
+and fixes in [Known issues and remediation](./upgrade-paths.md#known-issues-and-remediation). The
+most common:
+
+| Symptom | Where |
+|---------|-------|
+| The operator logs `401` for its `thorium-operator` user in a loop and never reaches `Ready` | [Logins](./upgrade-paths.md#logins) |
+| A local account from an older release can't log in after the upgrade | [Logins](./upgrade-paths.md#logins) |
+| `SchemaDrift` lists old tables, the upgrade system's tables, or leftovers from unreleased builds | [Schema apply and drift](./upgrade-paths.md#schema-apply-and-drift) |
+| Ingested repos show no data, or view-backed listings miss rows, on an old keyspace | [Schema apply and drift](./upgrade-paths.md#schema-apply-and-drift) |
+| A setting from `site.yaml` (such as a component's proxy `env`) is missing after the install | [Conversion and Helm](./upgrade-paths.md#conversion-and-helm) |
+| External MCP clients lose their sessions, or a hand-made `/api/mcp` route is left over | [Conversion and Helm](./upgrade-paths.md#conversion-and-helm) |
+| A backup exits 2 with skipped records, or thoradm can't find its Thorctl config | [Backups and restores](./upgrade-paths.md#backups-and-restores) |
 
 ## The toolbox import Job
 
@@ -372,8 +379,8 @@ sets. Helm 3 creates and patches objects client-side without checking field owne
 | Message | Cause and fix |
 |---------|---------------|
 | failed to install CRD crds/thoriumcluster.yaml: conflict occurred while applying object /thoriumclusters.sandia.gov ... conflicts with "thorium_cluster_apply": .spec.names.categories, .spec.names.shortNames | The `ThoriumCluster` CRD already exists, applied by the operator (field manager `thorium_cluster_apply`) or by `convert-to-helm.sh`, and Helm 4 installs a chart's `crds/` with server-side apply. This happens on the first install after a conversion, or on an install over a cluster that kept the CRD (`helm uninstall` leaves it). Run the install again with `--skip-crds`, which leaves the existing CRD alone as Helm 3 does; the operator applies its own CRD when it starts, and the chart's pre-upgrade hook applies it on every upgrade. minithor and megathor pass it whenever the CRD exists |
-| server-side apply failed for object thorium/`<name>` sandia.gov/v1, Kind=ThoriumCluster ... field not declared in schema, on a `helm upgrade` to a newer chart, and applying the new CRD by hand doesn't help | A values file still sets `operator.image.tag` to the previous release's image. The chart's pre-upgrade hook runs `thorium-operator crd --apply` from the image the values name, so it applies the previous release's CRD over the new one with every attempt, and the old operator does the same when it starts. Remove the override or set it to the new image's tag in every values file, check with `helm get values thorium -n thorium --all`, and run `helm upgrade` again |
-| conflict occurred while applying object thorium/banner /v1, Kind=ConfigMap: Apply failed with 1 conflict: conflict with "kubectl-create" using v1: .data.banner.txt (or `"before-first-apply"`, or ServiceAccount `thorium` or a namespace) | The object was created by the pre-Helm scripts and handed to the release by a `convert-to-helm.sh` that left its field ownership with its creator (`kubectl-create`), and the chart sets one of its fields to another value (that script dropped the banner's trailing newline). Clearing `managedFields` to `[{}]` doesn't help: Helm's next apply gives every field to `before-first-apply`. Hand the fields to the release with the patch below for each object an error names, then run the install again; Helm then writes the chart's values, so check that `operator.banner` in the converted values holds the banner you want |
+| conflict occurred while applying object thorium/banner /v1, Kind=ConfigMap: Apply failed with 1 conflict: conflict with "kubectl-create" using v1: .data.banner.txt (or `"before-first-apply"`, or ServiceAccount `thorium` or a namespace) | The object was created by the pre-Helm scripts and handed to the release by a `convert-to-helm.sh` that left its field ownership with its creator (`kubectl-create`), and the chart sets one of its fields to another value (that script dropped the banner's trailing newline). Clearing `managedFields` to `[{}]` doesn't help: Helm's next apply gives every field to `before-first-apply`. Hand the fields to the release with the patch below for each object an error names, then run the install again; Helm then writes the chart's values, so check that `operator.banner` in the converted values holds the banner you want. For the `banner` ConfigMap, deleting it (`kubectl -n thorium delete configmap banner`) and running the install again also works, since the chart then creates it |
+| conflict occurred while applying object `<ns>/<name>` ... ThoriumCluster: Apply failed with ... conflict with "kubectl-edit" (or "kubectl-patch") | Someone changed the Helm-owned `ThoriumCluster` with `kubectl edit` or `kubectl patch`, so that field manager owns the fields. Put the change in your values, remove the manager's `managedFields` entry, and run the upgrade again (see [Conversion and Helm](./upgrade-paths.md#conversion-and-helm)) |
 
 ```bash
 # the object the error names, such as configmap banner -n thorium or serviceaccount thorium -n thorium
