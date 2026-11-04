@@ -159,7 +159,11 @@ The values file holds credentials and is written readable only by you. It:
   megathor's Traefik `thorium-ingress` IngressRoute: its `Host(...)` match becomes
   `operator.ingress.host`, its TLS Secret (or that of a `default` TLSStore in the namespace)
   `operator.ingress.tls.secretName`, and `traefikDefaultStore` is on when that TLSStore named the
-  same Secret and no Helm release owns it;
+  same Secret and no Helm release owns it. The chart's ingress routes `/api/mcp` to the
+  `thorium-mcp` Service itself, so a route added by hand that sent `/api/mcp` (for example
+  ``Host(`thorium.example.com`) && PathPrefix(`/api/mcp`)``) to `thorium-mcp` is covered when the
+  legacy ingress is deleted; a separate IngressRoute or Ingress made for it can be deleted after
+  the conversion;
 - carries the pull login of the pre-Helm `--docker-config` (minithor) or
   `thorium_image_pull_secret` (megathor) `registry-token` Secret into
   `operator.createImagePullSecret` and `operator.dockerConfigJson` when the `ThoriumCluster` has

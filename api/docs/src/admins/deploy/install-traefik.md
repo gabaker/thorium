@@ -71,8 +71,9 @@ Change the values later with
 With `operator.ingress.type: traefik`, the `thorium` chart creates, in the thorium namespace:
 
 - an `IngressRoute` named `thorium-ingress` on the `websecure` entrypoint that sends
-  `operator.ingress.host` (every host when empty) to the `thorium-api` Service on port 80, and
-  `operator.ingress.registryHost` to the chart's registry when set;
+  `operator.ingress.host` (every host when empty) to the `thorium-api` Service on port 80, except
+  `/api/mcp`, which goes to the `thorium-mcp` Service on port 80 (the one API pod holding the MCP
+  sessions), and `operator.ingress.registryHost` to the chart's registry when set;
 - a `TLSOption` named `tls12` (TLS 1.2 and 1.3);
 - with `operator.ingress.tls.secretName` and `operator.ingress.tls.traefikDefaultStore: true`,
   the cluster's `default` `TLSStore`, which makes that certificate Traefik's default. Traefik
