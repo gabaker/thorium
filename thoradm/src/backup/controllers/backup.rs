@@ -33,7 +33,9 @@ use crate::args::BackupComponents;
 use crate::args::NewBackup;
 use crate::backup::Utils;
 use crate::backup::coverage::{Registry, Store};
-use crate::backup::failures::{FAILURES_FILE, FailureLog, FailurePolicy, FailureRecord, Operation};
+use crate::backup::failures::{
+    FAILURES_FILE, FailureKind, FailureLog, FailurePolicy, FailureRecord, Operation,
+};
 use crate::backup::graphics::Graphic;
 use crate::backup::manifest::{
     self, FORMAT_VERSION, INDEX_FILE, InProgressMarker, LOCK_FILE, Layout, MANIFEST_FILE,
@@ -1006,7 +1008,10 @@ impl BackupController {
     ///
     /// The state is fetched through the API, retrying transient failures (5xx, a reset
     /// connection, a timeout, a truncated or unparsable body). A fetch that still fails, or a
-    /// write that fails, is recorded and the rest of the backup carries on. When the API dropped
+    /// write that fails, is recorded and the rest of the backup carries on. The API leaves out
+    /// the records it can't parse, each recorded as skipped under its Redis key before
+    /// `redis.json` is written, so the state is never kept without that record; an API that
+    /// can't skip them fails the fetch with each recorded as failed instead. When the API dropped
     /// dangling references, they are listed in `pruned.jsonl`, written before `redis.json` so
     /// a state with references dropped is never kept without its list.
     ///
@@ -1035,6 +1040,7 @@ impl BackupController {
         // fetch the Redis state through the API, retrying what may pass
         let params = BackupParams {
             prune_dangling: self.prune_dangling,
+            skip_unreadable: true,
         };
         let fetched = self
             .retry
@@ -1069,6 +1075,14 @@ impl BackupController {
                 return Ok(());
             }
         };
+        // each record the API couldn't parse and left out is recorded before the state is written
+        record_unreadable(
+            &component,
+            std::mem::take(&mut backup.unreadable),
+            fetched.attempts,
+            log,
+        )
+        .await?;
         // what the API dropped is listed beside the state, never in it
         let pruned = std::mem::take(&mut backup.pruned);
         if !pruned.is_empty() && !self.write_pruned(&path, &pruned, log).await? {
@@ -1785,6 +1799,34 @@ pub async fn handle(backup_args: &NewBackup, args: &Args) -> Result<RunOutcome, 
         Arc::new(TokioFs),
     ))
     .await
+}
+
+/// Records each record the API couldn't parse and left out of the Redis state as skipped, under
+/// its own Redis key
+///
+/// # Arguments
+///
+/// * `component` - The Redis component's name
+/// * `unreadable` - The records the API left out, each with what is wrong with it
+/// * `attempts` - The attempts the fetch took
+/// * `log` - The run's failure log
+async fn record_unreadable(
+    component: &str,
+    unreadable: Vec<BackupProblem>,
+    attempts: u32,
+    log: &FailureLog,
+) -> Result<(), Error> {
+    // each record the API left out gets its own record
+    for problem in unreadable {
+        // a skipped record of the Redis operation, named by the record's key
+        let mut record = FailureRecord::failed(component, Operation::Redis, problem.error)
+            .key(problem.key)
+            .attempts(attempts);
+        record.kind = FailureKind::Skipped;
+        // write it durably before the state that leaves the record out
+        log.record(&record).await?;
+    }
+    Ok(())
 }
 
 /// Returns the records a failed Redis backup names as unparsable, one per Redis key
