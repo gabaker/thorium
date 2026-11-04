@@ -728,8 +728,8 @@ step "Keeping the old scaler's permissions"
 if printf '%s\n' ${replace[@]+"${replace[@]}"} | grep -qx "ClusterRole - $LEGACY_ROLE"; then
     # copy the legacy rules so the old scaler keeps them until its Deployment is upgraded
     if [ -z "$(get_json clusterrole "$LEGACY_COPY_ROLE")" ]; then
-        copy=$(get_json clusterrole "$LEGACY_ROLE" | jq --arg name "$LEGACY_COPY_ROLE" --arg label "$LEGACY_LABEL" '
-            {apiVersion, kind, rules, metadata: {name: $name, labels: {($label): "true"}}}')
+        copy=$(get_json clusterrole "$LEGACY_ROLE" | jq --arg name "$LEGACY_COPY_ROLE" --arg legacy_label "$LEGACY_LABEL" '
+            {apiVersion, kind, rules, metadata: {name: $name, labels: {($legacy_label): "true"}}}')
         change "create ClusterRole $LEGACY_COPY_ROLE with the rules of $LEGACY_ROLE" kc create -f - <<< "$copy"
     fi
     # bind each subject of the legacy role to the copy under a new binding before removing the
@@ -740,9 +740,9 @@ if printf '%s\n' ${replace[@]+"${replace[@]}"} | grep -qx "ClusterRole - $LEGACY
     while read -r binding; do
         [ -n "$binding" ] || continue
         name=$(jq -r .metadata.name <<< "$binding")
-        moved=$(jq --arg copy "$LEGACY_COPY_ROLE" --arg label "$LEGACY_LABEL" '
+        moved=$(jq --arg copy "$LEGACY_COPY_ROLE" --arg legacy_label "$LEGACY_LABEL" '
             {apiVersion, kind, subjects, roleRef: (.roleRef | .name = $copy),
-             metadata: {name: "\(.metadata.name)-legacy", labels: {($label): "true"}}}' <<< "$binding")
+             metadata: {name: "\(.metadata.name)-legacy", labels: {($legacy_label): "true"}}}' <<< "$binding")
         if [ -z "$(get_json clusterrolebinding "$name-legacy")" ]; then
             change "bind the subjects of ClusterRoleBinding $name to $LEGACY_COPY_ROLE as $name-legacy" \
                 kc create -f - <<< "$moved"
