@@ -99,7 +99,7 @@ fn s3_unreachable<E, R>(error: &SdkError<E, R>) -> bool {
 /// * `chain` - The error and its causes
 fn s3_waiting(endpoint: &str, description: &str, chain: &str) -> CheckError {
     // name the endpoint without any credentials in its URL
-    let endpoint = redact_url(endpoint);
+    let endpoint = endpoint_name(endpoint);
     // an unreachable S3 is waited on with what failed and why
     CheckError::Waiting(format!(
         "Waiting for S3 at {endpoint} to accept connections: failed to {description}: {chain}"
@@ -284,10 +284,129 @@ fn bucket_access_error(bucket_name: &str, description: &str) -> CheckError {
     .into()
 }
 
+/// Find the user info in an S3 endpoint
+///
+/// Returns the range of everything after the scheme up to the last `@`, not including the `@`.
+/// Text before a `://` only counts as a scheme when it is made of the characters a scheme may
+/// hold. An S3 endpoint has no query to hold an `@`, so taking up to the last one covers a
+/// password holding `@`, `/`, `?`, or `#` whole.
+///
+/// # Arguments
+///
+/// * `endpoint` - The S3 endpoint to find the user info of
+fn endpoint_user_info(endpoint: &str) -> Option<std::ops::Range<usize>> {
+    // the user info starts after the scheme if there is one
+    let start = endpoint
+        .find("://")
+        .filter(|end| {
+            *end > 0
+                && endpoint[..*end]
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+        })
+        .map_or(0, |end| end + 3);
+    // and runs up to the last '@'
+    endpoint[start..].rfind('@').map(|at| start..start + at)
+}
+
+/// Name an S3 endpoint without its user info
+///
+/// The user info is cut out as text before the rest is parsed, since a parser reads a user and a
+/// password holding `/` and then `?` or `#` as a host and port, and rewrites the user it took for
+/// a host into lowercase or punycode.
+///
+/// # Arguments
+///
+/// * `endpoint` - The S3 endpoint as configured
+fn endpoint_name(endpoint: &str) -> String {
+    // cut out everything after the scheme up to and including the last '@'
+    match endpoint_user_info(endpoint) {
+        Some(range) => redact_url(&format!(
+            "{}{}",
+            &endpoint[..range.start],
+            &endpoint[range.end + 1..]
+        )),
+        None => redact_url(endpoint),
+    }
+}
+
+/// Remove an S3 endpoint's user info from a message, such as an SDK error that repeats the
+/// endpoint
+///
+/// The endpoint as configured is replaced by its redacted name, and its user info is dropped
+/// wherever else it shows up before an `@`, as written or escaped in a debug message.
+///
+/// # Arguments
+///
+/// * `text` - The message to redact
+/// * `endpoint` - The S3 endpoint as configured
+fn redact_endpoint_in(text: &str, endpoint: &str) -> String {
+    // an empty endpoint can't show up in a message
+    if endpoint.is_empty() {
+        return text.to_owned();
+    }
+    // name the endpoint, as written or escaped, by its redacted form
+    let named = endpoint_name(endpoint);
+    let mut redacted = text.replace(endpoint, &named);
+    redacted = redacted.replace(&endpoint.escape_debug().to_string(), &named);
+    // drop the user info wherever else it comes before an '@'
+    if let Some(range) = endpoint_user_info(endpoint).filter(|range| !range.is_empty()) {
+        let user_info = &endpoint[range];
+        for form in [user_info.to_owned(), user_info.escape_debug().to_string()] {
+            redacted = redacted.replace(&format!("{form}@"), "");
+        }
+    }
+    redacted
+}
+
+/// Remove an S3 endpoint's user info from a bucket check's error
+///
+/// # Arguments
+///
+/// * `error` - The error a bucket check failed with
+/// * `endpoint` - The S3 endpoint as configured
+fn redact_check_error(error: CheckError, endpoint: &str) -> CheckError {
+    match error {
+        // a wait only carries its description
+        CheckError::Waiting(details) => CheckError::Waiting(redact_endpoint_in(&details, endpoint)),
+        // a failure is rebuilt from its redacted message, since the SDK's error text is in it
+        CheckError::Failed(error) => match error.msg() {
+            Some(msg) => CheckError::Failed(Error::new(redact_endpoint_in(&msg, endpoint))),
+            None => CheckError::Failed(error),
+        },
+    }
+}
+
+/// Describe a bucket that S3 refused to create
+///
+/// # Arguments
+///
+/// * `config` - The Thorium S3 configuration
+/// * `bucket_name` - The bucket that couldn't be created
+/// * `cause` - The error and its causes
+fn create_bucket_error(config: &S3, bucket_name: &str, cause: &str) -> CheckError {
+    // name the endpoint without any credentials in its URL
+    let endpoint = endpoint_name(&config.endpoint);
+    // show the region setting as configured, telling an empty one apart from an unset one
+    let region = config
+        .region
+        .as_deref()
+        .map_or_else(|| "unset".to_owned(), |region| format!("{region:?}"));
+    // name the bucket, where it was created, and how to work around a gateway that refuses it
+    Error::new(format!(
+        "Failed to create bucket {bucket_name} at {endpoint} (thorium.s3.region: {region}): \
+         {cause}. Pre-create the bucket to work around this, since the operator skips \
+         buckets that already exist"
+    ))
+    .into()
+}
+
 /// Create an S3 bucket
 ///
 /// Only a bucket that `HeadBucket` reports missing is created, so pre-created buckets need no
 /// create rights, and any other `HeadBucket` failure is reported with its status code.
+/// A `CreateBucketConfiguration` is only sent when the region needs a location constraint.
+/// Any error is returned without the user info configured in the endpoint.
 ///
 /// # Arguments
 ///
@@ -295,6 +414,24 @@ fn bucket_access_error(bucket_name: &str, description: &str) -> CheckError {
 /// * `client` - API client for S3 interface
 /// * `bucket_name` - Name of bucket to create
 pub async fn create_bucket(
+    config: &S3,
+    client: &Client,
+    bucket_name: &str,
+) -> Result<(), CheckError> {
+    // create the bucket, dropping the endpoint's credentials from any SDK error text
+    try_create_bucket(config, client, bucket_name)
+        .await
+        .map_err(|error| redact_check_error(error, &config.endpoint))
+}
+
+/// Create an S3 bucket, returning errors that may repeat the endpoint as configured
+///
+/// # Arguments
+///
+/// * `config` - The Thorium S3 configuration
+/// * `client` - API client for S3 interface
+/// * `bucket_name` - Name of bucket to create
+async fn try_create_bucket(
     config: &S3,
     client: &Client,
     bucket_name: &str,
@@ -331,17 +468,19 @@ pub async fn create_bucket(
             }
         },
     }
-    // build out the bucket creation config, pinning the bucket to our region when needed
-    let bucket_config = CreateBucketConfiguration::builder()
-        .set_location_constraint(location_constraint(config.region.as_deref()))
-        .build();
+    // start building the request to create the bucket
+    let mut request = client.create_bucket().bucket(bucket_name);
+    // pin the bucket to our region only when it needs a constraint, since some S3 gateways
+    // such as Ceph RGW reject an empty CreateBucketConfiguration
+    if let Some(constraint) = location_constraint(config.region.as_deref()) {
+        // build the configuration holding our location constraint
+        let bucket_config = CreateBucketConfiguration::builder()
+            .location_constraint(constraint)
+            .build();
+        request = request.create_bucket_configuration(bucket_config);
+    }
     // attempt to create the bucket
-    let response = client
-        .create_bucket()
-        .create_bucket_configuration(bucket_config)
-        .bucket(bucket_name)
-        .send()
-        .await;
+    let response = request.send().await;
     match response {
         // bucket was created
         Ok(_) => {
@@ -374,18 +513,18 @@ pub async fn create_bucket(
                     Ok(())
                 }
                 // any other service error fails bucket creation
-                other => Err(Error::new(format!(
-                    "Failed to create bucket {bucket_name}: {}",
-                    error_chain(other)
-                ))
-                .into()),
+                other => Err(create_bucket_error(
+                    config,
+                    bucket_name,
+                    &error_chain(other),
+                )),
             },
             // any error that isn't a service error fails bucket creation too
-            _ => Err(Error::new(format!(
-                "Failed to create bucket {bucket_name}: {}",
-                error_chain(&error)
-            ))
-            .into()),
+            _ => Err(create_bucket_error(
+                config,
+                bucket_name,
+                &error_chain(&error),
+            )),
         },
     }
 }
@@ -410,7 +549,7 @@ fn missing_buckets_error(endpoint: &str, results: &[(&str, Option<String>)]) -> 
         return None;
     }
     // name the endpoint without any credentials in its URL
-    let endpoint = redact_url(endpoint);
+    let endpoint = endpoint_name(endpoint);
     Some(format!(
         "skip_bucket_auto_create is set but {} required S3 bucket(s) are missing or \
          inaccessible at {endpoint}: {}. Create them or grant Thorium's S3 identity access \
@@ -423,6 +562,7 @@ fn missing_buckets_error(endpoint: &str, results: &[(&str, Option<String>)]) -> 
 /// Verify every required bucket exists and is accessible without creating any of them
 ///
 /// An S3 that can't be reached at all is waited on rather than reported as missing buckets.
+/// Any error is returned without the user info configured in the endpoint.
 ///
 /// # Arguments
 ///
@@ -430,6 +570,25 @@ fn missing_buckets_error(endpoint: &str, results: &[(&str, Option<String>)]) -> 
 /// * `client` - API client for S3 interface
 /// * `buckets` - The names of the buckets to check
 async fn verify_buckets(config: &S3, client: &Client, buckets: &[&str]) -> Result<(), CheckError> {
+    // check the buckets, dropping the endpoint's credentials from any SDK error text
+    try_verify_buckets(config, client, buckets)
+        .await
+        .map_err(|error| redact_check_error(error, &config.endpoint))
+}
+
+/// Verify every required bucket exists, returning errors that may repeat the endpoint as
+/// configured
+///
+/// # Arguments
+///
+/// * `config` - The Thorium S3 configuration
+/// * `client` - API client for S3 interface
+/// * `buckets` - The names of the buckets to check
+async fn try_verify_buckets(
+    config: &S3,
+    client: &Client,
+    buckets: &[&str],
+) -> Result<(), CheckError> {
     // head each bucket and keep the reason for any failure
     let mut results = Vec::with_capacity(buckets.len());
     for bucket in buckets {
@@ -769,9 +928,10 @@ mod tests {
         &'static str,
     );
 
-    /// Serve scripted S3 responses on a local port and record each request's method and path
+    /// Serve scripted S3 responses on a local port and record each request
     ///
-    /// Returns the endpoint to send requests to and the requests seen so far.
+    /// Returns the endpoint to send requests to and the full requests (request line, headers,
+    /// and body) seen so far.
     ///
     /// # Arguments
     ///
@@ -817,10 +977,10 @@ mod tests {
                         }
                     }
                 }
-                // record the method and path
+                // record the whole request
                 let text = String::from_utf8_lossy(&buf).to_string();
                 let line = text.lines().next().unwrap_or_default().to_owned();
-                record.lock().unwrap().push(line.clone());
+                record.lock().unwrap().push(text);
                 // pick the scripted response for this method
                 let (status, headers, body) = if line.starts_with("HEAD") {
                     &head
@@ -911,6 +1071,67 @@ mod tests {
             .to_string();
         assert!(!message.contains("SVs3Pw42"), "password leaked: {message}");
         assert!(message.contains(&endpoint), "no endpoint: {message}");
+    }
+
+    /// Bucket errors never carry an endpoint's user info, even when the SDK refuses the endpoint
+    /// as an invalid URI and repeats it in its error, or a password holds `/`, `?`, or `#` after an
+    /// uppercase or non-ASCII user a URL parser would rewrite
+    #[tokio::test]
+    async fn bucket_errors_redact_endpoint_credentials_in_causes() {
+        // endpoints carrying user info in forms a URL parser reads differently, and the endpoint
+        // each must be named as
+        let cases = [
+            ("svuser:SVs3Pw42@127.0.0.1:1", "127.0.0.1:1"),
+            ("http://svuser:SVs3Pw42@127.0.0.1:1", "http://127.0.0.1:1"),
+            ("svuser:12/SVs3Pw42@127.0.0.1:1", "127.0.0.1:1"),
+            ("svuser:SVp?a#SVs3Pw42@127.0.0.1:1", "127.0.0.1:1"),
+            ("svuser@127.0.0.1:1", "127.0.0.1:1"),
+            ("svuser:SVs3Pw42@[::1]:1", "[::1]:1"),
+            ("http://svuser:SVs3Pw42@[::1]:1", "http://[::1]:1"),
+            (
+                "http://SVUser:12/SVPq?SVPp1@127.0.0.1:1",
+                "http://127.0.0.1:1",
+            ),
+            ("SVUser:12/SVPq?SVPp1@127.0.0.1:1", "127.0.0.1:1"),
+            (
+                "http://SVUser:12/SVPq#SVPp1@127.0.0.1:1",
+                "http://127.0.0.1:1",
+            ),
+            (
+                "http://SV\u{fc}ser:12/SVPq?SVPp1@127.0.0.1:1",
+                "http://127.0.0.1:1",
+            ),
+            (
+                "http://SVAKIAEXAMPLE:443/SVPq?SVPp1@127.0.0.1:1",
+                "http://127.0.0.1:1",
+            ),
+        ];
+        for (endpoint, named) in cases {
+            // check and create a bucket at an endpoint nothing listens on
+            let (config, client) = test_s3(endpoint, "key", "secret");
+            let create = create_bucket(&config, &client, "thorium-files")
+                .await
+                .expect_err("a create at a closed port must not pass")
+                .to_string();
+            let verify = verify_buckets(&config, &client, &["thorium-files"])
+                .await
+                .expect_err("a check at a closed port must not pass")
+                .to_string();
+            // neither the user nor any part of the password is shown, in any case or as punycode
+            for message in [&create, &verify] {
+                let lowered = message.to_lowercase();
+                for secret in ["svuser", "svs3pw42", "svp", "svakia", "xn--"] {
+                    assert!(
+                        !lowered.contains(secret),
+                        "{endpoint} leaked {secret}: {message}"
+                    );
+                }
+            }
+            assert!(
+                verify.contains(&format!(" at {named}")),
+                "{endpoint} not named as {named}: {verify}"
+            );
+        }
     }
 
     /// A `HeadBucket` redirect to another region is reported with that region, and no bucket is
@@ -1077,5 +1298,97 @@ mod tests {
             location_constraint(Some("custom-1")),
             Some(BucketLocationConstraint::from("custom-1"))
         );
+    }
+
+    /// Get the body of each `CreateBucket` request a mock S3 saw
+    ///
+    /// # Arguments
+    ///
+    /// * `seen` - The full requests the mock S3 recorded
+    fn create_bucket_bodies(seen: &std::sync::Mutex<Vec<String>>) -> Vec<String> {
+        // keep the body after the header block of every PUT
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.starts_with("PUT"))
+            .map(|request| {
+                request
+                    .split_once("\r\n\r\n")
+                    .map_or_else(String::new, |(_, body)| body.to_owned())
+            })
+            .collect()
+    }
+
+    /// A bucket created without a region, with an empty region, or in us-east-1 is sent with no
+    /// `CreateBucketConfiguration`, and any other region sends its location constraint
+    #[tokio::test]
+    async fn create_bucket_sends_configuration_only_with_a_constraint() {
+        for region in [None, Some(""), Some("us-east-1")] {
+            // serve a missing bucket that is then created
+            let (endpoint, seen) =
+                mock_s3(("404 Not Found", vec![], ""), ("200 OK", vec![], "")).await;
+            let (mut config, client) = test_s3(&endpoint, "key", "secret");
+            config.region = region.map(str::to_owned);
+            create_bucket(&config, &client, "thorium-files")
+                .await
+                .expect("the missing bucket is created");
+            // the create carries no body, which gateways like Ceph RGW reject when empty
+            let bodies = create_bucket_bodies(&seen);
+            assert_eq!(bodies.len(), 1, "region {region:?} sent {bodies:?}");
+            assert!(
+                bodies[0].is_empty(),
+                "region {region:?} sent a body: {}",
+                bodies[0]
+            );
+        }
+        // any other region pins the bucket to it
+        let (endpoint, seen) = mock_s3(("404 Not Found", vec![], ""), ("200 OK", vec![], "")).await;
+        let (mut config, client) = test_s3(&endpoint, "key", "secret");
+        config.region = Some("us-west-2".to_owned());
+        create_bucket(&config, &client, "thorium-files")
+            .await
+            .expect("the missing bucket is created");
+        let bodies = create_bucket_bodies(&seen);
+        assert_eq!(bodies.len(), 1, "sent {bodies:?}");
+        assert!(
+            bodies[0].contains("<CreateBucketConfiguration")
+                && bodies[0].contains("<LocationConstraint>us-west-2</LocationConstraint>"),
+            "no location constraint: {}",
+            bodies[0]
+        );
+    }
+
+    /// A rejected `CreateBucket` names the bucket, the endpoint, and the region setting, and
+    /// suggests pre-creating the bucket
+    #[tokio::test]
+    async fn create_bucket_failure_names_bucket_endpoint_and_region() {
+        // serve a missing bucket whose create is rejected without a message, as Ceph RGW does
+        let (endpoint, _) = mock_s3(
+            ("404 Not Found", vec![], ""),
+            (
+                "400 Bad Request",
+                vec![("Content-Type", "application/xml")],
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Code>InvalidArgument</Code>\
+                 </Error>",
+            ),
+        )
+        .await;
+        let (mut config, client) = test_s3(&endpoint, "key", "secret");
+        config.region = Some(String::new());
+        let message = create_bucket(&config, &client, "thorium-yara-rulesets")
+            .await
+            .expect_err("a rejected create must not pass")
+            .to_string();
+        assert!(
+            message.contains("thorium-yara-rulesets"),
+            "no bucket: {message}"
+        );
+        assert!(message.contains(&endpoint), "no endpoint: {message}");
+        assert!(
+            message.contains("thorium.s3.region"),
+            "no region: {message}"
+        );
+        assert!(message.contains("InvalidArgument"), "no cause: {message}");
+        assert!(message.contains("Pre-create"), "no suggestion: {message}");
     }
 }

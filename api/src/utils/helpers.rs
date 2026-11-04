@@ -283,6 +283,30 @@ fn strip_user_info(url: &str) -> String {
     }
 }
 
+/// Check whether the text a parser would show may still hold part of a password
+///
+/// When the text strip leaves an `@` behind (one after a `/` and then a `?` or `#`), everything
+/// from the authority up to the last `@` may be user info: the user may hold a `/`, `\`, `?`,
+/// or `#` before its `:` (`https://DOMAIN\user:pass?x@host`), or the password may hold an `@`
+/// (`https://user:pa@ss/w?d@host`). A `:` in that text may start the password, so the URL can't
+/// be shown. This also covers a host and port followed by an `@` (`https://host:9200/x?q=a@b`),
+/// which no text split can tell apart from a user and the start of a password.
+///
+/// # Arguments
+///
+/// * `url` - The URL as given
+/// * `stripped` - The URL with the user info a text split finds removed
+fn ambiguous_user_info(url: &str, stripped: &str) -> bool {
+    // find where each authority starts, after the scheme if there is one
+    let start = scheme_end(url).map_or(0, |end| end + 3);
+    let stripped_start = scheme_end(stripped).map_or(0, |end| end + 3);
+    // an '@' left after the strip with a ':' before the original's last '@' may end a password
+    stripped[stripped_start..].contains('@')
+        && url[start..]
+            .rfind('@')
+            .is_some_and(|at| url[start..start + at].contains(':'))
+}
+
 /// Remove any user info (a username and password) from a URL so it can be logged or shown
 ///
 /// The user info is first stripped as text, which also catches user info a lenient parse would
@@ -292,7 +316,9 @@ fn strip_user_info(url: &str) -> String {
 /// same way repo URLs are read. A URL that doesn't parse to one with a host, such as one whose
 /// unencoded password holds a `/` before a `?`, `#`, or `://`, or an scp-like git URL
 /// (`git@host:path`), is replaced by `<unparseable url>`, so no text split can let a credential
-/// through.
+/// through. So is a URL that still holds an `@` after the strip with a `:` before its last `@`
+/// (see [`ambiguous_user_info`]), since the text before that `@` may be a user and part of a
+/// password. An `@` in a query that is meant to be shown must be written `%40`.
 ///
 /// # Arguments
 ///
@@ -301,6 +327,10 @@ fn strip_user_info(url: &str) -> String {
 pub fn redact_url(url: &str) -> String {
     // strip the user info as text before parsing
     let stripped = strip_user_info(url);
+    // text left before an '@' may still be user info, so it is never shown
+    if ambiguous_user_info(url, &stripped) {
+        return UNPARSEABLE_URL.to_owned();
+    }
     // parse a URL with a scheme as given and one without as an https URL
     let schemeless = scheme_end(&stripped).is_none();
     let parsed = if schemeless {
@@ -496,10 +526,6 @@ mod tests {
                 "alice:SecretPw1@github.com/corn/harvest?next=https://x",
                 "github.com/corn/harvest?next=https://x",
             ),
-            (
-                "https://ftp//alice:SecretPw1@github.com/corn?next=a@b",
-                "https://github.com/corn?next=a@b",
-            ),
         ];
         for (url, expected) in cases {
             assert_eq!(redact_url(url), expected, "redacting {url}");
@@ -517,11 +543,100 @@ mod tests {
             "github.com/corn/harvest",
             "https://github.com/corn/harvest?ref=a@b#frag@c",
             "https://github.com/corn/harvest#frag@c",
-            "github.com/corn/harvest?next=https://alice@x",
             "localhost:9200",
+            "https://host/x?q=a%40b",
+            "http://127.0.0.1:9200/x?q=a%40b",
+            "https://host/x#a@b",
+            "host/x?q=a@b&r=c@d",
         ] {
             assert_eq!(redact_url(url), url, "redacting {url}");
         }
+    }
+
+    /// User info is never shown in any of the forms a URL can carry it, and URLs with an `@` only
+    /// in their query or fragment are kept
+    #[test]
+    fn redact_url_hides_user_info_in_every_form() {
+        // URLs with user info and what each must look like once redacted
+        let cases = [
+            ("user:pass@host", "host"),
+            ("https://user:pass@host", "https://host"),
+            ("user:12/pass@host", "host"),
+            ("https://\u{fc}ser:pass@host/x", "https://host/x"),
+            ("https://user:p#w@host", "https://host"),
+            ("user:p#w@host", "host"),
+            ("https://user:p%40ss@host/x", "https://host/x"),
+            ("https://a@b:c@host/x", "https://host/x"),
+            ("https://user:@host", "https://host"),
+            ("https://user:pass@[::1]:9000/x", "https://[::1]:9000/x"),
+            ("user:pass@[::1]:9000", "[::1]:9000"),
+        ];
+        for (url, expected) in cases {
+            assert_eq!(redact_url(url), expected, "redacting {url}");
+        }
+        // URLs with an '@' only in their query or fragment are kept as they are; an '@' in the
+        // path before any query is read as ending user info, since a password may hold a '/'
+        for url in [
+            "https://host/x?q=a@b",
+            "host/x?q=a@b",
+            "https://host/x?q=a%40b",
+        ] {
+            assert_eq!(redact_url(url), url, "redacting {url}");
+        }
+    }
+
+    /// User info a parser would read as a host and port, because its password holds a `/` and
+    /// then a `?`, `#`, or `@`, is hidden whatever the case or script of its user
+    #[test]
+    fn redact_url_hides_port_shaped_user_info() {
+        // URLs whose user and the start of whose password parse as a host and port
+        for url in [
+            "https://user:12/a?b@host",
+            "https://user:12/a?b@host/x",
+            "https://User:12/Pq?Pp1@host",
+            "User:12/Pq?Pp1@host",
+            "https://User:12/Pq#Pp1@host",
+            "https://\u{fc}ser:12/Pq?Pp1@host",
+            "https://user:12#a/b?c@host",
+            "https://user:12\\a/b?c@host",
+            "https://user:1\t2/a?b@host",
+            "https://a@User:12/Pq?Pp1@host",
+            "http://AKIAEXAMPLE:443/Pq?Pp1@s3.example.com",
+            // a port followed by an '@' in the query reads the same way, so it is hidden too
+            "http://127.0.0.1:9200/x?q=a@b",
+        ] {
+            assert_eq!(redact_url(url), "<unparseable url>", "redacting {url}");
+        }
+    }
+
+    /// User info whose user holds a delimiter before its `:`, or whose password holds an `@`, is
+    /// hidden even though the rest parses as a URL
+    #[test]
+    fn redact_url_hides_ambiguous_user_info() {
+        // URLs whose password a parser would place in the printed host, path, or query
+        let leaked: Vec<(&str, String)> = [
+            "https://DOMAIN\\user:SE/CRET?x@host",
+            "https://DOMAIN\\user:SE/CRET4?x@host",
+            "DOMAIN\\user:SE/CRET5?x@host",
+            "https://DOMAIN\\user:12/CRET6?x@host",
+            "https://a/b:SECRET1?x@host",
+            "https://us?er:SE/CRET2?x@host",
+            "https://us#er:SE/CRET2?x@host",
+            "https://user:pa@ss/w?d@host",
+            "https://u:p@host/x?q=a@b",
+            "https://u:p@host:9000/x?q=a@b",
+            "https://ftp//alice:SecretPw1@github.com/corn?next=a@b",
+            // text that reads the same way as one of the above is hidden too
+            "https://host/x?q=a:b@c",
+            "http://[::1]:9200/x?q=a@b",
+            "https://[::1]:9000/x?q=a@b",
+            "github.com/corn/harvest?next=https://alice@x",
+        ]
+        .into_iter()
+        .map(|url| (url, redact_url(url)))
+        .filter(|(_, redacted)| redacted != "<unparseable url>")
+        .collect();
+        assert!(leaked.is_empty(), "shown: {leaked:?}");
     }
 
     /// URLs that can't be parsed are replaced by a placeholder, so user info a text split would

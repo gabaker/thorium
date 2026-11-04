@@ -262,6 +262,13 @@ Workflows](../agentic/upgrading.md) covers them in full.
   hook puts the stage-2 CRD back and the upgrade fails (see the known issues). Check with
   `helm get values thorium -n thorium --all`.
 - Repo ingests stay held while the schema apply recreates `committed_repo_data`, as in stage 2.
+- **The YARA ruleset cache bucket.** Stage 3 adds one bucket, `thorium.yara.cache_bucket`
+  (`<namespace>-yara-rulesets` from the chart, so `thorium-yara-rulesets` in the `thorium`
+  namespace). To name it like the deployment's other buckets, set
+  `operator.cluster.config.thorium.yara.cache_bucket` in the values file passed last. The operator
+  creates it when HeadBucket answers 404 and skips a bucket that exists, so pre-create it where
+  Thorium's S3 identity can't create buckets or the store refuses the operator's request (see
+  [External services](./helm-configuration.md#external-services)).
 
 **Steps.**
 
@@ -639,6 +646,12 @@ i=$(kubectl -n thorium get $TC -o json \
 kubectl -n thorium patch $TC --type json \
   -p "[{\"op\":\"remove\",\"path\":\"/metadata/managedFields/$i\"}]"
 ```
+
+### Buckets
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| The phase is `Error` with `Failed to create bucket <bucket> at <endpoint> (thorium.s3.region: <region>): ...`, or a bare `InvalidArgument` from S3 | The store refused the CreateBucket request. An operator built without the location-constraint check sends an empty `CreateBucketConfiguration` when `thorium.s3.region` is unset, empty, or `us-east-1`, which Ceph RGW refuses with `InvalidArgument` | Pre-create the bucket the message names (`<namespace>-yara-rulesets` on stage 3, unless `thorium.yara.cache_bucket` names another): the operator skips a bucket that exists. A stage-1 operator doesn't check whether a bucket exists, so on stage 1 pre-create every bucket and set `thorium.s3.skip_bucket_auto_create: true` in the `ThoriumCluster`'s `spec.config` |
 
 ### Proxies and network policies
 

@@ -370,6 +370,13 @@ signature, is reported with its status code and the bucket instead. The minimum 
 - `s3:GetObject`, `s3:PutObject`, and `s3:DeleteObject` on the objects in each bucket;
 - `s3:CreateBucket`, only if the operator should create missing buckets.
 
+The operator sends a location constraint with CreateBucket only when
+`operator.backends.s3.region` (`thorium.s3.region`) names a region other than `us-east-1`; with no
+region, an empty one, or `us-east-1` it sends no bucket configuration, so the store creates the
+bucket in its default location. A refused CreateBucket fails the reconcile (phase `Error`) with a
+message naming the bucket, the endpoint, and `thorium.s3.region`; pre-creating that bucket works
+around a store that refuses the request, since the operator skips buckets that exist.
+
 If Thorium's S3 identity may not create buckets, pre-create them and set
 `operator.cluster.config.thorium.s3.skip_bucket_auto_create: true`. The operator then creates
 nothing, but checks every required bucket with HeadBucket on each reconcile and reports one error
