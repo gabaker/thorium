@@ -22,7 +22,7 @@ use crate::utils::{ApiError, Shared, bounder};
 use crate::{bad, bad_internal, deserialize, update, update_clear, update_opt};
 
 /// A protected prefix for system organized files
-const THORIUM_PREFIX: &str = "__thorium_";
+const THORIUM_PREFIX: &str = crate::utils::helpers::THORIUM_RESULT_FILE_PREFIX;
 
 /// The different kinds of files to upload for results
 enum ResultFileUpload<'a> {
@@ -82,18 +82,11 @@ impl<O: OutputSupport> OutputFormBuilder<O> {
         if field.content_type().is_none() {
             return bad!("A content type must be set for the result file form entry!".to_owned());
         }
-        // validate our file name for this field if we have one
-        // if we don't then just use a random uuid
+        // validate our file name for this field if we have one, which also refuses names
+        // starting with the protected __thorium_ prefix; if we don't then just use a random uuid
         let file_name = bounder::multipart_path(&field, "Result File", false)?
             // we don't have a file name so just use a random uuid
             .unwrap_or_else(|| Uuid::new_v4().to_string());
-        // result files cannot start with __thorium_ as those are protected names
-        if file_name.starts_with(THORIUM_PREFIX) {
-            // raise an error since this result file uses a protected prefix
-            return bad!(format!(
-                "Result files cannot start with {THORIUM_PREFIX}: '{file_name}'"
-            ));
-        }
         // build the path to save this attachment at in s3
         let s3_path = format!("{}/{}", self.id, file_name);
         // log which result file we are uploading so a stalled upload can be traced to it

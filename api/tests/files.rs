@@ -1570,6 +1570,49 @@ async fn get_result_files() -> Result<(), thorium::Error> {
     Ok(())
 }
 
+/// Result file names are checked segment by segment: dots inside a segment upload and download,
+/// while `..` segments and backslashes (which downloads refuse) are refused at upload
+#[tokio::test]
+async fn result_file_names_are_checked_by_segment() -> Result<(), thorium::Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    // Create a group
+    let group = generators::groups(1, &client).await?.remove(0).name;
+    // upload a sample to attach results to
+    let file_req = SampleRequest::new_buffer(Buffer::new("ResultFileNames"), vec![group]);
+    let hashes = client.files.create(file_req).await?;
+    // names with dots inside a segment upload and download back unchanged
+    let output_req = OutputRequest::new(
+        hashes.sha256.clone(),
+        "TestTool",
+        "I am a test result",
+        OutputDisplayType::String,
+    )
+    .buffer(Buffer::new("dotted").name("report..json"))
+    .buffer(Buffer::new("nested").name("sub/report..json"));
+    let result_id = client.files.create_result(output_req).await?;
+    for (name, data) in [("report..json", "dotted"), ("sub/report..json", "nested")] {
+        let downloaded = client
+            .files
+            .download_result_file(&hashes.sha256, "TestTool", &result_id.id, name)
+            .await?;
+        is!(downloaded.data, data.as_bytes());
+    }
+    // parent segments and backslashes are refused at upload
+    for name in ["../x", "a/../b", r"a\b.txt", r"sub\deeper\out.txt"] {
+        let output_req = OutputRequest::new(
+            hashes.sha256.clone(),
+            "TestTool",
+            "I am a test result",
+            OutputDisplayType::String,
+        )
+        .buffer(Buffer::new("refused").name(name));
+        let created = client.files.create_result(output_req).await;
+        fail!(created, 400);
+    }
+    Ok(())
+}
+
 /// The result files of a workflow run, stored under a result key that holds `#` and `~`, download
 /// whole: the key reaches the API as one path segment and lists back unchanged
 #[tokio::test]

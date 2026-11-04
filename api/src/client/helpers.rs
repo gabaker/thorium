@@ -1,5 +1,6 @@
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Certificate, ClientBuilder, NoProxy, Proxy};
+use std::path::{Component, Path};
 
 use super::{ClientSettings, Error};
 
@@ -29,6 +30,39 @@ const PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
 pub(crate) fn encode_path_segment(segment: &str) -> String {
     // encode everything but the unreserved characters
     utf8_percent_encode(segment, PATH_SEGMENT).to_string()
+}
+
+/// Build the name a file is uploaded under from its path, joining its parts with `/`
+///
+/// Uploaded names become object keys and are downloaded by name later, so they use `/` on every
+/// platform: a Windows path such as `sub\out.txt` is sent as `sub/out.txt`, not with the
+/// platform separator.
+///
+/// # Arguments
+///
+/// * `path` - The path (usually relative to a collection directory) to name the upload by
+#[doc(hidden)]
+#[must_use]
+pub fn portable_file_name(path: &Path) -> String {
+    // rebuild the name from the path's parts so the platform separator never leaks into it
+    let mut name = String::new();
+    for component in path.components() {
+        match component {
+            // a root starts the name with a separator
+            Component::RootDir => name.push('/'),
+            // a `.` part adds nothing to the name
+            Component::CurDir => (),
+            // every other part is added after a separator
+            Component::Prefix(_) | Component::ParentDir | Component::Normal(_) => {
+                // separate this part from the previous one
+                if !name.is_empty() && !name.ends_with('/') {
+                    name.push('/');
+                }
+                name.push_str(&component.as_os_str().to_string_lossy());
+            }
+        }
+    }
+    name
 }
 
 /// Apply our proxy settings to a [`reqwest::ClientBuilder`]
@@ -444,10 +478,11 @@ macro_rules! multipart_file {
         let file = tokio::fs::File::open(&$path).await?;
         // get the length of this file so we can size our buffer correctly
         let len = file.metadata().await?.len();
-        // get the name this file is going to be uploaded under trimming any prefix that was set
+        // get the name this file is going to be uploaded under trimming any prefix that was set,
+        // with its parts joined by `/` on every platform
         let file_name = match $prefix {
-            Some(prefix) => $path.strip_prefix(prefix)?.to_string_lossy().to_string(),
-            None => $path.to_string_lossy().to_string(),
+            Some(prefix) => $crate::client::portable_file_name($path.strip_prefix(prefix)?),
+            None => $crate::client::portable_file_name(&$path),
         };
         // convert our file into a framed read stream
         let codec = tokio_util::codec::BytesCodec::new();
@@ -463,4 +498,38 @@ macro_rules! multipart_file {
         let form = $form.part($key, file_part);
         form
     }};
+}
+
+#[cfg(test)]
+mod tests {
+    use super::portable_file_name;
+    use std::path::{Path, PathBuf};
+
+    /// Nested names built from path parts are joined with `/`, whatever the platform separator
+    #[test]
+    fn portable_file_names_join_parts_with_slashes() {
+        // a nested path built from its parts as a Windows client would after trimming its prefix
+        let nested: PathBuf = ["sub", "deeper", "out.txt"].iter().collect();
+        assert_eq!(portable_file_name(&nested), "sub/deeper/out.txt");
+        // a single file and a `.` part keep their plain names
+        assert_eq!(portable_file_name(Path::new("out.txt")), "out.txt");
+        let dotted: PathBuf = [".", "sub", "out.txt"].iter().collect();
+        assert_eq!(portable_file_name(&dotted), "sub/out.txt");
+        // a root keeps its leading separator, so the API refuses this Unix absolute path (a Windows
+        // drive prefix such as `C:` has no root separator before it, so it is not refused this way)
+        let absolute: PathBuf = ["/", "tmp", "out.txt"].iter().collect();
+        assert_eq!(portable_file_name(&absolute), "/tmp/out.txt");
+    }
+
+    /// A Windows path's backslashes become `/` when the client runs on Windows
+    #[cfg(windows)]
+    #[test]
+    fn portable_file_names_replace_windows_separators() {
+        // a Windows separator splits parts, so it never reaches the name
+        assert_eq!(portable_file_name(Path::new(r"sub\out.txt")), "sub/out.txt");
+        assert_eq!(
+            portable_file_name(Path::new(r"C:\tmp\out.txt")),
+            "C:/tmp/out.txt"
+        );
+    }
 }

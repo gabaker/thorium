@@ -1387,8 +1387,8 @@ impl S3Client {
     #[instrument(name = "S3Client::stream", skip(self, field), err(Debug))]
     pub async fn stream<'a>(&self, path: &str, field: Field<'a>) -> Result<(), ApiError> {
         // ban any paths that might contain traversal attacks
-        if path.contains("..") {
-            return bad!("S3 file names cannot contain '..'".to_owned());
+        if has_parent_segment(path) {
+            return bad!("S3 file names cannot contain a '..' segment".to_owned());
         }
         // initiate a multipart upload to s3
         let init = self
@@ -1431,8 +1431,8 @@ impl S3Client {
         content_type: &str,
     ) -> Result<(), ApiError> {
         // ban any paths that might contain traversal attacks
-        if path.contains("..") {
-            return bad!("S3 file names cannot contain '..'".to_owned());
+        if has_parent_segment(path) {
+            return bad!("S3 file names cannot contain a '..' segment".to_owned());
         }
         // initiate a multipart upload to s3
         let init = self
@@ -1467,8 +1467,8 @@ impl S3Client {
         // log the size of our encoded data
         event!(Level::INFO, encoded_size = encoded.len());
         // ban any paths that might contain traversal attacks
-        if path.contains("..") {
-            return bad!("S3 file names cannot contain '..'".to_owned());
+        if has_parent_segment(path) {
+            return bad!("S3 file names cannot contain a '..' segment".to_owned());
         }
         // decode our base64'd bytes
         let decoded = base64::engine::general_purpose::STANDARD.decode(encoded)?;
@@ -1598,8 +1598,8 @@ impl S3Client {
     #[instrument(name = "S3Client::stream_body", skip(self, body), err(Debug))]
     pub async fn stream_body(&self, path: &str, body: axum::body::Body) -> Result<(), ApiError> {
         // ban any paths that might contain traversal attacks
-        if path.contains("..") {
-            return bad!("S3 file names cannot contain '..'".to_owned());
+        if has_parent_segment(path) {
+            return bad!("S3 file names cannot contain a '..' segment".to_owned());
         }
         // initiate a multipart upload to s3
         let init = self
@@ -1745,6 +1745,18 @@ impl GraphicsS3Client {
     }
 }
 
+/// Check whether an object key holds a `..` segment that could traverse out of its prefix
+///
+/// Both `/` and `\` count as separators, since some stores treat a backslash as a `/`, while
+/// dots inside a segment (such as `report..json`) are harmless and allowed.
+///
+/// # Arguments
+///
+/// * `path` - The object key to check
+fn has_parent_segment(path: &str) -> bool {
+    path.split(['/', '\\']).any(|segment| segment == "..")
+}
+
 /// Decide whether [`S3Client::stream_helper`] submits the bytes left after its read loop
 ///
 /// The read loop empties the buffer whenever it flushes a full part, so a body that ends exactly
@@ -1762,7 +1774,30 @@ fn should_submit_trailing_part(buffer_empty: bool, next_part_num: i32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_ZIP_DOWNLOAD_SIZE, enforce_zip_download_limit, should_submit_trailing_part};
+    use super::{
+        MAX_ZIP_DOWNLOAD_SIZE, enforce_zip_download_limit, has_parent_segment,
+        should_submit_trailing_part,
+    };
+
+    /// Keys with a `..` segment are refused, by either separator, while dots inside a segment pass
+    #[test]
+    fn parent_segments_are_refused_but_dotted_names_pass() {
+        // a parent segment anywhere in the key is refused
+        for key in [
+            "id/../x",
+            "id/a/../b",
+            "..",
+            "id/..",
+            r"id/..\x",
+            r"id\..\x",
+        ] {
+            assert!(has_parent_segment(key), "{key} passed");
+        }
+        // dots inside a segment never traverse
+        for key in ["id/report..json", "id/a/b.c/d..e", "id/...", "id/.hidden"] {
+            assert!(!has_parent_segment(key), "{key} was refused");
+        }
+    }
 
     /// an object far larger than the in-memory zip cap must be rejected before it is
     /// buffered, so a single authenticated request cannot OOM the API.
