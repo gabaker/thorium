@@ -62,6 +62,39 @@ dev, which Helm doesn't manage. ..."), and minithor and megathor refuse to deplo
   is `test`/`INSECURE_DEV_PASSWORD`, and a login minithor saved with `--rand-password` (in the
   `minithor-credentials` Secret) is read automatically. Without one the chart's admin bootstrap is
   turned off, and the `thorium-admin` Secret the chart still renders names no real user.
+- **Network policies on the backing services**: if NetworkPolicies guard Elasticsearch, Scylla,
+  Redis, or S3 in their own namespaces, they must admit every pod in the Thorium namespace, not
+  only the API's. The operator's schema and migration Jobs run with their own labels
+  (`app.kubernetes.io/managed-by: thorium-operator` and `thorium.sandia.gov/job-kind`), not
+  `app: api`, so a policy that admits only `app: api` pods blocks them and the operator reports
+  "error sending request" from the schema probe (see
+  [Troubleshooting](./troubleshooting.md#the-schema-probe-reports-error-sending-request)).
+  Admit the namespace on each backend's port, for example Elasticsearch's 9200:
+
+  ```yaml
+  apiVersion: networking.k8s.io/v1
+  kind: NetworkPolicy
+  metadata:
+    name: allow-thorium
+    namespace: elastic-system
+  spec:
+    podSelector:
+      matchLabels:
+        elasticsearch.k8s.elastic.co/cluster-name: elastic
+    policyTypes: [Ingress]
+    ingress:
+      - from:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: thorium
+        ports:
+          - protocol: TCP
+            port: 9200
+  ```
+
+  Use the same `namespaceSelector` with port 9042 for Scylla, 6379 for Redis, and your S3
+  store's port. Kubernetes sets the `kubernetes.io/metadata.name` label on every namespace; use
+  `<prefix>-thorium` with a namespace prefix.
 
 ## Procedure
 

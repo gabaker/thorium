@@ -229,6 +229,43 @@ operator log shows:
 Key the cluster by that context (Helm value `operator.cluster.scaler.k8s.context`). An operator
 running in the cluster always uses `kubernetes-admin@cluster.local`.
 
+### The schema probe reports "error sending request"
+
+> Transient Error: the probe failed to read GET thorium_sample_results/_mapping: error sending
+> request for url (https://elastic-es-http.elastic-system.svc.cluster.local:9200/...): ...
+
+The operator's `thoradm schema status` Job, or a migration Job, couldn't reach Elasticsearch. The
+text after the URL names the cause:
+
+| Cause in the message | Meaning |
+|----------------------|---------|
+| `dns error` or `failed to lookup address` | The name in `elastic.node` doesn't resolve from the Thorium namespace |
+| `Connection refused` | The name resolves but nothing listens on the port: Elasticsearch is down, or the port is wrong |
+| `timed out` | Packets are dropped on the way, most often by a NetworkPolicy in the backend's namespace (a CNI that rejects instead of dropping shows `Connection refused`) |
+| `invalid peer certificate` or another certificate error | TLS verification failed; see the `certificate` row in [Backends](#backends) |
+
+These Jobs run in the Thorium namespace with the labels `app.kubernetes.io/managed-by:
+thorium-operator` and `thorium.sandia.gov/job-kind: <kind>`, not `app: api`, so a NetworkPolicy
+that admits only the API's pods lets the API reach Elasticsearch while the Jobs time out. To see
+what a Job sees, start a pod with the same labels and try the request from it, using the Thorium
+image (on amd64, where it has `curl`) or another image with `curl` and `getent`:
+
+```bash
+kubectl -n thorium run probe-check --rm -it --restart=Never --image=<thorium image> \
+  --labels=app.kubernetes.io/managed-by=thorium-operator,thorium.sandia.gov/job-kind=schema-status \
+  --command -- sh -c '
+    # does the name resolve?
+    getent hosts elastic-es-http.elastic-system.svc.cluster.local
+    # does the port answer, and does TLS verify? (-k skips verification, as insecureCertificates does)
+    curl -sS -k -o /dev/null -w "%{http_code}\n" --max-time 10 \
+      https://elastic-es-http.elastic-system.svc.cluster.local:9200/'
+```
+
+A resolved name with a timeout points at a NetworkPolicy: list them with `kubectl -n
+elastic-system get networkpolicy -o yaml` and admit the whole Thorium namespace, as shown in
+[Converting a Pre-Helm Deployment](./convert-to-helm.md#before-you-start). The same holds for
+policies guarding Scylla, Redis, or S3. A `401` from `curl` means the network path is fine.
+
 ## Rollouts
 
 | Message | Cause and fix |
