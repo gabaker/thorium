@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use thorium::Error;
 use thorium::conf::K8sHostAliases;
+use tracing::{Level, event};
 
 use super::clusters::ClusterMeta;
 use super::config_maps::TRACING_CONFIG_MAP;
@@ -494,7 +495,12 @@ pub async fn create(spec: &JobSpec, meta: &ClusterMeta) -> Result<bool, Error> {
     let job = build(spec, meta)?;
     match api(meta).create(&PostParams::default(), &job).await {
         Ok(_) => {
-            println!("Created Job {} in namespace {}", spec.name, meta.namespace);
+            event!(
+                Level::INFO,
+                msg = "Created Job",
+                job = spec.name,
+                step = spec.step
+            );
             Ok(true)
         }
         // a Job with this name is this same attempt, so it is found by label next time
@@ -756,7 +762,7 @@ pub async fn delete(meta: &ClusterMeta, name: &str) -> Result<(), Error> {
     // delete it in the foreground so it stays until its pods are gone
     match api(meta).delete(name, &DeleteParams::foreground()).await {
         Ok(_) => {
-            println!("Deleted Job {name} in namespace {}", meta.namespace);
+            event!(Level::INFO, msg = "Deleted Job", job = name);
             Ok(())
         }
         // a Job that is already gone is the state we want
@@ -803,7 +809,7 @@ pub async fn delete_unchanged(meta: &ClusterMeta, job: &Job) -> Result<Pinned, E
     // delete it in the foreground so it stays until its pods are gone
     match api(meta).delete(&name, &params).await {
         Ok(_) => {
-            println!("Deleted Job {name} in namespace {}", meta.namespace);
+            event!(Level::INFO, msg = "Deleted Job", job = name);
             Ok(Pinned::Deleting)
         }
         // a Job that changed since it was read is looked at again rather than deleted

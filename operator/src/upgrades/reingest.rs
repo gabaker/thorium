@@ -20,6 +20,7 @@ use thorium::models::schema::{RebuildProgress, elastic_client, probe_elastic};
 use thorium::models::upgrades::{
     AppliedStep, PlannedStep, StepDef, StepState, UpgradeComponent, UpgradeConditionType,
 };
+use tracing::{Level, event, instrument};
 
 use super::migration::{self, Advance};
 use super::state::{self, StoredState};
@@ -135,14 +136,16 @@ async fn report(meta: &ClusterMeta, holds: bool, message: String) {
 /// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
+#[instrument(name = "reingest::track", skip_all)]
 pub async fn track(meta: &ClusterMeta) -> Option<u64> {
     // the reingest is advice and work beside the reconcile: whatever goes wrong here never fails it
     match try_track(meta).await {
         Ok(next) => next,
         Err(error) => {
-            println!(
-                "Warning: following the reingest of {} failed: {error}",
-                meta.name
+            event!(
+                Level::WARN,
+                msg = "Following the reingest failed",
+                error = crate::trace::describe(&error)
             );
             Some(RETRY_SECS)
         }

@@ -327,10 +327,14 @@ thorium-operator crd [--apply]
 thorium-operator uninstall --namespace <NAMESPACE> [--name <NAME>] [--timeout <SECONDS>]
 ```
 
+`--log-level` and `--trace` apply to every subcommand and may come before or after it.
+
 | Option | Notes |
 |--------|-------|
 | `--namespace <NAMESPACE>` (env `THORIUM_OPERATOR_NAMESPACE`) | Only watch `ThoriumCluster`s in this namespace. Without it the operator watches every namespace. The chart passes it while `operator.controller.watchOwnNamespaceOnly` is `true` |
 | `-u, --url <URL>` | The Thorium API URL, for running the operator outside the cluster during development |
+| `--log-level <LEVEL>` (env `THORIUM_OPERATOR_LOG_LEVEL`) | How much to log on stdout: `off`, `error`, `warn`, `setup`, `info`, `debug`, or `trace`, in any case (default `info`). `setup` logs the same as `warn` in the operator. Overrides the local level in the `--trace` file. The chart sets it from `operator.controller.logLevel` |
+| `--trace <FILE>` (env `THORIUM_OPERATOR_TRACE`) | A tracing config in the format the other components use, which can also send traces to a gRPC (OTLP) collector. A file that doesn't exist or doesn't parse stops the operator at startup with an error naming it |
 
 `thorium-operator crd` prints the `ThoriumCluster` CRD as YAML. At startup `operate` applies that
 CRD with server-side apply (field manager `thorium_cluster_apply`) and waits for it to be

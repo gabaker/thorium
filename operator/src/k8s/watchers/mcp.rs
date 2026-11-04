@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thorium::Error;
+use tracing::{Level, event, instrument};
 
 use crate::k8s::controller::{SharedInfo, ThoriumInfo};
 
@@ -40,15 +41,25 @@ struct ApiWatchContext {
 ///
 /// # Arguments
 ///
-/// * `_pod` - The api pod whose reconcile failed
+/// * `pod` - The api pod whose reconcile failed
 /// * `error` - The error the reconcile failed with
 /// * `_state` - The api pod watcher's context
-fn api_pod_error_policy(_pod: Arc<Pod>, error: &Error, _state: Arc<ApiWatchContext>) -> Action {
+// the controller hands every error policy its object by value
+#[allow(clippy::needless_pass_by_value)]
+fn api_pod_error_policy(pod: Arc<Pod>, error: &Error, _state: Arc<ApiWatchContext>) -> Action {
     // log the failure and when the pod is retried
-    println!("Controller error:\n\t{error}");
-    println!(
-        "Requeuing api pod reconciliation in {} seconds",
-        super::RECONCILE_ERROR_REQUEUE_SECS
+    let name = pod.metadata.name.as_deref().unwrap_or_default();
+    event!(
+        Level::ERROR,
+        msg = "Controller error",
+        pod = name,
+        error = crate::trace::describe(error)
+    );
+    event!(
+        Level::INFO,
+        msg = "Requeuing api pod reconciliation",
+        pod = name,
+        requeue_secs = super::RECONCILE_ERROR_REQUEUE_SECS
     );
     Action::requeue(Duration::from_secs(super::RECONCILE_ERROR_REQUEUE_SECS))
 }
@@ -154,6 +165,14 @@ fn pod_serves_mcp(pod: &Pod) -> bool {
 ///
 /// * `pod` - The api pod that changed
 /// * `ctx` - The api pod watcher's context
+#[instrument(
+    name = "ApiPod::reconcile",
+    skip_all,
+    fields(
+        pod = pod.metadata.name.as_deref().unwrap_or_default(),
+        namespace = pod.metadata.namespace.as_deref().unwrap_or_default(),
+    )
+)]
 async fn reconcile_api_pods(pod: Arc<Pod>, ctx: Arc<ApiWatchContext>) -> Result<Action, Error> {
     // if we don't have any configs then just requeue this pod in 30 seconds
     if ctx.shared.info.is_empty() {
@@ -170,7 +189,7 @@ async fn reconcile_api_pods(pod: Arc<Pod>, ctx: Arc<ApiWatchContext>) -> Result<
         Some(ns) => ns.to_string(),
         // all pods we scan must be in a namespace
         None => {
-            println!("Pod {name} is not in a namespace?");
+            event!(Level::WARN, msg = "Pod is not in a namespace", pod = name);
             // ignore this pod for one minute
             return Ok(Action::requeue(Duration::from_secs(60)));
         }
@@ -254,7 +273,11 @@ fn designation_slot(
 /// * `pod` - The name of the pod to add the mcp label to
 async fn add_label(pod_api: &Api<Pod>, pod: &str) {
     // log which pod we are labelling
-    println!("labeling {pod} with mcp=enabled");
+    event!(
+        Level::INFO,
+        msg = "Labeling pod with mcp=enabled",
+        pod = pod
+    );
     // build a label json template
     let label = serde_json::json!({
         "metadata": {
@@ -268,8 +291,17 @@ async fn add_label(pod_api: &Api<Pod>, pod: &str) {
         .patch(pod, &PatchParams::default(), &Patch::Merge(&label))
         .await
     {
-        Ok(_) => println!("pod {pod} labeled successfully with mcp=enabled"),
-        Err(error) => println!("Failed to label pod {pod}: {error}"),
+        Ok(_) => event!(
+            Level::INFO,
+            msg = "Pod labeled successfully with mcp=enabled",
+            pod = pod
+        ),
+        Err(error) => event!(
+            Level::ERROR,
+            msg = "Failed to label pod",
+            pod = pod,
+            error = crate::app::helpers::error_chain(&error)
+        ),
     }
 }
 
@@ -293,18 +325,36 @@ async fn remove_label(pod_api: &Api<Pod>, pod: &str) {
     // patch the pod with the new label
     match pod_api.patch(pod, &params, &Patch::Merge(&label)).await {
         Ok(_) => {
-            println!("Patched pod to remove label mcp=enabled from {pod}");
+            event!(
+                Level::INFO,
+                msg = "Patched pod to remove label mcp=enabled",
+                pod = pod
+            );
         }
         Err(kube::Error::Api(error)) => {
             // pod does not exist to remove label, continue on
             if error.code == 404 {
-                println!("pod {pod} not found to remove label, skipping pod update");
+                event!(
+                    Level::INFO,
+                    msg = "Pod not found to remove label, skipping pod update",
+                    pod = pod
+                );
             } else {
-                println!("Failed to remove label {label} from pod {pod}: {error}");
+                event!(
+                    Level::ERROR,
+                    msg = "Failed to remove label mcp=enabled from pod",
+                    pod = pod,
+                    error = %error
+                );
             }
         }
         Err(error) => {
-            println!("Failed to remove label {label} from pod {pod}: {error}");
+            event!(
+                Level::ERROR,
+                msg = "Failed to remove label mcp=enabled from pod",
+                pod = pod,
+                error = crate::app::helpers::error_chain(&error)
+            );
         }
     }
 }
@@ -336,7 +386,7 @@ async fn scan(pod_api: &Api<Pod>) -> Result<Option<String>, Error> {
         // get this pods name and status
         let Some(name) = pod.metadata.name else {
             // log that we are skipping an api pod without a name
-            println!("Skipping API pod without a name!");
+            event!(Level::WARN, msg = "Skipping API pod without a name");
             // skip to the next pod
             continue;
         };
@@ -367,13 +417,22 @@ async fn scan(pod_api: &Api<Pod>) -> Result<Option<String>, Error> {
             Some("Failed") => continue,
             Some(phase) => {
                 // log that we are skipping an api pod with the wrong phase
-                println!("Skipping API pod with phase: {phase}");
+                event!(
+                    Level::INFO,
+                    msg = "Skipping API pod with phase",
+                    pod = name,
+                    phase = phase
+                );
                 // skip to the next pod
                 continue;
             }
             None => {
                 // log that we are skipping an api pod without a phase
-                println!("Skipping API pod without a phase!");
+                event!(
+                    Level::INFO,
+                    msg = "Skipping API pod without a phase",
+                    pod = name
+                );
                 // skip to the next pod
                 continue;
             }
@@ -402,7 +461,10 @@ async fn scan(pod_api: &Api<Pod>) -> Result<Option<String>, Error> {
                 }
                 None => {
                     // log that no pod could be marked as our mcp pod
-                    println!("No viable API found to label for MCP support");
+                    event!(
+                        Level::WARN,
+                        msg = "No viable API found to label for MCP support"
+                    );
                     // we couldn't label a pod as being mcp enabled
                     None
                 }

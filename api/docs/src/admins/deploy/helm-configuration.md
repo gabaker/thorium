@@ -556,6 +556,12 @@ Create the TLS Secret before installing:
 kubectl -n thorium create secret tls thorium-tls --cert=thorium.crt --key=thorium.key
 ```
 
+## Operator logs
+
+`operator.controller.logLevel` (default `Info`) sets how much the operator logs: `Off`, `Error`,
+`Warn`, `Setup` (the same as `Warn` in the operator), `Info`, `Debug`, or `Trace`. See
+[Reading the operator's logs](./troubleshooting.md#reading-the-operators-logs).
+
 ## Proxies
 
 `operator.controller.proxy` (`httpProxy`, `httpsProxy`, `noProxy`) sets the operator's proxy

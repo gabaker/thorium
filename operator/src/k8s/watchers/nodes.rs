@@ -9,6 +9,7 @@ use kube::{Api, Client};
 use std::sync::Arc;
 use std::time::Duration;
 use thorium::Error;
+use tracing::{Level, event, instrument};
 
 use crate::k8s::controller::SharedInfo;
 
@@ -37,10 +38,17 @@ struct NodeWatchContext {
 fn node_error_policy(node: Arc<Node>, error: &Error, _state: Arc<NodeWatchContext>) -> Action {
     // log the failure and when the node is retried
     let name = node.metadata.name.as_deref().unwrap_or_default();
-    println!("Controller error:\n\t{error}");
-    println!(
-        "Requeuing node provision reconciliation of {name} in {} seconds",
-        super::RECONCILE_ERROR_REQUEUE_SECS
+    event!(
+        Level::ERROR,
+        msg = "Controller error",
+        node = name,
+        error = crate::trace::describe(error)
+    );
+    event!(
+        Level::INFO,
+        msg = "Requeuing node provision reconciliation",
+        node = name,
+        requeue_secs = super::RECONCILE_ERROR_REQUEUE_SECS
     );
     Action::requeue(Duration::from_secs(super::RECONCILE_ERROR_REQUEUE_SECS))
 }
@@ -51,6 +59,11 @@ fn node_error_policy(node: Arc<Node>, error: &Error, _state: Arc<NodeWatchContex
 ///
 /// * `node` - The node that changed
 /// * `ctx` - The node watcher's context
+#[instrument(
+    name = "Node::reconcile",
+    skip_all,
+    fields(node = node.metadata.name.as_deref().unwrap_or_default())
+)]
 async fn reconcile_nodes(node: Arc<Node>, ctx: Arc<NodeWatchContext>) -> Result<Action, Error> {
     // if we don't have any configs then just requeue this node in 30 seconds
     if ctx.shared.info.is_empty() {
@@ -89,9 +102,11 @@ async fn reconcile_nodes(node: Arc<Node>, ctx: Arc<NodeWatchContext>) -> Result<
                             // this node is already up to date so ignore it for 15 minutes
                             return Ok(Action::requeue(Duration::from_mins(15)));
                         }
-                        println!(
-                            "node {name} is running {node_version} but needs to be updated to {}",
-                            api_version.thorium
+                        event!(
+                            Level::INFO,
+                            msg = "Node needs to be updated",
+                            running = node_version,
+                            needed = %api_version.thorium
                         );
                     }
                 }
@@ -108,7 +123,11 @@ async fn reconcile_nodes(node: Arc<Node>, ctx: Arc<NodeWatchContext>) -> Result<
         // a down or unreachable node can't run its provision pod, so check it again once it
         // reports a change (such as becoming ready) or after a while
         if let Some(reason) = crate::k8s::nodes::node_unavailable(&node) {
-            println!("Not provisioning node {name} until it is ready as {reason}");
+            event!(
+                Level::INFO,
+                msg = "Not provisioning node until it is ready",
+                reason = reason
+            );
             return Ok(Action::requeue(Duration::from_mins(
                 UNAVAILABLE_REQUEUE_MINS,
             )));
@@ -122,7 +141,7 @@ async fn reconcile_nodes(node: Arc<Node>, ctx: Arc<NodeWatchContext>) -> Result<
         return Ok(Action::requeue(Duration::from_mins(15)));
     }
     // a node without any labels is checked again later
-    println!("{name} doesn't have any labels?");
+    event!(Level::WARN, msg = "Node doesn't have any labels");
     Ok(Action::requeue(Duration::from_secs(60)))
 }
 

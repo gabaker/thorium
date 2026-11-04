@@ -3,6 +3,7 @@ use kube::Api;
 use kube::api::{DeleteParams, ObjectMeta, Patch, PatchParams, PostParams};
 use std::collections::BTreeMap;
 use thorium::{Error, conf::Tracing};
+use tracing::{Level, event, instrument};
 
 use super::clusters::ClusterMeta;
 
@@ -27,7 +28,7 @@ pub async fn create_or_update(meta: &ClusterMeta, cm: &ConfigMap) -> Result<(), 
     let params = PostParams::default();
     match meta.cm_api.create(&params, cm).await {
         Ok(_) => {
-            println!("Created {name} ConfigMap in namespace {}", meta.namespace);
+            event!(Level::INFO, msg = "Created ConfigMap", config_map = name);
             Ok(())
         }
         // an existing ConfigMap has the keys we manage overwritten
@@ -41,7 +42,7 @@ pub async fn create_or_update(meta: &ClusterMeta, cm: &ConfigMap) -> Result<(), 
             let params: PatchParams = PatchParams::default();
             match meta.cm_api.patch(name, &params, &patch).await {
                 Ok(_) => {
-                    println!("Patched {name} ConfigMap in namespace {}", meta.namespace);
+                    event!(Level::INFO, msg = "Patched ConfigMap", config_map = name);
                     Ok(())
                 }
                 Err(error) => Err(Error::new(format!(
@@ -108,6 +109,7 @@ async fn create_tracing_cm(meta: &ClusterMeta, tracing: &Tracing) -> Result<(), 
 /// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
+#[instrument(name = "config_maps::create_or_update_all", skip_all)]
 pub async fn create_or_update_all(meta: &ClusterMeta) -> Result<(), Error> {
     // create tracing config
     create_tracing_cm(meta, &meta.conf.thorium.tracing).await?;
@@ -159,10 +161,18 @@ pub async fn delete(cm_api: &Api<ConfigMap>) -> Result<(), Error> {
     let params: DeleteParams = DeleteParams::default();
     // delete the tracing ConfigMap
     match cm_api.delete(TRACING_CONFIG_MAP, &params).await {
-        Ok(_) => println!("Deleted {TRACING_CONFIG_MAP} ConfigMap"),
+        Ok(_) => event!(
+            Level::INFO,
+            msg = "Deleted ConfigMap",
+            config_map = TRACING_CONFIG_MAP
+        ),
         // a missing ConfigMap is already in the state we want
         Err(kube::Error::Api(error)) if error.code == 404 => {
-            println!("ConfigMap {TRACING_CONFIG_MAP} does not exist, skipping deletion");
+            event!(
+                Level::INFO,
+                msg = "ConfigMap does not exist, skipping deletion",
+                config_map = TRACING_CONFIG_MAP
+            );
         }
         Err(error) => {
             return Err(Error::new(format!(

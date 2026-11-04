@@ -5,6 +5,7 @@ use kube::{
     runtime::reflector::Lookup,
 };
 use thorium::Error;
+use tracing::{Level, event, instrument};
 
 use super::clusters::ClusterMeta;
 
@@ -90,7 +91,7 @@ async fn update(meta: &ClusterMeta, name: &str, service: &Service) -> Result<(),
     match meta.service_api.patch(name, &params, &patch).await {
         Ok(_) => {
             // log that we patched this service
-            println!("Patched {name} service in namespace {}", meta.namespace);
+            event!(Level::INFO, msg = "Patched service", service = name);
             Ok(())
         }
         // an error occured during patching
@@ -120,7 +121,7 @@ pub async fn create_or_update(meta: &ClusterMeta, service: &Service) -> Result<(
     match meta.service_api.create(&post_params, service).await {
         // log that we successfully created this service
         Ok(_) => {
-            println!("{name} service created in namespace {}", meta.namespace);
+            event!(Level::INFO, msg = "Service created", service = &*name);
             Ok(())
         }
         // this service already exists so patch it instead
@@ -143,6 +144,7 @@ pub async fn create_or_update(meta: &ClusterMeta, service: &Service) -> Result<(
 /// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
+#[instrument(name = "services::create_or_update_all", skip_all)]
 pub async fn create_or_update_all(meta: &ClusterMeta) -> Result<(), Error> {
     // build API service template
     let api_service = api_service()?;
@@ -167,10 +169,14 @@ pub async fn delete(service_api: &Api<Service>) -> Result<(), Error> {
     // delete each service we create
     for service_name in ["thorium-api", "thorium-mcp"] {
         match service_api.delete(service_name, &params).await {
-            Ok(_) => println!("Deleted {service_name} service"),
+            Ok(_) => event!(Level::INFO, msg = "Deleted service", service = service_name),
             // a missing service is already in the state we want
             Err(kube::Error::Api(error)) if error.code == 404 => {
-                println!("Service {service_name} does not exist, skipping deletion");
+                event!(
+                    Level::INFO,
+                    msg = "Service does not exist, skipping deletion",
+                    service = service_name
+                );
             }
             Err(kube::Error::Api(error)) => {
                 return Err(Error::new(format!(

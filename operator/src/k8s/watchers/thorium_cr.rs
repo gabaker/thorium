@@ -16,6 +16,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
 use thorium::Error;
+use tracing::{Level, event, instrument};
 
 use crate::args::OperateCluster;
 use crate::k8s::clusters::{
@@ -71,15 +72,25 @@ impl State {
 ///
 /// # Arguments
 ///
-/// * `_cluster` - The `ThoriumCluster` whose reconcile failed
+/// * `cluster` - The `ThoriumCluster` whose reconcile failed
 /// * `error` - The error the reconcile failed with
 /// * `_state` - The controller state
-pub fn error_policy(_cluster: Arc<ThoriumCluster>, error: &Error, _state: Arc<State>) -> Action {
+// the controller hands every error policy its object by value
+#[allow(clippy::needless_pass_by_value)]
+pub fn error_policy(cluster: Arc<ThoriumCluster>, error: &Error, _state: Arc<State>) -> Action {
     // log the failure and when the cluster is retried
-    println!("Controller error:\n\t{error}");
-    println!(
-        "Requeuing ThoriumCluster reconciliation in {} seconds",
-        super::RECONCILE_ERROR_REQUEUE_SECS
+    event!(
+        Level::ERROR,
+        msg = "Controller error",
+        cluster = cluster.metadata.name.as_deref().unwrap_or_default(),
+        namespace = cluster.metadata.namespace.as_deref().unwrap_or_default(),
+        error = crate::trace::describe(error),
+    );
+    event!(
+        Level::INFO,
+        msg = "Requeuing ThoriumCluster reconciliation",
+        cluster = cluster.metadata.name.as_deref().unwrap_or_default(),
+        requeue_secs = super::RECONCILE_ERROR_REQUEUE_SECS,
     );
     Action::requeue(Duration::from_secs(super::RECONCILE_ERROR_REQUEUE_SECS))
 }
@@ -173,8 +184,10 @@ async fn release_unresolvable(
         return Ok(Action::await_change());
     }
     // log why the node cleanup is skipped
-    println!(
-        "ThoriumCluster config can't be resolved, skipping node cleanup before deletion: {error}"
+    event!(
+        Level::WARN,
+        msg = "ThoriumCluster config can't be resolved, skipping node cleanup before deletion",
+        error = crate::trace::describe(&error)
     );
     // stop the watchers from acting on this cluster before cleaning up
     let (name, namespace) = cluster_name_and_namespace(cluster)?;
@@ -372,7 +385,7 @@ async fn skip_unmanaged(
         Ok(Some((managed, _))) => {
             // record why nothing is deployed for this cluster
             let message = duplicate_message(&managed);
-            eprintln!("Error: {message}");
+            event!(Level::ERROR, msg = message);
             crds::set_status(&state.client, tracker, ClusterPhase::Error, Some(message)).await;
             Some(Ok(Action::requeue(Duration::from_secs(
                 DUPLICATE_REQUEUE_SECS,
@@ -545,7 +558,35 @@ async fn apply_cluster(
     }
 }
 
-/// Reconcile changes to `ThoriumCluster`
+/// Reconcile changes to `ThoriumCluster`, logging every line of it under the cluster's name,
+/// namespace, and generation
+///
+/// # Arguments
+///
+/// * `cluster` - Thorium cluster being changed
+/// * `state` - Controller context including client instance and optional URL
+#[instrument(
+    name = "ThoriumCluster::reconcile",
+    skip_all,
+    fields(
+        cluster = cluster.metadata.name.as_deref().unwrap_or_default(),
+        namespace = cluster.metadata.namespace.as_deref().unwrap_or_default(),
+        generation = cluster.metadata.generation.unwrap_or_default(),
+    )
+)]
+// a reconcile awaits every step of an apply or upgrade, which makes its future large
+#[allow(clippy::large_futures)]
+pub async fn reconcile(cluster: Arc<ThoriumCluster>, state: Arc<State>) -> Result<Action, Error> {
+    // reconcile this cluster, which the error policy logs a failure of
+    let result = reconcile_cluster(cluster, state).await;
+    // log when this cluster is looked at again
+    if let Ok(action) = &result {
+        event!(Level::INFO, msg = "Reconciled ThoriumCluster", next = ?action);
+    }
+    result
+}
+
+/// Reconcile changes to `ThoriumCluster` within its reconcile span
 ///
 /// # Arguments
 ///
@@ -554,7 +595,10 @@ async fn apply_cluster(
 // the gate, the config, the namespace check, and the apply run in this order, which reads best in
 // one place
 #[allow(clippy::too_many_lines)]
-pub async fn reconcile(cluster: Arc<ThoriumCluster>, state: Arc<State>) -> Result<Action, Error> {
+async fn reconcile_cluster(
+    cluster: Arc<ThoriumCluster>,
+    state: Arc<State>,
+) -> Result<Action, Error> {
     // list every cluster to find the one the operator manages
     let listing = list_clusters(&state, &cluster).await;
     // work from the listed copy of this cluster since the watch cache may not have the status
@@ -649,9 +693,10 @@ pub async fn reconcile(cluster: Arc<ThoriumCluster>, state: Arc<State>) -> Resul
     // get the api for this cluster's namespace to manage its finalizer with
     let clusters_api: Api<ThoriumCluster> = Api::namespaced(meta.client.clone(), &meta.namespace);
     // log which cluster we are reconciling
-    println!(
-        "Reconciling ThoriumCluster changes for {} in namespace {}",
-        meta.name, meta.namespace
+    event!(
+        Level::INFO,
+        msg = "Reconciling ThoriumCluster changes",
+        deleting = cluster.metadata.deletion_timestamp.is_some()
     );
     // apply or clean up this cluster
     let result = finalizer(

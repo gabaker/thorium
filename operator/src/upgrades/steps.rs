@@ -2,6 +2,7 @@
 
 use thorium::Error;
 use thorium::models::upgrades::{StepDef, UpgradeApproval};
+use tracing::instrument;
 
 use crate::app;
 use crate::app::bootstrap::StepOutcome;
@@ -313,6 +314,7 @@ async fn run_unattended(meta: &ClusterMeta, unattended: Unattended) -> Result<St
 ///
 /// * `meta` - Thorium cluster client and metadata
 /// * `step` - The step to run
+#[instrument(name = "steps::execute", skip_all, fields(step = step.id))]
 pub async fn execute(meta: &ClusterMeta, step: &StepDef) -> Result<StepResult, Error> {
     // find this step's executor
     let Some(executor) = executor(step) else {

@@ -14,6 +14,7 @@ use thorium::models::schema::setting_id;
 use thorium::models::upgrades::{
     PlannedStep, RevisionId, StepDef, StepKind, StepState, UpgradeComponent,
 };
+use tracing::{Level, event, instrument};
 
 use super::migration::{self, Advance};
 use super::state::{self, StoredState};
@@ -128,6 +129,7 @@ fn first_step(refused: &[String]) -> Option<&'static StepDef> {
 /// * `stored` - The recorded upgrade state, which the step's records are saved in
 /// * `revision` - The revision the cluster is at
 /// * `refused` - The settings the schema apply refused, as config paths
+#[instrument(name = "rebucket::drive", skip_all)]
 pub(super) async fn drive(
     meta: &ClusterMeta,
     stored: &mut StoredState,
@@ -181,7 +183,7 @@ pub(super) async fn drive(
                  any component rolls: {message}",
                 def.id
             );
-            println!("{text}");
+            event!(Level::INFO, msg = text, step = def.id);
             crds::set_upgrade_status(
                 &meta.client,
                 &meta.status,

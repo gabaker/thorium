@@ -5,6 +5,7 @@ use kube::api::{DeleteParams, ListParams, Patch, PatchParams, PostParams};
 use serde_json::Value;
 use thorium::conf::K8sHostAliases;
 use thorium::{Error, client::Basic};
+use tracing::{Level, event, instrument};
 
 use super::clusters::ClusterMeta;
 use super::crds::{self, ThoriumCluster};
@@ -843,7 +844,7 @@ pub async fn create_or_update(
     // create the deployment, or patch it towards our template if it already exists
     let applied = match meta.deploy_api.create(&params, &deployment).await {
         Ok(_) => {
-            println!("Deployment created {name} in namespace {}", meta.namespace);
+            event!(Level::INFO, msg = "Deployment created", deployment = name);
             Ok(())
         }
         Err(kube::Error::Api(error)) => {
@@ -856,7 +857,7 @@ pub async fn create_or_update(
                 let params: PatchParams = PatchParams::default();
                 match meta.deploy_api.patch(&name, &params, &patch).await {
                     Ok(_) => {
-                        println!("Patched {name} deployment in namespace {}", meta.namespace);
+                        event!(Level::INFO, msg = "Patched deployment", deployment = name);
                         Ok(())
                     }
                     Err(error) => Err(Error::new(format!(
@@ -892,15 +893,13 @@ pub async fn delete_one(name: &str, meta: &ClusterMeta) -> Result<(), Error> {
     let params = DeleteParams::default();
     // delete the deployment by name
     match meta.deploy_api.delete(name, &params).await {
-        Ok(_) => println!(
-            "Deleted {name} deployment from namespace {}",
-            meta.namespace
-        ),
+        Ok(_) => event!(Level::INFO, msg = "Deleted deployment", deployment = name),
         // a missing deployment is already in the state we want
         Err(kube::Error::Api(error)) if error.code == 404 => {
-            println!(
-                "No {name} deployment in namespace {} to delete, skipping cleanup",
-                meta.namespace
+            event!(
+                Level::INFO,
+                msg = "No deployment to delete, skipping cleanup",
+                deployment = name
             );
         }
         Err(kube::Error::Api(error)) => {
@@ -926,6 +925,7 @@ pub async fn delete_one(name: &str, meta: &ClusterMeta) -> Result<(), Error> {
 /// * `meta` - Thorium cluster client and metadata
 /// * `host_aliases` - The host aliases to add to each pod
 /// * `hashes` - The hashes of the inputs these pods are built from
+#[instrument(name = "deployments::deploy", skip_all, fields(component = "api"))]
 pub async fn deploy_api(
     meta: &ClusterMeta,
     host_aliases: &Vec<K8sHostAliases>,
@@ -946,6 +946,7 @@ pub async fn deploy_api(
 /// * `host_aliases` - The host aliases to add to each pod
 /// * `scaler_hashes` - The hashes of the inputs the k8s scaler's pods are built from
 /// * `hashes` - The hashes of the inputs the baremetal scaler's pods are built from
+#[instrument(name = "deployments::deploy", skip_all, fields(component = "scaler"))]
 pub async fn deploy_scalers(
     meta: &ClusterMeta,
     host_aliases: &Vec<K8sHostAliases>,
@@ -978,6 +979,11 @@ pub async fn deploy_scalers(
 /// * `meta` - Thorium cluster client and metadata
 /// * `host_aliases` - The host aliases to add to each pod
 /// * `hashes` - The hashes of the inputs these pods are built from
+#[instrument(
+    name = "deployments::deploy",
+    skip_all,
+    fields(component = "event-handler")
+)]
 pub async fn deploy_event_handler(
     meta: &ClusterMeta,
     host_aliases: &Vec<K8sHostAliases>,
@@ -1007,6 +1013,11 @@ const SEARCH_STREAMER_CLEANUP: &str = "search-streamer";
 /// * `meta` - Thorium cluster client and metadata
 /// * `host_aliases` - The host aliases to add to each pod
 /// * `hashes` - The hashes of the inputs these pods are built from
+#[instrument(
+    name = "deployments::deploy",
+    skip_all,
+    fields(component = "search-streamer")
+)]
 pub async fn deploy_search_streamer(
     meta: &ClusterMeta,
     host_aliases: &Vec<K8sHostAliases>,
@@ -1342,7 +1353,11 @@ fn pending_rollouts(
     let mut pending = Vec::with_capacity(checked.len());
     for (name, state) in checked {
         match state {
-            Ok(true) => println!("Deployment {name} has rolled out"),
+            Ok(true) => event!(
+                Level::INFO,
+                msg = "Deployment has rolled out",
+                deployment = name
+            ),
             Ok(false) => pending.push(name),
             Err(stalled) => return Err((name, stalled)),
         }
@@ -1418,6 +1433,7 @@ fn status_reports_wait(
 /// * `meta` - Thorium cluster client and metadata
 /// * `names` - The names of the deployments to wait on
 /// * `timeout` - How long to wait for every deployment before handing back
+#[instrument(name = "deployments::wait_for_rollouts", skip_all, fields(components = names.join(",")))]
 pub async fn wait_for_rollouts(
     meta: &ClusterMeta,
     names: &[String],
@@ -1490,6 +1506,7 @@ pub async fn wait_for_rollouts(
 ///
 /// * `host` - The url the operator reaches the API at
 /// * `timeout` - How long to wait for the API to answer
+#[instrument(name = "deployments::wait_for_health", skip_all)]
 pub async fn wait_for_health(
     host: &str,
     timeout: std::time::Duration,
@@ -1524,18 +1541,27 @@ pub async fn wait_for_health(
 ///
 /// * `deploy_api` - The Deployment API for the `ThoriumCluster`'s namespace
 /// * `cluster` - The `ThoriumCluster` whose component deployments to delete
+#[instrument(name = "deployments::delete", skip_all)]
 pub async fn delete(deploy_api: &Api<Deployment>, cluster: &ThoriumCluster) -> Result<(), Error> {
     // log that the component deployments are being cleaned up
-    println!("Cleaning up deployments using CRD");
+    event!(Level::INFO, msg = "Cleaning up deployments using CRD");
     // use default delete params
     let params = DeleteParams::default();
     // delete each deployment from the namespace
     for deployment in cluster.list_component_names() {
         match deploy_api.delete(&deployment, &params).await {
-            Ok(_) => println!("Deleted {deployment} deployment"),
+            Ok(_) => event!(
+                Level::INFO,
+                msg = "Deleted deployment",
+                deployment = deployment
+            ),
             // a missing deployment is already in the state we want
             Err(kube::Error::Api(error)) if error.code == 404 => {
-                println!("No {deployment} deployment to delete, skipping cleanup");
+                event!(
+                    Level::INFO,
+                    msg = "No deployment to delete, skipping cleanup",
+                    deployment = deployment
+                );
             }
             Err(kube::Error::Api(error)) => {
                 return Err(Error::new(format!(

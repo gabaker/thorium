@@ -69,6 +69,7 @@ spec:
           args: ["--namespace", {{ $ns | quote }}]
           {{- end }}
           env:
+            - { name: THORIUM_OPERATOR_LOG_LEVEL, value: {{ .Values.controller.logLevel | default "Info" | quote }} }
             {{- with .Values.controller.proxy }}
             {{- $noProxy := compact (splitList "," (.noProxy | default "" | nospace)) }}
             {{- if or .httpProxy .httpsProxy }}

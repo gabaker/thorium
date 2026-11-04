@@ -48,6 +48,7 @@ use thorium::models::upgrades::{
     RevisionId, StepDef, StepState, UPGRADE_STOPPED_STEP, UpgradeApproval, UpgradeError,
     UpgradeState, UpgradeStatus,
 };
+use tracing::{Level, event, instrument};
 
 use crate::k8s::clusters::{ClusterMeta, cluster_name_and_namespace};
 use crate::k8s::crds::{
@@ -234,7 +235,7 @@ async fn hold_error(
     requeue_secs: u64,
 ) -> Gate {
     // log the problem and record it in the cluster's status
-    eprintln!("Error: {message}");
+    event!(Level::ERROR, msg = message);
     crds::set_status(client, tracker, ClusterPhase::Error, Some(message)).await;
     Gate::Hold(Action::requeue(Duration::from_secs(requeue_secs)))
 }
@@ -326,7 +327,7 @@ fn decide(state: &UpgradeState, spec: &UpgradeSpec) -> Decision {
                  {latest} (Helm value operator.cluster.upgrade.targetRevision); the steps that \
                  will run are listed in status.upgrade.steps"
             );
-            println!("{message}");
+            event!(Level::INFO, msg = message);
             Decision::Required {
                 message,
                 progress: progress(&current, None, remaining),
@@ -380,6 +381,7 @@ fn note_stale_start(mut progress: UpgradeStatus, cluster: &ThoriumCluster) -> Up
 ///
 /// * `client` - The kube client to use
 /// * `tracker` - The cluster being reconciled and the status last written for it
+#[instrument(name = "upgrades::gate", skip_all)]
 pub async fn gate(client: &Client, tracker: &StatusTracker) -> Result<Gate, Error> {
     // get the cluster snapshot this reconcile works from
     let cluster = tracker.cluster();
@@ -403,7 +405,11 @@ pub async fn gate(client: &Client, tracker: &StatusTracker) -> Result<Gate, Erro
         // a hand-over that stopped before it rewrote the state in the previous layout does it now
         let mut stored = stored;
         if let Err(error) = handover::keep_previous_layout(client, &namespace, &mut stored).await {
-            println!("{error}");
+            event!(
+                Level::WARN,
+                msg = "Failed to keep the previous state layout",
+                error = crate::trace::describe(&error)
+            );
         }
         return Ok(Gate::Hold(
             handover::hold(client, tracker, &stored.state).await,
@@ -506,6 +512,7 @@ fn stop_first(gate: Gate, stored: StoredState) -> Gate {
 /// * `meta` - Thorium cluster client and metadata
 /// * `action` - The action the hold returns once nothing is left stopping
 /// * `stored` - The recorded upgrade state the gate read
+#[instrument(name = "upgrades::stop", skip_all)]
 pub async fn stop(
     meta: &ClusterMeta,
     action: Action,
@@ -560,7 +567,7 @@ pub async fn stop_unresolved(client: &Client, tracker: &StatusTracker, error: &E
         status.message.unwrap_or_default(),
         crds::error_message(error)
     );
-    eprintln!("Error: {message}");
+    event!(Level::ERROR, msg = message);
     if let Some(phase) = status.phase {
         crds::set_status(client, tracker, phase, Some(message)).await;
     }
@@ -775,7 +782,7 @@ fn credit_manual_fix(result: steps::StepResult, blocked_before: bool) -> steps::
 /// * `line` - The line to write
 fn log(line: &str) {
     // write the line where the operator's other messages go
-    println!("{line}");
+    event!(Level::INFO, msg = line);
     // keep it for the tests running on this thread to read back
     #[cfg(test)]
     tests::LOGGED.with(|logged| logged.borrow_mut().push(line.to_owned()));
@@ -936,6 +943,16 @@ async fn execute_step(
 /// * `index` - The index of the step to run
 /// * `start` - The revision the upgrade started from
 /// * `ops` - How the record is moved
+#[instrument(
+    name = "upgrades::run_step",
+    skip_all,
+    fields(
+        step = pending.steps[index].step.as_str(),
+        revision = pending.steps[index].revision.as_str(),
+    )
+)]
+// finding, running, recording, and holding a step read best in one place
+#[allow(clippy::too_many_lines)]
 async fn run_step(
     meta: &ClusterMeta,
     pending: &mut Pending,
@@ -1259,6 +1276,7 @@ pub async fn run(meta: &ClusterMeta, pending: Pending) -> Result<Option<Action>,
 /// * `meta` - Thorium cluster client and metadata
 /// * `pending` - The upgrade to run
 /// * `ops` - How the record is read and moved
+#[instrument(name = "upgrades::run", skip_all, fields(start = %pending.stored.state.revision, target = %pending.target))]
 async fn run_with(
     meta: &ClusterMeta,
     mut pending: Pending,
@@ -1305,7 +1323,7 @@ async fn run_with(
     }
     // the recorded Thorium version is advisory, so a mismatch is only a warning
     if let Some(warning) = pending.stored.state.version_mismatch() {
-        println!("Warning: {warning}");
+        event!(Level::WARN, msg = warning);
     }
     // say whether the image's thoradm plans the same catalog, then check every gated step in the
     // plan so the admin sees each one's scope before approving
@@ -1335,7 +1353,12 @@ async fn run_with(
         .await;
         return Ok(Some(action));
     }
-    println!("Upgraded {} from revision {start} to {target}", meta.name);
+    event!(
+        Level::INFO,
+        msg = "Upgraded ThoriumCluster",
+        from = %start,
+        to = %target
+    );
     // a downgrade ends by handing the cluster over to the previous operator
     if target < start {
         return Ok(Some(handover::finish(meta, &mut pending, &target).await?));
@@ -2586,6 +2609,40 @@ pub(crate) mod tests {
         let last = status_patches(&fake).pop().expect("status");
         assert_eq!(last["phase"], "Provisioning");
         assert_eq!(last["upgrade"]["current"], catalog().latest().to_string());
+    }
+
+    /// An upgrade's log lines name the upgrade span with the revisions it moves between
+    #[tokio::test]
+    async fn run_logs_inside_the_upgrade_span() {
+        // plan with the steps of the first Helm revision
+        let _catalog = first_helm_fixture();
+        // a cluster that finished every step but the last
+        let cluster = chart_cluster(serde_json::json!({"auto_target_dev": true}));
+        let mut state = UpgradeState::new(rev(BASELINE_REVISION), "1.8.1");
+        finish(
+            &mut state,
+            &["scylla-role", "elastic-identity", fixture::STEP],
+        );
+        let (fake, pending) = pending_upgrade(&cluster, &state).await;
+        let target = pending.target.to_string();
+        // run the upgrade while capturing its log lines
+        let meta = meta_for(cluster, &fake.client());
+        let (captured, guard) = crate::trace::capture::capture();
+        assert_eq!(run_local(&meta, pending).await.expect("run"), None);
+        drop(guard);
+        // the finish is logged inside the upgrade span, which names both revisions
+        let text = captured.text();
+        let upgraded = text
+            .lines()
+            .find(|line| line.contains("msg=\"Upgraded ThoriumCluster\""))
+            .unwrap_or_else(|| panic!("no upgrade line in {text}"));
+        assert!(
+            upgraded.contains(&format!(
+                "upgrades::run{{start={BASELINE_REVISION} target={target}}}"
+            )),
+            "{upgraded}"
+        );
+        assert!(upgraded.contains(&format!("to={target}")), "{upgraded}");
     }
 
     /// A ready cluster upgraded by `auto_target_dev` gets back to ready in the same reconcile

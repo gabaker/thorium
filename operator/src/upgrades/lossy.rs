@@ -17,6 +17,7 @@ use thorium::models::upgrades::{
     StepLoss, StepState, UpgradeApproval, UpgradeConditionType, Work, confirmation_code,
     consumed_codes, recorded_code,
 };
+use tracing::{Level, event};
 
 use super::migration::{
     self, Advance, Approved, Check, NOT_RETRIED_BY_ITSELF, annotation, approval_hash,
@@ -80,7 +81,11 @@ pub(super) async fn report(client: &Client, tracker: &StatusTracker) {
     let found = match setting(client, tracker.cluster()).await {
         Ok(found) => found,
         Err(error) => {
-            println!("Failed to read the dev label of the Namespace: {error}");
+            event!(
+                Level::WARN,
+                msg = "Failed to read the dev label of the Namespace",
+                error = crate::trace::describe(&error)
+            );
             return;
         }
     };

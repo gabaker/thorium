@@ -1,4 +1,5 @@
 use thorium::{Error, Thorium};
+use tracing::{Level, event, instrument};
 
 /// Initialize Thorium system settings
 ///
@@ -8,8 +9,10 @@ use thorium::{Error, Thorium};
 /// # Arguments
 ///
 /// * `thorium` - The Thorium client being used for API interactions
+#[instrument(name = "configure::init_settings", skip_all)]
 pub async fn init_settings(thorium: &Thorium) -> Result<(), Error> {
-    println!("Initializing Thorium system settings");
+    // log that the default settings are being created
+    event!(Level::INFO, msg = "Initializing Thorium system settings");
     // ask the API to create any default settings that don't exist yet
     let result = thorium.system.init().await?;
     // the API answers a successful init with no content

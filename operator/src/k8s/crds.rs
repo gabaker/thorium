@@ -19,6 +19,7 @@ use thorium::models::upgrades::{
     DriftSummary, JobFailure, SchemaBackend, UpgradeApproval, UpgradeCondition,
     UpgradeConditionType, UpgradeStatus,
 };
+use tracing::{Level, event, instrument};
 
 /// A struct representing an environment variable
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Hash, Eq, PartialEq)]
@@ -1298,7 +1299,10 @@ async fn send_status_patch(client: &Client, tracker: &StatusTracker, status: ser
     let cluster = &tracker.cluster;
     let (Some(name), Some(namespace)) = (&cluster.metadata.name, &cluster.metadata.namespace)
     else {
-        println!("Cannot set the status of a ThoriumCluster without a name and namespace");
+        event!(
+            Level::WARN,
+            msg = "Cannot set the status of a ThoriumCluster without a name and namespace"
+        );
         return;
     };
     // a merge patch replaces lists, so the planned steps are always replaced as a whole
@@ -1312,7 +1316,13 @@ async fn send_status_patch(client: &Client, tracker: &StatusTracker, status: ser
         Ok(_) => tracker.record(&status),
         // leave the tracked status alone so the next update retries this one
         Err(error) => {
-            println!("Failed to set status of ThoriumCluster {namespace}/{name}: {error}");
+            event!(
+                Level::WARN,
+                msg = "Failed to set status of ThoriumCluster",
+                cluster = name,
+                namespace = namespace,
+                error = crate::app::helpers::error_chain(&error)
+            );
         }
     }
 }
@@ -1399,6 +1409,7 @@ async fn patch_status(
 /// # Arguments
 ///
 /// * `client` - The kube client for the k8s cluster to apply the CRD in
+#[instrument(name = "crds::create_or_update", skip_all)]
 pub async fn create_or_update(client: &Client) -> Result<(), Error> {
     // apply the CRD as our field manager
     let params = PatchParams::apply("thorium_cluster_apply").force();
@@ -1414,7 +1425,7 @@ pub async fn create_or_update(client: &Client) -> Result<(), Error> {
     // ensure CRD is established before continuing on
     match result {
         Ok(Ok(_)) => {
-            println!("ThoriumCluster CRD applied");
+            event!(Level::INFO, msg = "ThoriumCluster CRD applied");
             Ok(())
         }
         Ok(Err(error)) => Err(Error::new(format!(

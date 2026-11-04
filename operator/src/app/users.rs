@@ -5,6 +5,8 @@ use thorium::{
     models::{AuthResponse, UserCreate, UserRole, UserUpdate},
 };
 
+use tracing::{Level, event, instrument};
+
 use crate::k8s::clusters::ClusterMeta;
 use crate::k8s::secrets;
 
@@ -45,42 +47,75 @@ pub async fn create_or_auth_user(
     let settings = super::helpers::client_settings();
     // only admin accounts are created with Thorium's secret key
     let key = admin.then(|| meta.conf.thorium.secret_key.clone());
-    // attempt to create the user account if it doesn't exist
-    let result = thorium::client::Users::create(url, user_req, key.as_deref(), &settings).await;
+    // attempt to create the user account if it doesn't exist, without recording its password
+    let result = crate::trace::unrecorded(thorium::client::Users::create(
+        url,
+        user_req,
+        key.as_deref(),
+        &settings,
+    ))
+    .await;
     // use a new user's login or fall back to logging in as an existing one
     match result {
         Ok(auth_result) => {
-            println!("Created {username} user");
+            event!(Level::INFO, msg = "Created user", user = username);
             Ok(auth_result)
         }
         Err(error) => {
             match error.status() {
                 Some(StatusCode::CONFLICT) => {
-                    println!("User {username} already exists");
+                    event!(Level::INFO, msg = "User already exists", user = username);
                     // authenticate with the password we have, which may already be current
-                    println!("Attempting basic auth with {username}'s password");
-                    let current = Users::auth_basic(url, username, password, &client).await;
+                    event!(
+                        Level::INFO,
+                        msg = "Attempting basic auth with the user's password",
+                        user = username
+                    );
+                    let current = crate::trace::unrecorded(Users::auth_basic(
+                        url, username, password, &client,
+                    ))
+                    .await;
                     match thorium {
                         // force a reset with an admin client when our password doesn't work,
                         // since we may not know the password of a user created without us
                         Some(thorium_api) if needs_reset(&current) => {
-                            println!("Attempting force reset of password with an admin user token");
+                            event!(
+                                Level::INFO,
+                                msg = "Attempting force reset of password with an admin user token",
+                                user = username
+                            );
                             let update = UserUpdate {
                                 password: Some(password.to_owned()),
                                 email: None,
                                 role: if admin { Some(UserRole::Admin) } else { None },
                                 settings: None,
                             };
-                            // update the user via the Thorium client
-                            thorium_api.users.update(username, update).await?;
-                            println!("Password reset successful for {username}");
-                            println!("Attempting basic auth with {username}'s password");
+                            // update the user via the Thorium client without recording its password
+                            crate::trace::unrecorded(thorium_api.users.update(username, update))
+                                .await?;
+                            event!(
+                                Level::INFO,
+                                msg = "Password reset successful",
+                                user = username
+                            );
+                            event!(
+                                Level::INFO,
+                                msg = "Attempting basic auth with the user's password",
+                                user = username
+                            );
                             // attempt basic auth with password and return AuthResponse
-                            Users::auth_basic(url, username, password, &client).await
+                            crate::trace::unrecorded(Users::auth_basic(
+                                url, username, password, &client,
+                            ))
+                            .await
                         }
                         // an existing user whose password already works needs no reset
                         Some(_) => {
-                            println!("{username}'s stored password is current, skipping reset");
+                            event!(
+                                Level::INFO,
+                                msg = "Stored password is current, skipping reset",
+                                user = username
+                            );
                             current
                         }
                         // without an admin client we can only use the user's password as is
@@ -120,6 +155,7 @@ fn needs_reset(current: &Result<AuthResponse, Error>) -> bool {
 ///
 /// * `meta` - Thorium cluster client and metadata
 /// * `url` - The url the operator reaches the Thorium API at
+#[instrument(name = "users::create_operator", skip_all)]
 pub async fn create_operator(meta: &ClusterMeta, url: &str) -> Result<String, Error> {
     // the operator always runs as this user
     let username = "thorium-operator";
@@ -127,13 +163,16 @@ pub async fn create_operator(meta: &ClusterMeta, url: &str) -> Result<String, Er
     let mut password = secrets::create_user_secret(username, meta).await?;
     if password.is_none() {
         // grab existing password from secret
-        println!("Operator secret exists, not updating password");
+        event!(
+            Level::INFO,
+            msg = "Operator secret exists, not updating password"
+        );
         password = secrets::get_user_password(username, meta).await?;
     }
     // create the operator user: thorium-operator
     match password {
         Some(operator_pass) => {
-            println!("Creating operator user");
+            event!(Level::INFO, msg = "Creating operator user");
             let maybe_authed =
                 create_or_auth_user(meta, url, username, operator_pass.as_ref(), true, None)
                     .await?;
@@ -166,6 +205,7 @@ pub async fn create_operator(meta: &ClusterMeta, url: &str) -> Result<String, Er
 /// * `thorium` - Thorium API client to use for forced password updates
 /// * `url` - The url the operator reaches the Thorium API at
 /// * `username` - Name of user to create
+#[instrument(name = "users::create", skip_all, fields(user = username))]
 pub async fn create(
     meta: &ClusterMeta,
     thorium: &thorium::Thorium,
@@ -176,13 +216,17 @@ pub async fn create(
     let mut password = secrets::create_user_secret(username, meta).await?;
     if password.is_none() {
         // the secret already exists, so read the password it holds
-        println!("{username} user secret exists, not updating password");
+        event!(
+            Level::INFO,
+            msg = "User secret exists, not updating password",
+            user = username
+        );
         password = secrets::get_user_password(username, meta).await?;
     }
     // create or log in as this user with its stored password
     match password {
         Some(user_pass) => {
-            println!("Creating {username} user");
+            event!(Level::INFO, msg = "Creating user", user = username);
             // create or authenticate a Thorium admin account
             let maybe_authed =
                 create_or_auth_user(meta, url, username, user_pass.as_ref(), true, Some(thorium))

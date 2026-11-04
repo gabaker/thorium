@@ -13,6 +13,7 @@ use kube::api::{Patch, PatchParams};
 use std::collections::BTreeMap;
 use thorium::Error;
 use thorium::models::upgrades::{AppliedStep, StepState, UpgradeComponent, UpgradeState};
+use tracing::{Level, event};
 
 use super::state::{self, StoredState};
 use super::{OPERATOR_VERSION, catalog};
@@ -216,9 +217,11 @@ async fn scale(meta: &ClusterMeta, name: &str, replicas: i32) -> Result<(), Erro
                 meta.namespace
             ))
         })?;
-    println!(
-        "Scaled the {name} deployment in namespace {} to {replicas}",
-        meta.namespace
+    event!(
+        Level::INFO,
+        msg = "Scaled deployment",
+        deployment = name,
+        replicas = replicas
     );
     Ok(())
 }

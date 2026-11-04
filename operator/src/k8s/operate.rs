@@ -5,6 +5,7 @@ use std::sync::Arc;
 use thorium::conf::K8sHostAliases;
 use thorium::{Error, Thorium};
 use tokio::time::Duration;
+use tracing::{Level, event, instrument};
 
 use crate::app;
 use crate::app::bootstrap::StepOutcome;
@@ -146,7 +147,11 @@ async fn kube_config_content(meta: &ClusterMeta) -> Result<Vec<u8>, Error> {
 /// * `details` - What the cluster is still waiting on
 async fn still_provisioning(meta: &ClusterMeta, details: String) -> Action {
     // log what we are waiting on
-    println!("{details}");
+    event!(
+        Level::INFO,
+        msg = "Still provisioning",
+        waiting_on = details
+    );
     // record what we are still waiting on
     k8s::crds::set_status(
         &meta.client,
@@ -177,6 +182,7 @@ struct BackendChecks {
 ///
 /// * `meta` - Thorium cluster metadata being operated upon
 /// * `bootstrap_due` - Whether the privileged bootstrap steps should run
+#[instrument(name = "operate::check_backends", skip_all)]
 async fn check_backends(
     meta: &ClusterMeta,
     bootstrap_due: bool,
@@ -190,7 +196,7 @@ async fn check_backends(
         app::bootstrap::scylla(meta).await?;
         // create Thorium's role and user in an external Elastic if requested
         if let StepOutcome::MissingSecret(details) = app::bootstrap::elastic_identity(meta).await? {
-            println!("{details}");
+            event!(Level::WARN, msg = details);
             missing.push(details);
         }
     }
@@ -221,6 +227,7 @@ async fn check_backends(
 /// * `meta` - Thorium cluster metadata being operated upon
 /// * `host_aliases` - The host aliases to add to each pod
 /// * `hashes` - The hashes of the inputs the API's pods are built from
+#[instrument(name = "operate::roll_api", skip_all)]
 async fn roll_api(
     meta: &ClusterMeta,
     host_aliases: &Vec<K8sHostAliases>,
@@ -260,6 +267,7 @@ pub(crate) struct Prepared {
 /// # Arguments
 ///
 /// * `meta` - Thorium cluster metadata being operated upon
+#[instrument(name = "operate::prepare", skip_all)]
 pub(crate) async fn prepare(meta: &ClusterMeta) -> Result<Result<Prepared, Action>, Error> {
     // create or update ConfigMaps
     k8s::config_maps::create_or_update_all(meta).await?;
@@ -322,6 +330,7 @@ pub(crate) async fn prepare(meta: &ClusterMeta) -> Result<Result<Prepared, Actio
 /// * `meta` - Thorium cluster metadata being operated upon
 /// * `url` - An override for the url the operator reaches the Thorium API at
 /// * `shared` - Data shared across watchers
+#[instrument(name = "operate::apply", skip_all)]
 #[allow(clippy::too_many_lines)]
 pub async fn apply(
     meta: &ClusterMeta,
@@ -329,10 +338,7 @@ pub async fn apply(
     shared: &Arc<SharedInfo>,
 ) -> Result<Action, Error> {
     // log which cluster we are applying
-    println!(
-        "Applying {} ThoriumCluster in {} namespace",
-        meta.name, meta.namespace
-    );
+    event!(Level::INFO, msg = "Applying ThoriumCluster");
     // get our k8s config
     let k8s_config = &meta.conf.thorium.scaler.k8s;
     // get the name of our primary cluster
@@ -393,7 +399,7 @@ pub async fn apply(
         && let StepOutcome::MissingSecret(details) =
             app::bootstrap::admin(meta, &host, &operator).await?
     {
-        println!("{details}");
+        event!(Level::WARN, msg = details);
         missing.push(details);
     }
     // create thorium user using operator token
@@ -467,6 +473,7 @@ pub async fn apply(
 ///
 /// * `meta` - Thorium cluster metadata being operated upon
 /// * `thorium` - The thorium user's Thorium client
+#[instrument(name = "operate::provision_workers", skip_all)]
 async fn provision_workers(meta: &ClusterMeta, thorium: &Thorium) -> Result<Option<String>, Error> {
     // get the version the API reports so a new version replaces provision pods and labels
     let version = thorium.updates.get_version().await?.thorium.to_string();
@@ -528,6 +535,7 @@ struct Outcome {
 /// * `meta` - Thorium cluster metadata being operated upon
 /// * `outcome` - What the apply found
 /// * `rollout_wait` - How long to wait for the components to roll out
+#[instrument(name = "operate::finish", skip_all)]
 async fn finish(
     meta: &ClusterMeta,
     outcome: Outcome,
@@ -562,7 +570,7 @@ async fn finish(
             )));
         }
         // log completed ThoriumCluster instance
-        println!("Completed creation of {} ThoriumCluster", meta.name);
+        event!(Level::INFO, msg = "Completed creation of ThoriumCluster");
         // report any non-fatal problems alongside the ready phase
         let message = (!outcome.notes.is_empty()).then(|| outcome.notes.join("; "));
         // mark this cluster as ready and record the bootstrap inputs we applied
@@ -591,7 +599,7 @@ async fn finish(
     // report the non-fatal problems too
     problems.extend(outcome.notes);
     let message = problems.join("; ");
-    println!("Error: {message}");
+    event!(Level::ERROR, msg = message);
     // mark this cluster as errored while recording the bootstrap inputs we applied
     k8s::crds::set_status_with_bootstrap(
         &meta.client,
@@ -629,12 +637,10 @@ async fn finish(
 ///
 /// * `meta` - Thorium cluster metadata being operated upon
 /// * `shared` - Data shared across watchers
+#[instrument(name = "operate::cleanup", skip_all)]
 pub async fn cleanup(meta: &ClusterMeta, shared: &Arc<SharedInfo>) -> Result<Action, Error> {
     // log which cluster we are deleting
-    println!(
-        "Deleting {} ThoriumCluster in {} namespace",
-        meta.name, meta.namespace
-    );
+    event!(Level::INFO, msg = "Deleting ThoriumCluster");
     // stop the watchers from provisioning or labelling for this cluster before cleaning up
     shared
         .info
@@ -652,7 +658,7 @@ pub async fn cleanup(meta: &ClusterMeta, shared: &Arc<SharedInfo>) -> Result<Act
     // remove the resources that don't depend on this cluster's config
     cleanup_namespace(&meta.cluster, &meta.client).await?;
     // log completion of cluster deletion
-    println!("Completed cleanup of {} ThoriumCluster", meta.name);
+    event!(Level::INFO, msg = "Completed cleanup of ThoriumCluster");
     Ok(Action::await_change())
 }
 
@@ -665,6 +671,7 @@ pub async fn cleanup(meta: &ClusterMeta, shared: &Arc<SharedInfo>) -> Result<Act
 ///
 /// * `cluster` - The `ThoriumCluster` being deleted
 /// * `client` - The kube client to delete resources with
+#[instrument(name = "operate::cleanup_namespace", skip_all)]
 pub async fn cleanup_namespace(cluster: &ThoriumCluster, client: &Client) -> Result<(), Error> {
     // get the name and namespace of this cluster
     let (name, namespace) = cluster_name_and_namespace(cluster)?;

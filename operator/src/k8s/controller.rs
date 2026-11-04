@@ -4,6 +4,7 @@ use kube::client::Client;
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use std::sync::Arc;
 use thorium::{Error, Thorium};
+use tracing::{Level, event};
 
 use super::watchers;
 use crate::args::OperateCluster;
@@ -192,7 +193,7 @@ impl SharedInfo {
                 // log the mismatch once instead of on every reconcile of every node
                 let message = context_mismatch_message(k8s_cluster, &configured);
                 if self.first_warning(&message) {
-                    eprintln!("Warning: {message}");
+                    event!(Level::WARN, msg = message);
                 }
                 Ok(None)
             }
@@ -225,7 +226,10 @@ async fn get_k8s_clients() -> Result<Vec<(String, Client)>, Error> {
     // try to load the kubeconfig from the environment
     let Some(kube_conf) = Kubeconfig::from_env()? else {
         // log that we are running with our service account
-        println!("Couldn't find kubeconfig falling back to service account");
+        event!(
+            Level::INFO,
+            msg = "Couldn't find kubeconfig falling back to service account"
+        );
         // try to get a kubconfig from the environment
         let client = Client::try_default().await?;
         // assume we are using the default k8s context name
@@ -293,7 +297,12 @@ pub async fn run(args: OperateCluster) {
         let clusters_api: Api<ThoriumCluster> =
             watchers::scoped_api(&client, args.namespace.as_deref());
         if let Err(error) = clusters_api.list(&ListParams::default().limit(1)).await {
-            println!("Failed to list ThoriumCluster API: {error}");
+            event!(
+                Level::ERROR,
+                msg = "Failed to list ThoriumCluster API",
+                context = name,
+                error = crate::app::helpers::error_chain(&error)
+            );
             std::process::exit(1);
         }
         // start the watchers for this cluster

@@ -172,21 +172,25 @@ async fn a_hold_stops_the_running_job(target: Option<&str>, phase: &str) {
 #[tokio::test]
 async fn clearing_the_target_stops_the_running_job() {
     // a cleared target holds the cluster in UpgradeRequired
-    a_hold_stops_the_running_job(None, "UpgradeRequired").await;
+    Box::pin(a_hold_stops_the_running_job(None, "UpgradeRequired")).await;
 }
 
 /// Setting the target to the deployment's revision while a step's Job runs stops the Job
 #[tokio::test]
 async fn setting_the_target_to_the_current_revision_stops_the_running_job() {
     // a target at the recorded revision holds the cluster in UpgradeRequired
-    a_hold_stops_the_running_job(Some("2026-10-v01"), "UpgradeRequired").await;
+    Box::pin(a_hold_stops_the_running_job(
+        Some("2026-10-v01"),
+        "UpgradeRequired",
+    ))
+    .await;
 }
 
 /// Setting a target the operator can't use while a step's Job runs stops the Job
 #[tokio::test]
 async fn an_unusable_target_stops_the_running_job() {
     // a target this build doesn't know holds the cluster in Error
-    a_hold_stops_the_running_job(Some("2026-10-v09"), "Error").await;
+    Box::pin(a_hold_stops_the_running_job(Some("2026-10-v09"), "Error")).await;
 }
 
 /// A stopped step resumes under the same approval when the target is set again: no second start

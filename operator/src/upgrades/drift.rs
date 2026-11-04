@@ -16,6 +16,7 @@ use thorium::models::upgrades::{
     APPLY_KEY_MARKER, DriftSummary, RETRY_VALUE_MARKER, StepDef, StepKind, UpgradeConditionType,
     UpgradeState,
 };
+use tracing::{Level, event, instrument};
 
 use super::record::{self, Read};
 use super::state;
@@ -305,14 +306,16 @@ pub async fn publish(meta: &ClusterMeta, summary: Option<&DriftSummary>) {
 /// # Returns
 ///
 /// When to reconcile again, if sooner than the cluster's usual wait.
+#[instrument(name = "drift::check", skip_all)]
 pub async fn check(meta: &ClusterMeta) -> Option<Action> {
     // drift is advice: whatever goes wrong here never fails the reconcile
     match try_check(meta).await {
         Ok(again) => again,
         Err(error) => {
-            println!(
-                "Warning: reading the schema drift of {} failed: {error}",
-                meta.name
+            event!(
+                Level::WARN,
+                msg = "Reading the schema drift failed",
+                error = crate::trace::describe(&error)
             );
             None
         }
@@ -365,10 +368,10 @@ async fn try_check(meta: &ClusterMeta) -> Result<Option<Action>, Error> {
                 // a restore or a state reset moved the record, so the state follows it
                 let followed = record::rewound(&record, &stored.state);
                 if followed {
-                    println!(
-                        "The record of {} was moved to revision {} by a restore or a state \
-                         reset; following it",
-                        meta.namespace, record.revision
+                    event!(
+                        Level::INFO,
+                        msg = "The record was moved by a restore or a state reset; following it",
+                        revision = %record.revision
                     );
                     record::follow(&mut stored.state, &record);
                 }

@@ -2,38 +2,56 @@
 mod app;
 mod args;
 mod k8s;
+mod trace;
 mod upgrades;
 
 use clap::Parser;
 use k8s::controller;
 use std::process::ExitCode;
 use std::time::Duration;
+use tracing::{Level, event};
 
 /// Run the operator subcommand given on the command line
 #[tokio::main]
 async fn main() -> ExitCode {
     // load command line args
     let args = args::Args::parse();
+    // printing the CRD writes YAML to stdout, so it runs without logs mixed into it
+    if let args::SubCommands::Crd(crd_args) = &args.cmd
+        && !crd_args.apply
+    {
+        k8s::crds::print_crd();
+        return ExitCode::SUCCESS;
+    }
+    // build the tracing config our log arguments describe
+    let trace_conf = match trace::config(&args.trace) {
+        Ok(trace_conf) => trace_conf,
+        Err(error) => {
+            // no logs are set up yet, so report a bad tracing config on stderr
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // send our logs to stdout and any external collector the config names
+    let provider = thorium::utils::trace::setup(trace::TRACE_NAME, &trace_conf);
     // execute the right handler
-    match args.cmd {
+    let code = match args.cmd {
         // operate the ThoriumClusters in k8s
         args::SubCommands::Operate(operate_args) => {
             controller::run(operate_args).await;
             ExitCode::SUCCESS
         }
         // apply the ThoriumCluster CRD to the cluster
-        args::SubCommands::Crd(crd_args) if crd_args.apply => apply_crd().await,
-        // print the ThoriumCluster CRD
-        args::SubCommands::Crd(_) => {
-            k8s::crds::print_crd();
-            ExitCode::SUCCESS
-        }
+        args::SubCommands::Crd(_) => apply_crd().await,
         // delete a ThoriumCluster and wait for the operator to clean it up
         args::SubCommands::Uninstall(uninstall) => {
             let timeout = Duration::from_secs(uninstall.timeout);
             k8s::uninstall::run(&uninstall.namespace, &uninstall.name, timeout).await
         }
-    }
+    };
+    // flush any traces still waiting to be sent
+    thorium::utils::trace::shutdown(provider);
+    code
 }
 
 /// Apply the `ThoriumCluster` CRD to the cluster this runs in, failing if it can't be applied
@@ -44,7 +62,11 @@ async fn apply_crd() -> ExitCode {
     let client = match kube::Client::try_default().await {
         Ok(client) => client,
         Err(error) => {
-            eprintln!("Failed to connect to Kubernetes: {error}");
+            event!(
+                Level::ERROR,
+                msg = "Failed to connect to Kubernetes",
+                error = app::helpers::error_chain(&error)
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -63,7 +85,11 @@ async fn apply_crd_with(client: &kube::Client) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             // report why the CRD couldn't be applied
-            eprintln!("Failed to apply the ThoriumCluster CRD: {error}");
+            event!(
+                Level::ERROR,
+                msg = "Failed to apply the ThoriumCluster CRD",
+                error = trace::describe(&error)
+            );
             ExitCode::FAILURE
         }
     }

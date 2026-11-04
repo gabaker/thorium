@@ -44,6 +44,10 @@
         "watchOwnNamespaceOnly": {
           "type": "boolean"
         },
+        "logLevel": {
+          "type": "string",
+          "enum": ["Off", "Error", "Warn", "Setup", "Info", "Debug", "Trace", "off", "error", "warn", "setup", "info", "debug", "trace"]
+        },
         "resources": {
           "type": [
             "object",
