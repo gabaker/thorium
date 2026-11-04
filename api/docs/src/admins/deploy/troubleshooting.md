@@ -281,6 +281,20 @@ sets. Helm 3 creates and patches objects client-side without checking field owne
 | Message | Cause and fix |
 |---------|---------------|
 | failed to install CRD crds/thoriumcluster.yaml: conflict occurred while applying object /thoriumclusters.sandia.gov ... conflicts with "thorium_cluster_apply": .spec.names.categories, .spec.names.shortNames | The `ThoriumCluster` CRD already exists, applied by the operator (field manager `thorium_cluster_apply`) or by `convert-to-helm.sh`, and Helm 4 installs a chart's `crds/` with server-side apply. This happens on the first install after a conversion, or on an install over a cluster that kept the CRD (`helm uninstall` leaves it). Run the install again with `--skip-crds`, which leaves the existing CRD alone as Helm 3 does; the operator applies its own CRD when it starts, and the chart's pre-upgrade hook applies it on every upgrade. minithor and megathor pass it whenever the CRD exists |
+| server-side apply failed for object thorium/`<name>` sandia.gov/v1, Kind=ThoriumCluster ... field not declared in schema, on a `helm upgrade` to a newer chart, and applying the new CRD by hand doesn't help | A values file still sets `operator.image.tag` to the previous release's image. The chart's pre-upgrade hook runs `thorium-operator crd --apply` from the image the values name, so it applies the previous release's CRD over the new one with every attempt, and the old operator does the same when it starts. Remove the override or set it to the new image's tag in every values file, check with `helm get values thorium -n thorium --all`, and run `helm upgrade` again |
+| conflict occurred while applying object thorium/banner /v1, Kind=ConfigMap: Apply failed with 1 conflict: conflict with "kubectl-create" using v1: .data.banner.txt (or `"before-first-apply"`, or ServiceAccount `thorium` or a namespace) | The object was created by the pre-Helm scripts and handed to the release by a `convert-to-helm.sh` that left its field ownership with its creator (`kubectl-create`), and the chart sets one of its fields to another value (that script dropped the banner's trailing newline). Clearing `managedFields` to `[{}]` doesn't help: Helm's next apply gives every field to `before-first-apply`. Hand the fields to the release with the patch below for each object an error names, then run the install again; Helm then writes the chart's values, so check that `operator.banner` in the converted values holds the banner you want |
+
+```bash
+# the object the error names, such as configmap banner -n thorium or serviceaccount thorium -n thorium
+kubectl patch configmap banner -n thorium --type merge -p '{"metadata":{"managedFields":[{
+  "manager":"convert-to-helm","operation":"Update","apiVersion":"v1","fieldsType":"FieldsV1",
+  "fieldsV1":{"f:metadata":{"f:annotations":{"f:meta.helm.sh/release-name":{},
+  "f:meta.helm.sh/release-namespace":{}},"f:labels":{"f:app.kubernetes.io/managed-by":{}}}}}]}}'
+```
+
+The patch leaves one entry owning only the Helm release annotations and `managed-by` label the
+conversion set (they must be on the object, as they are on every object the conversion handed
+over), so no other field manager owns a field the chart sets.
 
 ## Uninstalling
 
