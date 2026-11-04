@@ -43,6 +43,8 @@ pub use error::Error;
 pub use events::Events;
 pub use files::{Files, SampleBytes};
 pub use groups::Groups;
+#[doc(hidden)]
+pub use helpers::portable_file_name;
 pub use images::Images;
 pub use jobs::Jobs;
 pub use keys::Keys;

@@ -12,6 +12,7 @@ use uuid::Uuid;
 use super::ApiError;
 use crate::bad;
 use crate::models::EventTrigger;
+use crate::utils::helpers::refused_result_file_name;
 use crate::utils::protected_names;
 
 /// Bounds check a string
@@ -156,8 +157,8 @@ pub fn file_name(input: &str, name: &'static str, min: usize, max: usize) -> Res
     Ok(())
 }
 
-/// Validate a path in a multipart form data field that becomes an S3 key, such as a result
-/// file's name, segment by segment (see [`file_path`])
+/// Validate a result file's name in a multipart form data field, which becomes an S3 key (see
+/// [`file_path`])
 ///
 /// # Arguments
 ///
@@ -236,11 +237,12 @@ pub fn file_name_path(
     Ok(file_name.to_owned())
 }
 
-/// Validate a path a client named that becomes an S3 key, such as a result file's name
+/// Validate a result file's name that a client named, which becomes an S3 key
 ///
-/// The name is checked as given, segment by segment, since it is stored and later used as an S3
-/// key unchanged: an empty segment, a segment of only dots, or a trailing `/` would be dropped by
-/// a path's own parsing but stay in the key.
+/// The name is checked by [`refused_result_file_name`], the same check clients run before an
+/// upload: it is checked as given, segment by segment, since it is stored and later used as an S3
+/// key unchanged, and a backslash, a control character, or the reserved `__thorium_` prefix is
+/// refused too.
 ///
 /// # Arguments
 ///
@@ -248,25 +250,9 @@ pub fn file_name_path(
 /// * `name` - The name of the field to use in error messages
 /// * `allow_absolute` - Whether to allow absolute paths or not
 pub fn file_path(file_name: &str, name: &str, allow_absolute: bool) -> Result<String, ApiError> {
-    // convert our file name to a path to validate it
-    let path = PathBuf::from_str(file_name)?;
-    // validate this file name is not an absolute path
-    if !allow_absolute && path.is_absolute() {
-        return bad!(format!("{name} paths cannot be an absolute: {path:?}"));
-    }
-    // an absolute path starts with one separator; every segment after it must hold a name
-    let relative = file_name.strip_prefix('/').unwrap_or(file_name);
-    for segment in relative.split('/') {
-        if segment.is_empty() {
-            return bad!(format!(
-                "{name} paths cannot have empty segments or end with '/': {path:?}"
-            ));
-        }
-        if segment.chars().all(|chr| chr == '.') {
-            return bad!(format!(
-                "{name} paths cannot have components that have .. in them: {path:?}"
-            ));
-        }
+    // refuse this name if the shared result file name rules refuse it
+    if let Some(reason) = refused_result_file_name(file_name, allow_absolute) {
+        return bad!(format!("{name} paths {reason}: {file_name:?}"));
     }
     // return our validated file name
     Ok(file_name.to_owned())
@@ -452,8 +438,37 @@ mod tests {
         // an absolute name is refused unless allowed
         assert!(file_path("/a/b", "Result", false).is_err());
         assert_eq!(file_path("/a/b", "Result", true).unwrap(), "/a/b");
+        // a parent segment is refused wherever it sits
+        for name in ["../x", "a/../b", "..", "a/.."] {
+            assert!(file_path(name, "Result", false).is_err(), "{name} passed");
+        }
+        // a backslash is refused, as a separator or inside a segment
+        for name in [r"a\b.txt", r"..\x", r"sub\deeper\out.txt", r"C:\out.txt"] {
+            assert!(file_path(name, "Result", true).is_err(), "{name} passed");
+        }
+        // the reserved prefix is refused, whether or not the name is nested under it
+        for name in [
+            "__thorium_x",
+            "__thorium_x/y",
+            "__thorium_entities/files.json",
+        ] {
+            assert!(file_path(name, "Result", false).is_err(), "{name} passed");
+        }
+        // CR, LF, and other control characters a multipart header can't carry are refused
+        for name in ["a\nb", "a\rb", "out.txt\r\n", "a\0b"] {
+            assert!(file_path(name, "Result", false).is_err(), "{name:?} passed");
+        }
         // ordinary names pass unchanged, including dots inside a segment
-        for name in ["out.txt", "nested/out.txt", "a/b.c/d..e", ".hidden/file"] {
+        for name in [
+            "dir/__thorium_x",
+            "a\tb",
+            "out.txt",
+            "nested/out.txt",
+            "a/b.c/d..e",
+            ".hidden/file",
+            "report..json",
+            "nested/report..json",
+        ] {
             assert_eq!(file_path(name, "Result", false).unwrap(), name);
         }
     }

@@ -412,8 +412,70 @@ pub fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
     messages.join(": ")
 }
 
+/// The prefix reserved for the files Thorium stores next to a result's files, such as its entities
+pub const THORIUM_RESULT_FILE_PREFIX: &str = "__thorium_";
+
+/// Get why a result file's name would be refused at upload, if it would
+///
+/// The API refuses these names, and clients check them before uploading, since one refused name
+/// fails the whole result upload. The name is checked as given, segment by segment, since it
+/// becomes an S3 key unchanged and is later downloaded by its `/`-separated parts:
+///
+/// * an ASCII control character other than a tab, since the multipart header that carries the
+///   name can't hold it (a CR or LF is escaped with a backslash by clients such as reqwest, and
+///   other control characters fail to parse)
+/// * a backslash, since downloads refuse it
+/// * a leading `/`, unless absolute names are allowed
+/// * an empty segment or trailing `/`, or a segment of only dots, since a path's parsing would
+///   drop them but they stay in the key
+/// * the reserved [`THORIUM_RESULT_FILE_PREFIX`] at the start of the name
+///
+/// The reason returned completes a sentence about the name, such as "Result File paths <reason>".
+///
+/// # Arguments
+///
+/// * `name` - The name the file is uploaded under
+/// * `allow_absolute` - Whether a name starting with `/` is allowed
+#[must_use]
+pub fn refused_result_file_name(name: &str, allow_absolute: bool) -> Option<&'static str> {
+    // a multipart header can't carry control characters other than a tab
+    if name
+        .chars()
+        .any(|chr| chr.is_ascii_control() && chr != '\t')
+    {
+        return Some("cannot contain control characters such as CR or LF");
+    }
+    // names are downloaded by `/`-separated parts, which refuse a backslash
+    if name.contains('\\') {
+        return Some("must separate directories with '/', not a backslash");
+    }
+    // an absolute name starts with one separator
+    let relative = match name.strip_prefix('/') {
+        Some(_) if !allow_absolute => return Some("cannot be absolute"),
+        Some(relative) => relative,
+        None => name,
+    };
+    // every segment after a leading separator must hold a name that isn't only dots
+    for segment in relative.split('/') {
+        // an empty segment would stay in the stored key
+        if segment.is_empty() {
+            return Some("cannot have empty segments or end with '/'");
+        }
+        // a segment of only dots is refused as a possible parent segment
+        if segment.chars().all(|chr| chr == '.') {
+            return Some("cannot have segments of only dots, such as '..'");
+        }
+    }
+    // names starting with the reserved prefix belong to Thorium's own files
+    if name.starts_with(THORIUM_RESULT_FILE_PREFIX) {
+        return Some("cannot start with the reserved prefix __thorium_");
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
+    use super::refused_result_file_name;
     use super::{error_chain, redact_url};
     use super::{intersection, is_superset, missing_groups};
 
@@ -736,5 +798,70 @@ mod tests {
             error_chain(&error),
             "error for url (https://es:9200/x): refused"
         );
+    }
+
+    /// Result file names the upload path refuses get a reason, including names starting with the
+    /// reserved prefix and names a multipart header can't carry, while accepted names get none
+    #[test]
+    fn refused_result_file_names() {
+        // names refused for their segments, separators, or reserved prefix
+        for name in [
+            "a//b",
+            "a/./b",
+            "a/",
+            "./a",
+            "a/..",
+            "..",
+            "...",
+            r"a\b",
+            r"C:\out.txt",
+            "__thorium_x",
+            "__thorium_entities/files.json",
+            "__thorium_x/y",
+        ] {
+            assert!(
+                refused_result_file_name(name, false).is_some(),
+                "{name} passed"
+            );
+        }
+        // names with CR, LF, or another control character the multipart header can't carry
+        for name in [
+            "a\nb",
+            "a\rb",
+            "a\r\nb",
+            "out.txt\n",
+            "a\0b",
+            "a\x1bb",
+            "a\x7fb",
+        ] {
+            assert_eq!(
+                refused_result_file_name(name, false),
+                Some("cannot contain control characters such as CR or LF"),
+                "{name:?}"
+            );
+        }
+        // an absolute name is refused unless allowed, and is still checked by segment when allowed
+        assert_eq!(
+            refused_result_file_name("/a/b", false),
+            Some("cannot be absolute")
+        );
+        assert_eq!(refused_result_file_name("/a/b", true), None);
+        assert!(refused_result_file_name("/a//b", true).is_some());
+        assert!(refused_result_file_name("/", true).is_some());
+        // ordinary names pass, including dots inside a segment, tabs, quotes, and the prefix later on
+        for name in [
+            "out.txt",
+            "nested/out.txt",
+            "a/b.c/d..e",
+            ".hidden/file",
+            "report..json",
+            "a\tb",
+            "say \"hi\".txt",
+            "dir/__thorium_x",
+            "_thorium_x",
+            "résumé.txt",
+        ] {
+            assert_eq!(refused_result_file_name(name, false), None, "{name:?}");
+        }
     }
 }
