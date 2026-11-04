@@ -8,7 +8,7 @@ use futures::stream::{self, StreamExt, TryStreamExt};
 use itertools::Itertools;
 use scylla::statement::batch::{Batch, BatchType};
 use std::time::{Duration, Instant};
-use tracing::instrument;
+use tracing::{Level, event, instrument};
 use uuid::Uuid;
 
 use crate::models::backends::TagSupport;
@@ -342,6 +342,9 @@ pub async fn get(groups: &[String], id: Uuid, shared: &Shared) -> Result<Entity,
 
 /// Get an entity from Scylla without its tags
 ///
+/// An entity whose stored data can't be read is logged and returns an error naming it as
+/// unreadable.
+///
 /// # Arguments
 ///
 /// * `groups` - The list of groups to check for the entity
@@ -375,8 +378,17 @@ pub async fn get_untagged(
             .await?;
         // cast rows to entity rows and save the info
         for row in rows {
-            // make sure the row is valid
-            let row = row?;
+            // refuse an entity whose stored data can't be read, naming it in the error
+            let row = match row {
+                Ok(row) => row,
+                Err(error) => {
+                    // log this entity's unreadable rows so an admin can find and repair them
+                    warn_unreadable(&[id], groups_chunk, &HashMap::new(), &[error], shared).await;
+                    return internal_err!(format!(
+                        "Entity {id} is unreadable: its stored data could not be parsed"
+                    ));
+                }
+            };
             // get the entity we are building or cast this row to one
             match entity.as_mut() {
                 Some(handle) => handle.groups.push(row.group),
@@ -440,7 +452,8 @@ pub async fn all_groups(id: Uuid, shared: &Shared) -> Result<Vec<String>, ApiErr
 /// force an unbounded read or a silently incomplete entity. Matches come back
 /// ordered oldest-created first and an
 /// unknown name is just an empty list since callers distinguish the zero, one,
-/// and many match cases themselves.
+/// and many match cases themselves. A match whose stored data can't be read
+/// is logged and returns an error naming it as unreadable.
 ///
 /// # Arguments
 ///
@@ -490,8 +503,22 @@ pub async fn get_by_name(
         let mut chunk_rows: usize = 0;
         // cast rows to entity rows and save the info
         for cast in rows {
-            // make sure the row is valid
-            let row = cast?;
+            // refuse a match whose stored data can't be read, naming it in the error
+            let row = match cast {
+                Ok(row) => row,
+                Err(error) => {
+                    // log the unreadable match so an admin can find and repair it
+                    event!(
+                        Level::WARN,
+                        msg = "Entity row is unreadable",
+                        name = name,
+                        error = error.to_string(),
+                    );
+                    return internal_err!(format!(
+                        "An entity named '{name}' is unreadable: its stored data could not be parsed"
+                    ));
+                }
+            };
             // count this row towards this chunks truncation guard
             chunk_rows += 1;
             // get an entry to the timestamp map
@@ -738,6 +765,8 @@ pub async fn list_greppable(
 
 /// Get all details for many entities
 ///
+/// Entities whose stored data can't be read are logged and skipped.
+///
 /// # Arguments
 ///
 /// * `groups` - The groups to get from
@@ -772,6 +801,8 @@ pub async fn get_many(
 
 /// Get many entities without their tags, newest first
 ///
+/// Entities whose stored data can't be read are logged and skipped.
+///
 /// # Arguments
 ///
 /// * `groups` - The groups to get from
@@ -796,7 +827,8 @@ pub async fn get_many_untagged(
 ///
 /// Bounded aggregate readers like the admin hunt census project entities into
 /// tag free status lines, so loading tags for every entity across every group
-/// would just multiply the census read cost for data nothing reads.
+/// would just multiply the census read cost for data nothing reads. Entities
+/// whose stored data can't be read are logged and skipped.
 ///
 /// # Arguments
 ///
@@ -814,6 +846,9 @@ pub async fn get_many_bare(
 }
 
 /// Read the rows of many entities without their tags, newest first
+///
+/// Rows whose stored data can't be read are logged and skipped, so one bad row can't fail a
+/// whole listing.
 ///
 /// # Arguments
 ///
@@ -843,10 +878,19 @@ async fn read_many(
             .entities_by_id
             .get_many_chunk(&shared.scylla.session, ids_chunk, groups_chunk)
             .await?;
+        // track the errors of any rows in this chunk that can't be read
+        let mut unreadable = Vec::new();
         // try to cast rows to entiry rows
         for cast in rows {
-            // make sure the row is valid
-            let row = cast?;
+            // skip a row whose stored data can't be read so one bad row can't fail the listing
+            let row = match cast {
+                Ok(row) => row,
+                Err(error) => {
+                    // keep the error so this chunk's skipped rows can be logged together
+                    unreadable.push(error);
+                    continue;
+                }
+            };
             // get an entry to the timestamp map
             let timestamp_list = sorted.entry(row.created).or_default();
             // add our entity's id to it
@@ -863,6 +907,10 @@ async fn read_many(
                 Entry::Occupied(occupied) => occupied.into_mut().add_row(row),
             }
         }
+        // log the rows this chunk skipped so an admin can find and repair them
+        if !unreadable.is_empty() {
+            warn_unreadable(ids_chunk, groups_chunk, &data_map, &unreadable, shared).await;
+        }
     }
     // compile our details into a final list
     let mut details = Vec::with_capacity(data_map.len());
@@ -876,6 +924,82 @@ async fn read_many(
         }
     }
     Ok(details)
+}
+
+/// Log the entity rows that failed to deserialize, naming each by its id, kind, and group
+///
+/// The deserialization errors don't say which row failed, so the rows are found by reading the
+/// ids, kinds, and groups of the requested entities and keeping the ones that weren't read. No
+/// other row contents are logged.
+///
+/// # Arguments
+///
+/// * `ids` - The ids of the entities that were requested
+/// * `groups` - The groups the entities were requested in
+/// * `read` - The entities that were read, with the groups they were read in
+/// * `errors` - The errors from the rows that failed to deserialize
+/// * `shared` - Shared Thorium objects
+async fn warn_unreadable(
+    ids: &[Uuid],
+    groups: &[String],
+    read: &HashMap<Uuid, Entity>,
+    errors: &[scylla::deserialize::DeserializationError],
+    shared: &Shared,
+) {
+    // describe the errors, which are usually all the same
+    let error = errors
+        .iter()
+        .map(ToString::to_string)
+        .unique()
+        .collect::<Vec<_>>()
+        .join("; ");
+    // read the ids, kinds, and groups of the requested entities' rows
+    let rows = match shared
+        .scylla
+        .queries
+        .entities_by_id
+        .get_groups_kinds_by_ids(&shared.scylla.session, ids)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(lookup) => {
+            // log the skipped rows without naming them since they couldn't be found
+            event!(
+                Level::WARN,
+                msg = "Skipped unreadable entity rows",
+                count = errors.len(),
+                error = error,
+                lookup_error = lookup.to_string(),
+            );
+            return;
+        }
+    };
+    // log each requested row of an entity that wasn't read in that group, once
+    let mut logged = HashSet::new();
+    for row in rows.into_iter().flatten() {
+        // only rows in the requested groups were read
+        if !groups.contains(&row.group) {
+            continue;
+        }
+        // skip rows whose entity was read in this group
+        if read
+            .get(&row.id)
+            .is_some_and(|entity| entity.groups.contains(&row.group))
+        {
+            continue;
+        }
+        // log this unreadable row once per entity and group
+        if logged.insert((row.id, row.group.clone())) {
+            event!(
+                Level::WARN,
+                msg = "Skipped unreadable entity row",
+                id = row.id.to_string(),
+                kind = row.kind.as_str(),
+                group = row.group,
+                error = error,
+            );
+        }
+    }
 }
 
 /// Supplement entity list lines from tag rows with the names and kinds of
