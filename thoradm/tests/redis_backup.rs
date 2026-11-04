@@ -4,6 +4,7 @@
 mod common;
 
 use axum::http::Method;
+use common::cycle::{describe, restore_with, verify};
 use common::faulty_sink::{FaultySink, SinkFault};
 use common::harness::{Harness, redis_pool, write_ctl_conf};
 use common::mock_s3::{MockS3, S3Behavior, S3Rule};
@@ -12,8 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thoradm::args::{BackupComponents, NewBackup, RestoreBackup};
 use thoradm::backup::controllers::{backup, restore};
-use thoradm::backup::failures::{FAILURES_FILE, FailureKind, read_records};
-use thoradm::backup::manifest::InProgressMarker;
+use thoradm::backup::failures::{FAILURES_FILE, FailureKind, Operation, read_records};
+use thoradm::backup::manifest::{InProgressMarker, Manifest};
 use thoradm::backup::sink::{SinkFactory, TokioFs};
 use thoradm::outcome::RunOutcome;
 use thorium::test_utilities::generators;
@@ -577,38 +578,59 @@ async fn swap_field(harness: &Harness, key: &str, field: &str, value: &str) -> S
     old.unwrap_or_else(|| panic!("{key} has no {field}"))
 }
 
-/// Records the API can't parse fail the Redis backup with one failure per key, no `redis.json`,
-/// and exit 2, without copying a stored value into the failures file; once they are repaired,
-/// a new backup exits 0
+/// Reads the records every report a backup directory holds lists
+///
+/// # Arguments
+///
+/// * `out` - The backup directory
+fn reported_records(out: &Path) -> Vec<thoradm::backup::failures::FailureRecord> {
+    // each report directory's failures file, when it has one
+    let mut reported = Vec::new();
+    for entry in std::fs::read_dir(out.join("reports")).unwrap() {
+        let dir = entry.unwrap().path();
+        if dir.join(FAILURES_FILE).exists() {
+            reported.extend(read_records(&dir.join(FAILURES_FILE)).unwrap());
+        }
+    }
+    reported
+}
+
+/// Records the API can't parse are left out of the Redis backup, each recorded once as skipped
+/// under its key without copying a stored value, while `redis.json` and its manifest entry are
+/// written and the run exits 2; verify passes coverage and reports only the skipped records, and
+/// a restore with `--accept-failures` writes everything else
 #[tokio::test]
-async fn unparsable_records_are_recorded_one_per_key() {
+async fn unparsable_records_are_skipped_and_recorded_one_per_key() {
     let harness = Harness::get().await;
     let _guard = harness.restore_guard().await;
     let ns = &harness.conf.thorium.namespace;
-    // a group with an image and a pipeline
+    // a group with images and a pipeline whose stages tools back, so no stage needs an image
     let client = harness.client().await;
     let (groups, images, pipes) = generators::gen_all(1, &client).await.unwrap();
     let group = &groups[0].name;
-    let group_key = format!("{ns}:groups_data:{group}");
-    let image_key = format!("{ns}:image_data:{group}:{}", images[0].name);
+    // skip the image the pipeline doesn't run, so the kept image's used_by names the skipped
+    // pipeline
+    let stage = pipes[0].order[0].as_str().unwrap();
+    let (kept, skipped): (Vec<_>, Vec<_>) = images.iter().partition(|image| image.name == stage);
+    let (kept, skipped) = (&kept[0].name, &skipped[0].name);
+    let image_key = format!("{ns}:image_data:{group}:{skipped}");
     let pipe_key = format!("{ns}:pipeline_data:{group}:{}", pipes[0].name);
-    // corrupt one field of each with values of the wrong type
-    let allowed = swap_field(
-        harness,
-        &group_key,
-        "allowed",
-        r#"{"files":"secret-allowed-bv"}"#,
-    )
-    .await;
-    let resources = swap_field(
-        harness,
-        &image_key,
-        "resources",
-        r#"{"cpu":"secret-res-bv"}"#,
-    )
-    .await;
-    let order = swap_field(harness, &pipe_key, "order", r#""secret-order-bv""#).await;
-    // the backup records each key once, writes no redis.json, and exits 2
+    // an image hash without its group field, and a pipeline order of the wrong type
+    let mut conn = redis_pool(&harness.conf)
+        .await
+        .unwrap()
+        .get_owned()
+        .await
+        .unwrap();
+    redis::cmd("HDEL")
+        .arg(&image_key)
+        .arg("group")
+        .query_async::<()>(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+    swap_field(harness, &pipe_key, "order", r#""secret-order-bv""#).await;
+    // the backup records each key once as skipped, writes redis.json, and exits 2
     let out = harness.scratch("unparsable");
     let run = harness
         .thoradm()
@@ -618,39 +640,164 @@ async fn unparsable_records_are_recorded_one_per_key() {
         .expect("failed to run thoradm");
     let stderr = String::from_utf8_lossy(&run.stderr);
     assert_eq!(run.status.code(), Some(2), "{stderr}");
-    assert!(!out.join("redis.json").exists());
     let records = read_records(&out.join(FAILURES_FILE)).unwrap();
-    for key in [&group_key, &image_key, &pipe_key] {
-        let matching = records
+    for key in [&image_key, &pipe_key] {
+        let matching: Vec<_> = records
             .iter()
             .filter(|record| {
                 record.component == "redis" && record.key.as_deref() == Some(key.as_str())
             })
-            .count();
-        assert_eq!(matching, 1, "{key} in {records:?}");
+            .collect();
+        assert_eq!(matching.len(), 1, "{key} in {records:?}");
+        assert_eq!(matching[0].kind, FailureKind::Skipped, "{records:?}");
+        assert_eq!(matching[0].operation, Operation::Redis, "{records:?}");
     }
+    assert!(
+        records
+            .iter()
+            .any(|record| record.key.as_deref() == Some(image_key.as_str())
+                && record.error == "its group field is missing"),
+        "{records:?}"
+    );
+    // the state is written without the skipped records, and the manifest lists it
+    let written = std::fs::read_to_string(out.join("redis.json")).unwrap();
+    assert!(
+        !written.contains(skipped.as_str()),
+        "the skipped image is in redis.json"
+    );
+    assert!(
+        written.contains(kept.as_str()),
+        "the readable image is missing"
+    );
+    let manifest = Manifest::read(&out).await.unwrap().expect("no manifest");
+    assert!(manifest.redis.is_some(), "{manifest:?}");
+    assert_eq!(manifest.skipped, 2, "{manifest:?}");
     // no stored value reaches the failures file or the log
     let failures = std::fs::read_to_string(out.join(FAILURES_FILE)).unwrap();
-    for secret in ["secret-allowed-bv", "secret-res-bv", "secret-order-bv"] {
-        assert!(!failures.contains(secret), "{failures}");
-        assert!(!stderr.contains(secret), "{stderr}");
+    assert!(!failures.contains("secret-order-bv"), "{failures}");
+    assert!(!stderr.contains("secret-order-bv"), "{stderr}");
+    // verify passes coverage and reports each skipped record as missing from the backup
+    let checked = verify(harness, &out);
+    assert_eq!(checked.status.code(), Some(2), "{}", describe(&checked));
+    let verified = String::from_utf8_lossy(&checked.stderr);
+    assert!(
+        !verified.contains("lists nothing it backed up"),
+        "{verified}"
+    );
+    let reported = reported_records(&out);
+    assert_eq!(reported.len(), 2, "{reported:?}");
+    for record in &reported {
+        let key = record.key.as_deref();
+        assert!(
+            key == Some(image_key.as_str()) || key == Some(pipe_key.as_str()),
+            "{reported:?}"
+        );
     }
-    // once repaired, a new backup, as a finished one is never changed, exits 0 with redis.json
-    swap_field(harness, &group_key, "allowed", &allowed).await;
-    swap_field(harness, &image_key, "resources", &resources).await;
-    swap_field(harness, &pipe_key, "order", &order).await;
-    let repaired = harness.scratch("unparsable-repaired");
+    // a restore needs --accept-failures, and then writes every other record
+    restores_without_skipped(harness, &out, kept, skipped).await;
+}
+
+/// A pipeline whose stage no tool backs and runs an image the API can't parse is skipped with the
+/// image: both are recorded as skipped, `redis.json` is written, and a restore with
+/// `--accept-failures` leaves a state `verify --cluster` finds matches the backup
+#[tokio::test]
+async fn a_pipeline_running_a_skipped_image_is_skipped_too() {
+    let harness = Harness::get().await;
+    let _guard = harness.restore_guard().await;
+    let ns = &harness.conf.thorium.namespace;
+    // a group with images and a pipeline running one of them with no tool behind its stage
+    let client = harness.client().await;
+    let (groups, images, pipes) = generators::gen_all(1, &client).await.unwrap();
+    let group = &groups[0].name;
+    let stage = pipes[0].order[0].as_str().unwrap();
+    let kept = &images
+        .iter()
+        .find(|image| image.name != stage)
+        .unwrap()
+        .name;
+    let image_key = format!("{ns}:image_data:{group}:{stage}");
+    let pipe_key = format!("{ns}:pipeline_data:{group}:{}", pipes[0].name);
+    swap_field(harness, &pipe_key, "stage_tools", "{}").await;
+    // the image it runs loses its group field
+    let mut conn = redis_pool(&harness.conf)
+        .await
+        .unwrap()
+        .get_owned()
+        .await
+        .unwrap();
+    redis::cmd("HDEL")
+        .arg(&image_key)
+        .arg("group")
+        .query_async::<()>(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+    // the backup skips both, naming the image the pipeline depends on, and exits 2
+    let out = harness.scratch("skipped-image-pipeline");
+    let run = harness
+        .thoradm()
+        .args(["backup", "new", "redis", "-o"])
+        .arg(&out)
+        .output()
+        .expect("failed to run thoradm");
+    assert_eq!(run.status.code(), Some(2), "{}", describe(&run));
+    let records = read_records(&out.join(FAILURES_FILE)).unwrap();
+    let reason = format!("its image {group}/{stage} was skipped");
+    assert!(
+        records
+            .iter()
+            .any(|record| record.key.as_deref() == Some(pipe_key.as_str())
+                && record.kind == FailureKind::Skipped
+                && record.error == reason),
+        "{records:?}"
+    );
+    assert!(
+        records
+            .iter()
+            .any(|record| record.key.as_deref() == Some(image_key.as_str())),
+        "{records:?}"
+    );
+    assert!(out.join("redis.json").exists());
+    // a restore writes everything else, and verify --cluster finds it matches the backup
+    restores_without_skipped(harness, &out, kept, stage).await;
+}
+
+/// Restores a backup that skipped an image, checking it needs `--accept-failures` and then writes
+/// every other record, that `verify --cluster` finds the restored state matches the backup, and
+/// that the restored state backs up with exit 0
+///
+/// # Arguments
+///
+/// * `harness` - The harness naming the cluster
+/// * `out` - The backup directory
+/// * `kept` - An image the backup holds
+/// * `skipped` - The image the backup skipped
+async fn restores_without_skipped(harness: &Harness, out: &Path, kept: &str, skipped: &str) {
+    // refused without the flag, restored with it
+    let refused = restore_with(harness, out, &[]);
+    assert_eq!(refused.status.code(), Some(1), "{}", describe(&refused));
+    let restored = restore_with(harness, out, &["--accept-failures"]);
+    assert_eq!(restored.status.code(), Some(0), "{}", describe(&restored));
+    let after = harness.client().await.system.backup().await.unwrap();
+    assert!(after.images.iter().any(|image| image.name == kept));
+    assert!(!after.images.iter().any(|image| image.name == skipped));
+    // the restored Redis state matches the backup's, used_by lists included
+    let cluster = harness
+        .thoradm()
+        .args(["backup", "verify", "--cluster", "-b"])
+        .arg(out)
+        .output()
+        .expect("failed to run thoradm");
+    assert_eq!(cluster.status.code(), Some(0), "{}", describe(&cluster));
+    // the restored state holds nothing unreadable, so a new backup exits 0
+    let name = out.file_name().unwrap().to_string_lossy();
+    let rerun_out = harness.scratch(&format!("{name}-restored"));
     let rerun = harness
         .thoradm()
         .args(["backup", "new", "redis", "-o"])
-        .arg(&repaired)
+        .arg(&rerun_out)
         .output()
         .expect("failed to run thoradm");
-    assert_eq!(
-        rerun.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&rerun.stderr)
-    );
-    assert!(repaired.join("redis.json").exists());
+    assert_eq!(rerun.status.code(), Some(0), "{}", describe(&rerun));
+    assert!(rerun_out.join("redis.json").exists());
 }

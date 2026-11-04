@@ -751,6 +751,12 @@ pub struct Backup {
     /// empty
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accepted: Vec<DanglingReference>,
+    /// The users, groups, images, pipelines, and scoped tokens a backup taken with
+    /// `skip_unreadable` left out because they don't parse, and the images and pipelines left out
+    /// because they depend on one of those, each named by its Redis key with what is wrong with it
+    /// and never a stored value; left out when empty
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreadable: Vec<BackupProblem>,
 }
 
 /// The params for taking a backup
@@ -768,6 +774,12 @@ pub struct BackupParams {
     /// instead of failing the backup; `prune_dangling` takes precedence when both are set
     #[serde(default)]
     pub accept_dangling: bool,
+    /// Leave out the records that still don't parse after every read of the backup, and the
+    /// images and pipelines that depend on them (a skipped group's, and the pipelines with a stage
+    /// no tool backs running a skipped image), listing each in the backup's `unreadable`, instead
+    /// of failing the backup
+    #[serde(default)]
+    pub skip_unreadable: bool,
 }
 
 impl BackupParams {
@@ -785,6 +797,16 @@ impl BackupParams {
     pub fn accept_dangling(mut self) -> Self {
         // ask the API to keep and list what stays dangling
         self.accept_dangling = true;
+        self
+    }
+
+    /// Leaves out the records that don't parse, and the images and pipelines that depend on them
+    /// (a skipped group's, and the pipelines with a stage no tool backs running a skipped image),
+    /// listing them in the backup's `unreadable`, instead of failing the backup
+    #[must_use]
+    pub fn skip_unreadable(mut self) -> Self {
+        // ask the API to skip and list what doesn't parse
+        self.skip_unreadable = true;
         self
     }
 }

@@ -261,6 +261,10 @@ that means:
   doesn't hold;
 - a user whose groups name a group the backup doesn't hold.
 
+A user or group the backup leaves out because its record doesn't parse (see [Records that don't
+parse](#records-that-dont-parse)) is one the backup doesn't hold, so a reference to it is dangling
+like a reference to a deleted one, and the rules below apply to it the same way.
+
 The API reads the records up to three times (200 ms, then 400 ms apart) before it fails, so a change
 made while it reads (a user deleted mid-backup) doesn't fail the backup. A reference that stays
 dangling, left behind by an earlier failure, fails every backup until it is repaired. To take a
@@ -272,9 +276,10 @@ thoradm backup new --prune-dangling -o /mnt/backups/thorium-2026-10-17
 ```
 
 A reference is dropped only when it is dangling on all three reads and the API then confirms, by
-looking the user or group up in Redis, that it doesn't exist. One that resolves on a later read, or
-whose user or group exists by the time it is looked up, is kept, and a kept reference that is still
-dangling fails the backup as without the flag. With the flag, the backup drops:
+looking the user or group up in Redis, that it doesn't exist or that its record doesn't parse. One
+that resolves on a later read, or whose user or group exists by the time it is looked up, is kept,
+and a kept reference that is still dangling fails the backup as without the flag. With the flag,
+the backup drops:
 
 | Reference | What is dropped |
 |---|---|
@@ -303,8 +308,12 @@ component:
   scoped token's;
 - a user, group, image, pipeline, scoped token, or network-policy set held twice or named with a
   `:` or an empty name, a network-policy set of a group the backup doesn't hold, and a scoped token
-  whose owner isn't in the backup;
-- a record that doesn't parse.
+  whose owner isn't in the backup.
+
+A pipeline running an image, or an image or pipeline of a group, that the backup left out because
+its record doesn't parse isn't among them: it is left out too (see [Records that don't
+parse](#records-that-dont-parse)). When the component does fail, its 422 lists the records left
+out beside the problems.
 
 Nor does it look at references the API doesn't check at all: the rows of the Scylla tables (samples,
 results, tags, comments, repos, entities, associations, and network policies, for example) naming a
@@ -395,7 +404,7 @@ the time it is looked up, or that is still dangling without that confirmation, f
 component as without the flag. A scoped token's groups that are gone are backed up as
 they are with or without the flag, and aren't recorded. The flag accepts nothing else the
 `redis` component fails on (an image or pipeline naming a group that is gone, shared tokens,
-duplicate or invalid names, records that don't parse): see [Pruning dangling
+duplicate or invalid names): see [Pruning dangling
 references](#pruning-dangling-references) for the full list. With both `--prune-dangling` and
 `--accept-broken-links`, the dangling Redis references are pruned and listed in `pruned.jsonl`, not
 kept, and S3 broken links are still accepted.
@@ -440,7 +449,7 @@ A backup taken without the flag behaves as before.
 | Exit code | Meaning | What to do |
 |---|---|---|
 | 0 | The backup finished and nothing failed or was skipped | Nothing; the backup is complete |
-| 2 | The backup finished, but objects failed or rows were skipped, each listed in `failures.jsonl` and counted in the manifest; or `--accept-broken-links` accepted broken links, each listed in `failures.jsonl` and counted apart in the manifest; or `--prune-dangling` dropped references, each listed in `pruned.jsonl` and counted in the manifest | Read `failures.jsonl` and `pruned.jsonl`. Fix the cause and take a new backup into a new directory. A backup with failed or skipped objects is missing those objects, and a restore of it, or of one that pruned references, needs `--accept-failures`; a backup whose only records are accepted broken links restores without it |
+| 2 | The backup finished, but objects failed or rows or Redis records were skipped, each listed in `failures.jsonl` and counted in the manifest; or `--accept-broken-links` accepted broken links, each listed in `failures.jsonl` and counted apart in the manifest; or `--prune-dangling` dropped references, each listed in `pruned.jsonl` and counted in the manifest | Read `failures.jsonl` and `pruned.jsonl`. Fix the cause and take a new backup into a new directory. A backup with failed or skipped objects is missing those objects, and a restore of it, or of one that pruned references, needs `--accept-failures`; a backup whose only records are accepted broken links restores without it |
 | 1 | The run stopped early: `--abort-on-failure` hit a failure, the directory was refused, a config or usage error, or a component couldn't run at all | Read the last error on stderr. If `backup-in-progress.json` is present, fix the cause and run the same command again to resume |
 | 101 | Thoradm crashed (a panic) | Report it with the stderr output; the directory is an interrupted backup and can be resumed |
 
@@ -459,7 +468,7 @@ logged on stderr as it happens. An empty file means nothing failed.
 
 | Field | Present | What it holds |
 |---|---|---|
-| `kind` | Always | `failed` (the object exhausted its retries or hit a permanent error), `skipped` (a row that couldn't be read into its archive struct), or `broken-link` (a reference to an S3 object, user, or group the cluster lacks, accepted with `--accept-broken-links`) |
+| `kind` | Always | `failed` (the object exhausted its retries or hit a permanent error), `skipped` (a row that couldn't be read into its archive struct, or a Redis record the API couldn't parse or that depends on one, left out of `redis.json`), or `broken-link` (a reference to an S3 object, user, or group the cluster lacks, accepted with `--accept-broken-links`) |
 | `component` | Always | The component, as named on the command line (`redis`, `samples-list`, `result-files`, ...) |
 | `table` | Rows, ranges, archives | The Scylla table |
 | `bucket` | S3 objects | The S3 bucket |
@@ -480,18 +489,46 @@ such as a comment whose attachments column isn't valid JSON, which skips that co
 and no others. When the `redis` component fails, no state names the users' icons, so the `graphics`
 component writes one `skipped` record saying the icons weren't checked; without it, an
 `--accept-broken-links` list could pass as whole when it isn't.
-A user, group, image, pipeline, or scoped token the API can't parse, and records that don't fit
-together (for example a group member that isn't a user, a user in a group that doesn't exist, or
-two users sharing a token), fail the `redis` component with one record per Redis key, naming the
-problem but never a stored value, and no `redis.json` is written; repair the records and back up
-again into a new directory, or, for dangling user and group references, back up with
-`--prune-dangling` (see [Pruning dangling references](#pruning-dangling-references)) or
-`--accept-broken-links` (see [Accepting broken links](#accepting-broken-links)). A change
-made while the API reads Redis can look like either problem (a user deleted between the API listing
-the users and reading them reads as an empty record), so the API reads every record up to three
-times, pausing a little longer after each read, and fails only if the last read still has problems.
-A record that is really damaged therefore costs well under a second of extra reads before it fails
-the backup.
+Records that don't fit together (for example a group member that isn't a user, a user in a group
+that doesn't exist, or two users sharing a token) fail the `redis` component with one record per
+Redis key, naming the problem but never a stored value, and no `redis.json` is written; repair the
+records and back up again into a new directory, or, for dangling user and group references, back
+up with `--prune-dangling` (see [Pruning dangling references](#pruning-dangling-references)) or
+`--accept-broken-links` (see [Accepting broken links](#accepting-broken-links)).
+
+#### Records that don't parse
+
+A user, group, image, pipeline, or scoped token whose Redis record the API can't parse (an image
+hash missing its `group` field, for example) is left out of the backup, as a table row that can't
+be read is. The `redis` component still writes `redis.json` with every other record, and its
+manifest entry, and records each record it left out as a `skipped` record with `component` and
+`operation` `redis`, the record's Redis key in `key`, and what is wrong with it in `error`, never a
+stored value:
+
+```json
+{"kind":"skipped","component":"redis","key":"thorium:image_data:analysts:unpacker","operation":"redis","attempts":1,"error":"its group field is missing","at":"2026-10-17T23:55:38.111880138Z"}
+```
+
+The record goes into `failures.jsonl` before `redis.json` is written, so the state is never kept
+without it. The run exits 2, and `graphics` checks the icons of the users `redis.json` holds as
+usual. A skipped user's scoped tokens and a skipped group's network-policy set are left out with
+it, and so are the records a skipped record leaves unusable, each recorded the same way with the
+record it depends on in `error`: the images and pipelines of a skipped group (`its group <group>
+was skipped`), and a pipeline with a stage no tool backs that runs a skipped image (`its image
+<group>/<image> was skipped`). Since the backup doesn't hold a skipped record, any other reference
+to it is a reference to a record that is gone: a group member naming a skipped user, or a user in a
+skipped group, fails the component unless `--prune-dangling` or `--accept-broken-links` handles it
+(see [Pruning dangling references](#pruning-dangling-references)). `backup verify` passes the
+backup's coverage and lists each skipped record as an object the backup doesn't hold (exit 2),
+and `backup restore` needs `--accept-failures`, then restores every record but the skipped ones.
+To keep a skipped record, repair it on the cluster and take a new backup. A thoradm older than
+this behaviour, or one talking to an API older than it, fails the `redis` component with one
+`failed` record per such record and no `redis.json` instead.
+
+A change made while the API reads Redis can look like either problem (a user deleted between the
+API listing the users and reading them reads as an empty record), so the API reads every record up
+to three times, pausing a little longer after each read, and skips or fails only what the last read
+still finds. A record that is really damaged therefore costs well under a second of extra reads.
 
 ## What Is Backed Up
 

@@ -153,9 +153,13 @@ The [Taking Backups](./taking_backups.md) guide covers taking a backup in full: 
 first, the configs and access thoradm needs, the components and every flag of `backup new` with its
 default, the output directory (a finished backup directory is never reused, so each backup needs a
 new one; it is made private to the user running thoradm unless it has the setgid bit, which shares
-it with its group, for example `chgrp thorium-admins DIR && chmod 2770 DIR`), resuming an interrupted backup, the exit codes and `failures.jsonl`, and every file a
-backup writes. A backup whose Redis records don't fit together (a group member or a user's group
-that no longer exists, for example) fails its `redis` component until the records are repaired;
+it with its group, for example `chgrp thorium-admins DIR && chmod 2770 DIR`), resuming an
+interrupted backup, the exit codes and `failures.jsonl`, and every file a backup writes. A Redis
+record the API can't parse (an image hash missing its `group` field, for example) is left out of
+`redis.json` and recorded as a `skipped` record in `failures.jsonl`, so the backup exits 2 and a
+restore of it needs `--accept-failures`. A backup whose Redis records don't fit together (a group
+member or a user's group that no longer exists, or one that names a skipped user or group, for
+example) fails its `redis` component until the records are repaired;
 `backup new --prune-dangling` (off by default) drops the dangling user and group references
 instead, lists each change in `pruned.jsonl`, and exits 2, and a restore of such a backup needs
 `--accept-failures` (see [Pruning dangling

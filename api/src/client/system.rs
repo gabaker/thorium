@@ -398,7 +398,8 @@ impl System {
     /// Get a backup of data in Thorium
     ///
     /// The API fails the backup with a 422 listing every record that doesn't parse or doesn't fit
-    /// together; see [`System::backup_with`] to drop or keep dangling references instead.
+    /// together; see [`System::backup_with`] to skip records that don't parse, or to drop or keep
+    /// dangling references, instead.
     ///
     /// # Examples
     ///
@@ -423,7 +424,8 @@ impl System {
         self.backup_with(&BackupParams::default()).await
     }
 
-    /// Get a backup of data in Thorium with params, such as pruning or keeping dangling references
+    /// Get a backup of data in Thorium with params, such as skipping records that don't parse, or
+    /// pruning or keeping dangling references
     ///
     /// # Arguments
     ///
@@ -460,6 +462,9 @@ impl System {
         }
         if params.accept_dangling {
             query.push(("accept_dangling", "true"));
+        }
+        if params.skip_unreadable {
+            query.push(("skip_unreadable", "true"));
         }
         // build request
         let req = self

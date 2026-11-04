@@ -7,17 +7,17 @@ use std::path::PathBuf;
 
 use thorium::client::{ClientSettings, Users};
 use thorium::models::{
-    AiSettingsUpdate, AllowedEndpoint, Backup, BedrockEndpointKind, CredentialKind, EntityMetadata,
-    EntityMetadataRequest, EntityMetadataUpdate, EntityUpdate, GroupAllowed, GroupAllowedUpdate,
-    GroupUpdate, HostPathWhitelistUpdate, ImageBan, ImageBanKind, ImageBanUpdate,
-    ImageNetworkPolicyUpdate, ImageScaler, ImageUpdate, ModelBan, ModelBanKind, ModelBanUpdate,
-    ModelEndpointEntity, ModelEndpointEntityRequest, ModelProvider, ModelProviderKind, ModelSecret,
-    ModelsConf, ModelsConfUpdate, NetworkPolicyUpdate, PipelineBan, PipelineBanKind,
-    PipelineBanUpdate, PipelineRequest, PipelineUpdate, Pools, RepoRequest, Resources,
-    RunTokenScope, ScopedTokenRequest, SystemInfo, SystemSettings, SystemSettingsResetParams,
-    SystemSettingsUpdate, SystemSettingsUpdateParams, UserCreate, UserCredentialRef,
-    UserModelEndpoint, UserModelSettingsUpdate, UserRole, UserSettingsUpdate, UserUpdate, Volume,
-    VolumeTypes, WorkerDeleteMap, WorkerRegistrationList,
+    AiSettingsUpdate, AllowedEndpoint, Backup, BackupParams, BedrockEndpointKind, CredentialKind,
+    EntityMetadata, EntityMetadataRequest, EntityMetadataUpdate, EntityUpdate, GroupAllowed,
+    GroupAllowedUpdate, GroupUpdate, HostPathWhitelistUpdate, ImageBan, ImageBanKind,
+    ImageBanUpdate, ImageNetworkPolicyUpdate, ImageScaler, ImageUpdate, ModelBan, ModelBanKind,
+    ModelBanUpdate, ModelEndpointEntity, ModelEndpointEntityRequest, ModelProvider,
+    ModelProviderKind, ModelSecret, ModelsConf, ModelsConfUpdate, NetworkPolicyUpdate, PipelineBan,
+    PipelineBanKind, PipelineBanUpdate, PipelineRequest, PipelineUpdate, Pools, RepoRequest,
+    Resources, RunTokenScope, ScopedTokenRequest, SystemInfo, SystemSettings,
+    SystemSettingsResetParams, SystemSettingsUpdate, SystemSettingsUpdateParams, UserCreate,
+    UserCredentialRef, UserModelEndpoint, UserModelSettingsUpdate, UserRole, UserSettingsUpdate,
+    UserUpdate, Volume, VolumeTypes, WorkerDeleteMap, WorkerRegistrationList,
 };
 use thorium::models::{NodeGetParams, ReactionRequest, ReactionStatus};
 use thorium::test_utilities::generators::GroupRoles;
@@ -1116,8 +1116,8 @@ async fn swap_field(key: &str, field: &str, value: &str) -> Result<String, Error
     old.ok_or_else(|| Error::new(format!("{key} has no {field}")))
 }
 
-/// A backup of records that don't parse fails with 422, naming every such record's key and never
-/// its stored value, and succeeds once they are repaired
+/// A backup of records that don't parse, taken without `skip_unreadable`, fails with 422, naming
+/// every such record's key and never its stored value, and succeeds once they are repaired
 #[serial_test::serial]
 #[tokio::test]
 async fn unparsable_records_fail_the_backup() -> Result<(), Error> {
@@ -1165,6 +1165,270 @@ async fn unparsable_records_fail_the_backup() -> Result<(), Error> {
         backup.pipelines.iter().any(|p| p.name == pipes[0].name),
         true
     );
+    Ok(())
+}
+
+/// Runs one Redis command against the API's Redis
+///
+/// # Arguments
+///
+/// * `args` - The command and its arguments
+async fn redis_run(args: &[&str]) -> Result<(), Error> {
+    // connect to the API's Redis
+    let pool = test_utilities::get_redis_client(&test_utilities::CONF).await;
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|err| Error::new(format!("failed to get a Redis connection: {err}")))?;
+    // run the command, ignoring its reply
+    let mut command = redis::cmd(args[0]);
+    for arg in &args[1..] {
+        command.arg(*arg);
+    }
+    command
+        .query_async::<redis::Value>(&mut *conn)
+        .await
+        .map_err(|err| Error::new(format!("failed to run {}: {err}", args[0])))?;
+    Ok(())
+}
+
+/// Returns the problems a 422 backup error lists
+///
+/// # Arguments
+///
+/// * `result` - The backup's result
+fn listed_problems(result: Result<Backup, Error>) -> Result<Vec<Value>, Error> {
+    // the backup must have failed with 422
+    let Err(err) = result else {
+        return Err(Error::new("the backup succeeded"));
+    };
+    is!(err.status(), Some(StatusCode::UNPROCESSABLE_ENTITY));
+    let text = err.msg().unwrap_or_default();
+    let body: Value = serde_json::from_str(&text)
+        .map_err(|parse| Error::new(format!("the error body isn't JSON ({parse}): {text}")))?;
+    Ok(body["problems"].as_array().cloned().unwrap_or_default())
+}
+
+/// A backup taken with `skip_unreadable` leaves out an image without its group field and a
+/// pipeline whose order doesn't parse, lists each in `unreadable` by key without its stored value,
+/// and restores everything else, while a backup without the param still fails with 422
+#[serial_test::serial]
+#[tokio::test]
+async fn skip_unreadable_lists_records_that_dont_parse() -> Result<(), Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    let ns = test_utilities::CONF.thorium.namespace.clone();
+    // a group with images and a pipeline whose stages tools back, so no stage needs an image
+    let (groups, images, pipes) = generators::gen_all(1, &client).await?;
+    let group = &groups[0].name;
+    let image_key = format!("{ns}:image_data:{group}:{}", images[0].name);
+    let pipe_key = format!("{ns}:pipeline_data:{group}:{}", pipes[0].name);
+    // an image hash without its group field, and a pipeline order of the wrong type
+    redis_run(&["HDEL", &image_key, "group"]).await?;
+    swap_field(&pipe_key, "order", r#""secret-order-bv""#).await?;
+    // without the param, the backup fails with 422 naming both keys, as older clients expect
+    let problems = listed_problems(client.system.backup().await)?;
+    is!(names(&problems, &image_key), true);
+    is!(names(&problems, &pipe_key), true);
+    // with it, the backup leaves both out and lists them
+    let params = BackupParams::default().skip_unreadable();
+    let backup = client.system.backup_with(&params).await?;
+    let image = backup
+        .unreadable
+        .iter()
+        .find(|problem| problem.key == image_key)
+        .ok_or_else(|| Error::new(format!("{image_key} isn't listed: {:?}", backup.unreadable)))?;
+    is!(image.error.as_str(), "its group field is missing");
+    is!(
+        backup
+            .unreadable
+            .iter()
+            .any(|problem| problem.key == pipe_key),
+        true
+    );
+    is!(
+        backup
+            .images
+            .iter()
+            .any(|i| &i.group == group && i.name == images[0].name),
+        false
+    );
+    is!(
+        backup
+            .pipelines
+            .iter()
+            .any(|p| &p.group == group && p.name == pipes[0].name),
+        false
+    );
+    is!(backup.images.iter().any(|i| i.name == images[1].name), true);
+    // no stored value is copied into the backup's listing
+    let text = serde_json::to_string(&backup)?;
+    is!(text.contains("secret-order-bv"), false);
+    // the backup restores without the records it left out, and the restored state backs up whole
+    client.system.restore(&backup).await?;
+    let restored = client.system.backup().await?;
+    is!(restored.unreadable.is_empty(), true);
+    is!(restored.images.len(), backup.images.len());
+    is!(restored.pipelines.len(), backup.pipelines.len());
+    Ok(())
+}
+
+/// A reference to a record a backup left out because it doesn't parse is dangling: a group member
+/// naming a skipped user fails the backup without a flag, is dropped with `prune_dangling`, and is
+/// kept with `accept_dangling`; a pipeline running a skipped image is skipped with it, listed with
+/// the image it depends on, while a backup without `skip_unreadable` still fails
+#[serial_test::serial]
+#[tokio::test]
+async fn references_to_skipped_records_follow_the_dangling_rules() -> Result<(), Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    let ns = test_utilities::CONF.thorium.namespace.clone();
+    let (groups, images, pipes) = generators::gen_all(1, &client).await?;
+    let group = &groups[0].name;
+    // a listed user whose hash holds too little to parse, made a member of the group
+    let ghost = format!("io-{}", generators::name_suffix());
+    let ghost_key = format!("{ns}:user_data:{ghost}");
+    redis_run(&["SADD", &format!("{ns}:users"), &ghost]).await?;
+    redis_run(&["HSET", &ghost_key, "username", &ghost]).await?;
+    for set in ["groups_direct", "groups_combined"] {
+        redis_run(&["SADD", &format!("{ns}:{set}:{group}:users"), &ghost]).await?;
+    }
+    // without a flag, the member fails the backup, which lists the skipped user too
+    let skip = BackupParams::default().skip_unreadable();
+    let problems = listed_problems(client.system.backup_with(&skip).await)?;
+    is!(names(&problems, &ghost_key), true);
+    is!(names(&problems, "a user the backup doesn't hold"), true);
+    // with prune_dangling, the member is dropped and the user listed as skipped
+    let pruned = client.system.backup_with(&skip.prune_dangling()).await?;
+    is!(
+        pruned
+            .pruned
+            .iter()
+            .any(|change| change.record == format!("groups/{group}")
+                && change.name.as_deref() == Some(ghost.as_str())),
+        true
+    );
+    is!(
+        pruned
+            .unreadable
+            .iter()
+            .any(|problem| problem.key == ghost_key),
+        true
+    );
+    // with accept_dangling, it is kept and listed as accepted
+    let accepted = client.system.backup_with(&skip.accept_dangling()).await?;
+    is!(
+        accepted
+            .accepted
+            .iter()
+            .any(|reference| reference.record == format!("groups/{group}")
+                && reference.name == ghost),
+        true
+    );
+    // remove the user again
+    for set in ["groups_direct", "groups_combined"] {
+        redis_run(&["SREM", &format!("{ns}:{set}:{group}:users"), &ghost]).await?;
+    }
+    redis_run(&["SREM", &format!("{ns}:users"), &ghost]).await?;
+    redis_run(&["DEL", &ghost_key]).await?;
+    // a pipeline whose stages no tool backs, running an image without its group field
+    let stage = pipes[0].order[0]
+        .as_str()
+        .ok_or_else(|| Error::new(format!("unexpected order {}", pipes[0].order)))?
+        .to_owned();
+    is!(images.iter().any(|image| image.name == stage), true);
+    let pipe_key = format!("{ns}:pipeline_data:{group}:{}", pipes[0].name);
+    let image_key = format!("{ns}:image_data:{group}:{stage}");
+    let tools = swap_field(&pipe_key, "stage_tools", "{}").await?;
+    redis_run(&["HDEL", &image_key, "group"]).await?;
+    // without skip_unreadable the backup fails, naming the image
+    let problems = listed_problems(client.system.backup().await)?;
+    is!(names(&problems, &image_key), true);
+    // with it, the pipeline is skipped with the image, naming the image it runs
+    let backup = client.system.backup_with(&skip).await?;
+    let pipeline = backup
+        .unreadable
+        .iter()
+        .find(|problem| problem.key == pipe_key)
+        .ok_or_else(|| Error::new(format!("{pipe_key} isn't listed: {:?}", backup.unreadable)))?;
+    is!(
+        pipeline.error.clone(),
+        format!("its image {group}/{stage} was skipped")
+    );
+    is!(
+        backup
+            .unreadable
+            .iter()
+            .any(|problem| problem.key == image_key),
+        true
+    );
+    is!(
+        backup.pipelines.iter().any(|p| p.name == pipes[0].name),
+        false
+    );
+    // repair both records
+    swap_field(&pipe_key, "stage_tools", &tools).await?;
+    redis_run(&["HSET", &image_key, "group", group]).await?;
+    client.system.backup().await?;
+    Ok(())
+}
+
+/// A backup taken with `skip_unreadable` of a group that doesn't parse skips the group's images and
+/// pipelines with it, each listed with the group it depends on; the members' memberships of the
+/// group are dangling, so the backup needs `prune_dangling` or `accept_dangling` too
+#[serial_test::serial]
+#[tokio::test]
+async fn a_skipped_group_skips_its_images_and_pipelines() -> Result<(), Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    let ns = test_utilities::CONF.thorium.namespace.clone();
+    let (groups, images, pipes) = generators::gen_all(1, &client).await?;
+    let group = &groups[0].name;
+    let group_key = format!("{ns}:groups_data:{group}");
+    // a group whose allowed field is of the wrong type
+    let allowed = swap_field(&group_key, "allowed", r#"{"files":"secret-allowed-bv"}"#).await?;
+    // skipped alone, the group leaves its creator's membership dangling, which fails the backup
+    let skip = BackupParams::default().skip_unreadable();
+    let problems = listed_problems(client.system.backup_with(&skip).await)?;
+    is!(names(&problems, &group_key), true);
+    // with prune_dangling, the group, its images, and its pipeline are listed as skipped
+    let backup = client.system.backup_with(&skip.prune_dangling()).await?;
+    let reason = format!("its group {group} was skipped");
+    let dependents = images
+        .iter()
+        .map(|image| format!("{ns}:image_data:{group}:{}", image.name))
+        .chain(
+            pipes
+                .iter()
+                .map(|pipe| format!("{ns}:pipeline_data:{group}:{}", pipe.name)),
+        );
+    for key in dependents {
+        is!(
+            backup
+                .unreadable
+                .iter()
+                .any(|problem| problem.key == key && problem.error == reason),
+            true
+        );
+    }
+    is!(
+        backup
+            .unreadable
+            .iter()
+            .any(|problem| problem.key == group_key),
+        true
+    );
+    is!(
+        backup.images.iter().any(|image| &image.group == group),
+        false
+    );
+    is!(
+        serde_json::to_string(&backup)?.contains("secret-allowed-bv"),
+        false
+    );
+    // repair the group
+    swap_field(&group_key, "allowed", &allowed).await?;
+    client.system.backup().await?;
     Ok(())
 }
 

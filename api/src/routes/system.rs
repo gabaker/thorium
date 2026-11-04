@@ -422,10 +422,14 @@ async fn reset_cache(
 ///
 /// This will backup all data except reactions as those are large. A user, scoped token, group,
 /// image, or pipeline whose Redis record doesn't parse fails the backup, listing every such
-/// record's key, as do records that don't fit together. With `prune_dangling`, the user and group
-/// references that stay dangling are dropped instead and listed in the backup's `pruned`; with
-/// `accept_dangling` (and no `prune_dangling`), the group members and user memberships that stay
-/// dangling are kept and listed in the backup's `accepted`.
+/// record's key, as do records that don't fit together. With `skip_unreadable`, the records that
+/// don't parse are left out instead and listed in the backup's `unreadable`, and so are the
+/// images and pipelines that depend on them (a skipped group's, and the pipelines with a stage no
+/// tool backs running a skipped image). With
+/// `prune_dangling`, the user and group references that stay dangling are dropped instead and
+/// listed in the backup's `pruned`; with `accept_dangling` (and no `prune_dangling`), the group
+/// members and user memberships that stay dangling are kept and listed in the backup's
+/// `accepted`.
 ///
 /// # Arguments
 ///
@@ -442,7 +446,7 @@ async fn reset_cache(
         (status = 200, description = "Backup of Thorium data", body = Backup),
         (status = 401, description = "This user is not authorized to access this route. Only a full token may use this route: a scoped token, including a run token, is refused."),
         (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
-        (status = 422, description = "Some Redis records don't parse or don't fit together; no backup was built", body = BackupProblems),
+        (status = 422, description = "Some Redis records don't parse (without skip_unreadable) or don't fit together; no backup was built", body = BackupProblems),
         (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
         (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),

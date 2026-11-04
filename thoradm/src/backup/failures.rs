@@ -29,7 +29,8 @@ pub const FAILURES_FILE: &str = "failures.jsonl";
 pub enum FailureKind {
     /// The object exhausted its retries or hit a permanent error
     Failed,
-    /// A row that couldn't be deserialized into the archive struct
+    /// A row that couldn't be deserialized into the archive struct, or a Redis record the API
+    /// couldn't parse and left out of the Redis state
     Skipped,
     /// A reference to an object the source doesn't hold, kept as it is in the source and accepted
     /// by `--accept-broken-links`
