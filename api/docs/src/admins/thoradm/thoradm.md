@@ -456,8 +456,10 @@ guide](./taking_backups.md#large-restores-flushing-the-redis-database) covers it
 
 **Views.** `schema apply` defines every view, so the restore saves no view statements: it creates
 each view it dropped, and any view an interrupted restore left dropped, from the schema, and waits
-for them to build, with no time limit, logging every 10 seconds how many views are built and which are
-still building (and, on a cluster, how many nodes have finished each). A view that can't be created is
+for them to build for up to five hours (the default of `schema apply --view-wait-secs`), logging
+every 10 seconds how many views are built and which are still building (and, on a cluster, how
+many nodes have finished each and which nodes it still waits on). A Scylla node that is down never
+finishes a build, so restore with every node up. A view that can't be created is
 recorded (operation `post-restore`, key `schema apply`) and the summary says the views couldn't be recreated; once the cause is fixed, run
 `thoradm schema apply`, which creates them. The schema apply that converges the keyspace before any
 row is restored records its failure with operation `pre-restore` and key `schema apply`.
@@ -985,6 +987,7 @@ thoradm schema hash [--backend scylla|elastic|redis|s3]
 thoradm schema apply [--dry-run] [--wait-for-scylla <secs>] [--seed-revision <revision>]
                      [--to-revision <revision>] [--accept-partition-sizes]
                      [--recreate-view <view>]... [--yes] [--force-break-lease]
+                     [--view-wait-secs <secs>]
 thoradm schema status [--acknowledged <json>] [--no-probe] [--result <job uid>]
                       [--wait-for-scylla <secs>]
 thoradm schema diff [--json] [--acknowledged <file>]
@@ -997,7 +1000,7 @@ thoradm schema drop-legacy --object <backend:name> [--execute] [--confirm]
 |---|---|
 | `print` | Prints the declared schema as CQL, or with `--canonical` in canonical JSON, optionally for one backend. Reads no config |
 | `hash` | Prints the declared fingerprints: the deployment's and each backend's. Reads no config |
-| `apply` | Creates the keyspace and the `schema_migrations` tables, then converges every declared object: it creates what is missing and adds missing columns, and it never drops anything. It records what it applied. `--dry-run` prints the statements and takes no lease. The operator runs the same command as the schema-apply Job before it rolls components out |
+| `apply` | Creates the keyspace and the `schema_migrations` tables, then converges every declared object: it creates what is missing, adds missing columns, and recreates each declared materialized view whose definition is out of date, and it drops nothing else. It records what it applied. `--dry-run` prints the statements and takes no lease. The operator runs the same command as the schema-apply Job before it rolls components out |
 | `status` | Prints the deployment's record (revision, fingerprints, history), a capped drift summary, and this thoradm's catalog identity on one `THORIUM-RESULT` line, read-only. `--no-probe` skips the probe of the live schema and reports the record only |
 | `diff` | Compares the live schema with the snapshot of the recorded revision (see [Comparing the Live Schema](#comparing-the-live-schema)) |
 | `verify-views` | Compares each declared materialized view with its base table by token range, read-only; `--sample <n>` checks only that many random token ranges. Scylla updates views in the background, so rows written while it runs can show a view briefly out of step: run it again, with writers paused, before recreating a view it reports |
@@ -1018,6 +1021,16 @@ default TTL differs from the live one is altered.
   an older revision's committed snapshot instead of the declared schema: it creates the tables, columns, and views that snapshot has and the live schema
   lacks (what a later step dropped) and drops nothing a newer revision added. It is the first step
   of reversing a step that dropped something.
+- A declared materialized view whose live definition differs from this build's (another base
+  table, key, clustering order, filter, or selected columns, as views created by older releases
+  have) is dropped and created again, since Scylla can't alter a view. `schema apply` logs how each
+  view differed, lists it under `views_recreated` in its report, and waits for every node to build
+  it before it records anything. Views hold no data of their own, but routes reading one fail
+  while it is dropped and see missing rows until its build finishes, which scans the base table:
+  about 10 to 25 seconds per million base rows per view in benchmarks. A dry run logs how each
+  view it would recreate differs. A view the registry doesn't declare is never compared or
+  dropped, and a declared view whose live definition can't be read is left as it is and named in
+  a warning; `--recreate-view` replaces it if it is out of date.
 - `--recreate-view <view>` (repeatable) drops a declared materialized view and recreates it from the
   declaration, then waits for it to build. Routes that read the view fail while it is dropped and
   then see missing rows until its build finishes. It asks for confirmation unless `--yes` is given,
@@ -1031,10 +1044,41 @@ default TTL differs from the live one is altered.
   way before changing anything, naming the table. It never drops a view, so drop it by hand once
   you have checked nothing needs it; the next `schema apply` creates the table.
 - `--wait-for-scylla <secs>` waits up to that long for Scylla to accept connections.
+- `--view-wait-secs <secs>` (default 18000, five hours) is the longest `schema apply` and
+  `--recreate-view` wait for materialized views to build. When it passes with views still
+  building, the command fails (exit 1) naming each view and the Scylla nodes that haven't built
+  it, and records nothing; run it again once the cause is fixed. The operator's schema-apply Job
+  relies on this default, an hour under its six hour limit, so the Job's failure carries that
+  message. Raise it when a view's build over a large table legitimately takes longer.
 
-`schema apply` exits 0 on success, 1 when it refuses, 2 for an unusable config or flag, 3 when
-`--to-revision` names a revision with no committed snapshot, and 4 when Scylla or Redis can't be
-reached or a statement failed in a way a retry may get past.
+**A schema apply that creates views can't finish while a Scylla node is down.** After it creates
+a view, `schema apply` waits until every node of the cluster reports the view built in
+`system_distributed.view_build_status` (on a single node, until `system.built_views` lists it). A
+node that is down never reports, so the wait runs to `--view-wait-secs` and fails naming that node.
+The operator applies the schema before any step that changes data, so when that apply creates
+views, an upgrade's data migrations don't start either. Bring the node back, or remove it from the
+cluster (`nodetool removenode`), first. Only the cluster's current members count: a status row
+left by a node that was removed or replaced, which isn't a member any more, is ignored. Each
+waiting progress line names the nodes a view still waits on, as `<address> (<host id>)`.
+
+`schema apply` exits 0 on success, 1 when it refuses (including a view wait that reached
+`--view-wait-secs`), 2 for an unusable config or flag, 3 when `--to-revision` names a revision with
+no committed snapshot, and 4 when Scylla or Redis can't be reached or a statement failed in a way a
+retry may get past.
+
+`schema verify-views` logs (on stderr) one line per view as it is checked (`view <view>: in step over <n>
+ranges`, `view <view>: out of step; first differing range <index> of the <Base or View> table's
+tokens [<start>, <end>]: <n> base rows, <n> view rows`, or `view <view>: missing`), then prints its
+report as one line of JSON on stdout: `views` holds each view checked with its `view`, `base`
+table, `state` (`{"status":"in_step"}`, `{"status":"out_of_step","first":{...}}` with the first
+differing range's `side`, `index`, `start`, `end`, `base_rows`, and `view_rows`, or
+`{"status":"missing"}` when the view or its base table doesn't exist), the `ranges` checked by
+index, and the `base_rows` and `view_rows` read; `sampled` says whether only some ranges were
+checked. It exits 0 when every view checked is in step (logging `Every view checked is in step
+with its base table`), 1 when any is out of step or missing, logging how many and which and
+suggesting `thoradm schema apply --recreate-view <name>`, 2 for an undeclared `--view`, a
+`--sample` outside 1 to 256 ranges, or an unusable config, and 4 when Scylla
+can't be reached or a read fails.
 
 ## Comparing the Live Schema
 
@@ -1066,7 +1110,7 @@ view (removed in 1.1.0). Thorium no longer creates them, a keyspace an older rel
 them with their rows, and starting Thorium against that keyspace leaves them alone. `thoradm schema
 diff` reports a live one as an acknowledged `unexpected` object, so it raises no drift. They cost
 disk and, for the views, write work, and an admin can remove them on purpose. Two commands list and
-drop them. Neither runs unless you type it, and `thoradm schema apply` never drops anything.
+drop them. Neither runs unless you type it, and `thoradm schema apply` never drops one.
 
 Each object is named `<backend>:<name>`, such as `scylla:events` and `scylla:entities_by_name`. A
 legacy object is one Thorium's registry of retired objects lists; only those can be dropped.

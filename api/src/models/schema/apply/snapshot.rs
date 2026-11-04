@@ -7,6 +7,7 @@
 
 use serde_json::Value;
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 use super::{
     Change, ConfigAccept, LiveSchema, config_record, execute, live_schema, plan, record_snapshot,
@@ -37,6 +38,9 @@ pub struct SnapshotRun<'a> {
     /// The names of snapshot tables and views this run leaves uncreated, such as the objects no
     /// release reads any more
     pub skip: BTreeSet<String>,
+    /// The longest the run waits for views to build before failing with the views and hosts
+    /// still building; `None` waits for as long as the builds take
+    pub view_wait: Option<Duration>,
 }
 
 /// One Scylla table or view of a snapshot, read from its canonical form
@@ -381,13 +385,14 @@ pub async fn apply_snapshot(
         .copied()
         .collect::<Vec<_>>();
     let objects = scylla_of(snapshot, &run.skip);
-    let mut changes = plan(conf, &live, &record_tables);
+    let mut changes = plan(conf, &live, &record_tables, &[]);
     // a table a snapshot creates, or a column it adds, can't exist in the record tables' plan
     changes.extend(plan_snapshot(conf, &live, &objects));
     let mut report = ApplyReport {
         statements: changes
             .iter()
-            .map(|change| change.cql().to_owned())
+            .flat_map(Change::statements)
+            .map(ToOwned::to_owned)
             .collect(),
         created: Vec::new(),
         added: Vec::new(),
@@ -395,13 +400,14 @@ pub async fn apply_snapshot(
         fingerprint: snapshot.deployment.clone(),
         trigger_key: trigger_key.clone(),
         views_built: Vec::new(),
+        views_recreated: Vec::new(),
         warnings: config.warnings.clone(),
         dry_run: run.dry_run,
     };
     // sort each change into what the report lists
     for change in &changes {
         match change {
-            Change::Keyspace(_) => (),
+            Change::Keyspace(_) | Change::Recreate { .. } => (),
             Change::Create { name, .. } => report.created.push(name.clone()),
             Change::Add { table, column, .. } => report.added.push(format!("{table}.{column}")),
             Change::Ttl {
@@ -418,9 +424,10 @@ pub async fn apply_snapshot(
     if run.dry_run {
         return Ok(report);
     }
-    // issue each change in order
+    // issue each change in order; a snapshot plans no recreated view, so no drop is waited on
+    let started = std::time::Instant::now();
     for change in &changes {
-        execute(session, &keyspace, change).await?;
+        execute(session, &keyspace, change, started, run.view_wait).await?;
     }
     // wait for the views this run created, and for any a stopped earlier run left building
     let views = objects
@@ -428,8 +435,15 @@ pub async fn apply_snapshot(
         .filter(|object| object.view)
         .map(|object| object.name)
         .collect::<Vec<_>>();
-    report.views_built =
-        wait_for_changed_views(session, &keyspace, &views, &changes, progress).await?;
+    report.views_built = wait_for_changed_views(
+        session,
+        &keyspace,
+        &views,
+        &changes,
+        run.view_wait,
+        progress,
+    )
+    .await?;
     // record the snapshot's fingerprints and layouts with the data-shaping settings
     record_snapshot(session, conf, snapshot, &trigger_key, &config.rows).await?;
     Ok(report)

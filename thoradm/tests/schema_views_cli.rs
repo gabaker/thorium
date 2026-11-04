@@ -318,6 +318,50 @@ async fn a_dry_run_prints_the_recreate_and_drops_nothing() {
     drop_keyspace(&session, &ns).await;
 }
 
+/// A declared view whose live definition is out of date is recreated by a plain `schema apply`:
+/// the run exits 0, logs how the view differed, and names it under `views_recreated` in its
+/// summary, and the apply after it recreates nothing
+#[tokio::test]
+async fn apply_recreates_an_out_of_date_view_and_names_it() {
+    // a converged keyspace whose samples view carries a filter the registry doesn't declare
+    let session = session().await;
+    let ns = namespace("vcli_stale");
+    applied(&session, &ns).await;
+    let samples = thorium::models::schema::resolve_views(&["samples"]).expect("declared")[0];
+    let old = samples
+        .create_cql(&ns)
+        .replacen(" PRIMARY KEY", " AND bucket = 0 PRIMARY KEY", 1);
+    for cql in [format!("DROP MATERIALIZED VIEW {ns}.samples"), old] {
+        session
+            .query_unpaged(cql.as_str(), ())
+            .await
+            .unwrap_or_else(|err| panic!("{cql}: {err}"));
+    }
+    let before = view_id(&session, &ns, "samples").await;
+    // a plain apply recreates it and says why
+    let log = termination_log("stale");
+    let output = run(thoradm(&ns)
+        .args(["schema", "apply"])
+        .env("THORIUM_TERMINATION_LOG", &log));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert!(stderr.contains("view `samples` differs"), "{stderr}");
+    let first = summary(&log);
+    assert_eq!(first["outcome"], "done");
+    assert_eq!(first["views_recreated"], serde_json::json!(["samples"]));
+    let after = view_id(&session, &ns, "samples").await;
+    assert!(after.is_some() && after != before);
+    // the next apply finds nothing to recreate
+    let output = run(thoradm(&ns)
+        .args(["schema", "apply"])
+        .env("THORIUM_TERMINATION_LOG", &log));
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(summary(&log)["views_recreated"], serde_json::json!([]));
+    assert_eq!(view_id(&session, &ns, "samples").await, after);
+    let _ = std::fs::remove_file(&log);
+    drop_keyspace(&session, &ns).await;
+}
+
 /// The `--recreate-view` help says what routes reading the view see until its build finishes
 #[test]
 fn the_recreate_help_says_what_readers_see() {

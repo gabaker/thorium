@@ -6,6 +6,7 @@
 //! without one. The run exits like `schema apply` and writes the same termination summary.
 
 use std::io::IsTerminal;
+use std::time::Duration;
 use thorium::models::schema::{self, ApplyError, ApplyReport, ViewDef, ViewError};
 use tracing::{info, warn};
 
@@ -114,10 +115,16 @@ pub(super) async fn run(cmd: &ApplySchema, args: &Args) -> Result<ApplyReport, F
     }
     // converge first, so every base table exists and the schema is recorded
     let mut report = super::apply::run(cmd, args).await?;
-    // a view this run just created is already fresh
+    // a view this run just created, or recreated because its definition differed, is already fresh
     let views = views
         .into_iter()
         .filter(|view| !report.created.iter().any(|name| name == view.name))
+        .filter(|view| {
+            !report
+                .views_recreated
+                .iter()
+                .any(|stale| stale.name == view.name)
+        })
         .collect::<Vec<_>>();
     if views.is_empty() {
         return Ok(report);
@@ -127,7 +134,8 @@ pub(super) async fn run(cmd: &ApplySchema, args: &Args) -> Result<ApplyReport, F
     let session = crate::shared::scylla::get_client(&conf)
         .await
         .map_err(|err| Error::Transient(format!("Scylla can't be reached: {err}")))?;
-    let recreated = schema::recreate_views(&session, &conf, &views, cmd.dry_run, &|line| {
+    let wait = Some(Duration::from_secs(cmd.view_wait_secs));
+    let recreated = schema::recreate_views(&session, &conf, &views, cmd.dry_run, wait, &|line| {
         info!("{line}");
     })
     .await

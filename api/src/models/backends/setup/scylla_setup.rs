@@ -8,7 +8,9 @@ use std::time::Duration as StdDuration;
 
 use crate::models::schema::queries::ScyllaQueries;
 use crate::models::schema::statements::prepare_all;
-use crate::models::schema::{ApplyOptions, ApplyTarget, apply, check_startup, connect};
+use crate::models::schema::{
+    ApplyOptions, ApplyTarget, DEFAULT_VIEW_WAIT_SECS, apply, check_startup, connect,
+};
 use crate::models::schema::{RevisionSnapshot, SchemaCheckError, SchemaCheckPass, SnapshotError};
 use crate::models::upgrades::Catalog;
 use crate::utils::StartupOpts;
@@ -166,10 +168,12 @@ pub async fn new_session(config: &Conf) -> Session {
 /// * `session` - The scylla session to apply with
 /// * `config` - The Thorium config
 async fn apply_declared_schema(session: &Session, config: &Conf) -> Result<(), SchemaCheckError> {
-    // converge to the declared schema and record it, the way `thoradm schema apply` does
+    // converge to the declared schema and record it, the way `thoradm schema apply` does, with
+    // its default limit on the wait for views to build
     let options = ApplyOptions {
         target: ApplyTarget::Declared,
         dry_run: false,
+        view_wait: Some(StdDuration::from_secs(DEFAULT_VIEW_WAIT_SECS)),
     };
     let progress = |line: &str| {
         setup!(config.thorium.tracing.local.level, line.to_owned());

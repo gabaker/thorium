@@ -453,7 +453,9 @@ pub fn spec(
         STEP,
         &[revision.as_str(), "", "", &attempt, key],
     );
-    // run `schema apply`, waiting for Scylla to come up
+    // run `schema apply`, waiting for Scylla to come up; the view wait is left at thoradm's
+    // default, which ends before the Job's deadline, since an older image's thoradm has no flag
+    // for it
     let args = ["schema", "apply", "--wait-for-scylla", WAIT_FOR_SCYLLA_SECS]
         .map(ToOwned::to_owned)
         .to_vec();
@@ -1214,6 +1216,22 @@ pub(crate) mod tests {
         );
         // any other failure is retried twice
         assert_eq!(job["spec"]["backoffLimit"], 2, "{kind}");
+    }
+
+    /// The schema-apply Job leaves the view wait at thoradm's default, passing no flag an older
+    /// image's thoradm would reject
+    #[tokio::test]
+    async fn schema_apply_passes_no_view_wait_flag() {
+        // build the schema-apply Job
+        let fake = FakeKube::default();
+        let meta = meta_for(cluster(), &fake.client());
+        let spec = spec(&meta, &state(None).revision, "key", 0, None).expect("spec");
+        // its arguments don't set the view wait
+        assert!(
+            !spec.args.iter().any(|arg| arg.starts_with("--view-wait")),
+            "{:?}",
+            spec.args
+        );
     }
 
     /// The schema-apply Job, and every other thoradm Job, runs restricted under the jobs

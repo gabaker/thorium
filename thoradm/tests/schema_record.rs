@@ -201,6 +201,7 @@ async fn a_keyspace_without_a_record_table_backs_up_without_a_record() {
         &thorium::models::schema::ApplyOptions {
             target: thorium::models::schema::ApplyTarget::Declared,
             dry_run: false,
+            view_wait: None,
         },
         "",
         &|_| (),

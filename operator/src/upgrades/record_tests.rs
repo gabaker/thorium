@@ -668,6 +668,11 @@ async fn the_starting_revision_is_seeded_by_the_apply_job() {
         "{args:?}"
     );
     assert!(args.contains(&"apply"), "{args:?}");
+    // the view wait is left at thoradm's default, so an older image's thoradm accepts the args
+    assert!(
+        !args.iter().any(|arg| arg.starts_with("--view-wait")),
+        "{args:?}"
+    );
     let env = container["env"].as_array().expect("env");
     assert!(
         env.iter().any(|var| var["name"] == "THORIUM_SEED_SOURCE"

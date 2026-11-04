@@ -75,6 +75,7 @@ async fn apply_declared(session: &Session, conf: &Conf) -> Result<(), Error> {
     let options = ApplyOptions {
         target: ApplyTarget::Declared,
         dry_run: false,
+        view_wait: None,
     };
     apply(session, conf, &options, "probe-test", &|_| ())
         .await

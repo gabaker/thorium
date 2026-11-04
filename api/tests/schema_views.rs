@@ -15,10 +15,11 @@ use std::collections::BTreeSet;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use thorium::models::schema::{
-    ApplyError, ApplyOptions, ApplyTarget, ColumnRole, RangeDifference, RangeSelection, RangeSide,
-    RecreateReport, TOKEN_RANGES, TableDef, VerifyOptions, VerifyReport, ViewCheck, ViewDef,
-    ViewError, ViewState, apply, declared_views, range_of, recreate_statements, recreate_views,
-    recreate_warning, resolve_views, token_range, verify_views,
+    ApplyError, ApplyOptions, ApplyReport, ApplyTarget, ColumnRole, HostStatus, RangeDifference,
+    RangeSelection, RangeSide, RecreateReport, TOKEN_RANGES, VerifyOptions, VerifyReport,
+    ViewCheck, ViewDef, ViewError, ViewState, apply, cluster_hosts, declared_views, member_build,
+    range_of, recreate_statements, recreate_views, recreate_warning, resolve_views, token_range,
+    verify_views, view_build_statuses, views_built,
 };
 use thorium::test_utilities::{self, CONF};
 use thorium::{Conf, Error};
@@ -87,6 +88,7 @@ async fn applied(session: &Session, suffix: &str) -> Result<Conf, Error> {
     let options = ApplyOptions {
         target: ApplyTarget::Declared,
         dry_run: false,
+        view_wait: None,
     };
     apply(session, &conf, &options, "", &|_| ())
         .await
@@ -336,7 +338,15 @@ async fn an_undeclared_view_is_refused_and_nothing_is_dropped() -> Result<(), Er
         name: "extra_by_name",
         ..view("samples")
     };
-    let refused = recreate_views(&session, &conf, &[view("samples"), extra], false, &|_| ()).await;
+    let refused = recreate_views(
+        &session,
+        &conf,
+        &[view("samples"), extra],
+        false,
+        None,
+        &|_| (),
+    )
+    .await;
     assert!(
         matches!(&refused, Err(ViewError::Undeclared { name }) if name == "extra_by_name"),
         "{refused:?}"
@@ -403,6 +413,7 @@ async fn a_failed_create_after_the_drop_says_the_view_is_missing() -> Result<(),
         &conf,
         &[view("network_policies_by_name")],
         false,
+        None,
         &|_| (),
     )
     .await
@@ -489,9 +500,11 @@ async fn a_stale_view_is_recreated_and_matches_its_base_again() -> Result<(), Er
     let absent = absent.expect("a hidden row's sha256");
     // recreate it, keeping the progress it reports
     let lines = Lines::default();
-    let report = recreate_views(&session, &conf, &[samples], false, &|line| lines.push(line))
-        .await
-        .map_err(|err| Error::new(err.to_string()))?;
+    let report = recreate_views(&session, &conf, &[samples], false, None, &|line| {
+        lines.push(line);
+    })
+    .await
+    .map_err(|err| Error::new(err.to_string()))?;
     assert_eq!(
         report,
         RecreateReport {
@@ -542,7 +555,7 @@ async fn a_dry_run_drops_nothing_and_a_missing_view_is_created() -> Result<(), E
         resolve_views(&["samples", "comments_by_id"]).map_err(|err| Error::new(err.to_string()))?;
     // a dry run lists both views' statements and changes nothing
     let before = object_id(&session, &ks, "samples").await?;
-    let report = recreate_views(&session, &conf, &views, true, &|_| ())
+    let report = recreate_views(&session, &conf, &views, true, None, &|_| ())
         .await
         .map_err(|err| Error::new(err.to_string()))?;
     let statements = views
@@ -555,7 +568,7 @@ async fn a_dry_run_drops_nothing_and_a_missing_view_is_created() -> Result<(), E
     assert_eq!(object_id(&session, &ks, "samples").await?, before);
     assert_eq!(object_id(&session, &ks, "comments_by_id").await?, None);
     // a real run replaces the existing view and creates the missing one
-    let report = recreate_views(&session, &conf, &views, false, &|_| ())
+    let report = recreate_views(&session, &conf, &views, false, None, &|_| ())
         .await
         .map_err(|err| Error::new(err.to_string()))?;
     assert_eq!(report.recreated, ["samples", "comments_by_id"]);
@@ -563,6 +576,257 @@ async fn a_dry_run_drops_nothing_and_a_missing_view_is_created() -> Result<(), E
     assert!(after.is_some());
     assert_ne!(after, before);
     assert!(object_id(&session, &ks, "comments_by_id").await?.is_some());
+    exec(&session, &format!("DROP KEYSPACE IF EXISTS {ks}")).await?;
+    Ok(())
+}
+
+/// Write sample rows to `samples_list` many at a time, for tests that need a base table whose
+/// view takes a while to build
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to use
+/// * `keyspace` - The keyspace to write to
+/// * `count` - How many rows to write
+async fn seed_many_samples(session: &Session, keyspace: &str, count: u32) -> Result<(), Error> {
+    use futures::StreamExt;
+    // prepare the insert once for every row
+    let cql = format!(
+        "INSERT INTO {keyspace}.samples_list (group, year, bucket, uploaded, id, sha256, name) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)"
+    );
+    let insert = session
+        .prepare(cql.as_str())
+        .await
+        .map_err(|err| Error::new(format!("{cql}: {err}")))?;
+    // write each row with its own sha256, spread over 64 buckets, a few hundred in flight
+    let failed = futures::stream::iter(0..count)
+        .map(|i| {
+            let values = (
+                "views",
+                2026_i32,
+                i32::try_from(i % 64).expect("small bucket"),
+                scylla::value::CqlTimestamp(1_700_000_000_000 + i64::from(i)),
+                Uuid::new_v4(),
+                format!("{i:064x}"),
+                format!("sample-{i}"),
+            );
+            let insert = &insert;
+            async move { session.execute_unpaged(insert, values).await.map(|_| ()) }
+        })
+        .buffer_unordered(256)
+        .filter_map(|written| async move { written.err() })
+        .collect::<Vec<_>>()
+        .await;
+    // name the first failed write, if any
+    match failed.first() {
+        Some(err) => Err(Error::new(format!("{cql}: {err}"))),
+        None => Ok(()),
+    }
+}
+
+/// Write a `system.built_views` row for a view, standing in for the row Scylla keeps for a
+/// dropped view until its view builder handles the drop
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to use
+/// * `keyspace` - The view's keyspace
+/// * `name` - The view
+async fn plant_built_row(session: &Session, keyspace: &str, name: &str) -> Result<(), Error> {
+    // a one-node Scylla takes writes to its local list of built views
+    session
+        .query_unpaged(
+            "INSERT INTO system.built_views (keyspace_name, view_name) VALUES (?, ?)",
+            (keyspace, name),
+        )
+        .await
+        .map_err(|err| Error::new(format!("planting a built_views row: {err}")))?;
+    Ok(())
+}
+
+/// Delete a view's `system.built_views` row, as Scylla's view builder does once it handles the
+/// view's drop
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to use
+/// * `keyspace` - The view's keyspace
+/// * `name` - The view
+async fn clear_built_row(session: &Session, keyspace: &str, name: &str) -> Result<(), Error> {
+    // delete the one row
+    session
+        .query_unpaged(
+            "DELETE FROM system.built_views WHERE keyspace_name = ? AND view_name = ?",
+            (keyspace, name),
+        )
+        .await
+        .map_err(|err| Error::new(format!("clearing a built_views row: {err}")))?;
+    Ok(())
+}
+
+/// Wait until Scylla has handled a view's drop and cleared its `system.built_views` row
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to use
+/// * `keyspace` - The view's keyspace
+/// * `name` - The dropped view
+async fn drop_handled(session: &Session, keyspace: &str, name: &str) -> Result<(), Error> {
+    // poll for up to a minute
+    let cql = format!(
+        "SELECT view_name FROM system.built_views WHERE keyspace_name = '{keyspace}' AND \
+         view_name = '{name}'"
+    );
+    let started = Instant::now();
+    while !rows(session, &cql).await?.is_empty() {
+        if started.elapsed() > Duration::from_secs(60) {
+            return Err(Error::new(format!("the drop of {name} was never handled")));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Ok(())
+}
+
+/// A recreate doesn't take what a dropped view left in `system.built_views` as the new view's
+/// build: it creates the view only once that row is gone and returns with the view fully built,
+/// and a row that outlasts the wait's limit fails it, naming the view as missing
+///
+/// After `DROP MATERIALIZED VIEW` returns, Scylla keeps the dropped view's row until its view
+/// builder handles the drop, which takes seconds while the builder is busy. A planted row that the
+/// test clears later stands in for it on a single node; a cluster's `view_build_status` rows are
+/// waited for the same way but can't be planted (Scylla 6.2 doesn't keep a row written there).
+#[tokio::test]
+async fn a_recreate_waits_out_the_dropped_views_built_row() -> Result<(), Error> {
+    // a converged keyspace with sample rows and its samples view dropped by hand
+    let _guard = RESTART.read().await;
+    let session = test_utilities::scylla_session().await?;
+    let peers = rows(&session, "SELECT peer FROM system.peers").await?.len();
+    if peers > 0 {
+        eprintln!("skipped: a built_views row can only stand in for the build state on one node");
+        return Ok(());
+    }
+    let conf = applied(&session, "views_stale_row").await?;
+    let ks = conf.thorium.namespace.clone();
+    let samples = view("samples");
+    seed_many_samples(&session, &ks, 50_000).await?;
+    let expected = expected_keys(&session, &ks, &samples).await?;
+    assert_eq!(expected.len(), 50_000);
+    exec(&session, &format!("DROP MATERIALIZED VIEW {ks}.samples")).await?;
+    // let Scylla clear the dropped view's own row before planting one in its place
+    drop_handled(&session, &ks, "samples").await?;
+    // a row Scylla clears a few seconds into the recreate holds the create back until then
+    plant_built_row(&session, &ks, "samples").await?;
+    let recreate = [samples];
+    let (held, cleared) = tokio::join!(
+        async {
+            recreate_views(
+                &session,
+                &conf,
+                &recreate,
+                false,
+                Some(Duration::from_secs(600)),
+                &|_| (),
+            )
+            .await
+            .map_err(|err| Error::new(err.to_string()))?;
+            // read the view the moment the recreate returns, without waiting any further
+            view_keys(&session, &ks, &samples).await
+        },
+        async {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            clear_built_row(&session, &ks, "samples").await
+        }
+    );
+    cleared?;
+    // the view holds every base row once the recreate returns
+    assert_eq!(
+        held?.len(),
+        expected.len(),
+        "the recreate returned while the view was still building"
+    );
+    // a row that outlasts the limit fails the recreate before the create, so the view is missing
+    exec(&session, &format!("DROP MATERIALIZED VIEW {ks}.samples")).await?;
+    drop_handled(&session, &ks, "samples").await?;
+    plant_built_row(&session, &ks, "samples").await?;
+    let expired = recreate_views(
+        &session,
+        &conf,
+        &[samples],
+        false,
+        Some(Duration::from_secs(2)),
+        &|_| (),
+    )
+    .await;
+    clear_built_row(&session, &ks, "samples").await?;
+    match expired {
+        Err(ViewError::NotCreated {
+            view,
+            error: ApplyError::DropUnfinished { views, .. },
+        }) => {
+            assert_eq!(view, "samples");
+            assert_eq!(views, ["samples"]);
+        }
+        other => panic!("expected the dropped view's row to fail the recreate: {other:?}"),
+    }
+    assert_eq!(object_id(&session, &ks, "samples").await?, None);
+    exec(&session, &format!("DROP KEYSPACE IF EXISTS {ks}")).await?;
+    Ok(())
+}
+
+/// A `view_build_status` row left by a host that is no longer a cluster member doesn't hold a
+/// built view back, and a member without a `SUCCESS` row is named as the one the view waits on
+///
+/// Scylla 6.2 doesn't keep a row written straight into `system_distributed.view_build_status`, so
+/// the former member's row is added to the rows read back from the live table.
+#[tokio::test]
+async fn a_former_members_view_build_row_is_ignored() -> Result<(), Error> {
+    // a converged keyspace, whose views every member has built
+    let _guard = RESTART.read().await;
+    let session = test_utilities::scylla_session().await?;
+    let conf = applied(&session, "views_former_member").await?;
+    let ks = conf.thorium.namespace.to_lowercase();
+    // the members the driver knows, each with a host id the rows are keyed by
+    let hosts = cluster_hosts(&session);
+    assert!(!hosts.is_empty());
+    // read the view's rows until every member reports it built, which may trail the apply
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut rows = loop {
+        let rows = view_build_statuses(&session, &ks, "samples")
+            .await
+            .map_err(|err| Error::new(err.to_string()))?;
+        if member_build(&hosts, &rows).waiting.is_empty() || Instant::now() > deadline {
+            break rows;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    let live = member_build(&hosts, &rows);
+    assert!(live.waiting.is_empty(), "{live:?} from {rows:?}");
+    assert_eq!(live.built.len(), hosts.len());
+    // add the row a removed node leaves when it never finished the build
+    let former = Uuid::new_v4().to_string();
+    rows.push(HostStatus {
+        host_id: former.clone(),
+        status: "STARTED".to_owned(),
+    });
+    // every row counted would never finish, but only the members' rows decide
+    assert!(!rows.iter().all(|row| row.status == "SUCCESS"));
+    let build = member_build(&hosts, &rows);
+    assert!(build.waiting.is_empty(), "{build:?}");
+    assert_eq!(build.built.len(), hosts.len());
+    assert_eq!(build.ignored, std::slice::from_ref(&former));
+    // with only the former member's row, every member is named as one the view waits on
+    let only_former = rows
+        .iter()
+        .filter(|row| row.host_id == former)
+        .cloned()
+        .collect::<Vec<_>>();
+    let waiting = member_build(&hosts, &only_former);
+    assert_eq!(waiting.built, Vec::<String>::new());
+    assert_eq!(waiting.waiting, hosts.values().cloned().collect::<Vec<_>>());
+    for (id, name) in &hosts {
+        assert!(name.contains(id.as_str()), "{name} names {id}");
+    }
     exec(&session, &format!("DROP KEYSPACE IF EXISTS {ks}")).await?;
     Ok(())
 }
@@ -581,7 +845,7 @@ async fn a_view_without_its_base_table_is_refused() -> Result<(), Error> {
     let before = object_id(&session, &ks, "samples").await?;
     let views =
         resolve_views(&["samples", "s3_sha256s"]).map_err(|err| Error::new(err.to_string()))?;
-    let refused = recreate_views(&session, &conf, &views, false, &|_| ()).await;
+    let refused = recreate_views(&session, &conf, &views, false, None, &|_| ()).await;
     assert!(
         matches!(&refused, Err(ViewError::MissingBase { view, base }) if view == "s3_sha256s" && base == "s3_ids"),
         "{refused:?}"
@@ -614,7 +878,7 @@ async fn a_view_name_held_by_a_table_is_refused_before_any_drop() -> Result<(), 
     let before = object_id(&session, &ks, "samples").await?;
     let views =
         resolve_views(&["samples", "results_auth"]).map_err(|err| Error::new(err.to_string()))?;
-    let refused = recreate_views(&session, &conf, &views, false, &|_| ()).await;
+    let refused = recreate_views(&session, &conf, &views, false, None, &|_| ()).await;
     assert!(
         matches!(&refused, Err(ViewError::Apply(ApplyError::ViewHeldByTable { views })) if views == &["results_auth"]),
         "{refused:?}"
@@ -1261,7 +1525,7 @@ async fn stale_views_report_the_first_differing_range_until_recreated() -> Resul
     .await?;
     assert_eq!(report.views[0].state, ViewState::InStep);
     // recreating both views brings every view back in step
-    recreate_views(&session, &conf, &[samples, s3], false, &|_| ())
+    recreate_views(&session, &conf, &[samples, s3], false, None, &|_| ())
         .await
         .map_err(|err| Error::new(err.to_string()))?;
     let report = verify(&session, &conf, None, RangeSelection::All).await?;
@@ -1448,7 +1712,7 @@ async fn a_wrong_value_in_a_view_row_reports_out_of_step() -> Result<(), Error> 
         ViewState::OutOfStep { first: expected }
     );
     // recreating the view brings it back in step in both modes
-    recreate_views(&session, &conf, &[samples], false, &|_| ())
+    recreate_views(&session, &conf, &[samples], false, None, &|_| ())
         .await
         .map_err(|err| Error::new(err.to_string()))?;
     for ranges in [RangeSelection::All, RangeSelection::Sample(TOKEN_RANGES)] {
@@ -1456,5 +1720,392 @@ async fn a_wrong_value_in_a_view_row_reports_out_of_step() -> Result<(), Error> 
         assert_eq!(report.views[0].state, ViewState::InStep, "{report:?}");
     }
     exec(&session, &format!("DROP KEYSPACE IF EXISTS {ks}")).await?;
+    Ok(())
+}
+
+/// Apply the declared schema to a test's keyspace, keeping the progress it reports
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to use
+/// * `conf` - The config naming the test's keyspace
+/// * `view_wait` - The longest to wait for view builds, or `None` to wait as long as they take
+/// * `lines` - Receives each progress line
+async fn apply_declared(
+    session: &Session,
+    conf: &Conf,
+    view_wait: Option<Duration>,
+    lines: &Lines,
+) -> Result<ApplyReport, ApplyError> {
+    // converge to this build's registry like `thoradm schema apply`
+    let options = ApplyOptions {
+        target: ApplyTarget::Declared,
+        dry_run: false,
+        view_wait,
+    };
+    apply(session, conf, &options, "", &|line| lines.push(line)).await
+}
+
+/// The base table Scylla records for a view, if the view exists
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to use
+/// * `keyspace` - The keyspace holding the view
+/// * `view` - The view
+async fn view_base(session: &Session, keyspace: &str, view: &str) -> Result<Option<String>, Error> {
+    // read the view's base table from the schema tables
+    let cql =
+        "SELECT base_table_name FROM system_schema.views WHERE keyspace_name = ? AND view_name = ?";
+    Ok(session
+        .query_unpaged(cql, (keyspace, view))
+        .await
+        .map_err(|err| Error::new(format!("{cql}: {err}")))?
+        .into_rows_result()
+        .map_err(|err| Error::new(format!("{cql}: {err}")))?
+        .maybe_first_row::<(String,)>()
+        .map_err(|err| Error::new(format!("{cql}: {err}")))?
+        .map(|(base,)| base))
+}
+
+/// Count the rows a table or view holds
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to use
+/// * `keyspace` - The keyspace holding the table or view
+/// * `name` - The table or view
+async fn count_rows(session: &Session, keyspace: &str, name: &str) -> Result<usize, Error> {
+    // page through every row rather than trusting a count over a large table to finish in time
+    Ok(rows(session, &format!("SELECT * FROM {keyspace}.{name}"))
+        .await?
+        .len())
+}
+
+/// Write commit rows to `commitish_list`, each backed by one of a few repo data blobs
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to use
+/// * `keyspace` - The keyspace to write to
+/// * `count` - How many rows to write
+async fn seed_commitishes(session: &Session, keyspace: &str, count: u32) -> Result<(), Error> {
+    // write each commit with its own key, spread over three blobs
+    let cql = format!(
+        "INSERT INTO {keyspace}.commitish_list (kind, group, year, bucket, repo, timestamp, key, \
+         repo_data) VALUES ('Commit', 'views', 2026, 1, 'github.com/views/repo', ?, ?, ?)"
+    );
+    for i in 0..count {
+        let values = (
+            scylla::value::CqlTimestamp(1_700_000_000_000 + i64::from(i)),
+            format!("c{i}"),
+            format!("blob{}", i % 3),
+        );
+        session
+            .query_unpaged(cql.as_str(), values)
+            .await
+            .map_err(|err| Error::new(format!("{cql}: {err}")))?;
+    }
+    Ok(())
+}
+
+/// Replace a keyspace's `committed_repo_data` view with the one internal builds before April 2024
+/// created, which selects from the `commits_list` table nothing writes any more
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to use
+/// * `keyspace` - The keyspace whose view is replaced
+async fn old_committed_repo_data(session: &Session, keyspace: &str) -> Result<(), Error> {
+    // drop the declared view, then lay down the old table and the view built on it
+    for cql in [
+        format!("DROP MATERIALIZED VIEW IF EXISTS {keyspace}.committed_repo_data"),
+        format!(
+            "CREATE TABLE IF NOT EXISTS {keyspace}.commits_list (group TEXT, year INT, bucket INT, \
+             repo TEXT, timestamp TIMESTAMP, hash TEXT, repo_data TEXT, PRIMARY KEY ((group, \
+             year, bucket, repo), timestamp, hash)) WITH CLUSTERING ORDER BY (timestamp DESC, \
+             hash DESC)"
+        ),
+        format!(
+            "CREATE MATERIALIZED VIEW IF NOT EXISTS {keyspace}.committed_repo_data AS SELECT \
+             group, repo, repo_data, hash FROM {keyspace}.commits_list WHERE group IS NOT NULL \
+             AND repo IS NOT NULL AND repo_data IS NOT NULL AND hash IS NOT NULL AND year IS NOT \
+             NULL AND bucket IS NOT NULL AND timestamp IS NOT NULL PRIMARY KEY ((repo_data, year, \
+             bucket), group, repo, hash, timestamp)"
+        ),
+    ] {
+        exec(session, &cql).await?;
+    }
+    Ok(())
+}
+
+/// A keyspace an old release created, whose `committed_repo_data` still selects from
+/// `commits_list`, gets the declared view back from `schema apply`: the view is dropped and
+/// created on `commitish_list`, the reason is logged, and the view holds every commit row once
+/// the apply returns
+#[tokio::test]
+async fn an_old_committed_repo_data_view_is_recreated_on_its_base() -> Result<(), Error> {
+    // a converged keyspace with commits, whose view is swapped for the old one
+    let _guard = RESTART.read().await;
+    let session = test_utilities::scylla_session().await?;
+    let conf = applied(&session, "views_old_repo_data").await?;
+    let ks = conf.thorium.namespace.clone();
+    seed_commitishes(&session, &ks, 300).await?;
+    old_committed_repo_data(&session, &ks).await?;
+    assert_eq!(
+        view_base(&session, &ks, "committed_repo_data")
+            .await?
+            .as_deref(),
+        Some("commits_list")
+    );
+    assert_eq!(count_rows(&session, &ks, "committed_repo_data").await?, 0);
+    // apply recreates the view, saying how it differed
+    let lines = Lines::default();
+    let report = apply_declared(&session, &conf, None, &lines)
+        .await
+        .map_err(|err| Error::new(err.to_string()))?;
+    let names = report
+        .views_recreated
+        .iter()
+        .map(|stale| stale.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["committed_repo_data"], "{report:?}");
+    let differences = &report.views_recreated[0].differences;
+    assert!(
+        differences
+            .iter()
+            .any(|line| line == "base: commits_list -> commitish_list"),
+        "{differences:?}"
+    );
+    assert!(
+        report
+            .views_built
+            .iter()
+            .any(|view| view == "committed_repo_data"),
+        "{report:?}"
+    );
+    assert!(
+        report.statements.iter().any(|statement| statement
+            == &format!("DROP MATERIALIZED VIEW IF EXISTS {ks}.committed_repo_data")),
+        "{:?}",
+        report.statements
+    );
+    assert!(
+        lines
+            .all()
+            .iter()
+            .any(|line| line.starts_with("view `committed_repo_data` differs")),
+        "{:?}",
+        lines.all()
+    );
+    // the view is on its declared base and already holds every commit
+    assert_eq!(
+        view_base(&session, &ks, "committed_repo_data")
+            .await?
+            .as_deref(),
+        Some("commitish_list")
+    );
+    assert_eq!(count_rows(&session, &ks, "committed_repo_data").await?, 300);
+    assert!(
+        views_built(&session, &ks, &["committed_repo_data"])
+            .await
+            .map_err(|err| Error::new(err.to_string()))?
+    );
+    exec(&session, &format!("DROP KEYSPACE IF EXISTS {ks}")).await?;
+    Ok(())
+}
+
+/// The `samples` view's creating statement with a filter the registry doesn't declare, which
+/// keeps only the rows of bucket 0
+///
+/// Scylla 6 refuses the `IS NOT NULL` filters on non-key columns that views created on Scylla 5
+/// carry, so the tests stand in this filter, which hides rows the same way.
+///
+/// # Arguments
+///
+/// * `keyspace` - The keyspace the view is in
+fn filtered_samples(keyspace: &str) -> String {
+    // add the restriction ahead of the view's primary key
+    let declared = view("samples").create_cql(keyspace);
+    let filtered = declared.replacen(" PRIMARY KEY", " AND bucket = 0 PRIMARY KEY", 1);
+    assert_ne!(filtered, declared, "the filter was added");
+    filtered
+}
+
+/// A `samples` view created with a filter the registry doesn't declare, as older releases'
+/// views were, hides rows; `schema apply` recreates it from the registry and it holds every sample
+/// again
+#[tokio::test]
+async fn a_samples_view_with_an_old_filter_is_recreated() -> Result<(), Error> {
+    // a converged keyspace with samples spread over 64 buckets
+    let _guard = RESTART.read().await;
+    let session = test_utilities::scylla_session().await?;
+    let conf = applied(&session, "views_old_filter").await?;
+    let ks = conf.thorium.namespace.clone();
+    seed_samples(&session, &ks, 200).await?;
+    // swap the view for one that keeps only bucket 0, which hides most rows
+    exec(&session, &format!("DROP MATERIALIZED VIEW {ks}.samples")).await?;
+    // the dropped view's built row would otherwise pass for the filtered view's build
+    drop_handled(&session, &ks, "samples").await?;
+    exec(&session, &filtered_samples(&ks)).await?;
+    settled_build(&session, &ks).await?;
+    assert_eq!(count_rows(&session, &ks, "samples").await?, 4);
+    // apply recreates it, naming the filter as the difference
+    let lines = Lines::default();
+    let report = apply_declared(&session, &conf, None, &lines)
+        .await
+        .map_err(|err| Error::new(err.to_string()))?;
+    assert_eq!(report.views_recreated.len(), 1, "{report:?}");
+    assert_eq!(report.views_recreated[0].name, "samples");
+    assert!(
+        report.views_recreated[0]
+            .differences
+            .iter()
+            .any(|line| line.starts_with("filter: ")),
+        "{report:?}"
+    );
+    // every sample is in the view once the apply returns
+    assert_eq!(count_rows(&session, &ks, "samples").await?, 200);
+    exec(&session, &format!("DROP KEYSPACE IF EXISTS {ks}")).await?;
+    Ok(())
+}
+
+/// Applying again to a converged keyspace recreates no view and issues no statement
+#[tokio::test]
+async fn a_converged_keyspace_recreates_no_view() -> Result<(), Error> {
+    // a converged keyspace, applied a second time
+    let _guard = RESTART.read().await;
+    let session = test_utilities::scylla_session().await?;
+    let conf = applied(&session, "views_converged").await?;
+    let ks = conf.thorium.namespace.clone();
+    let before = object_id(&session, &ks, "committed_repo_data").await?;
+    let report = apply_declared(&session, &conf, None, &Lines::default())
+        .await
+        .map_err(|err| Error::new(err.to_string()))?;
+    // nothing differs, so nothing is dropped or created
+    assert!(report.views_recreated.is_empty(), "{report:?}");
+    assert!(report.statements.is_empty(), "{report:?}");
+    assert!(report.views_built.is_empty(), "{report:?}");
+    assert_eq!(
+        object_id(&session, &ks, "committed_repo_data").await?,
+        before
+    );
+    exec(&session, &format!("DROP KEYSPACE IF EXISTS {ks}")).await?;
+    Ok(())
+}
+
+/// A view the registry doesn't declare is never compared, dropped, or recreated by `schema
+/// apply`, even on a base table whose declared view is recreated in the same run
+#[tokio::test]
+async fn apply_leaves_an_undeclared_view_alone() -> Result<(), Error> {
+    // a converged keyspace with a hand-made view on samples_list and a stale samples view
+    let _guard = RESTART.read().await;
+    let session = test_utilities::scylla_session().await?;
+    let conf = applied(&session, "views_undecl_apply").await?;
+    let ks = conf.thorium.namespace.clone();
+    exec(
+        &session,
+        &format!(
+            "CREATE MATERIALIZED VIEW {ks}.extra_by_name AS SELECT name, group, year, bucket, \
+             uploaded, id FROM {ks}.samples_list WHERE name IS NOT NULL AND group IS NOT NULL AND \
+             year IS NOT NULL AND bucket IS NOT NULL AND uploaded IS NOT NULL AND id IS NOT NULL \
+             PRIMARY KEY ((name), group, year, bucket, uploaded, id)"
+        ),
+    )
+    .await?;
+    exec(&session, &format!("DROP MATERIALIZED VIEW {ks}.samples")).await?;
+    exec(&session, &filtered_samples(&ks)).await?;
+    let extra = object_id(&session, &ks, "extra_by_name").await?;
+    assert!(extra.is_some());
+    // apply recreates only the declared view
+    let report = apply_declared(&session, &conf, None, &Lines::default())
+        .await
+        .map_err(|err| Error::new(err.to_string()))?;
+    let names = report
+        .views_recreated
+        .iter()
+        .map(|stale| stale.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["samples"], "{report:?}");
+    assert!(
+        !report
+            .statements
+            .iter()
+            .any(|statement| statement.contains("extra_by_name")),
+        "{:?}",
+        report.statements
+    );
+    assert_eq!(object_id(&session, &ks, "extra_by_name").await?, extra);
+    exec(&session, &format!("DROP KEYSPACE IF EXISTS {ks}")).await?;
+    Ok(())
+}
+
+/// A recreated view still building when the view wait runs out fails the apply while Scylla keeps
+/// building it, and the next apply waits for that build before returning
+#[tokio::test]
+async fn a_view_build_past_the_view_wait_fails_and_the_retry_waits_for_it() -> Result<(), Error> {
+    // a converged keyspace with enough samples that rebuilding the view takes a moment
+    let _guard = RESTART.read().await;
+    let session = test_utilities::scylla_session().await?;
+    let conf = applied(&session, "views_wait_expired").await?;
+    let ks = conf.thorium.namespace.clone();
+    seed_many_samples(&session, &ks, 40_000).await?;
+    exec(&session, &format!("DROP MATERIALIZED VIEW {ks}.samples")).await?;
+    // the dropped view's built row would otherwise pass for the filtered view's build
+    drop_handled(&session, &ks, "samples").await?;
+    exec(&session, &filtered_samples(&ks)).await?;
+    settled_build(&session, &ks).await?;
+    // an apply that waits no time at all drops the view, then fails: on its build when Scylla
+    // cleared the dropped view's build state at once, else before creating it again
+    let failed = apply_declared(&session, &conf, Some(Duration::ZERO), &Lines::default()).await;
+    assert!(
+        matches!(&failed, Err(ApplyError::ViewWaitExpired { stuck, .. })
+            if stuck.len() == 1 && stuck[0].view == "samples")
+            || matches!(&failed, Err(ApplyError::DropUnfinished { views, .. }) if views == &["samples"]),
+        "{failed:?}"
+    );
+    // a drop that outlasted the wait leaves the view missing once Scylla clears its built row
+    if matches!(&failed, Err(ApplyError::DropUnfinished { .. })) {
+        drop_handled(&session, &ks, "samples").await?;
+    }
+    assert!(
+        !views_built(&session, &ks, &["samples"])
+            .await
+            .map_err(|err| Error::new(err.to_string()))?
+    );
+    // the retry finds the definition right (or the view missing), and waits for its build
+    let report = apply_declared(&session, &conf, None, &Lines::default())
+        .await
+        .map_err(|err| Error::new(err.to_string()))?;
+    assert!(report.views_recreated.is_empty(), "{report:?}");
+    assert!(
+        views_built(&session, &ks, &["samples"])
+            .await
+            .map_err(|err| Error::new(err.to_string()))?
+    );
+    assert_eq!(count_rows(&session, &ks, "samples").await?, 40_000);
+    exec(&session, &format!("DROP KEYSPACE IF EXISTS {ks}")).await?;
+    Ok(())
+}
+
+/// Wait until the keyspace's `samples` view has finished its own build, so a test starts from a
+/// built view
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to use
+/// * `keyspace` - The keyspace holding the view
+async fn settled_build(session: &Session, keyspace: &str) -> Result<(), Error> {
+    // poll for up to ten minutes, since builds run slowly while other tests keep the builder busy
+    let started = Instant::now();
+    while !views_built(session, keyspace, &["samples"])
+        .await
+        .map_err(|err| Error::new(err.to_string()))?
+    {
+        if started.elapsed() > Duration::from_secs(600) {
+            return Err(Error::new("samples never finished building"));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
     Ok(())
 }

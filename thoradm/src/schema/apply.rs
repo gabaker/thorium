@@ -11,6 +11,7 @@
 //! reached or a statement failed, which the Job retries.
 
 use serde_json::{Value, json};
+use std::time::Duration;
 use thorium::Conf;
 use thorium::models::schema::{
     self, ApplyError, ApplyOptions, ApplyReport, ApplyTarget, ConfigAccept, RecordStatus,
@@ -150,6 +151,11 @@ fn summary_with(result: &Result<ApplyReport, Failure>, row: Option<&str>) -> Str
                 "created": report.created.len(),
                 "added": report.added.len(),
                 "views_built": report.views_built,
+                "views_recreated": report
+                    .views_recreated
+                    .iter()
+                    .map(|view| view.name.as_str())
+                    .collect::<Vec<_>>(),
                 "warnings": report.warnings,
                 "dry_run": report.dry_run,
                 "result": row,
@@ -157,6 +163,7 @@ fn summary_with(result: &Result<ApplyReport, Failure>, row: Option<&str>) -> Str
             // the lists give way to their lengths when they'd outgrow the message
             if summary.to_string().len() > TERMINATION_LIMIT {
                 summary["views_built"] = json!(report.views_built.len());
+                summary["views_recreated"] = json!(report.views_recreated.len());
                 summary["warnings"] = json!(report.warnings.len());
             }
             // a key still too long is cut to what's left, so the message stays whole JSON
@@ -232,6 +239,7 @@ pub(super) async fn run(cmd: &ApplySchema, args: &Args) -> Result<ApplyReport, F
     let options = ApplyOptions {
         target: snapshot_target(cmd)?,
         dry_run: cmd.dry_run,
+        view_wait: Some(Duration::from_secs(cmd.view_wait_secs)),
     };
     let progress = |line: &str| info!("{line}");
     let result = schema::apply_seeding(
@@ -365,10 +373,11 @@ pub(super) async fn handle(cmd: &ApplySchema, args: &Args) -> Result<RunOutcome,
     } else {
         // a real run logs what it changed and prints its full report
         info!(
-            "Applied the schema: {} objects created, {} columns added, {} views built; recorded \
-             deployment fingerprint {}",
+            "Applied the schema: {} objects created, {} columns added, {} views recreated, {} \
+             views built; recorded deployment fingerprint {}",
             report.created.len(),
             report.added.len(),
+            report.views_recreated.len(),
             report.views_built.len(),
             report.fingerprint.as_str()
         );
@@ -380,7 +389,9 @@ pub(super) async fn handle(cmd: &ApplySchema, args: &Args) -> Result<RunOutcome,
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
-    use thorium::models::schema::{ApplyError, ApplyReport, ApplyTarget, Fingerprint};
+    use thorium::models::schema::{
+        ApplyError, ApplyReport, ApplyTarget, DEFAULT_VIEW_WAIT_SECS, Fingerprint, StuckView,
+    };
 
     use super::{
         ELLIPSIS, Failure, TERMINATION_LIMIT, apply_error, seed_request, snapshot_target, summary,
@@ -398,6 +409,7 @@ mod tests {
             fingerprint: Fingerprint::of(&json!("fixture")),
             trigger_key: "image=thorium:1;revision=2026-10-v02".to_owned(),
             views_built: vec!["v".to_owned(); 500],
+            views_recreated: Vec::new(),
             warnings: vec!["a warning".to_owned(); 500],
             dry_run: false,
         }
@@ -494,6 +506,41 @@ mod tests {
         assert_eq!(Error::Transient("unreachable".to_owned()).exit_code(), 4);
     }
 
+    /// `--view-wait-secs` defaults to five hours, takes a number of seconds, and refuses zero
+    #[test]
+    fn the_view_wait_defaults_to_five_hours_and_refuses_zero() {
+        use clap::Parser;
+        // no flag, the default of five hours
+        let parsed = ApplySchema::try_parse_from(["apply"]).expect("parsed");
+        assert_eq!(parsed.view_wait_secs, DEFAULT_VIEW_WAIT_SECS);
+        assert_eq!(DEFAULT_VIEW_WAIT_SECS, 5 * 3600);
+        // a number of seconds is taken as given
+        let parsed =
+            ApplySchema::try_parse_from(["apply", "--view-wait-secs", "60"]).expect("parsed");
+        assert_eq!(parsed.view_wait_secs, 60);
+        // a wait of nothing is refused
+        assert!(ApplySchema::try_parse_from(["apply", "--view-wait-secs", "0"]).is_err());
+    }
+
+    /// A view wait that reached its limit fails the Job at once, naming the views and hosts
+    #[test]
+    fn an_expired_view_wait_fails_at_once_naming_views_and_hosts() {
+        // a view one node never built
+        let err = ApplyError::ViewWaitExpired {
+            waited: 60,
+            stuck: vec![StuckView {
+                view: "samples".to_owned(),
+                hosts: vec!["10.0.0.3 (host-3)".to_owned()],
+            }],
+        };
+        let error = apply_error(err);
+        // exit 1 is one of the codes that fail the Job without a retry
+        assert_eq!(error.exit_code(), 1);
+        let message = error.to_string();
+        assert!(message.contains("`samples`"), "{message}");
+        assert!(message.contains("10.0.0.3 (host-3)"), "{message}");
+    }
+
     /// A seed names its revision and where it came from, no flag means no seed, and a malformed
     /// revision is a usage error that fails the Job at once
     #[test]
@@ -508,6 +555,7 @@ mod tests {
             recreate_view: Vec::new(),
             yes: false,
             force_break_lease: false,
+            view_wait_secs: DEFAULT_VIEW_WAIT_SECS,
         };
         assert!(seed_request(&plain).expect("no seed").is_none());
         // a revision is parsed and named with a source
@@ -545,6 +593,7 @@ mod tests {
             recreate_view: Vec::new(),
             yes: false,
             force_break_lease: false,
+            view_wait_secs: DEFAULT_VIEW_WAIT_SECS,
         };
         assert!(matches!(
             snapshot_target(&declared),

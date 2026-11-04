@@ -219,6 +219,7 @@ async fn a_revision_applies_to_an_empty_keyspace() -> Result<(), Error> {
     let options = ApplyOptions {
         target: ApplyTarget::Snapshot(REVISION.parse::<RevisionId>().unwrap()),
         dry_run: false,
+        view_wait: None,
     };
     let report = apply(&session, &conf, &options, "key-snap", &|_| ())
         .await
@@ -452,6 +453,7 @@ async fn a_revision_without_a_snapshot_is_unavailable() -> Result<(), Error> {
     let options = ApplyOptions {
         target: ApplyTarget::Snapshot("2026-10-v99".parse::<RevisionId>().unwrap()),
         dry_run: false,
+        view_wait: None,
     };
     let err = apply(&session, &conf, &options, "", &|_| ())
         .await

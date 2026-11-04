@@ -101,6 +101,7 @@ fn declared() -> ApplyOptions {
     ApplyOptions {
         target: ApplyTarget::Declared,
         dry_run: false,
+        view_wait: None,
     }
 }
 
@@ -913,6 +914,7 @@ async fn a_dry_run_changes_nothing() -> Result<(), Error> {
     let options = ApplyOptions {
         target: ApplyTarget::Declared,
         dry_run: true,
+        view_wait: None,
     };
     let report = apply(&session, &conf, &options, "key-dry", &|_| ())
         .await
@@ -1007,6 +1009,7 @@ async fn a_dry_run_on_a_converged_keyspace_keeps_the_record() -> Result<(), Erro
     let options = ApplyOptions {
         target: ApplyTarget::Declared,
         dry_run: true,
+        view_wait: None,
     };
     let report = apply(&session, &conf, &options, "key-after", &|_| ())
         .await
@@ -1141,6 +1144,7 @@ async fn a_changed_ttl_is_altered_and_reported_as_a_config_change() -> Result<()
         &ApplyOptions {
             target: ApplyTarget::Declared,
             dry_run: true,
+            view_wait: None,
         },
         "key-ttl",
         &|_| (),

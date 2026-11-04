@@ -8,15 +8,16 @@ use scylla::client::session::Session;
 use scylla::statement::batch::{Batch, BatchType};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 use strum::IntoEnumIterator;
 use thorium::Conf;
 use thorium::models::schema::scylla::{
     SchemaMigrationIssuesTable, SchemaMigrationRow, SchemaMigrationsTable,
 };
 use thorium::models::schema::{
-    ApplyError, ApplyOptions, ApplyReport, ApplyTarget, CLASSES, MigrationRecordKind, Projection,
-    REVISION_ROW, RevisionSnapshot, ScyllaObject, SnapshotRun, Store, TableStatements, apply,
-    apply_snapshot, verify_files_password, with_keyspace,
+    ApplyError, ApplyOptions, ApplyReport, ApplyTarget, CLASSES, DEFAULT_VIEW_WAIT_SECS,
+    MigrationRecordKind, Projection, REVISION_ROW, RevisionSnapshot, ScyllaObject, SnapshotRun,
+    Store, TableStatements, apply, apply_snapshot, verify_files_password, with_keyspace,
 };
 use thorium::models::upgrades::{
     AppliedStep, Catalog, FIRST_HELM_REVISION, RESTORED_STEP, RevisionId, StepState, UpgradeError,
@@ -635,7 +636,8 @@ fn apply_error(error: ApplyError) -> Error {
     }
 }
 
-/// Converges the target's Scylla schema to what a restore needs
+/// Converges the target's Scylla schema to what a restore needs, waiting for its views to build
+/// for at most `thoradm schema apply`'s default limit
 ///
 /// # Arguments
 ///
@@ -649,11 +651,14 @@ pub async fn converge(
     to: &ConvergeTo,
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<ApplyReport, Error> {
+    // a node that is down never reports its view builds, so the wait fails instead of hanging
+    let view_wait = Some(Duration::from_secs(DEFAULT_VIEW_WAIT_SECS));
     match to {
         // the backup's revision, leaving out the objects no release reads
         ConvergeTo::Snapshot(snapshot) => {
             let run = SnapshotRun {
                 skip: skipped_objects(),
+                view_wait,
                 ..SnapshotRun::default()
             };
             apply_snapshot(scylla, conf, snapshot, &run, progress)
@@ -665,6 +670,7 @@ pub async fn converge(
             let options = ApplyOptions {
                 target: ApplyTarget::Declared,
                 dry_run: false,
+                view_wait,
             };
             apply(scylla, conf, &options, "", progress)
                 .await

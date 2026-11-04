@@ -73,6 +73,7 @@ async fn apply_declared(session: &Session, conf: &Conf) -> Result<(), Error> {
     let options = ApplyOptions {
         target: ApplyTarget::Declared,
         dry_run: false,
+        view_wait: None,
     };
     apply(session, conf, &options, "legacy-test", &|_| ())
         .await
@@ -544,6 +545,7 @@ async fn a_downgrade_recreates_dropped_objects() -> Result<(), Error> {
     let options = ApplyOptions {
         target: ApplyTarget::Snapshot("2026-10-v02".parse().expect("a valid revision")),
         dry_run: false,
+        view_wait: None,
     };
     match apply(&session, &conf, &options, "downgrade-test", &|_| ()).await {
         Ok(_) => (),
@@ -671,7 +673,7 @@ async fn apply_and_recreate_leave_legacy_objects_in_place() -> Result<(), Error>
     );
     // recreating a declared view leaves them in place
     let views = resolve_views(&["entities_by_id"]).map_err(|err| Error::new(err.to_string()))?;
-    recreate_views(&session, &conf, &views, false, &|_| ())
+    recreate_views(&session, &conf, &views, false, None, &|_| ())
         .await
         .map_err(|err| Error::new(err.to_string()))?;
     let listing = list(&session, &conf).await?;

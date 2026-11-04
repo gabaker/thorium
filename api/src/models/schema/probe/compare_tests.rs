@@ -4,7 +4,7 @@
 use serde_json::{Value, json};
 
 use super::super::{Fingerprint, RevisionSnapshot, SnapshotObject};
-use super::{DriftReport, ObservedSchema, converged_revision};
+use super::{DriftReport, ObservedSchema, converged_revision, view_differences};
 use crate::models::upgrades::{
     BackendSchemaStatus, Catalog, CatalogEntry, DriftKind, RevisionId, SchemaBackend,
 };
@@ -556,4 +556,127 @@ fn the_applied_fingerprint_picks_the_revision_to_compare_with() {
         converged_revision(&catalog, &id("2026-10-v02"), &fingerprint("one")),
         id("2026-10-v02")
     );
+}
+
+/// The declared canonical form of a view
+///
+/// # Arguments
+///
+/// * `name` - The view's name
+fn declared_view(name: &str) -> Value {
+    // the declared entries hold every view
+    SnapshotObject::declared()
+        .iter()
+        .find(|object| object.backend == SchemaBackend::Scylla && object.name == name)
+        .unwrap_or_else(|| panic!("{name} is declared"))
+        .canonical
+        .clone()
+}
+
+/// A live view with the declared definition differs in nothing, even when Scylla renders its
+/// filter with every key column's `IS NOT NULL` in another order and case
+#[test]
+fn a_view_as_declared_has_no_differences() {
+    // the live form spells out the key columns' mandatory filters
+    let declared = declared_view("committed_repo_data");
+    let mut live = declared.clone();
+    live["filter"] = json!(
+        "timestamp IS NOT NULL AND KIND is not null AND \"group\" IS NOT NULL AND repo IS NOT \
+         NULL AND repo_data IS NOT NULL AND key IS NOT NULL AND year IS NOT NULL AND bucket IS \
+         NOT NULL"
+    );
+    assert_eq!(view_differences(&declared, &live), Vec::<String>::new());
+    assert_eq!(view_differences(&declared, &declared), Vec::<String>::new());
+}
+
+/// Every declared view compared with itself differs in nothing
+#[test]
+fn every_declared_view_matches_itself() {
+    // each declared view's form against itself
+    for object in SnapshotObject::declared() {
+        if object.canonical["kind"] == "view" {
+            assert!(
+                view_differences(&object.canonical, &object.canonical).is_empty(),
+                "{}",
+                object.name
+            );
+        }
+    }
+}
+
+/// The old `committed_repo_data` on `commits_list` lists its base, key, and columns as
+/// differences, live first and declared second
+#[test]
+fn an_old_view_lists_its_base_key_and_columns() {
+    // the view as releases before commitishes created it
+    let declared = declared_view("committed_repo_data");
+    let live = json!({
+        "kind": "view",
+        "name": "committed_repo_data",
+        "base": "commits_list",
+        "columns": [
+            {"name": "bucket", "type": "int"},
+            {"name": "group", "type": "text"},
+            {"name": "hash", "type": "text"},
+            {"name": "repo", "type": "text"},
+            {"name": "repo_data", "type": "text"},
+            {"name": "timestamp", "type": "timestamp"},
+            {"name": "year", "type": "int"},
+        ],
+        "partition_key": ["repo_data", "year", "bucket"],
+        "clustering_key": [
+            {"name": "group", "order": "asc"},
+            {"name": "repo", "order": "asc"},
+            {"name": "hash", "order": "asc"},
+            {"name": "timestamp", "order": "asc"},
+        ],
+        "filter": "group IS NOT NULL AND repo IS NOT NULL AND repo_data IS NOT NULL AND hash IS \
+                   NOT NULL AND year IS NOT NULL AND bucket IS NOT NULL AND timestamp IS NOT NULL",
+    });
+    let differences = view_differences(&declared, &live);
+    assert_eq!(
+        differences,
+        vec![
+            "base: commits_list -> commitish_list".to_owned(),
+            "clustering_key: (group asc, repo asc, hash asc, timestamp asc) -> (kind asc, group \
+             asc, repo asc, key asc, timestamp asc)"
+                .to_owned(),
+            "columns: -hash, +key, +kind".to_owned(),
+        ]
+    );
+}
+
+/// A filter on a column outside the key, as views created by older releases carry, is a
+/// difference
+#[test]
+fn a_filter_on_a_column_outside_the_key_differs() {
+    // the samples view with an extra `IS NOT NULL` on a regular column
+    let declared = declared_view("samples");
+    let mut live = declared.clone();
+    live["filter"] = json!("sha256 IS NOT NULL AND sha1 IS NOT NULL");
+    let differences = view_differences(&declared, &live);
+    assert_eq!(differences.len(), 1, "{differences:?}");
+    assert!(
+        differences[0].starts_with("filter: sha1 is not null -> "),
+        "{differences:?}"
+    );
+}
+
+/// A clustering order or a column type that differs is a difference
+#[test]
+fn an_order_or_type_change_differs() {
+    // flip the first clustering column's order and change one column's type
+    let declared = declared_view("samples");
+    let mut live = declared.clone();
+    live["clustering_key"][0]["order"] =
+        json!(if declared["clustering_key"][0]["order"] == "asc" {
+            "desc"
+        } else {
+            "asc"
+        });
+    live["columns"][0]["type"] = json!("blob");
+    let differences = view_differences(&declared, &live);
+    assert_eq!(differences.len(), 2, "{differences:?}");
+    assert!(differences[0].starts_with("clustering_key: "));
+    assert!(differences[1].starts_with("columns: "));
 }

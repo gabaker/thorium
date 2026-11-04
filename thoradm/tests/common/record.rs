@@ -519,6 +519,7 @@ pub async fn ensure_tables(harness: &Harness) {
         &thorium::models::schema::ApplyOptions {
             target: thorium::models::schema::ApplyTarget::Declared,
             dry_run: false,
+            view_wait: None,
         },
         "",
         &|_| (),

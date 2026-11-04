@@ -295,6 +295,24 @@ impl SchemaRows {
         })
     }
 
+    /// Build the canonical form of one materialized view these rows describe, or `None` when
+    /// they hold no view of that name
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The view's name
+    #[must_use]
+    pub fn view_form(&self, name: &str) -> Option<Result<Value, ProbeError>> {
+        // find the view's row, then build its form from its own columns
+        let view = self.views.iter().find(|view| view.view_name == name)?;
+        let columns = self
+            .columns
+            .iter()
+            .filter(|column| column.table_name == name)
+            .collect::<Vec<_>>();
+        Some(canonical_view(view, &columns))
+    }
+
     /// Build the canonical form of every object these rows describe, sorted by name
     ///
     /// Tables and views take the registry's canonical form exactly; user-defined types and

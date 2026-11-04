@@ -188,6 +188,7 @@ fn declared() -> ApplyOptions {
     ApplyOptions {
         target: ApplyTarget::Declared,
         dry_run: false,
+        view_wait: None,
     }
 }
 

@@ -241,7 +241,9 @@ const BACKOFF_LIMIT: i32 = 2;
 /// How long a cancelled thoradm pod gets to finish its batch and checkpoint, in seconds
 const TERMINATION_GRACE_SECS: i64 = 120;
 
-/// How long a thoradm Job may run, in seconds; a schema apply waits for new views to build
+/// How long a thoradm Job may run, in seconds; a schema apply waits for new views to build for
+/// thoradm's default view wait, which ends before this deadline so the Job fails with the stuck
+/// views and hosts in its summary instead of being killed
 const ACTIVE_DEADLINE_SECS: i64 = 6 * 3600;
 
 /// How long a finished thoradm Job is kept for reading its logs, in seconds
@@ -968,6 +970,27 @@ mod tests {
     use crate::k8s::clusters::tests::{
         FakeKube, full_spec, kube_status, meta_for, namespaced_cluster,
     };
+
+    /// thoradm's default view wait ends well before a schema-apply Job's deadline, so a wait that
+    /// can't finish fails with its own summary instead of being killed
+    #[test]
+    fn default_view_wait_ends_before_the_job_deadline() {
+        // build a schema-apply Job spec to read its deadline
+        let name = job_name(JobKind::SchemaApply, "step", &["0"]);
+        let spec = base_spec(
+            JobKind::SchemaApply,
+            "step",
+            name,
+            "image".to_owned(),
+            Vec::new(),
+        )
+        .expect("spec");
+        // the default wait plus the longest wait for Scylla to come up still leaves time to report
+        let view_wait =
+            i64::try_from(thorium::models::schema::DEFAULT_VIEW_WAIT_SECS).expect("wait");
+        let scylla_wait = 300;
+        assert!(view_wait + scylla_wait < spec.active_deadline_seconds);
+    }
 
     /// A Job's pod takes the API component's proxy variables in both cases and none of its other
     /// variables, the upper-case value wins when the API's cases disagree, the step's own

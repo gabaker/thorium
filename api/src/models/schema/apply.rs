@@ -1,10 +1,13 @@
 //! What `thoradm schema apply` converges to, what one run did, and why it can stop, and the
 //! applier itself: it creates the keyspace and `schema_migrations` first, then every missing
-//! declared object in creation order, adds the table columns the keyspace lacks, waits for the
-//! views to build, and records the applied fingerprints and layout versions
+//! declared object in creation order, adds the table columns the keyspace lacks, drops and
+//! creates again each declared view whose live definition differs from this build's, waits for
+//! the views to build, and records the applied fingerprints and layout versions
 
 use chrono::Utc;
 use scylla::client::session::Session;
+use scylla::statement::Consistency;
+use scylla::statement::unprepared::Statement;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
@@ -13,6 +16,7 @@ use super::config_record::{self, ConfigAccept};
 use super::queries::migrations::SchemaMigrationsQueries;
 use super::record::{self, RecordError};
 use super::scylla::{SchemaMigrationsTable, SchemaMigrationsTableRef};
+use super::views::{StaleView, ViewComparison, recreate_statements, stale_views};
 use super::{
     DriftReport, Fingerprint, MigrationRecordKind, ObjectDef, ObservedSchema, RevisionSnapshot,
     SchemaDefinition, SchemaObject, ScyllaObject, SnapshotObject, probe_scylla,
@@ -31,9 +35,13 @@ pub struct ApplyOptions {
     pub target: ApplyTarget,
     /// Return the statements without executing them (`print`, `diff`, and `--dry-run`)
     pub dry_run: bool,
+    /// The longest the run waits for views to build before failing with the views and hosts
+    /// still building (`--view-wait-secs`); `None` waits for as long as the builds take
+    pub view_wait: Option<Duration>,
 }
 
-/// The definitions the applier converges to; either way it only creates and adds, never drops
+/// The definitions the applier converges to: the declared schema creates and adds, and replaces
+/// only a declared view whose definition differs, while a snapshot only creates and adds
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplyTarget {
     /// The registry this build declares
@@ -61,10 +69,14 @@ pub struct ApplyReport {
     /// hashes of the data-shaping and TTL settings), recorded beside the fingerprint so later
     /// reconciles compare keys, not fingerprints; the files password's hash is left out
     pub trigger_key: String,
-    /// The views this run created, each reported only once `system.built_views` lists it, so no
-    /// reader moves to a view still being built
+    /// The views this run created or recreated, each reported only once every node has built it,
+    /// so no reader moves to a view still being built
     #[serde(default)]
     pub views_built: Vec<String>,
+    /// The declared views this run dropped and created again because their live definitions
+    /// differed from this build's, with how each differed (on a dry run, the views it would)
+    #[serde(default)]
+    pub views_recreated: Vec<StaleView>,
     /// Warnings for the status that don't stop the apply, such as a files password left at its
     /// public default
     #[serde(default)]
@@ -159,6 +171,22 @@ pub enum ApplyError {
         /// The views that no longer exist
         views: Vec<String>,
     },
+    /// Views being waited for didn't finish building within the wait's limit, so nothing was
+    /// recorded
+    ViewWaitExpired {
+        /// How long the wait lasted, in seconds
+        waited: u64,
+        /// Each view still building, with the hosts that haven't reported it built
+        stuck: Vec<StuckView>,
+    },
+    /// Scylla still reported dropped views as built when the wait's limit passed, so they weren't
+    /// created again: a view created under the name meanwhile would be taken as built
+    DropUnfinished {
+        /// How long the wait lasted, in seconds
+        waited: u64,
+        /// The dropped views Scylla still reported as built
+        views: Vec<String>,
+    },
     /// A statement failed
     Query {
         /// The statement that failed
@@ -174,6 +202,8 @@ impl std::fmt::Display for ApplyError {
     /// # Arguments
     ///
     /// * `f` - The formatter to write to
+    // one arm per error reads as the list of reasons an apply stops
+    #[allow(clippy::too_many_lines)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ApplyError::ConfigChanged {
@@ -276,7 +306,61 @@ impl std::fmt::Display for ApplyError {
                  `thoradm schema apply` creates them again",
                 quoted(views)
             ),
+            ApplyError::ViewWaitExpired { waited, stuck } => {
+                write!(f, "{}", StuckView::expired(*waited, stuck))
+            }
+            ApplyError::DropUnfinished { waited, views } => write!(
+                f,
+                "Scylla still reported the dropped views {} as built after {waited}s, so they \
+                 weren't created again (a busy Scylla clears a dropped view's build state late; \
+                 a longer `--view-wait-secs` gives it time)",
+                quoted(views)
+            ),
             ApplyError::Query { statement, error } => write!(f, "`{statement}` failed: {error}"),
+        }
+    }
+}
+
+/// A view still building when the wait for it ended, with the hosts that haven't built it
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StuckView {
+    /// The view's name
+    pub view: String,
+    /// The cluster members that haven't reported the view built, each as its address and host
+    /// id; empty on a single node, where `system.built_views` doesn't list the view yet
+    pub hosts: Vec<String>,
+}
+
+impl StuckView {
+    /// Describe a view wait that reached its limit, naming each view still building and the hosts
+    /// it waits on, and saying what to do
+    ///
+    /// # Arguments
+    ///
+    /// * `waited` - How long the wait lasted, in seconds
+    /// * `stuck` - Each view still building
+    fn expired(waited: u64, stuck: &[StuckView]) -> String {
+        // name each view still building and the hosts it waits on
+        let views = stuck
+            .iter()
+            .map(StuckView::describe)
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!(
+            "the materialized views didn't finish building within {waited}s, so nothing was \
+             recorded: {views}. A Scylla node that is down or still building holds them: bring it \
+             back, or remove it from the cluster, then run `thoradm schema apply` again (with a \
+             longer `--view-wait-secs` if the builds are only slow)"
+        )
+    }
+
+    /// Describe the view and the hosts it waits on, for an error message
+    fn describe(&self) -> String {
+        // a single node has no hosts to name, only its own list of built views
+        if self.hosts.is_empty() {
+            format!("`{}` (not yet in system.built_views)", self.view)
+        } else {
+            format!("`{}` (not built on {})", self.view, self.hosts.join(", "))
         }
     }
 }
@@ -321,6 +405,15 @@ const VIEW_POLL: Duration = Duration::from_secs(1);
 
 /// How often to report the views still building
 const VIEW_REPORT: Duration = Duration::from_secs(10);
+
+/// How often to check whether Scylla has cleared a dropped view's build state, which is usually
+/// gone within moments of the drop
+const DROP_POLL: Duration = Duration::from_millis(200);
+
+/// How long `thoradm schema apply` waits for views to build unless `--view-wait-secs` says
+/// otherwise, in seconds: five hours, which leaves the operator's six hour schema-apply Job time to
+/// fail with the stuck views and hosts instead of being killed without a summary
+pub const DEFAULT_VIEW_WAIT_SECS: u64 = 5 * 3600;
 
 /// What `system_schema` holds for Thorium's keyspace
 #[derive(Debug, Default)]
@@ -381,16 +474,29 @@ enum Change {
         /// The statement
         cql: String,
     },
+    /// Drop a declared view whose live definition differs from this build's and create it again,
+    /// which the apply then waits for like a created view
+    Recreate {
+        /// The view and how its live definition differs
+        stale: StaleView,
+        /// The view's base table, which its build scans
+        base: String,
+        /// The statement that drops the view
+        drop: String,
+        /// The statement that creates it from the registry
+        create: String,
+    },
 }
 
 impl Change {
-    /// The statement this change issues
-    fn cql(&self) -> &str {
+    /// The statements this change issues, in order
+    fn statements(&self) -> Vec<&str> {
         match self {
             Change::Keyspace(cql)
             | Change::Create { cql, .. }
             | Change::Add { cql, .. }
-            | Change::Ttl { cql, .. } => cql,
+            | Change::Ttl { cql, .. } => vec![cql],
+            Change::Recreate { drop, create, .. } => vec![drop, create],
         }
     }
 }
@@ -460,15 +566,17 @@ fn scylla_objects(objects: &[SchemaObject]) -> Vec<ObjectDef> {
 }
 
 /// Plan the statements that converge the live schema to a set of objects: create the keyspace
-/// when it's missing, create each missing object, and add each missing table column; nothing is
-/// ever dropped, and the only table option altered is a default TTL that differs from the config
+/// when it's missing, create each missing object, add each missing table column, and drop and
+/// create again each view listed as stale; nothing else is ever dropped, and the only table
+/// option altered is a default TTL that differs from the config
 ///
 /// # Arguments
 ///
 /// * `conf` - The Thorium config, for the keyspace and table TTLs
 /// * `live` - What the keyspace holds
 /// * `objects` - The Scylla objects to converge to, in creation order
-fn plan(conf: &Conf, live: &LiveSchema, objects: &[ObjectDef]) -> Vec<Change> {
+/// * `stale` - The existing views whose definitions differ from their declarations
+fn plan(conf: &Conf, live: &LiveSchema, objects: &[ObjectDef], stale: &[StaleView]) -> Vec<Change> {
     // collect the changes in the order they're issued
     let keyspace = &conf.thorium.namespace;
     let mut changes = Vec::new();
@@ -525,13 +633,24 @@ fn plan(conf: &Conf, live: &LiveSchema, objects: &[ObjectDef]) -> Vec<Change> {
                     }
                 }
             },
-            // a missing view is created; an existing one is never altered
+            // a missing view is created, and an existing view whose definition differs is
+            // dropped and created again, after its base table in creation order
             ObjectDef::View(view) => {
                 if !live.has(view.name) {
                     changes.push(Change::Create {
                         name: view.name.to_owned(),
                         view: true,
                         cql: view.create_cql(keyspace),
+                    });
+                } else if let Some(found) = stale.iter().find(|found| found.name == view.name)
+                    && live.views.contains(view.name)
+                {
+                    let [drop, create] = recreate_statements(keyspace, view);
+                    changes.push(Change::Recreate {
+                        stale: found.clone(),
+                        base: view.base.to_owned(),
+                        drop,
+                        create,
                     });
                 }
             }
@@ -550,9 +669,10 @@ fn plan(conf: &Conf, live: &LiveSchema, objects: &[ObjectDef]) -> Vec<Change> {
 #[must_use]
 pub fn render(conf: &Conf, objects: &[SchemaObject]) -> Vec<String> {
     // plan against a keyspace that holds nothing yet
-    plan(conf, &LiveSchema::default(), &scylla_objects(objects))
+    plan(conf, &LiveSchema::default(), &scylla_objects(objects), &[])
         .iter()
-        .map(|change| change.cql().to_owned())
+        .flat_map(Change::statements)
+        .map(ToOwned::to_owned)
         .collect()
 }
 
@@ -691,9 +811,40 @@ async fn live_schema(session: &Session, keyspace: &str) -> Result<LiveSchema, Ap
 /// * `session` - The Scylla session to apply with
 /// * `keyspace` - The keyspace, as Scylla stores its name
 /// * `change` - The change to issue
-async fn execute(session: &Session, keyspace: &str, change: &Change) -> Result<(), ApplyError> {
-    // issue the statement; the driver waits for schema agreement after it
-    let Err(err) = session.query_unpaged(change.cql(), ()).await else {
+/// * `started` - When the run's view wait started counting, for a recreated view's drop
+/// * `limit` - The longest the run waits for views from `started`; `None` waits for as long as
+///   they take
+async fn execute(
+    session: &Session,
+    keyspace: &str,
+    change: &Change,
+    started: Instant,
+    limit: Option<Duration>,
+) -> Result<(), ApplyError> {
+    // a view is dropped, then created again only once Scylla has cleared the dropped view's build
+    // state, which the build wait would otherwise take as the new view's; a run that stops after
+    // the drop leaves the view missing, which the next apply creates
+    if let Change::Recreate {
+        stale,
+        drop,
+        create,
+        ..
+    } = change
+    {
+        session
+            .query_unpaged(drop.as_str(), ())
+            .await
+            .map_err(|err| ApplyError::query(drop, err))?;
+        wait_for_drop(session, keyspace, &stale.name, started, limit).await?;
+        session
+            .query_unpaged(create.as_str(), ())
+            .await
+            .map_err(|err| ApplyError::query(create, err))?;
+        return Ok(());
+    }
+    // issue the change's one statement; the driver waits for schema agreement after it
+    let statement = change.statements().first().copied().unwrap_or_default();
+    let Err(err) = session.query_unpaged(statement, ()).await else {
         return Ok(());
     };
     // an add that lost a race to another writer leaves the column in place
@@ -709,7 +860,7 @@ async fn execute(session: &Session, keyspace: &str, change: &Change) -> Result<(
             return Ok(());
         }
     }
-    Err(ApplyError::query(change.cql(), err))
+    Err(ApplyError::query(statement, err))
 }
 
 /// How far one view's build has come
@@ -719,8 +870,123 @@ struct ViewBuild<'a> {
     name: &'a str,
     /// Whether the view is built everywhere
     built: bool,
-    /// On a cluster, how many nodes have built it and how many nodes there are; `None` on one node
+    /// On a cluster, how many member nodes have built it and how many members there are; `None`
+    /// on one node
     nodes: Option<(usize, usize)>,
+    /// On a cluster, the members that haven't reported the view built, each as its address and
+    /// host id
+    waiting: Vec<String>,
+}
+
+/// One node's build status for a view, as `system_distributed.view_build_status` holds it
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostStatus {
+    /// The host id of the node that wrote the row
+    pub host_id: String,
+    /// The node's status for the view, such as `STARTED` or `SUCCESS`
+    pub status: String,
+}
+
+/// How a view's build stands across the cluster's members
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemberBuild {
+    /// The members that reported the view built, each as its address and host id
+    pub built: Vec<String>,
+    /// The members that haven't reported the view built, each as its address and host id
+    pub waiting: Vec<String>,
+    /// The host ids with a status row for the view that aren't cluster members (a removed or
+    /// replaced node), whose rows are ignored
+    pub ignored: Vec<String>,
+}
+
+/// Judge a view's build from its status rows, counting only the cluster's members: a member is
+/// done once its own row says `SUCCESS`, and a row left by a host that is no longer a member
+/// (a removed or replaced node) neither holds the view back nor counts toward it
+///
+/// # Arguments
+///
+/// * `hosts` - The cluster's members, by host id, each named by its address and host id
+/// * `statuses` - The view's status rows, from `view_build_status`
+#[must_use]
+pub fn member_build(hosts: &BTreeMap<String, String>, statuses: &[HostStatus]) -> MemberBuild {
+    // split the members by whether their own row reports success
+    let mut build = MemberBuild::default();
+    for (id, name) in hosts {
+        let done = statuses
+            .iter()
+            .any(|row| &row.host_id == id && row.status == "SUCCESS");
+        if done {
+            build.built.push(name.clone());
+        } else {
+            build.waiting.push(name.clone());
+        }
+    }
+    // name the hosts whose rows were set aside, once each
+    build.ignored = statuses
+        .iter()
+        .filter(|row| !hosts.contains_key(&row.host_id))
+        .map(|row| row.host_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    build
+}
+
+/// Get the cluster's members by host id, each named by its address and host id
+///
+/// The driver reads them from `system.local` and `system.peers` on one connection, so the list
+/// is consistent; it keeps a member that is down and drops one removed from the cluster.
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session whose view of the cluster to read
+#[must_use]
+pub fn cluster_hosts(session: &Session) -> BTreeMap<String, String> {
+    // name each member by its address, with the host id its status rows carry
+    session
+        .get_cluster_state()
+        .get_nodes_info()
+        .iter()
+        .map(|node| {
+            let id = node.host_id.to_string();
+            let name = format!("{} ({id})", node.address.ip());
+            (id, name)
+        })
+        .collect()
+}
+
+/// Read each node's build status for a view from `system_distributed.view_build_status`
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to read with
+/// * `keyspace` - The view's keyspace, as Scylla stores its name
+/// * `view` - The view
+pub async fn view_build_statuses(
+    session: &Session,
+    keyspace: &str,
+    view: &str,
+) -> Result<Vec<HostStatus>, ApplyError> {
+    // each node writes its own row, so one replica answers; the keyspace's replication factor of
+    // three is more than a small cluster can give a quorum read
+    let cql = "SELECT CAST(host_id AS text), status FROM system_distributed.view_build_status \
+               WHERE keyspace_name = ? AND view_name = ?";
+    let mut statement = Statement::new(cql);
+    statement.set_consistency(Consistency::One);
+    let rows = session
+        .query_unpaged(statement, (keyspace, view))
+        .await
+        .map_err(|err| ApplyError::query(cql, err))?
+        .into_rows_result()
+        .map_err(|err| ApplyError::query(cql, err))?;
+    // keep each row's host and status
+    rows.rows::<(String, String)>()
+        .map_err(|err| ApplyError::query(cql, err))?
+        .map(|row| {
+            row.map(|(host_id, status)| HostStatus { host_id, status })
+                .map_err(|err| ApplyError::query(cql, err))
+        })
+        .collect()
 }
 
 /// Get the build state of a view on a single node, which lists each view it finished building
@@ -735,27 +1001,31 @@ fn single_node_build(name: &str, listed: bool) -> ViewBuild<'_> {
         name,
         built: listed,
         nodes: None,
+        waiting: Vec::new(),
     }
 }
 
-/// Get the build state of a view on a cluster from the statuses its nodes reported
+/// Get the build state of a view on a cluster from the statuses its members reported, ignoring
+/// rows of hosts that are no longer members
 ///
 /// # Arguments
 ///
 /// * `name` - The view's name
-/// * `nodes` - How many nodes the cluster has
-/// * `statuses` - Each reporting node's status for the view, from `view_build_status`
-fn cluster_build<'a>(name: &'a str, nodes: usize, statuses: &[String]) -> ViewBuild<'a> {
-    // count the nodes that finished; a node that hasn't reported yet hasn't finished
-    let done = statuses
-        .iter()
-        .filter(|status| status.as_str() == "SUCCESS")
-        .count();
-    // the view is built once every node has reported and every report is a success
+/// * `hosts` - The cluster's members, by host id, each named by its address and host id
+/// * `statuses` - The view's status rows, from `view_build_status`
+fn cluster_build<'a>(
+    name: &'a str,
+    hosts: &BTreeMap<String, String>,
+    statuses: &[HostStatus],
+) -> ViewBuild<'a> {
+    // judge the members' rows alone
+    let build = member_build(hosts, statuses);
+    // the view is built once every member has reported success
     ViewBuild {
         name,
-        built: statuses.len() >= nodes && done == statuses.len(),
-        nodes: Some((done, nodes)),
+        built: build.waiting.is_empty(),
+        nodes: Some((build.built.len(), hosts.len())),
+        waiting: build.waiting,
     }
 }
 
@@ -768,12 +1038,17 @@ fn cluster_build<'a>(name: &'a str, nodes: usize, statuses: &[String]) -> ViewBu
 fn progress_line(elapsed: u64, builds: &[ViewBuild<'_>]) -> String {
     // split the views into those finished and those still building
     let built = builds.iter().filter(|build| build.built).count();
-    // name each view still building, with the nodes that finished it where a cluster reports them
+    // name each view still building, with the nodes that finished it and the members it waits
+    // on where a cluster reports them
     let building = builds
         .iter()
         .filter(|build| !build.built)
         .map(|build| match build.nodes {
-            Some((done, total)) => format!("{} ({done} of {total} nodes)", build.name),
+            Some((done, total)) => format!(
+                "{} ({done} of {total} nodes, waiting on {})",
+                build.name,
+                build.waiting.join(", ")
+            ),
             None => build.name.to_owned(),
         })
         .collect::<Vec<_>>()
@@ -785,7 +1060,7 @@ fn progress_line(elapsed: u64, builds: &[ViewBuild<'_>]) -> String {
 }
 
 /// Get how far each view of a list has built: on one node, from `system.built_views`; on a
-/// cluster, from the status each node reported in `system_distributed.view_build_status`
+/// cluster, from the status each member reported in `system_distributed.view_build_status`
 ///
 /// # Arguments
 ///
@@ -801,6 +1076,12 @@ async fn view_builds<'a>(
     let peers = read_texts::<1>(session, "SELECT CAST(peer AS text) FROM system.peers", &[])
         .await?
         .len();
+    // the members whose rows count, read once for every view
+    let hosts = if peers == 0 {
+        BTreeMap::new()
+    } else {
+        cluster_hosts(session)
+    };
     let mut builds = Vec::with_capacity(views.len());
     for view in views {
         let build = if peers == 0 {
@@ -815,22 +1096,32 @@ async fn view_builds<'a>(
             .is_empty();
             single_node_build(view, listed)
         } else {
-            // a cluster reports each node's build, and every node must be done
-            let statuses = read_texts::<1>(
-                session,
-                "SELECT status FROM system_distributed.view_build_status \
-                 WHERE keyspace_name = ? AND view_name = ?",
-                &[keyspace, view],
-            )
-            .await?
-            .into_iter()
-            .map(|[status]| status)
-            .collect::<Vec<_>>();
-            cluster_build(view, peers + 1, &statuses)
+            // a cluster reports each node's build, and every member must be done
+            let statuses = view_build_statuses(session, keyspace, view).await?;
+            cluster_build(view, &hosts, &statuses)
         };
         builds.push(build);
     }
     Ok(builds)
+}
+
+/// Whether every node has finished building each of a list of views, so reads of them see every
+/// row; a view still building anywhere returns partial results
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to read with
+/// * `keyspace` - The keyspace
+/// * `views` - The views to check
+pub async fn views_built(
+    session: &Session,
+    keyspace: &str,
+    views: &[&str],
+) -> Result<bool, ApplyError> {
+    // every listed view must be built everywhere
+    Ok(unbuilt(session, &keyspace.to_lowercase(), views)
+        .await?
+        .is_empty())
 }
 
 /// Get the views of a list that aren't built yet
@@ -869,23 +1160,58 @@ fn vanished_views(builds: &[ViewBuild<'_>], existing: &[[String; 1]]) -> Vec<Str
         .collect()
 }
 
+/// Get the error for a wait that reached its limit with views still building, or `None` while
+/// the wait has time left or has no limit
+///
+/// # Arguments
+///
+/// * `builds` - The build state of every view waited for
+/// * `elapsed` - How long the wait has lasted
+/// * `limit` - The longest the wait may last, if it has a limit
+fn wait_expired(
+    builds: &[ViewBuild<'_>],
+    elapsed: Duration,
+    limit: Option<Duration>,
+) -> Option<ApplyError> {
+    // a wait with no limit, or with time left, carries on
+    if limit.is_none_or(|limit| elapsed < limit) {
+        return None;
+    }
+    // name each view still building and the members it waits on
+    let stuck = builds
+        .iter()
+        .filter(|build| !build.built)
+        .map(|build| StuckView {
+            view: build.name.to_owned(),
+            hosts: build.waiting.clone(),
+        })
+        .collect::<Vec<_>>();
+    Some(ApplyError::ViewWaitExpired {
+        waited: elapsed.as_secs(),
+        stuck,
+    })
+}
+
 /// Wait until every listed view is built, reporting which views are built and which are still
-/// building every few seconds, with no limit on the wait; the wait ends with an error only when a
-/// view it waits for no longer exists
+/// building every few seconds; the wait ends with an error when a view it waits for no longer
+/// exists, or when the limit passes with views still building
 ///
 /// `CREATE MATERIALIZED VIEW` returns before Scylla has built the view, so a reader moved to a
-/// new view would otherwise see a partial one.
+/// new view would otherwise see a partial one. On a cluster every member must report the view
+/// built, including one that is down, so the wait can't finish while a node is down.
 ///
 /// # Arguments
 ///
 /// * `session` - The Scylla session to read with
 /// * `keyspace` - The keyspace, as Scylla stores its name
 /// * `views` - The views to wait for
+/// * `limit` - The longest the wait may last; `None` waits for as long as the builds take
 /// * `progress` - Receives each progress report
 pub(super) async fn wait_for_views(
     session: &Session,
     keyspace: &str,
     views: &[&str],
+    limit: Option<Duration>,
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<(), ApplyError> {
     // time the wait from here, with no report made yet
@@ -915,12 +1241,59 @@ pub(super) async fn wait_for_views(
         if !vanished.is_empty() {
             return Err(ApplyError::ViewVanished { views: vanished });
         }
+        // fail hard once the limit passes, naming what is still building and where
+        if let Some(expired) = wait_expired(&builds, started.elapsed(), limit) {
+            progress(&progress_line(started.elapsed().as_secs(), &builds));
+            return Err(expired);
+        }
         // report what's still building at the start and every few seconds after
         if reported.is_none_or(|at| at.elapsed() >= VIEW_REPORT) {
             progress(&progress_line(started.elapsed().as_secs(), &builds));
             reported = Some(Instant::now());
         }
         tokio::time::sleep(VIEW_POLL).await;
+    }
+}
+
+/// Wait until a dropped view no longer reads as built anywhere, so a view created again under its
+/// name can't be taken as built from what the dropped one left behind
+///
+/// `DROP MATERIALIZED VIEW` returns before Scylla's view builder clears the dropped view's
+/// `system.built_views` row and `system_distributed.view_build_status` rows, which takes seconds
+/// while the builder is busy. On a cluster no member may still report the view built, since a
+/// member's stale row would stand in for its new build.
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to read with
+/// * `keyspace` - The keyspace, as Scylla stores its name
+/// * `view` - The dropped view
+/// * `started` - When the limit started counting
+/// * `limit` - The longest to wait from `started`; `None` waits for as long as clearing takes
+pub(super) async fn wait_for_drop(
+    session: &Session,
+    keyspace: &str,
+    view: &str,
+    started: Instant,
+    limit: Option<Duration>,
+) -> Result<(), ApplyError> {
+    loop {
+        // stop once neither the node's list nor any member's status row reports the view built
+        let builds = view_builds(session, keyspace, &[view]).await?;
+        let cleared = builds
+            .iter()
+            .all(|build| !build.built && build.nodes.is_none_or(|(done, _)| done == 0));
+        if cleared {
+            return Ok(());
+        }
+        // fail once the limit passes with the dropped view still reported as built
+        if limit.is_some_and(|limit| started.elapsed() >= limit) {
+            return Err(ApplyError::DropUnfinished {
+                waited: started.elapsed().as_secs(),
+                views: vec![view.to_owned()],
+            });
+        }
+        tokio::time::sleep(DROP_POLL).await;
     }
 }
 
@@ -1169,7 +1542,8 @@ async fn record_snapshot(
 ///
 /// * `session` - The Scylla session to apply with
 /// * `conf` - The Thorium config
-/// * `options` - What to converge to, and whether to execute anything
+/// * `options` - What to converge to, whether to execute anything, and how long to wait for
+///   views to build
 /// * `trigger_key` - The trigger key this run applies for, recorded with the fingerprint
 ///   without the files password's hash
 /// * `progress` - Receives a line for each progress report while views build
@@ -1192,7 +1566,8 @@ pub async fn apply(
 ///
 /// * `session` - The Scylla session to apply with
 /// * `conf` - The Thorium config
-/// * `options` - What to converge to, and whether to execute anything
+/// * `options` - What to converge to, whether to execute anything, and how long to wait for
+///   views to build
 /// * `accept` - What to record instead of refusing
 /// * `trigger_key` - The trigger key this run applies for, recorded with the fingerprint
 ///   without the files password's hash
@@ -1229,7 +1604,8 @@ pub struct SeedRequest {
 ///
 /// * `session` - The Scylla session to apply with
 /// * `conf` - The Thorium config
-/// * `options` - What to converge to, and whether to execute anything
+/// * `options` - What to converge to, whether to execute anything, and how long to wait for
+///   views to build
 /// * `accept` - What to record instead of refusing
 /// * `seed` - The revision to record when `schema_migrations` holds none
 /// * `trigger_key` - The trigger key this run applies for, recorded with the fingerprint
@@ -1253,6 +1629,7 @@ pub async fn apply_seeding(
                 accept,
                 trigger_key,
                 seed,
+                view_wait: options.view_wait,
             };
             converge(session, conf, &objects, &run, progress).await
         }
@@ -1278,6 +1655,7 @@ pub async fn apply_seeding(
                 accept: accept.clone(),
                 trigger_key,
                 skip: BTreeSet::new(),
+                view_wait: options.view_wait,
             };
             apply_snapshot(session, conf, &snapshot, &run, progress).await
         }
@@ -1288,9 +1666,10 @@ pub async fn apply_seeding(
 ///
 /// Checks the data-shaping settings against the record first, then creates the keyspace and
 /// `schema_migrations`, then every missing object in creation order, adds the table columns the
-/// keyspace lacks, waits until every declared view is built, and records the data-shaping
-/// settings the record lacks, the applied fingerprints, and the layout versions. It never drops
-/// or alters an existing object, so running it again on a converged keyspace issues no schema
+/// keyspace lacks, drops and creates again each declared view whose live definition differs,
+/// waits with no limit until every declared view is built, and records the data-shaping settings
+/// the record lacks, the applied fingerprints, and the layout versions. It never drops or alters
+/// any other existing object, so running it again on a converged keyspace issues no schema
 /// statement.
 ///
 /// # Arguments
@@ -1317,6 +1696,7 @@ pub async fn apply_objects(
         accept: &accept,
         trigger_key,
         seed: None,
+        view_wait: None,
     };
     converge(session, conf, objects, &run, progress).await
 }
@@ -1474,6 +1854,8 @@ struct RunSettings<'a> {
     trigger_key: &'a str,
     /// The revision to record when none is recorded
     seed: Option<&'a SeedRequest>,
+    /// The longest the run waits for views to build; `None` waits for as long as they take
+    view_wait: Option<Duration>,
 }
 
 /// Pick the views a stopped earlier run left building: unbuilt views that exist and that this run
@@ -1498,8 +1880,8 @@ pub(super) fn left_building<'a>(
         .collect()
 }
 
-/// Wait for the views a run created and for any a stopped earlier run left building, and return
-/// the names of the views waited for
+/// Wait for the views a run created or recreated and for any a stopped earlier run left
+/// building, and return the names of the views waited for
 ///
 /// # Arguments
 ///
@@ -1507,21 +1889,24 @@ pub(super) fn left_building<'a>(
 /// * `keyspace` - The keyspace, as Scylla stores its name
 /// * `views` - Every view the run's schema holds
 /// * `changes` - The changes the run issued
+/// * `limit` - The longest the wait may last; `None` waits for as long as the builds take
 /// * `progress` - Receives a line for each progress report
 async fn wait_for_changed_views(
     session: &Session,
     keyspace: &str,
     views: &[&str],
     changes: &[Change],
+    limit: Option<Duration>,
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<Vec<String>, ApplyError> {
-    // the views this run created
+    // the views this run created or dropped and created again
     let created = changes
         .iter()
         .filter_map(|change| match change {
             Change::Create {
                 name, view: true, ..
             } => Some(name.as_str()),
+            Change::Recreate { stale, .. } => Some(stale.name.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1541,7 +1926,7 @@ async fn wait_for_changed_views(
         .copied()
         .filter(|view| created.contains(view) || waiting.contains(view))
         .collect::<Vec<_>>();
-    wait_for_views(session, keyspace, &waited, progress).await?;
+    wait_for_views(session, keyspace, &waited, limit, progress).await?;
     Ok(waited.into_iter().map(ToOwned::to_owned).collect())
 }
 
@@ -1615,11 +2000,36 @@ async fn converge(
         session, conf, &scylla, &has_table, run.accept, dry_run, progress,
     )
     .await?;
-    let changes = plan(conf, &live, &scylla);
+    // find the declared views whose live definitions differ from this build's
+    let compared = if live.keyspace {
+        let views = scylla
+            .iter()
+            .filter_map(|def| match def {
+                ObjectDef::View(view) => Some(*view),
+                ObjectDef::Table(_) => None,
+            })
+            .collect::<Vec<_>>();
+        stale_views(session, &keyspace, &views).await?
+    } else {
+        ViewComparison::default()
+    };
+    let changes = plan(conf, &live, &scylla, &compared.stale);
+    // a view whose live definition can't be read is left as it is and reported
+    let mut warnings = config.warnings.clone();
+    for view in &compared.unreadable {
+        let warning = format!(
+            "view `{}`'s live definition can't be read ({}), so it was left as it is; \
+             `thoradm schema apply --recreate-view {}` replaces it if it is out of date",
+            view.name, view.reason, view.name
+        );
+        progress(&warning);
+        warnings.push(warning);
+    }
     let mut report = ApplyReport {
         statements: changes
             .iter()
-            .map(|change| change.cql().to_owned())
+            .flat_map(Change::statements)
+            .map(ToOwned::to_owned)
             .collect(),
         created: Vec::new(),
         added: Vec::new(),
@@ -1627,13 +2037,26 @@ async fn converge(
         fingerprint: fingerprints(objects).0,
         trigger_key: trigger_key.clone(),
         views_built: Vec::new(),
-        warnings: config.warnings.clone(),
+        views_recreated: Vec::new(),
+        warnings,
         dry_run,
     };
     for change in &changes {
         match change {
             Change::Keyspace(_) => (),
             Change::Create { name, .. } => report.created.push(name.clone()),
+            Change::Recreate { stale, base, .. } => {
+                // a dry run says why it would recreate the view, as a real run does below
+                if dry_run {
+                    progress(&format!(
+                        "view `{}` differs from this build's definition ({}); a real run drops it \
+                         and creates it again, then waits for Scylla to build it from `{base}`",
+                        stale.name,
+                        stale.differences.join("; ")
+                    ));
+                }
+                report.views_recreated.push(stale.clone());
+            }
             Change::Add { table, column, .. } => report.added.push(format!("{table}.{column}")),
             Change::Ttl {
                 table, from, to, ..
@@ -1661,9 +2084,19 @@ async fn converge(
     if !held.is_empty() {
         return Err(ApplyError::TableHeldByView { tables: held });
     }
-    // issue each change in order
+    // issue each change in order, timing the run's wait for views from here
+    let started = Instant::now();
     for change in &changes {
-        execute(session, &keyspace, change).await?;
+        // say why a view is dropped and created again, and what that costs, before doing it
+        if let Change::Recreate { stale, base, .. } = change {
+            progress(&format!(
+                "view `{}` differs from this build's definition ({}); dropping it and creating it \
+                 again, then waiting for Scylla to build it from `{base}`",
+                stale.name,
+                stale.differences.join("; ")
+            ));
+        }
+        execute(session, &keyspace, change, started, run.view_wait).await?;
         // a fresh install is recorded as soon as its record table exists, before the rest of the
         // schema, so a run that stops partway leaves a record its retry finds
         if let (Some(seeding), Change::Create { name, .. }) = (&seeding, change)
@@ -1689,8 +2122,11 @@ async fn converge(
             ObjectDef::Table(_) => None,
         })
         .collect::<Vec<_>>();
+    let left = run
+        .view_wait
+        .map(|limit| limit.saturating_sub(started.elapsed()));
     report.views_built =
-        wait_for_changed_views(session, &keyspace, &views, &changes, progress).await?;
+        wait_for_changed_views(session, &keyspace, &views, &changes, left, progress).await?;
     // record what was applied
     report.fingerprint = record(session, conf, objects, &trigger_key, &config.rows).await?;
     // a requested seed is recorded last, so a stopped run records none and seeds again
@@ -1771,18 +2207,36 @@ pub(super) async fn check_config(session: &Session, conf: &Conf) -> Result<(), A
 #[cfg(test)]
 mod tests {
     use super::{
-        LiveSchema, ObjectDef, SchemaMigrationsTable, ScyllaObject, ViewBuild, cluster_build,
-        progress_line, single_node_build, tables_held_by_views, vanished_views,
+        ApplyError, HostStatus, LiveSchema, ObjectDef, SchemaMigrationsTable, ScyllaObject,
+        StuckView, ViewBuild, cluster_build, member_build, progress_line, single_node_build,
+        tables_held_by_views, vanished_views, wait_expired,
     };
     use std::collections::{BTreeMap, BTreeSet};
+    use std::time::Duration;
 
-    /// Collect statuses from literals
+    /// Name cluster members by host id, each as `<id>-addr (<id>)`
     ///
     /// # Arguments
     ///
-    /// * `listed` - The status literals
-    fn statuses(listed: &[&str]) -> Vec<String> {
-        listed.iter().map(|status| (*status).to_owned()).collect()
+    /// * `ids` - The members' host ids
+    fn hosts(ids: &[&str]) -> BTreeMap<String, String> {
+        ids.iter()
+            .map(|id| ((*id).to_owned(), format!("{id}-addr ({id})")))
+            .collect()
+    }
+
+    /// Collect status rows from host and status literals
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - Each row's host id and status
+    fn statuses(rows: &[(&str, &str)]) -> Vec<HostStatus> {
+        rows.iter()
+            .map(|(host_id, status)| HostStatus {
+                host_id: (*host_id).to_owned(),
+                status: (*status).to_owned(),
+            })
+            .collect()
     }
 
     /// A single node's views are built when `built_views` lists them, and carry no node counts
@@ -1795,27 +2249,96 @@ mod tests {
         let building = single_node_build("tags_by_item", false);
         assert!(!building.built);
         assert_eq!(building.nodes, None);
+        assert_eq!(building.waiting, Vec::<String>::new());
     }
 
-    /// A cluster's view is built only once every node reported success, and the count says how many did
+    /// A cluster's view is built only once every member reported success, and the count says how
+    /// many did
     #[test]
-    fn cluster_builds_count_the_nodes_that_finished() {
-        // every node reported success
-        let done = cluster_build("samples", 3, &statuses(&["SUCCESS", "SUCCESS", "SUCCESS"]));
+    fn cluster_builds_count_the_members_that_finished() {
+        let members = hosts(&["a", "b", "c"]);
+        // every member reported success
+        let rows = statuses(&[("a", "SUCCESS"), ("b", "SUCCESS"), ("c", "SUCCESS")]);
+        let done = cluster_build("samples", &members, &rows);
         assert!(done.built);
         assert_eq!(done.nodes, Some((3, 3)));
-        // one node still building
-        let partial = cluster_build("samples", 3, &statuses(&["SUCCESS", "STARTED", "SUCCESS"]));
+        assert_eq!(done.waiting, Vec::<String>::new());
+        // one member still building
+        let rows = statuses(&[("a", "SUCCESS"), ("b", "STARTED"), ("c", "SUCCESS")]);
+        let partial = cluster_build("samples", &members, &rows);
         assert!(!partial.built);
         assert_eq!(partial.nodes, Some((2, 3)));
-        // a node that has not reported yet leaves the view unbuilt
-        let silent = cluster_build("samples", 3, &statuses(&["SUCCESS", "SUCCESS"]));
+        assert_eq!(partial.waiting, ["b-addr (b)"]);
+        // a member that has not reported yet, such as one that is down, leaves the view unbuilt
+        let rows = statuses(&[("a", "SUCCESS"), ("b", "SUCCESS")]);
+        let silent = cluster_build("samples", &members, &rows);
         assert!(!silent.built);
         assert_eq!(silent.nodes, Some((2, 3)));
-        // no node has reported
-        let none = cluster_build("samples", 3, &[]);
+        assert_eq!(silent.waiting, ["c-addr (c)"]);
+        // no member has reported
+        let none = cluster_build("samples", &members, &[]);
         assert!(!none.built);
         assert_eq!(none.nodes, Some((0, 3)));
+        assert_eq!(none.waiting.len(), 3);
+    }
+
+    /// A member that is down keeps the `SUCCESS` rows it wrote before it went down, so the views it
+    /// built still count as built and an apply that creates no view isn't held back by it, while a
+    /// view created since waits on it by name
+    #[test]
+    fn a_down_members_earlier_builds_still_count() {
+        // members a and b are up and c is down, having built samples before it went down
+        let members = hosts(&["a", "b", "c"]);
+        let built_before = statuses(&[("a", "SUCCESS"), ("b", "SUCCESS"), ("c", "SUCCESS")]);
+        let build = cluster_build("samples", &members, &built_before);
+        assert!(build.built);
+        assert_eq!(build.nodes, Some((3, 3)));
+        // a view created while c is down has no row from it, so it waits on c
+        let created_since = statuses(&[("a", "SUCCESS"), ("b", "SUCCESS")]);
+        let build = cluster_build("tags", &members, &created_since);
+        assert!(!build.built);
+        assert_eq!(build.waiting, ["c-addr (c)"]);
+    }
+
+    /// A row left by a host that is no longer a member neither holds a view back nor counts
+    /// toward it
+    #[test]
+    fn rows_of_former_members_are_ignored() {
+        let members = hosts(&["a", "b", "c"]);
+        // every member built it, and a removed node left a row that never finished
+        let rows = statuses(&[
+            ("a", "SUCCESS"),
+            ("b", "SUCCESS"),
+            ("c", "SUCCESS"),
+            ("gone", "STARTED"),
+        ]);
+        let build = cluster_build("samples", &members, &rows);
+        assert!(build.built);
+        assert_eq!(build.nodes, Some((3, 3)));
+        assert_eq!(member_build(&members, &rows).ignored, ["gone"]);
+        // a removed node's success doesn't stand in for a member that hasn't finished
+        let rows = statuses(&[("a", "SUCCESS"), ("b", "SUCCESS"), ("gone", "SUCCESS")]);
+        let build = cluster_build("samples", &members, &rows);
+        assert!(!build.built);
+        assert_eq!(build.nodes, Some((2, 3)));
+        assert_eq!(build.waiting, ["c-addr (c)"]);
+    }
+
+    /// The members are split by their own rows, and each ignored host is named once
+    #[test]
+    fn member_builds_split_members_and_name_ignored_hosts_once() {
+        let members = hosts(&["a", "b"]);
+        let rows = statuses(&[
+            ("a", "SUCCESS"),
+            ("b", "STARTED"),
+            ("x", "STARTED"),
+            ("x", "SUCCESS"),
+            ("w", "STARTED"),
+        ]);
+        let build = member_build(&members, &rows);
+        assert_eq!(build.built, ["a-addr (a)"]);
+        assert_eq!(build.waiting, ["b-addr (b)"]);
+        assert_eq!(build.ignored, ["w", "x"]);
     }
 
     /// On one node the line says how many views are built and names those still building
@@ -1834,18 +2357,75 @@ mod tests {
         );
     }
 
-    /// On a cluster each view still building shows how many nodes have finished it
+    /// On a cluster each view still building shows how many members have finished it and which
+    /// it waits on
     #[test]
     fn the_line_shows_node_counts_on_a_cluster() {
+        let members = hosts(&["n1", "n2", "n3"]);
+        let done = statuses(&[("n1", "SUCCESS"), ("n2", "SUCCESS"), ("n3", "SUCCESS")]);
+        let partial = statuses(&[("n1", "SUCCESS"), ("n2", "STARTED"), ("n3", "STARTED")]);
         let builds = [
-            cluster_build("a", 3, &statuses(&["SUCCESS", "SUCCESS", "SUCCESS"])),
-            cluster_build("b", 3, &statuses(&["SUCCESS", "STARTED", "STARTED"])),
-            cluster_build("c", 3, &[]),
+            cluster_build("a", &members, &done),
+            cluster_build("b", &members, &partial),
+            cluster_build("c", &members, &[]),
         ];
         assert_eq!(
             progress_line(0, &builds),
-            "1 of 3 views built after 0s; building: b (1 of 3 nodes), c (0 of 3 nodes)"
+            "1 of 3 views built after 0s; building: b (1 of 3 nodes, waiting on n2-addr (n2), \
+             n3-addr (n3)), c (0 of 3 nodes, waiting on n1-addr (n1), n2-addr (n2), n3-addr (n3))"
         );
+    }
+
+    /// A wait with no limit, or with time left, carries on; one past its limit fails naming each
+    /// view still building and the members it waits on
+    #[test]
+    fn the_wait_fails_at_its_limit_naming_views_and_hosts() {
+        let members = hosts(&["n1", "n2", "n3"]);
+        let down = statuses(&[("n1", "SUCCESS"), ("n2", "SUCCESS")]);
+        let done = statuses(&[("n1", "SUCCESS"), ("n2", "SUCCESS"), ("n3", "SUCCESS")]);
+        let builds = [
+            cluster_build("samples", &members, &down),
+            cluster_build("tags", &members, &done),
+            single_node_build("local", false),
+        ];
+        let limit = Some(Duration::from_secs(60));
+        // no limit never ends the wait, and neither does time left
+        assert!(wait_expired(&builds, Duration::from_secs(7_777), None).is_none());
+        assert!(wait_expired(&builds, Duration::from_secs(59), limit).is_none());
+        // at the limit the wait fails with the views still building
+        let Some(ApplyError::ViewWaitExpired { waited, stuck }) =
+            wait_expired(&builds, Duration::from_secs(60), limit)
+        else {
+            panic!("the wait should have expired");
+        };
+        assert_eq!(waited, 60);
+        assert_eq!(
+            stuck,
+            [
+                StuckView {
+                    view: "samples".to_owned(),
+                    hosts: vec!["n3-addr (n3)".to_owned()],
+                },
+                StuckView {
+                    view: "local".to_owned(),
+                    hosts: Vec::new(),
+                },
+            ]
+        );
+        // the message names each view and host, and says what to do
+        let message = ApplyError::ViewWaitExpired { waited, stuck }.to_string();
+        assert!(message.contains("within 60s"), "{message}");
+        assert!(message.contains("nothing was recorded"), "{message}");
+        assert!(
+            message.contains("`samples` (not built on n3-addr (n3))"),
+            "{message}"
+        );
+        assert!(
+            message.contains("`local` (not yet in system.built_views)"),
+            "{message}"
+        );
+        assert!(message.contains("--view-wait-secs"), "{message}");
+        assert!(!message.contains("`tags`"), "{message}");
     }
 
     /// Only a view still building that the keyspace no longer holds counts as vanished

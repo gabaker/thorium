@@ -1,13 +1,19 @@
-//! Recreating declared materialized views: `schema apply` never alters or drops an existing view,
-//! so a view that is present but out of step with its base table is repaired by dropping it and
-//! creating it again from the registry. This path drops only a declared view; any name the registry
-//! doesn't declare as a view is refused before anything is changed. The one other object thoradm
-//! ever drops is a registered legacy object, on `thoradm schema drop-legacy`.
+//! Recreating declared materialized views. Scylla can't alter a view's definition, so a declared
+//! view whose live definition differs from this build's (an older release's base table, key, or
+//! filter) is dropped and created again by `schema apply` itself, and a view whose definition is
+//! right but which is out of step with its base table is repaired the same way on request
+//! (`--recreate-view`). Views hold no data of their own: Scylla rebuilds every row from the base
+//! table. These paths drop only a declared view; any name the registry doesn't declare as a view
+//! is refused before anything is changed. The one other object thoradm ever drops is a
+//! registered legacy object, on `thoradm schema drop-legacy`.
 
 use scylla::client::session::Session;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::time::{Duration, Instant};
 
-use super::apply::{ApplyError, read_texts, wait_for_views};
+use super::apply::{ApplyError, read_texts, wait_for_drop, wait_for_views};
+use super::probe::{ProbeError, SchemaRows, view_differences};
 use super::{ObjectDef, SchemaDefinition, SchemaObject, ViewDef};
 use crate::Conf;
 
@@ -105,6 +111,102 @@ pub struct RecreateReport {
     pub dry_run: bool,
 }
 
+/// A declared view whose live definition differs from the one this build declares, which
+/// `schema apply` drops and creates again
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StaleView {
+    /// The view's name
+    pub name: String,
+    /// How the live definition differs, each as `part: live -> declared`
+    pub differences: Vec<String>,
+}
+
+/// A declared view whose live definition can't be read, which `schema apply` leaves as it is
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct UnreadableView {
+    /// The view's name
+    pub(super) name: String,
+    /// Why its live definition can't be read
+    pub(super) reason: String,
+}
+
+/// How the live definitions of a list of declared views compare with this build's
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct ViewComparison {
+    /// The views whose live definitions differ, which `schema apply` drops and creates again
+    pub(super) stale: Vec<StaleView>,
+    /// The views whose live definitions can't be read, which `schema apply` reports and leaves
+    pub(super) unreadable: Vec<UnreadableView>,
+}
+
+impl ViewComparison {
+    /// Sort one declared view into the comparison by its live definition: listed as stale when
+    /// it differs from the declared form, as unreadable when it can't be read, and not at all
+    /// when it matches
+    ///
+    /// A definition that can't be read is never taken as stale: a gap in reading what a newer
+    /// Scylla stores is likelier than an out-of-date view, and recreating it on every apply would
+    /// rebuild it from its whole base table each time.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The view's name
+    /// * `want` - The view's declared canonical form
+    /// * `live` - The view's live canonical form, or why it can't be read
+    pub(super) fn add(&mut self, name: &str, want: &Value, live: Result<Value, ProbeError>) {
+        match live {
+            // a live definition that reads is compared with the declared one
+            Ok(live) => {
+                let differences = view_differences(want, &live);
+                if !differences.is_empty() {
+                    self.stale.push(StaleView {
+                        name: name.to_owned(),
+                        differences,
+                    });
+                }
+            }
+            // one that can't be read is set aside with the reason
+            Err(err) => self.unreadable.push(UnreadableView {
+                name: name.to_owned(),
+                reason: err.to_string(),
+            }),
+        }
+    }
+}
+
+/// Compare the live definitions of a list of views with what this build declares
+///
+/// Only declared views that exist as views are compared: a declared view the keyspace lacks is
+/// created instead, and a view this build doesn't declare is never listed. A live view whose
+/// definition can't be read is listed apart, so the apply leaves it alone.
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to read with
+/// * `keyspace` - The keyspace, as Scylla stores its name
+/// * `views` - The views to compare
+pub(super) async fn stale_views(
+    session: &Session,
+    keyspace: &str,
+    views: &[ViewDef],
+) -> Result<ViewComparison, ApplyError> {
+    // read the keyspace's schema rows once for every view
+    let rows = SchemaRows::read(session, keyspace)
+        .await
+        .map_err(|err| ApplyError::query("read the live view definitions", err))?;
+    // compare each declared view that exists with its declared form
+    let declared = declared_views();
+    let mut compared = ViewComparison::default();
+    for view in views.iter().filter(|view| declared.contains(view)) {
+        let Some(live) = rows.view_form(view.name) else {
+            continue;
+        };
+        let want = SchemaDefinition::Scylla(ObjectDef::View(*view)).canonical();
+        compared.add(view.name, &want, live);
+    }
+    Ok(compared)
+}
+
 /// Get every materialized view this build declares, in declaration order
 #[must_use]
 pub fn declared_views() -> Vec<ViewDef> {
@@ -176,7 +278,8 @@ pub fn recreate_warning(view: &ViewDef) -> String {
 ///
 /// Each view must be declared and its base table must exist: otherwise the call refuses before
 /// anything is dropped. Routes reading a view fail while it is dropped, then see missing rows until
-/// its build finishes, which scans the whole base table.
+/// its build finishes, which scans the whole base table. Each view is created only once Scylla
+/// has cleared the dropped view's build state, so the wait can't take it for the new build.
 ///
 /// # Arguments
 ///
@@ -184,12 +287,16 @@ pub fn recreate_warning(view: &ViewDef) -> String {
 /// * `conf` - The Thorium config, for the keyspace
 /// * `views` - The declared views to recreate
 /// * `dry_run` - Return the statements without executing them
+/// * `view_wait` - The longest to wait, in all, for Scylla to clear each dropped view's build
+///   state and then for the builds, before failing with the view left dropped or with the views
+///   and hosts still building; `None` waits for as long as they take
 /// * `progress` - Receives the warning for each view and the progress of the builds
 pub async fn recreate_views(
     session: &Session,
     conf: &Conf,
     views: &[ViewDef],
     dry_run: bool,
+    view_wait: Option<Duration>,
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<RecreateReport, ViewError> {
     // refuse any definition the registry doesn't declare, however it was built
@@ -245,7 +352,8 @@ pub async fn recreate_views(
             });
         }
     }
-    // drop and create each view in turn, saying first what it costs
+    // drop and create each view in turn, saying first what it costs, all within one limit
+    let started = Instant::now();
     for view in views {
         progress(&recreate_warning(view));
         // drop the view, which tolerates one already gone
@@ -254,6 +362,14 @@ pub async fn recreate_views(
             .query_unpaged(drop_view.as_str(), ())
             .await
             .map_err(|err| ApplyError::query(&drop_view, err))?;
+        // create it only once Scylla has cleared the dropped view's build state, which the wait
+        // below would otherwise take as the new view's
+        wait_for_drop(session, &stored, view.name, started, view_wait)
+            .await
+            .map_err(|error| ViewError::NotCreated {
+                view: view.name.to_owned(),
+                error,
+            })?;
         // a create failing after the drop leaves the view missing, which the error says
         session
             .query_unpaged(create_view.as_str(), ())
@@ -263,8 +379,51 @@ pub async fn recreate_views(
                 error: ApplyError::query(&create_view, err),
             })?;
     }
-    // wait until every recreated view has built
+    // wait until every recreated view has built, within what's left of the limit
     let names = views.iter().map(|view| view.name).collect::<Vec<_>>();
-    wait_for_views(session, &stored, &names, progress).await?;
+    let left = view_wait.map(|limit| limit.saturating_sub(started.elapsed()));
+    wait_for_views(session, &stored, &names, left, progress).await?;
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProbeError, UnreadableView, ViewComparison, declared_views};
+    use crate::models::schema::{ObjectDef, SchemaDefinition};
+
+    /// A live view that matches is left out, one that differs is stale, and one whose definition
+    /// can't be read is set aside as unreadable instead of being taken as stale
+    #[test]
+    fn an_unreadable_live_view_is_set_aside_not_recreated() {
+        // the declared samples view's form, and a live form on another base table
+        let samples = declared_views()
+            .into_iter()
+            .find(|view| view.name == "samples")
+            .expect("samples is declared");
+        let want = SchemaDefinition::Scylla(ObjectDef::View(samples)).canonical();
+        let mut old = want.clone();
+        old["base"] = serde_json::json!("samples_old");
+        let mut compared = ViewComparison::default();
+        // a matching live view is neither stale nor unreadable
+        compared.add("samples", &want, Ok(want.clone()));
+        assert_eq!(compared, ViewComparison::default());
+        // a live view on another base table is stale, with how it differs
+        compared.add("samples", &want, Ok(old));
+        assert_eq!(compared.stale.len(), 1);
+        assert_eq!(
+            compared.stale[0].differences,
+            ["base: samples_old -> samples_list"]
+        );
+        // a live view the probe can't read is reported, never listed as stale
+        let unreadable = ProbeError::Unreadable {
+            object: "tags_by_item".to_owned(),
+            reason: "unterminated quote in the filter".to_owned(),
+        };
+        compared.add("tags_by_item", &want, Err(unreadable));
+        assert_eq!(compared.stale.len(), 1);
+        assert_eq!(compared.unreadable.len(), 1);
+        let UnreadableView { name, reason } = &compared.unreadable[0];
+        assert_eq!(name, "tags_by_item");
+        assert!(reason.contains("unterminated quote"), "{reason}");
+    }
 }

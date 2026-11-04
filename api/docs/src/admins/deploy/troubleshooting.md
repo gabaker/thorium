@@ -217,6 +217,7 @@ one of these messages.
 | Waiting for S3 at `<endpoint>` to accept connections: ... | The S3 store isn't reachable yet |
 | skip_bucket_auto_create is set but `<n>` required S3 bucket(s) are missing or inaccessible at `<endpoint>`: ... | Create the listed buckets or grant Thorium's S3 identity access to them |
 | Waiting for Redis at `<addr>` to accept connections: ... | Redis isn't up yet, or `redis.host`/`port` is wrong |
+| The schema-apply Job failed with "the materialized views didn't finish building within `<secs>`s, so nothing was recorded: `<view>` (not built on `<address> (<host id>)`) ..." | A Scylla node that is down, or still building, never reported the views built, and the Job's view wait (five hours) passed. Bring the node back, or remove it from the cluster (`nodetool removenode`), then set the `thorium.sandia.gov/retry-schema-apply` annotation on the `ThoriumCluster` to a new value. When every node is up and the build is only slow, run `thoradm schema apply --view-wait-secs <secs>` by hand with a longer wait (see [The Declared Schema](../thoradm/thoradm.md#the-declared-schema)) |
 | Elastic index `<name>` does not map group as a keyword, so group filters may not ... (alongside `Ready`) | The index was created from dynamic mappings. Reindex it: see [Reindexing Elasticsearch](./upgrades.md#reindexing-elasticsearch) |
 
 When the operator reaches the Kubernetes cluster through a context its config doesn't list, the
