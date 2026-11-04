@@ -17,6 +17,7 @@ use thorium::conf::K8sHostAliases;
 
 use super::clusters::ClusterMeta;
 use super::config_maps::TRACING_CONFIG_MAP;
+use super::crds::{EnvVar, PROXY_PAIRS, mirror_proxy_cases};
 use super::deployments::{mount_elastic_ca_in_pod, restrict_pod};
 
 /// The label naming what a Job is for
@@ -323,6 +324,42 @@ fn labels(spec: &JobSpec) -> BTreeMap<String, String> {
     ])
 }
 
+/// Get the proxy variables a Job takes from the API component's `env`, so it reaches the backends
+/// the way the API does
+///
+/// Only the API's proxy variables (see [`PROXY_PAIRS`]) are returned, in the API's order, with
+/// both cases mirrored as the API's own pods get them and an unset value as empty; any the Job's
+/// own environment sets are left out so its value wins.
+///
+/// # Arguments
+///
+/// * `spec` - The Job being built
+/// * `meta` - Thorium cluster client and metadata
+fn api_proxy_env(spec: &JobSpec, meta: &ClusterMeta) -> Vec<Value> {
+    // mirror both cases of the API's proxy variables
+    let is_proxy = |name: &str| {
+        PROXY_PAIRS
+            .iter()
+            .any(|(lower, upper)| name == *lower || name == *upper)
+    };
+    let proxies: Vec<EnvVar> = meta
+        .cluster
+        .spec
+        .components
+        .api
+        .env
+        .iter()
+        .filter(|var| is_proxy(&var.name))
+        .cloned()
+        .collect();
+    // keep the ones the Job doesn't set itself; a proxy the step sets in one case isn't mirrored
+    mirror_proxy_cases(&proxies)
+        .into_iter()
+        .filter(|var| !spec.env.contains_key(&var.name))
+        .map(|var| json!({"name": var.name, "value": var.value.unwrap_or_default()}))
+        .collect()
+}
+
 /// Build the pod a thoradm Job runs
 ///
 /// # Arguments
@@ -333,7 +370,7 @@ fn pod_spec(spec: &JobSpec, meta: &ClusterMeta) -> Result<PodSpec, Error> {
     // run thoradm against the mounted config with the step's arguments
     let mut args = vec!["--cluster-conf".to_owned(), CONFIG_PATH.to_owned()];
     args.extend(spec.args.iter().cloned());
-    // pass the Job's UID from its pod label and its name, then the step's own environment
+    // pass the Job's UID from its pod label and its name
     let mut env = vec![
         json!({
             "name": JOB_UID_ENV,
@@ -341,6 +378,9 @@ fn pod_spec(spec: &JobSpec, meta: &ClusterMeta) -> Result<PodSpec, Error> {
         }),
         json!({"name": JOB_NAME_ENV, "value": spec.name}),
     ];
+    // reach the backends through the API's proxy settings, which override any the image sets
+    env.extend(api_proxy_env(spec, meta));
+    // then add the step's own environment
     env.extend(
         spec.env
             .iter()
@@ -950,6 +990,82 @@ mod tests {
             i64::try_from(thorium::models::schema::DEFAULT_VIEW_WAIT_SECS).expect("wait");
         let scylla_wait = 300;
         assert!(view_wait + scylla_wait < spec.active_deadline_seconds);
+    }
+
+    /// A Job's pod takes the API component's proxy variables in both cases and none of its other
+    /// variables, the upper-case value wins when the API's cases disagree, the step's own
+    /// environment wins over them, and an API without proxy variables adds none
+    #[tokio::test]
+    async fn jobs_take_the_api_proxy_env() {
+        // an API whose env sets a lower-case proxy alone, disagreeing no_proxy cases, an unset
+        // upper-case all_proxy, a variable that isn't a proxy, and the HTTPS_PROXY the step sets
+        let mut raw = full_spec();
+        raw["components"]["api"]["env"] = json!([
+            {"name": "http_proxy", "value": "http://proxy:3128"},
+            {"name": "NO_PROXY", "value": ".svc,cluster.local"},
+            {"name": "no_proxy", "value": "localhost"},
+            {"name": "RUST_LOG", "value": "debug"},
+            {"name": "ALL_PROXY"},
+            {"name": "HTTPS_PROXY", "value": "http://proxy:3128"}
+        ]);
+        let fake = FakeKube::default();
+        let meta = meta_for(namespaced_cluster(raw.clone()), &fake.client());
+        // a step that sets its own HTTPS_PROXY
+        let name = job_name(JobKind::SchemaStatus, "step", &["0"]);
+        let mut spec = base_spec(
+            JobKind::SchemaStatus,
+            "step",
+            name.clone(),
+            "image".to_owned(),
+            Vec::new(),
+        )
+        .expect("spec");
+        spec.env
+            .insert("HTTPS_PROXY".to_owned(), "http://step:3128".to_owned());
+        // list the pod's literal variables in order
+        let env = |spec: &JobSpec, meta: &ClusterMeta| {
+            pod_spec(spec, meta).expect("pod").containers[0]
+                .env
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|var| var.value_from.is_none())
+                .map(|var| (var.name, var.value.unwrap_or_default()))
+                .collect::<Vec<_>>()
+        };
+        let pair = |name: &str, value: &str| (name.to_owned(), value.to_owned());
+        assert_eq!(
+            env(&spec, &meta),
+            [
+                pair(JOB_NAME_ENV, &name),
+                pair("http_proxy", "http://proxy:3128"),
+                pair("HTTP_PROXY", "http://proxy:3128"),
+                pair("NO_PROXY", ".svc,cluster.local"),
+                pair("no_proxy", ".svc,cluster.local"),
+                pair("ALL_PROXY", ""),
+                pair("all_proxy", ""),
+                pair("https_proxy", "http://proxy:3128"),
+                pair("HTTPS_PROXY", "http://step:3128"),
+            ]
+        );
+        // the default API env clears the proxies and bypasses the cluster's names
+        let meta = meta_for(namespaced_cluster(full_spec()), &fake.client());
+        let defaults = env(&spec, &meta);
+        assert!(defaults.contains(&pair("http_proxy", "")), "{defaults:?}");
+        assert!(
+            defaults.contains(&pair("no_proxy", "localhost,cluster.local")),
+            "{defaults:?}"
+        );
+        // an API env without proxy variables adds nothing
+        raw["components"]["api"]["env"] = json!([{"name": "RUST_LOG", "value": "debug"}]);
+        let meta = meta_for(namespaced_cluster(raw), &fake.client());
+        assert_eq!(
+            env(&spec, &meta),
+            [
+                pair(JOB_NAME_ENV, &name),
+                pair("HTTPS_PROXY", "http://step:3128"),
+            ]
+        );
     }
 
     /// Deleting a cluster's thoradm Jobs deletes every Job the operator labelled with a kind,

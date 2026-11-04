@@ -574,7 +574,8 @@ fn provision_pod(meta: &ClusterMeta, node: &str, version: &str) -> Result<Pod, E
                         "limits": resources.clone(),
                         "requests": resources
                     },
-                    "env": api_spec.env.clone(),
+                    // both cases of each proxy, so an image's value can't shadow it
+                    "env": crds::mirror_proxy_cases(&api_spec.env),
                     "volumeMounts": [
                         {
                             "name": "opt-mount",
