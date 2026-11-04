@@ -505,6 +505,24 @@ revision being applied before the record moves to it. Drift is compared with the
 applied schema belongs to, so those objects aren't reported as unexpected in the middle of an
 upgrade.
 
+A schema apply also replaces each declared materialized view whose live definition differs from
+the release's, such as a `committed_repo_data` view that still selects from the old
+`commits_list` table. Scylla can't alter a view, so the schema-apply Job drops the view, creates it
+again, logs how it differed, and waits for every node to build it before anything rolls out
+(`thoradm schema apply --dry-run` lists the views a run would replace, and why). The build scans
+the view's base table, about 10 to 25 seconds per million rows per view in benchmarks, and routes
+that read the view fail while it is dropped and see missing rows until it finishes. A build that
+outlasts the Job's view wait (five hours) fails the Job naming the views and the nodes still
+building them; once the cause is fixed, set the `thorium.sandia.gov/retry-schema-apply`
+annotation to a new value (see [The Declared Schema](../thoradm/thoradm.md#the-declared-schema)).
+A view whose live definition `thoradm` can't read is left as it is and named in a warning.
+
+The schema-apply Job doesn't pause the API, so the previous release's API keeps serving while
+views rebuild. When `thoradm schema apply --dry-run` (or the Job log) names `committed_repo_data`
+among the views to replace, don't ingest repos until the apply finishes: the previous release's
+repo ingest prunes the repo data that view doesn't reference, and while the view rebuilds that
+would delete data commits still use.
+
 ## Downgrading
 
 A target older than the deployment's revision is a downgrade. The planner follows the reverse

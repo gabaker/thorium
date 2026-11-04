@@ -1,7 +1,8 @@
 //! What `thoradm schema apply` converges to, what one run did, and why it can stop, and the
 //! applier itself: it creates the keyspace and `schema_migrations` first, then every missing
-//! declared object in creation order, adds the table columns the keyspace lacks, waits for the
-//! views to build, and records the applied fingerprints and layout versions
+//! declared object in creation order, adds the table columns the keyspace lacks, drops and
+//! creates again each declared view whose live definition differs from this build's, waits for
+//! the views to build, and records the applied fingerprints and layout versions
 
 use chrono::Utc;
 use scylla::client::session::Session;
@@ -15,6 +16,7 @@ use super::config_record::{self, ConfigAccept};
 use super::queries::migrations::SchemaMigrationsQueries;
 use super::record::{self, RecordError};
 use super::scylla::{SchemaMigrationsTable, SchemaMigrationsTableRef};
+use super::views::{StaleView, StaleViews, recreate_statements, stale_views};
 use super::{
     DriftReport, Fingerprint, MigrationRecordKind, ObjectDef, ObservedSchema, RevisionSnapshot,
     SchemaDefinition, SchemaObject, ScyllaObject, SnapshotObject, probe_scylla,
@@ -38,7 +40,8 @@ pub struct ApplyOptions {
     pub view_wait: Option<Duration>,
 }
 
-/// The definitions the applier converges to; either way it only creates and adds, never drops
+/// The definitions the applier converges to: the declared schema creates and adds, and replaces
+/// only a declared view whose definition differs, while a snapshot only creates and adds
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplyTarget {
     /// The registry this build declares
@@ -66,10 +69,14 @@ pub struct ApplyReport {
     /// hashes of the data-shaping and TTL settings), recorded beside the fingerprint so later
     /// reconciles compare keys, not fingerprints; the files password's hash is left out
     pub trigger_key: String,
-    /// The views this run created, each reported only once `system.built_views` lists it, so no
-    /// reader moves to a view still being built
+    /// The views this run created or recreated, each reported only once every node has built it,
+    /// so no reader moves to a view still being built
     #[serde(default)]
     pub views_built: Vec<String>,
+    /// The declared views this run dropped and created again because their live definitions
+    /// differed from this build's, with how each differed (on a dry run, the views it would)
+    #[serde(default)]
+    pub views_recreated: Vec<StaleView>,
     /// Warnings for the status that don't stop the apply, such as a files password left at its
     /// public default
     #[serde(default)]
@@ -467,16 +474,29 @@ enum Change {
         /// The statement
         cql: String,
     },
+    /// Drop a declared view whose live definition differs from this build's and create it again,
+    /// which the apply then waits for like a created view
+    Recreate {
+        /// The view and how its live definition differs
+        stale: StaleView,
+        /// The view's base table, which its build scans
+        base: String,
+        /// The statement that drops the view
+        drop: String,
+        /// The statement that creates it from the registry
+        create: String,
+    },
 }
 
 impl Change {
-    /// The statement this change issues
-    fn cql(&self) -> &str {
+    /// The statements this change issues, in order
+    fn statements(&self) -> Vec<&str> {
         match self {
             Change::Keyspace(cql)
             | Change::Create { cql, .. }
             | Change::Add { cql, .. }
-            | Change::Ttl { cql, .. } => cql,
+            | Change::Ttl { cql, .. } => vec![cql],
+            Change::Recreate { drop, create, .. } => vec![drop, create],
         }
     }
 }
@@ -546,15 +566,17 @@ fn scylla_objects(objects: &[SchemaObject]) -> Vec<ObjectDef> {
 }
 
 /// Plan the statements that converge the live schema to a set of objects: create the keyspace
-/// when it's missing, create each missing object, and add each missing table column; nothing is
-/// ever dropped, and the only table option altered is a default TTL that differs from the config
+/// when it's missing, create each missing object, add each missing table column, and drop and
+/// create again each view listed as stale; nothing else is ever dropped, and the only table
+/// option altered is a default TTL that differs from the config
 ///
 /// # Arguments
 ///
 /// * `conf` - The Thorium config, for the keyspace and table TTLs
 /// * `live` - What the keyspace holds
 /// * `objects` - The Scylla objects to converge to, in creation order
-fn plan(conf: &Conf, live: &LiveSchema, objects: &[ObjectDef]) -> Vec<Change> {
+/// * `stale` - The existing views whose definitions differ from their declarations
+fn plan(conf: &Conf, live: &LiveSchema, objects: &[ObjectDef], stale: &[StaleView]) -> Vec<Change> {
     // collect the changes in the order they're issued
     let keyspace = &conf.thorium.namespace;
     let mut changes = Vec::new();
@@ -611,13 +633,24 @@ fn plan(conf: &Conf, live: &LiveSchema, objects: &[ObjectDef]) -> Vec<Change> {
                     }
                 }
             },
-            // a missing view is created; an existing one is never altered
+            // a missing view is created, and an existing view whose definition differs is
+            // dropped and created again, after its base table in creation order
             ObjectDef::View(view) => {
                 if !live.has(view.name) {
                     changes.push(Change::Create {
                         name: view.name.to_owned(),
                         view: true,
                         cql: view.create_cql(keyspace),
+                    });
+                } else if let Some(found) = stale.iter().find(|found| found.name == view.name)
+                    && live.views.contains(view.name)
+                {
+                    let [drop, create] = recreate_statements(keyspace, view);
+                    changes.push(Change::Recreate {
+                        stale: found.clone(),
+                        base: view.base.to_owned(),
+                        drop,
+                        create,
                     });
                 }
             }
@@ -636,9 +669,10 @@ fn plan(conf: &Conf, live: &LiveSchema, objects: &[ObjectDef]) -> Vec<Change> {
 #[must_use]
 pub fn render(conf: &Conf, objects: &[SchemaObject]) -> Vec<String> {
     // plan against a keyspace that holds nothing yet
-    plan(conf, &LiveSchema::default(), &scylla_objects(objects))
+    plan(conf, &LiveSchema::default(), &scylla_objects(objects), &[])
         .iter()
-        .map(|change| change.cql().to_owned())
+        .flat_map(Change::statements)
+        .map(ToOwned::to_owned)
         .collect()
 }
 
@@ -777,9 +811,40 @@ async fn live_schema(session: &Session, keyspace: &str) -> Result<LiveSchema, Ap
 /// * `session` - The Scylla session to apply with
 /// * `keyspace` - The keyspace, as Scylla stores its name
 /// * `change` - The change to issue
-async fn execute(session: &Session, keyspace: &str, change: &Change) -> Result<(), ApplyError> {
-    // issue the statement; the driver waits for schema agreement after it
-    let Err(err) = session.query_unpaged(change.cql(), ()).await else {
+/// * `started` - When the run's view wait started counting, for a recreated view's drop
+/// * `limit` - The longest the run waits for views from `started`; `None` waits for as long as
+///   they take
+async fn execute(
+    session: &Session,
+    keyspace: &str,
+    change: &Change,
+    started: Instant,
+    limit: Option<Duration>,
+) -> Result<(), ApplyError> {
+    // a view is dropped, then created again only once Scylla has cleared the dropped view's build
+    // state, which the build wait would otherwise take as the new view's; a run that stops after
+    // the drop leaves the view missing, which the next apply creates
+    if let Change::Recreate {
+        stale,
+        drop,
+        create,
+        ..
+    } = change
+    {
+        session
+            .query_unpaged(drop.as_str(), ())
+            .await
+            .map_err(|err| ApplyError::query(drop, err))?;
+        wait_for_drop(session, keyspace, &stale.name, started, limit).await?;
+        session
+            .query_unpaged(create.as_str(), ())
+            .await
+            .map_err(|err| ApplyError::query(create, err))?;
+        return Ok(());
+    }
+    // issue the change's one statement; the driver waits for schema agreement after it
+    let statement = change.statements().first().copied().unwrap_or_default();
+    let Err(err) = session.query_unpaged(statement, ()).await else {
         return Ok(());
     };
     // an add that lost a race to another writer leaves the column in place
@@ -795,7 +860,7 @@ async fn execute(session: &Session, keyspace: &str, change: &Change) -> Result<(
             return Ok(());
         }
     }
-    Err(ApplyError::query(change.cql(), err))
+    Err(ApplyError::query(statement, err))
 }
 
 /// How far one view's build has come
@@ -1038,6 +1103,25 @@ async fn view_builds<'a>(
         builds.push(build);
     }
     Ok(builds)
+}
+
+/// Whether every node has finished building each of a list of views, so reads of them see every
+/// row; a view still building anywhere returns partial results
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to read with
+/// * `keyspace` - The keyspace
+/// * `views` - The views to check
+pub async fn views_built(
+    session: &Session,
+    keyspace: &str,
+    views: &[&str],
+) -> Result<bool, ApplyError> {
+    // every listed view must be built everywhere
+    Ok(unbuilt(session, &keyspace.to_lowercase(), views)
+        .await?
+        .is_empty())
 }
 
 /// Get the views of a list that aren't built yet
@@ -1582,10 +1666,11 @@ pub async fn apply_seeding(
 ///
 /// Checks the data-shaping settings against the record first, then creates the keyspace and
 /// `schema_migrations`, then every missing object in creation order, adds the table columns the
-/// keyspace lacks, waits with no limit until every declared view is built, and records the
-/// data-shaping settings the record lacks, the applied fingerprints, and the layout versions. It
-/// never drops or alters an existing object, so running it again on a converged keyspace issues no
-/// schema statement.
+/// keyspace lacks, drops and creates again each declared view whose live definition differs,
+/// waits with no limit until every declared view is built, and records the data-shaping settings
+/// the record lacks, the applied fingerprints, and the layout versions. It never drops or alters
+/// any other existing object, so running it again on a converged keyspace issues no schema
+/// statement.
 ///
 /// # Arguments
 ///
@@ -1795,8 +1880,8 @@ pub(super) fn left_building<'a>(
         .collect()
 }
 
-/// Wait for the views a run created and for any a stopped earlier run left building, and return
-/// the names of the views waited for
+/// Wait for the views a run created or recreated and for any a stopped earlier run left
+/// building, and return the names of the views waited for
 ///
 /// # Arguments
 ///
@@ -1814,13 +1899,14 @@ async fn wait_for_changed_views(
     limit: Option<Duration>,
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<Vec<String>, ApplyError> {
-    // the views this run created
+    // the views this run created or dropped and created again
     let created = changes
         .iter()
         .filter_map(|change| match change {
             Change::Create {
                 name, view: true, ..
             } => Some(name.as_str()),
+            Change::Recreate { stale, .. } => Some(stale.name.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1891,6 +1977,8 @@ fn tables_held_by_views(live: &LiveSchema, objects: &[ObjectDef]) -> Vec<String>
 /// * `objects` - The objects to converge to
 /// * `run` - Whether to execute, what to accept, and the trigger key
 /// * `progress` - Receives a line for each progress report
+// one step after another reads as the order an apply runs in
+#[allow(clippy::too_many_lines)]
 async fn converge(
     session: &Session,
     conf: &Conf,
@@ -1914,11 +2002,29 @@ async fn converge(
         session, conf, &scylla, &has_table, run.accept, dry_run, progress,
     )
     .await?;
-    let changes = plan(conf, &live, &scylla);
+    // find the declared views whose live definitions differ from this build's
+    let found = if live.keyspace {
+        let views = scylla
+            .iter()
+            .filter_map(|def| match def {
+                ObjectDef::View(view) => Some(*view),
+                ObjectDef::Table(_) => None,
+            })
+            .collect::<Vec<_>>();
+        stale_views(session, &keyspace, &views).await?
+    } else {
+        StaleViews::default()
+    };
+    // say which declared views were left alone because their definitions can't be read
+    for warning in &found.unreadable {
+        progress(warning);
+    }
+    let changes = plan(conf, &live, &scylla, &found.stale);
     let mut report = ApplyReport {
         statements: changes
             .iter()
-            .map(|change| change.cql().to_owned())
+            .flat_map(Change::statements)
+            .map(ToOwned::to_owned)
             .collect(),
         created: Vec::new(),
         added: Vec::new(),
@@ -1926,13 +2032,31 @@ async fn converge(
         fingerprint: fingerprints(objects).0,
         trigger_key: trigger_key.clone(),
         views_built: Vec::new(),
-        warnings: config.warnings.clone(),
+        views_recreated: Vec::new(),
+        warnings: config
+            .warnings
+            .iter()
+            .chain(&found.unreadable)
+            .cloned()
+            .collect(),
         dry_run,
     };
     for change in &changes {
         match change {
             Change::Keyspace(_) => (),
             Change::Create { name, .. } => report.created.push(name.clone()),
+            Change::Recreate { stale, base, .. } => {
+                // a dry run says why it would recreate the view, as a real run does below
+                if dry_run {
+                    progress(&format!(
+                        "view `{}` differs from this build's definition ({}); a real run drops it \
+                         and creates it again, then waits for Scylla to build it from `{base}`",
+                        stale.name,
+                        stale.differences.join("; ")
+                    ));
+                }
+                report.views_recreated.push(stale.clone());
+            }
             Change::Add { table, column, .. } => report.added.push(format!("{table}.{column}")),
             Change::Ttl {
                 table, from, to, ..
@@ -1960,9 +2084,19 @@ async fn converge(
     if !held.is_empty() {
         return Err(ApplyError::TableHeldByView { tables: held });
     }
-    // issue each change in order
+    // issue each change in order, timing the run's wait for views from here
+    let started = Instant::now();
     for change in &changes {
-        execute(session, &keyspace, change).await?;
+        // say why a view is dropped and created again, and what that costs, before doing it
+        if let Change::Recreate { stale, base, .. } = change {
+            progress(&format!(
+                "view `{}` differs from this build's definition ({}); dropping it and creating it \
+                 again, then waiting for Scylla to build it from `{base}`",
+                stale.name,
+                stale.differences.join("; ")
+            ));
+        }
+        execute(session, &keyspace, change, started, run.view_wait).await?;
         // a fresh install is recorded as soon as its record table exists, before the rest of the
         // schema, so a run that stops partway leaves a record its retry finds
         if let (Some(seeding), Change::Create { name, .. }) = (&seeding, change)
@@ -1988,15 +2122,11 @@ async fn converge(
             ObjectDef::Table(_) => None,
         })
         .collect::<Vec<_>>();
-    report.views_built = wait_for_changed_views(
-        session,
-        &keyspace,
-        &views,
-        &changes,
-        run.view_wait,
-        progress,
-    )
-    .await?;
+    let left = run
+        .view_wait
+        .map(|limit| limit.saturating_sub(started.elapsed()));
+    report.views_built =
+        wait_for_changed_views(session, &keyspace, &views, &changes, left, progress).await?;
     // record what was applied
     report.fingerprint = record(session, conf, objects, &trigger_key, &config.rows).await?;
     // a requested seed is recorded last, so a stopped run records none and seeds again
@@ -2150,6 +2280,24 @@ mod tests {
         assert!(!none.built);
         assert_eq!(none.nodes, Some((0, 3)));
         assert_eq!(none.waiting.len(), 3);
+    }
+
+    /// A member that is down keeps the `SUCCESS` rows it wrote before it went down, so the views it
+    /// built still count as built and an apply that creates no view isn't held back by it, while a
+    /// view created since waits on it by name
+    #[test]
+    fn a_down_members_earlier_builds_still_count() {
+        // members a and b are up and c is down, having built samples before it went down
+        let members = hosts(&["a", "b", "c"]);
+        let built_before = statuses(&[("a", "SUCCESS"), ("b", "SUCCESS"), ("c", "SUCCESS")]);
+        let build = cluster_build("samples", &members, &built_before);
+        assert!(build.built);
+        assert_eq!(build.nodes, Some((3, 3)));
+        // a view created while c is down has no row from it, so it waits on c
+        let created_since = statuses(&[("a", "SUCCESS"), ("b", "SUCCESS")]);
+        let build = cluster_build("tags", &members, &created_since);
+        assert!(!build.built);
+        assert_eq!(build.waiting, ["c-addr (c)"]);
     }
 
     /// A row left by a host that is no longer a member neither holds a view back nor counts

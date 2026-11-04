@@ -151,6 +151,11 @@ fn summary_with(result: &Result<ApplyReport, Failure>, row: Option<&str>) -> Str
                 "created": report.created.len(),
                 "added": report.added.len(),
                 "views_built": report.views_built,
+                "views_recreated": report
+                    .views_recreated
+                    .iter()
+                    .map(|view| view.name.as_str())
+                    .collect::<Vec<_>>(),
                 "warnings": report.warnings,
                 "dry_run": report.dry_run,
                 "result": row,
@@ -158,6 +163,7 @@ fn summary_with(result: &Result<ApplyReport, Failure>, row: Option<&str>) -> Str
             // the lists give way to their lengths when they'd outgrow the message
             if summary.to_string().len() > TERMINATION_LIMIT {
                 summary["views_built"] = json!(report.views_built.len());
+                summary["views_recreated"] = json!(report.views_recreated.len());
                 summary["warnings"] = json!(report.warnings.len());
             }
             // a key still too long is cut to what's left, so the message stays whole JSON
@@ -367,10 +373,11 @@ pub(super) async fn handle(cmd: &ApplySchema, args: &Args) -> Result<RunOutcome,
     } else {
         // a real run logs what it changed and prints its full report
         info!(
-            "Applied the schema: {} objects created, {} columns added, {} views built; recorded \
-             deployment fingerprint {}",
+            "Applied the schema: {} objects created, {} columns added, {} views recreated, {} \
+             views built; recorded deployment fingerprint {}",
             report.created.len(),
             report.added.len(),
+            report.views_recreated.len(),
             report.views_built.len(),
             report.fingerprint.as_str()
         );
@@ -402,6 +409,7 @@ mod tests {
             fingerprint: Fingerprint::of(&json!("fixture")),
             trigger_key: "image=thorium:1;revision=2026-10-v02".to_owned(),
             views_built: vec!["v".to_owned(); 500],
+            views_recreated: Vec::new(),
             warnings: vec!["a warning".to_owned(); 500],
             dry_run: false,
         }

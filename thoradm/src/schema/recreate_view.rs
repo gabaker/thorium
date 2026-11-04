@@ -115,10 +115,16 @@ pub(super) async fn run(cmd: &ApplySchema, args: &Args) -> Result<ApplyReport, F
     }
     // converge first, so every base table exists and the schema is recorded
     let mut report = super::apply::run(cmd, args).await?;
-    // a view this run just created is already fresh
+    // a view this run just created, or recreated because its definition differed, is already fresh
     let views = views
         .into_iter()
         .filter(|view| !report.created.iter().any(|name| name == view.name))
+        .filter(|view| {
+            !report
+                .views_recreated
+                .iter()
+                .any(|stale| stale.name == view.name)
+        })
         .collect::<Vec<_>>();
     if views.is_empty() {
         return Ok(report);

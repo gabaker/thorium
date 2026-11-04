@@ -131,6 +131,115 @@ fn with_filter_set(object: &SnapshotObject) -> SnapshotObject {
     object
 }
 
+/// Render one part of a view's canonical form for a difference line: its base table, its
+/// partition key, its clustering key with each column's order, or its filter
+///
+/// # Arguments
+///
+/// * `form` - The view's canonical form
+/// * `part` - The part to render
+fn view_part(form: &Value, part: &str) -> String {
+    // the names of a list's entries, read from the entry or from its `name`
+    let names = |value: &Value, order: bool| {
+        value.as_array().map_or_default(|entries| {
+            entries
+                .iter()
+                .map(|entry| match (entry.as_str(), order) {
+                    (Some(name), _) => name.to_owned(),
+                    (None, true) => format!(
+                        "{} {}",
+                        entry["name"].as_str().unwrap_or_default(),
+                        entry["order"].as_str().unwrap_or("asc")
+                    ),
+                    (None, false) => entry["name"].as_str().unwrap_or_default().to_owned(),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+    };
+    match part {
+        "partition_key" => format!("({})", names(&form[part], false)),
+        "clustering_key" => format!("({})", names(&form[part], true)),
+        _ => form[part].as_str().unwrap_or("none").to_owned(),
+    }
+}
+
+/// List how a live view's definition differs from a declared one's, each line as
+/// `part: live -> declared`: its base table, its partition key, its clustering key with each
+/// column's order, its filter, and the columns it selects with their types
+///
+/// Filters compare as sets of conjuncts without the `IS NOT NULL` that Scylla requires on every
+/// key column, so a view created from the declaration lists nothing, whichever Scylla version
+/// created it and however it renders the filter.
+///
+/// # Arguments
+///
+/// * `declared` - The declared view's canonical form
+/// * `live` - The live view's canonical form
+#[must_use]
+pub fn view_differences(declared: &Value, live: &Value) -> Vec<String> {
+    // compare both forms with their filters as sets
+    let set_form = |canonical: &Value| {
+        with_filter_set(&SnapshotObject {
+            backend: SchemaBackend::Scylla,
+            name: canonical["name"].as_str().unwrap_or_default().to_owned(),
+            fingerprint: Fingerprint::of(canonical),
+            canonical: canonical.clone(),
+        })
+    };
+    let (want, have) = (set_form(declared), set_form(live));
+    // the base table, the keys, and the filter, each as one line
+    let mut differences = Vec::new();
+    for part in ["base", "partition_key", "clustering_key", "filter"] {
+        if want.canonical[part] != have.canonical[part] {
+            differences.push(format!(
+                "{part}: {} -> {}",
+                view_part(&have.canonical, part),
+                view_part(&want.canonical, part)
+            ));
+        }
+    }
+    // the selected columns: those only one side has, and those whose type differs
+    let types = |form: &Value| {
+        form["columns"].as_array().map_or_default(|columns| {
+            columns
+                .iter()
+                .map(|column| {
+                    (
+                        column["name"].as_str().unwrap_or_default().to_owned(),
+                        column["type"].as_str().unwrap_or_default().to_owned(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        })
+    };
+    let (wanted, held) = (types(&want.canonical), types(&have.canonical));
+    let mut columns = Vec::new();
+    for (name, cql_type) in &held {
+        match wanted.get(name) {
+            None => columns.push(format!("-{name}")),
+            Some(declared) if declared != cql_type => {
+                columns.push(format!("{name} {cql_type} -> {declared}"));
+            }
+            Some(_) => (),
+        }
+    }
+    columns.extend(
+        wanted
+            .keys()
+            .filter(|name| !held.contains_key(*name))
+            .map(|name| format!("+{name}")),
+    );
+    if !columns.is_empty() {
+        differences.push(format!("columns: {}", columns.join(", ")));
+    }
+    // anything else that differs still makes the definitions differ
+    if differences.is_empty() && want.fingerprint != have.fingerprint {
+        differences.push("definition differs".to_owned());
+    }
+    differences
+}
+
 /// Describe one Scylla column of a canonical form: its type and its place in the key
 ///
 /// # Arguments

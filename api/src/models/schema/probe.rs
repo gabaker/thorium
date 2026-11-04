@@ -89,7 +89,7 @@ mod rows;
 mod tests;
 
 pub use acknowledge::Acknowledgement;
-pub use compare::{LegacyObjects, converged_revision};
+pub use compare::{LegacyObjects, converged_revision, view_differences};
 #[cfg(feature = "client")]
 pub use live::{diff, elastic_client, probe_configured};
 pub use mappings::mapping_object;

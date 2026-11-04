@@ -1,14 +1,18 @@
-//! Recreating declared materialized views: `schema apply` never alters or drops an existing view,
-//! so a view that is present but out of step with its base table is repaired by dropping it and
-//! creating it again from the registry. This path drops only a declared view; any name the registry
-//! doesn't declare as a view is refused before anything is changed. The one other object thoradm
-//! ever drops is a registered legacy object, on `thoradm schema drop-legacy`.
+//! Recreating declared materialized views. Scylla can't alter a view's definition, so a declared
+//! view whose live definition differs from this build's (an older release's base table, key, or
+//! filter) is dropped and created again by `schema apply` itself, and a view whose definition is
+//! right but which is out of step with its base table is repaired the same way on request
+//! (`--recreate-view`). Views hold no data of their own: Scylla rebuilds every row from the base
+//! table. These paths drop only a declared view; any name the registry doesn't declare as a view
+//! is refused before anything is changed. The one other object thoradm ever drops is a
+//! registered legacy object, on `thoradm schema drop-legacy`.
 
 use scylla::client::session::Session;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
 use super::apply::{ApplyError, read_texts, wait_for_drop, wait_for_views};
+use super::probe::{SchemaRows, view_differences};
 use super::{ObjectDef, SchemaDefinition, SchemaObject, ViewDef};
 use crate::Conf;
 
@@ -104,6 +108,87 @@ pub struct RecreateReport {
     pub recreated: Vec<String>,
     /// Whether nothing was executed
     pub dry_run: bool,
+}
+
+/// A declared view whose live definition differs from the one this build declares, which
+/// `schema apply` drops and creates again
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StaleView {
+    /// The view's name
+    pub name: String,
+    /// How the live definition differs, each as `part: live -> declared`
+    pub differences: Vec<String>,
+}
+
+/// What comparing the declared views with their live definitions found
+#[derive(Debug, Default)]
+pub(super) struct StaleViews {
+    /// The views whose live definitions differ, which `schema apply` drops and creates again
+    pub(super) stale: Vec<StaleView>,
+    /// A warning for each declared view whose live definition can't be read, which is left as it
+    /// is: what it holds can't be judged, so it is never dropped
+    pub(super) unreadable: Vec<String>,
+}
+
+/// Find the views of a list whose live definitions differ from what this build declares
+///
+/// Only declared views that exist as views are compared: a declared view the keyspace lacks is
+/// created instead, and a view this build doesn't declare is never listed. A live view whose
+/// definition can't be read is reported instead of listed, so it is never dropped.
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to read with
+/// * `keyspace` - The keyspace, as Scylla stores its name
+/// * `views` - The views to compare
+pub(super) async fn stale_views(
+    session: &Session,
+    keyspace: &str,
+    views: &[ViewDef],
+) -> Result<StaleViews, ApplyError> {
+    // read the keyspace's schema rows once for every view, then compare them
+    let rows = SchemaRows::read(session, keyspace)
+        .await
+        .map_err(|err| ApplyError::query("read the live view definitions", err))?;
+    Ok(judge_views(&rows, views))
+}
+
+/// Compare the views of a list with their live definitions in a keyspace's schema rows
+///
+/// # Arguments
+///
+/// * `rows` - The keyspace's `system_schema` rows
+/// * `views` - The views to compare
+fn judge_views(rows: &SchemaRows, views: &[ViewDef]) -> StaleViews {
+    // compare each declared view that exists with its declared form
+    let declared = declared_views();
+    let mut found = StaleViews::default();
+    for view in views.iter().filter(|view| declared.contains(view)) {
+        let Some(live) = rows.view_form(view.name) else {
+            continue;
+        };
+        // a definition that can't be read is reported and left in place
+        let live = match live {
+            Ok(live) => live,
+            Err(err) => {
+                found.unreadable.push(format!(
+                    "view `{}`'s live definition can't be read ({err}), so it was left as it is; \
+                     `thoradm schema apply --recreate-view {}` replaces it if it is out of date",
+                    view.name, view.name
+                ));
+                continue;
+            }
+        };
+        let want = SchemaDefinition::Scylla(ObjectDef::View(*view)).canonical();
+        let differences = view_differences(&want, &live);
+        if !differences.is_empty() {
+            found.stale.push(StaleView {
+                name: view.name.to_owned(),
+                differences,
+            });
+        }
+    }
+    found
 }
 
 /// Get every materialized view this build declares, in declaration order
@@ -283,4 +368,89 @@ pub async fn recreate_views(
     let left = view_wait.map(|limit| limit.saturating_sub(started.elapsed()));
     wait_for_views(session, &stored, &names, left, progress).await?;
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SchemaRows, judge_views, resolve_views};
+    use crate::models::schema::probe::{ColumnRow, ViewRow};
+
+    /// One column row of a view
+    ///
+    /// # Arguments
+    ///
+    /// * `view` - The view the column belongs to
+    /// * `name` - The column's name
+    /// * `cql_type` - The column's CQL type as Scylla renders it
+    fn column(view: &str, name: &str, cql_type: &str) -> ColumnRow {
+        // a regular column outside the key
+        ColumnRow {
+            table_name: view.to_owned(),
+            column_name: name.to_owned(),
+            kind: "regular".to_owned(),
+            position: -1,
+            clustering_order: "NONE".to_owned(),
+            cql_type: cql_type.to_owned(),
+        }
+    }
+
+    /// One view row selecting from a base table
+    ///
+    /// # Arguments
+    ///
+    /// * `view` - The view's name
+    /// * `base` - Its base table
+    fn view_row(view: &str, base: &str) -> ViewRow {
+        // a view with no filter beyond its keys
+        ViewRow {
+            view_name: view.to_owned(),
+            base_table_name: base.to_owned(),
+            where_clause: String::new(),
+            include_all_columns: false,
+        }
+    }
+
+    /// A declared view on another base is listed as stale with how it differs, a declared view
+    /// whose definition can't be read is reported and never listed for a drop, and a declared view
+    /// the keyspace lacks is neither
+    #[test]
+    fn unreadable_views_are_reported_and_never_dropped() {
+        // committed_repo_data on the old base, samples with a column type that can't be parsed
+        let rows = SchemaRows {
+            columns: vec![
+                column("committed_repo_data", "hash", "text"),
+                column("samples", "sha256", "map<text"),
+            ],
+            views: vec![
+                view_row("committed_repo_data", "commits_list"),
+                view_row("samples", "samples_list"),
+            ],
+            ..SchemaRows::default()
+        };
+        let views = resolve_views(&["committed_repo_data", "samples", "tags_by_item"])
+            .expect("declared views");
+        let found = judge_views(&rows, &views);
+        // only the readable stale view is dropped and created again
+        let names = found
+            .stale
+            .iter()
+            .map(|stale| stale.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["committed_repo_data"]);
+        assert!(
+            found.stale[0]
+                .differences
+                .iter()
+                .any(|line| line == "base: commits_list -> commitish_list"),
+            "{:?}",
+            found.stale[0].differences
+        );
+        // the unreadable one is named in a warning and left alone
+        assert_eq!(found.unreadable.len(), 1, "{:?}", found.unreadable);
+        assert!(
+            found.unreadable[0].contains("view `samples`"),
+            "{:?}",
+            found.unreadable
+        );
+    }
 }

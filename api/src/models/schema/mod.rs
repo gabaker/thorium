@@ -97,6 +97,7 @@ pub use apply::{
     HostStatus, MemberBuild, SeedRequest, SnapshotRun, StuckView, apply, apply_accepting,
     apply_objects, apply_seeding, apply_snapshot, cluster_hosts, fingerprints, keyspace_cql,
     member_build, redact_trigger_key, render, table_cql, view_build_statuses, view_cql,
+    views_built,
 };
 pub use baseline::BASELINE_REVISIONS;
 pub(crate) use baseline::object_added_later;
@@ -208,7 +209,7 @@ pub use verify_views::{
     ViewCheck, ViewState, range_of, token_range, verify_views,
 };
 pub use views::{
-    RecreateReport, ViewError, declared_views, recreate_statements, recreate_views,
+    RecreateReport, StaleView, ViewError, declared_views, recreate_statements, recreate_views,
     recreate_warning, resolve_views,
 };
 

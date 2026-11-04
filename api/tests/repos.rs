@@ -2,7 +2,10 @@
 
 use chrono::{DateTime, Duration, Utc};
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
+use tokio::sync::RwLock;
 
+use thorium::models::schema::{ApplyOptions, ApplyTarget, apply};
 use thorium::models::{
     BranchRequest, CommitListOpts, CommitRequest, CommitishMapRequest, CommitishRequest,
     GroupUpdate, GroupUsersUpdate, RepoCheckout, RepoDownloadOpts, RepoListLine, RepoListOpts,
@@ -10,6 +13,10 @@ use thorium::models::{
 };
 use thorium::test_utilities::{self, generators};
 use thorium::{Error, contains, fail, is, is_desc};
+
+/// Held for reading by every test that prunes repo data, and for writing by a test that swaps
+/// the API keyspace's `committed_repo_data` view, so no prune reads the view mid-swap
+static PRUNE_VIEW: LazyLock<RwLock<()>> = LazyLock::new(|| RwLock::new(()));
 
 #[tokio::test]
 async fn create() -> Result<(), Error> {
@@ -391,6 +398,8 @@ fn commit_batch(
 /// later batch of commits for another blob
 #[tokio::test]
 async fn prune_keeps_data_with_recent_commits() -> Result<(), Error> {
+    // keep the view in place while this test prunes
+    let _guard = PRUNE_VIEW.read().await;
     // get admin client
     let client = test_utilities::admin_client().await?;
     // create a group and a repo in it
@@ -415,6 +424,111 @@ async fn prune_keeps_data_with_recent_commits() -> Result<(), Error> {
     assert!(
         resp.is_ok(),
         "the first blob was pruned while c1 still references it: {resp:?}"
+    );
+    Ok(())
+}
+
+/// The repo data hashes Scylla holds for a repo
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to read with
+/// * `repo` - The repo whose data is listed
+async fn repo_data_rows(session: &scylla::client::session::Session, repo: &str) -> Vec<String> {
+    // read every repo_data row of this repo
+    let query = format!(
+        "SELECT hash FROM {}.repo_data WHERE repo = ?",
+        test_utilities::CONF.thorium.namespace
+    );
+    session
+        .query_unpaged(query, (repo,))
+        .await
+        .expect("failed to read the repo data")
+        .into_rows_result()
+        .expect("the repo data returned no rows")
+        .rows::<(String,)>()
+        .expect("unexpected repo data columns")
+        .filter_map(Result::ok)
+        .map(|(hash,)| hash)
+        .collect()
+}
+
+/// A keyspace an old release created, whose `committed_repo_data` view still selects from the
+/// `commits_list` table nothing writes, gets the declared view back from `schema apply`, after
+/// which pruning at the end of one blob's commits keeps another blob that commits still use
+#[tokio::test]
+async fn prune_keeps_referenced_data_after_apply_recreates_an_old_view() -> Result<(), Error> {
+    // no other test prunes while the view is swapped
+    let _guard = PRUNE_VIEW.write().await;
+    let client = test_utilities::admin_client().await?;
+    let session = scylla_session().await;
+    let ns = &test_utilities::CONF.thorium.namespace;
+    // swap the API keyspace's view for the one internal builds before April 2024 created
+    for cql in [
+        format!("DROP MATERIALIZED VIEW IF EXISTS {ns}.committed_repo_data"),
+        format!(
+            "CREATE TABLE IF NOT EXISTS {ns}.commits_list (group TEXT, year INT, bucket INT, \
+             repo TEXT, timestamp TIMESTAMP, hash TEXT, repo_data TEXT, PRIMARY KEY ((group, \
+             year, bucket, repo), timestamp, hash)) WITH CLUSTERING ORDER BY (timestamp DESC, \
+             hash DESC)"
+        ),
+        format!(
+            "CREATE MATERIALIZED VIEW IF NOT EXISTS {ns}.committed_repo_data AS SELECT group, \
+             repo, repo_data, hash FROM {ns}.commits_list WHERE group IS NOT NULL AND repo IS NOT \
+             NULL AND repo_data IS NOT NULL AND hash IS NOT NULL AND year IS NOT NULL AND bucket \
+             IS NOT NULL AND timestamp IS NOT NULL PRIMARY KEY ((repo_data, year, bucket), \
+             group, repo, hash, timestamp)"
+        ),
+    ] {
+        session
+            .query_unpaged(cql.as_str(), ())
+            .await
+            .map_err(|err| Error::new(format!("{cql}: {err}")))?;
+    }
+    // apply the declared schema like the upgrade Job, which recreates the view and waits for it
+    let options = ApplyOptions {
+        target: ApplyTarget::Declared,
+        dry_run: false,
+        view_wait: None,
+    };
+    let report = apply(&session, &test_utilities::CONF, &options, "", &|_| ())
+        .await
+        .map_err(|err| Error::new(format!("schema apply failed: {err}")))?;
+    // the old table has no view on it any more, so it can go
+    session
+        .query_unpaged(format!("DROP TABLE IF EXISTS {ns}.commits_list"), ())
+        .await
+        .map_err(|err| Error::new(format!("dropping commits_list failed: {err}")))?;
+    let recreated = report
+        .views_recreated
+        .iter()
+        .map(|stale| stale.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(recreated, ["committed_repo_data"], "{report:?}");
+    // blob A backs commit c1, then blob B's final batch for commit c2 prunes
+    let group = generators::groups(1, &client).await?.remove(0).name;
+    let repo = generators::repos(&group, 1, &client).await?.remove(0).url;
+    let now = Utc::now();
+    let first = upload_repo_data(&client, &repo, &group, "old view blob A").await?;
+    let two_hours = now - Duration::hours(2);
+    let batch = commit_batch(&group, "c1", two_hours, true, Some(two_hours));
+    let resp = client.repos.add_commits(&repo, &first, &batch).await?;
+    is!(resp.status().as_u16(), 204);
+    let second = upload_repo_data(&client, &repo, &group, "old view blob B").await?;
+    let batch = commit_batch(&group, "c2", now - Duration::hours(1), true, None);
+    let resp = client.repos.add_commits(&repo, &second, &batch).await?;
+    is!(resp.status().as_u16(), 204);
+    // c1 still references A, so A's row survives and commits can still be added to it
+    let rows = repo_data_rows(&session, &repo).await;
+    assert!(
+        rows.contains(&first) && rows.contains(&second),
+        "repo data rows after the prune: {rows:?}"
+    );
+    let batch = commit_batch(&group, "c3", now - Duration::minutes(30), false, None);
+    let resp = client.repos.add_commits(&repo, &first, &batch).await;
+    assert!(
+        resp.is_ok(),
+        "blob A was pruned while c1 still references it: {resp:?}"
     );
     Ok(())
 }
