@@ -129,6 +129,7 @@
         - [Configure the Helm Charts](./admins/deploy/helm-configuration.md)
         - [Operating a Deployment](./admins/deploy/operate.md)
         - [Upgrading Thorium](./admins/deploy/upgrades.md)
+        - [Upgrade Paths](./admins/deploy/upgrade-paths.md)
         - [Converting a Pre-Helm Deployment](./admins/deploy/convert-to-helm.md)
         - [Deploy the Operator Without Helm](./admins/deploy/deploy-thorium.md)
         - [Development Clusters (minithor)](./admins/deploy/minithor.md)

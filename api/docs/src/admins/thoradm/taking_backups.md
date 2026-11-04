@@ -3,7 +3,9 @@
 This guide covers taking a backup of a Thorium cluster with `thoradm backup new`: what you need
 before you start, how to choose what is backed up, where the backup goes, how to read the results,
 and every file and directory a backup writes. Restoring is covered briefly at the end and in the
-[Thoradm guide](./thoradm.md#restoring-a-backup).
+[Thoradm guide](./thoradm.md#restoring-a-backup). The backup to take before an upgrade or a Helm
+conversion, and the known backup issues of long-lived deployments, are in [Upgrade
+Paths](../deploy/upgrade-paths.md#taking-a-verified-backup).
 
 ## Before You Start
 
@@ -28,7 +30,10 @@ Thoradm reads two configs:
   [Config](./thoradm.md#config) for how to build it from the `ThoriumCluster` resource.
 - **The Thorctl config** (`--ctl-conf`, default `~/.thorium/config.yml`): the API URL and a token.
   Log in as a Thorium **admin** with `thorctl login` first; the Redis data (users, groups, images,
-  pipelines, system settings, and tool instance runtimes) is only served to admins.
+  pipelines, system settings, and tool instance runtimes) is only served to admins. Without the
+  config, backup, restore, and `verify --cluster` stop with `no Thorctl config at '<path>'` (older
+  thoradm builds fail with a bare file-not-found error naming the path): log in, or pass
+  `--ctl-conf <path>` before the subcommand (under `sudo`, `~` is root's home).
 
 ### Run thoradm at the API's version
 

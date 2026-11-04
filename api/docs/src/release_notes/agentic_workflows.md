@@ -231,7 +231,13 @@ See [Scheduling Tools and Runs](../admins/agentic/scheduling.md).
 
 - Every Scylla listing accepts 1 to 10,000 rows and stage log reads 1 to 250,000 lines, and
   refuses anything else with `400`; rows that share a timestamp are listed exactly once.
-- Login refuses a stored password hash that is not argon2id with Thorium's costs.
+- Login refuses a stored password hash whose algorithm, version, output length, and costs don't
+  match settings Thorium wrote: the current argon2 defaults, or the argonautica settings releases
+  through 1.105.4 used. A hash of the older settings is replaced with a current one on the next
+  successful login.
+- Result file uploads refuse names with a backslash or a control character other than a tab,
+  absolute names, names with empty segments or segments of only dots, and names starting with
+  `__thorium_`; the agent skips such files with a warning in the job's logs and uploads the rest.
 - A bulk reaction create for several users reports a user whose requests are refused as one error
   per request for that user, instead of failing every user's requests.
 - New user icons are stored under the Thorium namespace in the graphics bucket; icons at the old
