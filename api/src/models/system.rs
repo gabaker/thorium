@@ -511,6 +511,12 @@ pub struct Backup {
     /// added; left out when nothing was pruned, which is always the case without the param
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pruned: Vec<PrunedReference>,
+    /// The users, groups, images, pipelines, and scoped tokens a backup taken with
+    /// `skip_unreadable` left out because they don't parse, and the images and pipelines left out
+    /// because they depend on one of those, each named by its Redis key with what is wrong with it
+    /// and never a stored value; left out when empty
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreadable: Vec<BackupProblem>,
 }
 
 /// The params for taking a backup
@@ -521,6 +527,11 @@ pub struct BackupParams {
     /// backup and whose referent is confirmed gone, instead of failing the backup
     #[serde(default)]
     pub prune_dangling: bool,
+    /// Leave out the records that still don't parse after every read of the backup, and the
+    /// images and pipelines that depend on them (a skipped group's, and the pipelines running a
+    /// skipped image), listing each in the backup's `unreadable`, instead of failing the backup
+    #[serde(default)]
+    pub skip_unreadable: bool,
 }
 
 impl BackupParams {
@@ -529,6 +540,16 @@ impl BackupParams {
     pub fn prune_dangling(mut self) -> Self {
         // ask the API to prune what stays dangling
         self.prune_dangling = true;
+        self
+    }
+
+    /// Leaves out the records that don't parse, and the images and pipelines that depend on them
+    /// (a skipped group's, and the pipelines running a skipped image), listing them in the
+    /// backup's `unreadable`, instead of failing the backup
+    #[must_use]
+    pub fn skip_unreadable(mut self) -> Self {
+        // ask the API to skip and list what doesn't parse
+        self.skip_unreadable = true;
         self
     }
 }

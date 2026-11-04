@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use tracing::{Level, Span, event, instrument, span};
 use uuid::Uuid;
 
+use super::db::keys::{GroupKeys, ImageKeys, PipelineKeys, UserKeys};
 use super::db::{self, SimpleCursorExt};
 use crate::models::backends::NotificationSupport;
 use crate::models::schema::queries::{NodesListCursor, NodesListDetailsCursor};
@@ -485,7 +486,8 @@ impl SystemSettings {
     }
 }
 
-/// How many times a backup reads Redis before it gives up on records that don't fit together
+/// How many times a backup reads Redis before it gives up on records that don't parse or don't fit
+/// together
 const BACKUP_READS: u32 = 3;
 
 /// The bootstrap admin every deployment has, which a pruning backup makes the owner of a group
@@ -528,10 +530,15 @@ impl Backup {
     /// Fails with 422, listing every record's key, when any user, group, image, pipeline, or
     /// scoped token doesn't parse, rather than leaving it out of the backup; since a record
     /// deleted between listing and reading it reads as one that doesn't parse, the records are
-    /// read again a few times before the backup fails. The backup must also pass the checks a
-    /// restore makes; since a change made while the records are read can leave a reference
-    /// dangling, the records are read again a few times before the backup fails with 422, listing
-    /// every problem, rather than returning a backup no restore accepts.
+    /// read again a few times before the backup fails. With `skip_unreadable`, the records that
+    /// still don't parse on the last read are left out instead and listed in the backup's
+    /// `unreadable`, and so are the images and pipelines of a skipped group and the pipelines
+    /// running a skipped image; the backup holds them no more than a deleted record, so any other
+    /// reference to one follows the rules below, and a backup that fails on such a reference
+    /// lists them with its problems. The backup must also pass the checks a restore makes; since
+    /// a change made while the records are read can leave a reference dangling, the records are
+    /// read again a few times before the backup fails with 422, listing every problem, rather
+    /// than returning a backup no restore accepts.
     ///
     /// With `prune_dangling`, a user or group reference that every read finds dangling, and whose
     /// user or group a direct check of Redis confirms is gone, is dropped instead and listed in
@@ -542,7 +549,7 @@ impl Backup {
     /// * `user` - The user that is getting a system backup
     /// * `params` - The backup params
     /// * `shared` - Shared Thorium objects
-    #[instrument(name = "Backup::new", skip_all, fields(prune_dangling = params.prune_dangling), err(Debug))]
+    #[instrument(name = "Backup::new", skip_all, fields(prune_dangling = params.prune_dangling, skip_unreadable = params.skip_unreadable), err(Debug))]
     pub async fn new(
         user: &User,
         params: &BackupParams,
@@ -555,36 +562,26 @@ impl Backup {
         // the dangling references every read so far found, which alone may be pruned
         let mut lasting: Option<BTreeSet<Dangling>> = None;
         loop {
-            // read every record, with what a restore would refuse and what a prune would drop; a record
-            // deleted between listing and reading it reads as one that doesn't parse, so read again
-            // until the last read rather than failing at once
-            let mut backup = match Self::read(user, shared).await {
-                Ok(backup) => backup,
-                Err(ApiError::Problems { code, body })
-                    if code == StatusCode::UNPROCESSABLE_ENTITY && read < BACKUP_READS =>
-                {
-                    // wait a moment for a deletion in progress to finish, then read again
-                    event!(
-                        Level::WARN,
-                        msg = "A backup read records that don't parse; reading them again",
-                        read,
-                        problems = body.problems.len()
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(200 * u64::from(read)))
-                        .await;
-                    read += 1;
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
+            // read every record, with what a restore would refuse and what a prune would drop
+            let mut backup = Self::read(user, shared).await?;
+            // the records a skipped record leaves unusable are skipped too, and a skipped pipeline
+            // isn't restored, so no image the backup holds may list it as a user
+            if params.skip_unreadable {
+                backup.skip_dependents(shared);
+                backup.drop_skipped_users(shared);
+            }
             let problems = backup.problems();
             let dangling = if params.prune_dangling {
                 backup.dangling()
             } else {
                 BTreeSet::new()
             };
-            // return the backup once a restore would accept it and nothing is left to prune
-            if problems.is_empty() && dangling.is_empty() {
+            // a record deleted between listing and reading it reads as one that doesn't parse,
+            // so records that don't parse are read again until the last read
+            let unreadable = !backup.unreadable.is_empty();
+            // return the backup once every record parsed, a restore would accept it, and
+            // nothing is left to prune
+            if problems.is_empty() && dangling.is_empty() && !unreadable {
                 return Ok(backup);
             }
             // keep only the references this read finds dangling too
@@ -594,10 +591,14 @@ impl Backup {
             };
             // once every read is done, prune what is confirmed gone and fail on what is left
             if read == BACKUP_READS {
+                // records that still don't parse fail the backup unless it skips them
+                if unreadable && !params.skip_unreadable {
+                    return Err(Self::unparsable(std::mem::take(&mut backup.unreadable)));
+                }
                 let problems = if still.is_empty() {
                     problems
                 } else {
-                    let gone = Self::confirm_gone(still, shared).await?;
+                    let gone = Self::confirm_gone(still, &backup.unreadable, shared).await?;
                     backup.pruned = backup.apply_prune(&gone);
                     backup.problems()
                 };
@@ -610,18 +611,28 @@ impl Backup {
                             pruned = backup.pruned.len()
                         );
                     }
+                    if unreadable {
+                        event!(
+                            Level::WARN,
+                            msg = "A backup left out records that don't parse",
+                            unreadable = backup.unreadable.len()
+                        );
+                    }
                     return Ok(backup);
                 }
+                // the records left out are listed too, since a reference to one is a problem
+                let left = problems.len();
+                let mut listed = std::mem::take(&mut backup.unreadable);
+                listed.extend(problems);
                 return Err(ApiError::Problems {
                     code: StatusCode::UNPROCESSABLE_ENTITY,
                     body: BackupProblems {
                         error: format!(
                             "the records in Redis don't fit together, so a restore would refuse \
-                             them: {} problems were left after {read} reads, and no backup was \
-                             built; repair them and back up again",
-                            problems.len()
+                             them: {left} problems were left after {read} reads, and no backup \
+                             was built; repair them and back up again",
                         ),
-                        problems,
+                        problems: listed,
                     },
                 });
             }
@@ -629,8 +640,9 @@ impl Backup {
             // wait a moment for a change in progress to finish, then read again
             event!(
                 Level::WARN,
-                msg = "A backup's records don't fit together; reading them again",
+                msg = "A backup's records don't parse or don't fit together; reading them again",
                 read,
+                unreadable = backup.unreadable.len(),
                 problems = problems.len()
             );
             tokio::time::sleep(std::time::Duration::from_millis(200 * u64::from(read))).await;
@@ -638,16 +650,129 @@ impl Backup {
         }
     }
 
-    /// Keeps the dangling references whose user or group a direct check of Redis says is gone
+    /// Leaves out, and lists in `unreadable`, the records a skipped record leaves unusable: the
+    /// images and pipelines of a skipped group, and a pipeline that runs a skipped image
+    ///
+    /// # Arguments
+    ///
+    /// * `shared` - Shared Thorium objects
+    fn skip_dependents(&mut self, shared: &Shared) {
+        // the keys of the records left out so far
+        let mut skipped: HashSet<String> = self
+            .unreadable
+            .iter()
+            .map(|problem| problem.key.clone())
+            .collect();
+        // nothing was left out, so nothing depends on a skipped record
+        if skipped.is_empty() {
+            return;
+        }
+        // the records left out because they depend on a skipped one
+        let mut dependents = Vec::new();
+        // leave out the images of a skipped group
+        self.images.retain(|image| {
+            let kept = !skipped.contains(&GroupKeys::data(&image.group, shared));
+            if !kept {
+                dependents.push(BackupProblem::new(
+                    ImageKeys::data(&image.group, &image.name, shared),
+                    format!("its group {} was skipped", image.group),
+                ));
+            }
+            kept
+        });
+        // the images just left out are skipped images for the pipelines below
+        skipped.extend(dependents.iter().map(|problem| problem.key.clone()));
+        // leave out the pipelines of a skipped group, and those running a skipped image
+        self.pipelines.retain(|pipeline| {
+            let group = &pipeline.group;
+            let reason = if skipped.contains(&GroupKeys::data(group, shared)) {
+                Some(format!("its group {group} was skipped"))
+            } else {
+                pipeline
+                    .order
+                    .iter()
+                    .flatten()
+                    .find(|stage| skipped.contains(&ImageKeys::data(group, stage, shared)))
+                    .map(|stage| format!("its image {group}/{stage} was skipped"))
+            };
+            match reason {
+                Some(reason) => {
+                    dependents.push(BackupProblem::new(
+                        PipelineKeys::data(group, &pipeline.name, shared),
+                        reason,
+                    ));
+                    false
+                }
+                None => true,
+            }
+        });
+        // list every record left out this way beside the ones that don't parse
+        self.unreadable.extend(dependents);
+    }
+
+    /// Drops the pipelines the backup left out from the `used_by` of every image it holds, as a
+    /// restore, which rebuilds `used_by` from the pipelines it writes, would
+    ///
+    /// # Arguments
+    ///
+    /// * `shared` - Shared Thorium objects
+    fn drop_skipped_users(&mut self, shared: &Shared) {
+        // the keys of the records left out, among them the skipped pipelines'
+        let skipped: HashSet<&str> = self
+            .unreadable
+            .iter()
+            .map(|problem| problem.key.as_str())
+            .collect();
+        // nothing was left out, so every pipeline an image names is in the backup
+        if skipped.is_empty() {
+            return;
+        }
+        // keep only the users each image names that aren't skipped pipelines of its group
+        for image in &mut self.images {
+            image.used_by.retain(|pipeline| {
+                !skipped.contains(PipelineKeys::data(&image.group, pipeline, shared).as_str())
+            });
+        }
+    }
+
+    /// Builds the 422 a backup fails with when records don't parse and it doesn't skip them
+    ///
+    /// # Arguments
+    ///
+    /// * `problems` - The records that don't parse
+    fn unparsable(problems: Vec<BackupProblem>) -> ApiError {
+        // name every record and say that no backup was built
+        ApiError::Problems {
+            code: StatusCode::UNPROCESSABLE_ENTITY,
+            body: BackupProblems {
+                error: format!(
+                    "{} records in Redis don't parse, so no backup was built; repair them and \
+                     back up again",
+                    problems.len()
+                ),
+                problems,
+            },
+        }
+    }
+
+    /// Keeps the dangling references whose user or group a direct check of Redis says is gone,
+    /// or that the backup left out because it doesn't parse
     ///
     /// # Arguments
     ///
     /// * `dangling` - The references every read found dangling
+    /// * `unreadable` - The records the backup left out because they don't parse
     /// * `shared` - Shared Thorium objects
     async fn confirm_gone(
         dangling: BTreeSet<Dangling>,
+        unreadable: &[BackupProblem],
         shared: &Shared,
     ) -> Result<BTreeSet<Dangling>, ApiError> {
+        // the keys of the records left out, which the backup holds no more than a deleted one
+        let skipped: HashSet<&str> = unreadable
+            .iter()
+            .map(|problem| problem.key.as_str())
+            .collect();
         // whether each user and group exists, each checked once
         let mut users: HashMap<String, bool> = HashMap::new();
         let mut groups: HashMap<String, bool> = HashMap::new();
@@ -659,7 +784,8 @@ impl Backup {
                     if let Some(exists) = users.get(user) {
                         *exists
                     } else {
-                        let exists = db::users::exists(user, shared).await?;
+                        let exists = !skipped.contains(UserKeys::data(user, shared).as_str())
+                            && db::users::exists(user, shared).await?;
                         users.insert(user.clone(), exists);
                         exists
                     }
@@ -668,8 +794,8 @@ impl Backup {
                     if let Some(exists) = groups.get(group) {
                         *exists
                     } else {
-                        let exists =
-                            db::groups::exists(std::slice::from_ref(group), shared).await?;
+                        let exists = !skipped.contains(GroupKeys::data(group, shared).as_str())
+                            && db::groups::exists(std::slice::from_ref(group), shared).await?;
                         groups.insert(group.clone(), exists);
                         exists
                     }
@@ -683,7 +809,8 @@ impl Backup {
         Ok(gone)
     }
 
-    /// Reads every record a backup holds, failing with 422 when any of them doesn't parse
+    /// Reads every record a backup holds, listing each one that doesn't parse in the backup's
+    /// `unreadable` instead of holding it
     ///
     /// # Arguments
     ///
@@ -706,24 +833,11 @@ impl Backup {
         let mut group_names: Vec<String> = groups.iter().map(|group| group.name.clone()).collect();
         group_names.sort_unstable();
         let network_policy_sets = db::network_policies::backup_sets(&group_names, shared).await?;
-        // a record that doesn't parse fails the backup instead of going missing from it
+        // list every record that doesn't parse, which the backup doesn't hold
         problems.extend(group_problems);
         problems.extend(image_problems);
         problems.extend(pipeline_problems);
         problems.extend(token_problems);
-        if !problems.is_empty() {
-            return Err(ApiError::Problems {
-                code: StatusCode::UNPROCESSABLE_ENTITY,
-                body: BackupProblems {
-                    error: format!(
-                        "{} records in Redis don't parse, so no backup was built; repair them and \
-                         back up again",
-                        problems.len()
-                    ),
-                    problems,
-                },
-            });
-        }
         let backup = Backup {
             settings,
             users,
@@ -733,6 +847,7 @@ impl Backup {
             scoped_tokens,
             network_policy_sets,
             pruned: Vec::new(),
+            unreadable: problems,
         };
         Ok(backup)
     }
@@ -1965,6 +2080,7 @@ mod tests {
             scoped_tokens: Vec::new(),
             network_policy_sets: Vec::new(),
             pruned: Vec::new(),
+            unreadable: Vec::new(),
         }
     }
 
