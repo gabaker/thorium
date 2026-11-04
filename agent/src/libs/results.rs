@@ -5,11 +5,12 @@ use crossbeam::channel::Sender;
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use thorium::client::ResultsClient;
+use thorium::client::{ResultsClient, portable_file_name};
 use thorium::models::{
     Buffer, EntityKinds, EntityRequest, GenericJob, HarnessOutputs, Image, OnDiskFile,
     OutputDisplayType, OutputRequest, ReactionSource, Repo, Sample, ToolVersion,
 };
+use thorium::utils::helpers::refused_result_file_name;
 use thorium::{Error, Thorium};
 use tracing::instrument;
 use uuid::Uuid;
@@ -332,7 +333,8 @@ impl RawResults {
 
     /// Checks the filesystem for result files to send to Thorium
     ///
-    /// This looks for result files not results to store in s3.
+    /// This looks for result files not results to store in s3. A file whose name the API would
+    /// refuse is skipped with a warning in the job's logs.
     ///
     /// # Arguments
     ///
@@ -362,10 +364,8 @@ impl RawResults {
                     if meta.is_file() {
                         // build an on disk file for this file
                         let on_disk = OnDiskFile::new(entry.path()).trim_prefix(path);
-                        // log that we found this file
-                        log!(logs, "Found result file {}", on_disk.path.display());
-                        // add this file to our list fo result files
-                        self.files.push(on_disk);
+                        // add this file to our list of result files unless the API would refuse its name
+                        self.push_file(on_disk, logs);
                     }
                 }
             } else {
@@ -378,7 +378,8 @@ impl RawResults {
 
     /// Add files that exist to the result files if they aren't already in them
     ///
-    /// Each file is named by its file name.
+    /// Each file is named by its file name, and a file whose name the API would refuse is skipped
+    /// with a warning in the job's logs.
     ///
     /// # Arguments
     ///
@@ -402,11 +403,42 @@ impl RawResults {
             // name this file by its file name
             let parent = path.parent().unwrap_or_else(|| Path::new("/"));
             let on_disk = OnDiskFile::new(path).trim_prefix(parent);
-            // log that we found this file
-            log!(logs, "Found result file {}", on_disk.path.display());
-            self.files.push(on_disk);
+            // add this file unless the API would refuse its name
+            self.push_file(on_disk, logs);
         }
         Ok(())
+    }
+
+    /// Add a found file to the result files, skipping it with a warning if the API would refuse
+    /// its upload name
+    ///
+    /// The API refuses the whole upload when any file's name is refused, so one oddly named file
+    /// would otherwise fail every result of the job.
+    ///
+    /// # Arguments
+    ///
+    /// * `on_disk` - The file that was found
+    /// * `logs` - The logs to send to the API
+    fn push_file(&mut self, on_disk: OnDiskFile, logs: &mut Sender<String>) {
+        // build the name this file would be uploaded under
+        let trimmed = match &on_disk.trim_prefix {
+            Some(prefix) => on_disk.path.strip_prefix(prefix).unwrap_or(&on_disk.path),
+            None => &on_disk.path,
+        };
+        let name = portable_file_name(trimmed);
+        // skip this file if the API would refuse its name
+        if let Some(reason) = refused_result_file_name(&name, false) {
+            log!(
+                logs,
+                "Warning: Skipping result file {} since its name {}",
+                on_disk.path.display(),
+                reason
+            );
+            return;
+        }
+        // log that we found this file
+        log!(logs, "Found result file {}", on_disk.path.display());
+        self.files.push(on_disk);
     }
 
     /// Create a sample output request for these raw results
@@ -853,5 +885,129 @@ mod tests {
                 .iter()
                 .all(|file| file.trim_prefix.as_deref() == Some(dir.as_path()))
         );
+    }
+
+    /// Result files whose names the API would refuse are skipped with a warning in the job's
+    /// logs, and the rest are still uploaded
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refused_result_file_names_are_skipped() {
+        // a result files directory holding good names and names the API refuses
+        let dir = std::env::temp_dir().join(format!("thorium-result-names-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(dir.join("sub")).await.unwrap();
+        tokio::fs::create_dir_all(dir.join("__thorium_dir"))
+            .await
+            .unwrap();
+        for name in [
+            "ok.txt",
+            "sub/x.txt",
+            "sub/__thorium_nested",
+            r"a\b",
+            "...",
+            "__thorium_x",
+            "__thorium_dir/y",
+            "line\nbreak",
+            "carriage\rreturn",
+        ] {
+            tokio::fs::write(dir.join(name), "data").await.unwrap();
+        }
+        // collect the result files
+        let mut raw = raw();
+        let (mut logs, receiver) = crossbeam::channel::unbounded();
+        raw.collect_result_files(&dir, &mut logs).await.unwrap();
+        tokio::fs::remove_dir_all(&dir).await.unwrap();
+        // only the good names are result files
+        let mut found: Vec<PathBuf> = raw.files.iter().map(|file| file.path.clone()).collect();
+        found.sort();
+        assert_eq!(
+            found,
+            vec![
+                dir.join("ok.txt"),
+                dir.join("sub/__thorium_nested"),
+                dir.join("sub/x.txt")
+            ]
+        );
+        // each skipped file is named in a warning in the job's logs
+        let lines: Vec<String> = receiver.try_iter().collect();
+        let warnings: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.starts_with("Warning: Skipping result file"))
+            .collect();
+        assert_eq!(warnings.len(), 6, "{lines:?}");
+        // each warning names the file and why the API would refuse it
+        for (name, reason) in [
+            (r"a\b", "backslash"),
+            ("...", "only dots"),
+            ("__thorium_x", "reserved prefix"),
+            ("__thorium_dir/y", "reserved prefix"),
+            ("line\nbreak", "control characters"),
+            ("carriage\rreturn", "control characters"),
+        ] {
+            assert!(
+                warnings
+                    .iter()
+                    .any(|line| line.contains(name) && line.contains(reason)),
+                "{name:?} not warned about: {lines:?}"
+            );
+        }
+    }
+
+    /// Files a harness lists whose names the API would refuse are skipped with a warning, and the
+    /// rest are still added
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refused_harness_file_names_are_skipped() {
+        // a harness that wrote files with good and refused names
+        let dir = std::env::temp_dir().join(format!("thorium-harness-names-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let written =
+            ["status.json", "__thorium_entities", "two\nlines"].map(|name| dir.join(name));
+        for path in &written {
+            tokio::fs::write(path, "{}\n").await.unwrap();
+        }
+        // add the files the harness listed
+        let mut raw = raw();
+        let (mut logs, receiver) = crossbeam::channel::unbounded();
+        raw.add_files(&written, &mut logs).await.unwrap();
+        tokio::fs::remove_dir_all(&dir).await.unwrap();
+        // only the good name is a result file
+        let found: Vec<&PathBuf> = raw.files.iter().map(|file| &file.path).collect();
+        assert_eq!(found, vec![&written[0]]);
+        // each refused file is named in a warning in the job's logs
+        let lines: Vec<String> = receiver.try_iter().collect();
+        let warnings: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.starts_with("Warning: Skipping result file"))
+            .collect();
+        assert_eq!(warnings.len(), 2, "{lines:?}");
+        assert!(
+            warnings
+                .iter()
+                .any(|line| line.contains("__thorium_entities") && line.contains("reserved prefix")),
+            "{lines:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|line| line.contains("two\nlines") && line.contains("control characters")),
+            "{lines:?}"
+        );
+    }
+
+    /// An upload the API refuses still fails the submission
+    #[tokio::test]
+    async fn refused_uploads_still_fail() {
+        // a mock API that refuses every result
+        let mock = MockThorium::start(|_| (400, r#"{"error":"bad request"}"#.to_owned())).await;
+        let thorium = Thorium::build(&mock.host)
+            .token("token")
+            .build()
+            .await
+            .unwrap();
+        let (mut logs, _receiver) = crossbeam::channel::unbounded();
+        let tool = ResultTool::new(&test_server::workload(None), None);
+        // the refusal is returned rather than skipped
+        let result = super::submit(&thorium, &raw(), &job(), &tool, &mut logs).await;
+        assert!(result.is_err(), "{result:?}");
     }
 }
