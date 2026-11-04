@@ -29,6 +29,65 @@ pub struct EnvVar {
     pub value: Option<String>,
 }
 
+/// The proxy variables as lower-case and upper-case pairs, which the operator sets in both cases
+/// in the pods it builds
+pub const PROXY_PAIRS: [(&str, &str); 4] = [
+    ("http_proxy", "HTTP_PROXY"),
+    ("https_proxy", "HTTPS_PROXY"),
+    ("no_proxy", "NO_PROXY"),
+    ("all_proxy", "ALL_PROXY"),
+];
+
+/// Give every proxy variable an environment sets in one case the same value in the other case
+///
+/// reqwest reads the upper-case name first while curl reads the lower-case one first, so setting
+/// both cases keeps an image-level value of either case from shadowing the environment's own.
+/// Every entry of a pair takes the pair's value: the last upper-case one when set (the one
+/// reqwest uses), else the last lower-case one, since Kubernetes keeps the last of a repeated
+/// name. Other variables are kept as they are, and a missing case is added right after the first
+/// variable that sets the other.
+///
+/// # Arguments
+///
+/// * `env` - The environment to mirror the proxy variables of
+#[must_use]
+pub fn mirror_proxy_cases(env: &[EnvVar]) -> Vec<EnvVar> {
+    // find each variable's value, a later one winning as in Kubernetes
+    let values: BTreeMap<&str, &Option<String>> = env
+        .iter()
+        .map(|var| (var.name.as_str(), &var.value))
+        .collect();
+    let mut mirrored = Vec::with_capacity(env.len());
+    for var in env {
+        // keep variables that aren't proxy variables as they are
+        let Some(&(lower, upper)) = PROXY_PAIRS
+            .iter()
+            .find(|(lower, upper)| var.name == *lower || var.name == *upper)
+        else {
+            mirrored.push(var.clone());
+            continue;
+        };
+        // take the pair's value: the last upper-case one when set, else the last lower-case one
+        let value = values
+            .get(upper)
+            .or_else(|| values.get(lower))
+            .map_or_else(|| var.value.clone(), |value| (*value).clone());
+        mirrored.push(EnvVar {
+            name: var.name.clone(),
+            value: value.clone(),
+        });
+        // add the other case when the environment doesn't set it
+        let other = if var.name == lower { upper } else { lower };
+        if !values.contains_key(other) && !mirrored.iter().any(|added| added.name == other) {
+            mirrored.push(EnvVar {
+                name: other.to_owned(),
+                value,
+            });
+        }
+    }
+    mirrored
+}
+
 /// A struct representing the cpu and memory resources of a container
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Hash, Eq, PartialEq)]
 pub struct Resources {
@@ -1362,6 +1421,67 @@ pub async fn create_or_update(client: &Client) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build an environment variable for a test
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The variable's name
+    /// * `value` - The variable's value, if it has one
+    fn var(name: &str, value: Option<&str>) -> EnvVar {
+        // own the name and value
+        EnvVar {
+            name: name.to_owned(),
+            value: value.map(str::to_owned),
+        }
+    }
+
+    /// A proxy variable set in one case gets the other case, the upper-case value wins when both
+    /// are set, a repeated name mirrors its last value, and other variables and fully set pairs
+    /// are left as they are
+    #[test]
+    fn mirror_proxy_cases_fills_the_other_case() {
+        // one case alone, disagreeing cases, an unset value, a matching pair, and a non-proxy
+        let env = [
+            var("https_proxy", Some("http://lower:3128")),
+            var("RUST_LOG", Some("debug")),
+            var("no_proxy", Some("lower.example.com")),
+            var("NO_PROXY", Some("upper.example.com")),
+            var("HTTP_PROXY", None),
+            var("all_proxy", Some("")),
+            var("ALL_PROXY", Some("")),
+        ];
+        assert_eq!(
+            mirror_proxy_cases(&env),
+            [
+                var("https_proxy", Some("http://lower:3128")),
+                var("HTTPS_PROXY", Some("http://lower:3128")),
+                var("RUST_LOG", Some("debug")),
+                var("no_proxy", Some("upper.example.com")),
+                var("NO_PROXY", Some("upper.example.com")),
+                var("HTTP_PROXY", None),
+                var("http_proxy", None),
+                var("all_proxy", Some("")),
+                var("ALL_PROXY", Some("")),
+            ]
+        );
+        // a repeated name gives every entry of its pair the last value, as Kubernetes keeps it
+        let repeated = [
+            var("https_proxy", Some("http://first:3128")),
+            var("https_proxy", Some("http://last:3128")),
+        ];
+        assert_eq!(
+            mirror_proxy_cases(&repeated),
+            [
+                var("https_proxy", Some("http://last:3128")),
+                var("HTTPS_PROXY", Some("http://last:3128")),
+                var("https_proxy", Some("http://last:3128")),
+            ]
+        );
+        // the default env already sets both cases alike, so it is unchanged
+        let defaults = default_envs();
+        assert_eq!(mirror_proxy_cases(&defaults), defaults);
+    }
 
     /// Status messages drop the "Error: " prefix of plain errors but keep status codes
     #[test]

@@ -181,7 +181,9 @@ omit it (for example `scaler: null` to run Thorium without the k8s scaler) or to
 - `replicas` (API only; the chart sets 1, the `ThoriumCluster` default is 3).
 - `env`, `cmd`, and `args`, each of which **replaces** the defaults. The default `env` sets empty
   proxy variables with `no_proxy=localhost,cluster.local`. The operator sets a scaler's `HOME`,
-  and its `KUBECONFIG` when it uses the `kube-config` Secret, over any value in `env`.
+  and its `KUBECONFIG` when it uses the `kube-config` Secret, over any value in `env`. The thoradm
+  Jobs the operator runs take the proxy variables of the API's `env`, and node provision pods its
+  whole `env`. Every proxy variable is set in both cases (see [Proxies](#proxies)).
 - `service_account` (scaler only; the chart sets `true`): use the `thorium` service account
   instead of a kube config from the `kube-config` Secret (key `config`).
 
@@ -501,8 +503,13 @@ operator:
       noProxy: .corp.example.com
 ```
 
-The Thorium components take their proxy settings from their own `env` in
-`operator.cluster.components` (see [Components](#components)), which the chart doesn't fill in.
+The Thorium image carries no proxy settings. The Thorium components take theirs from their own
+`env` in `operator.cluster.components` (see [Components](#components)), which the chart doesn't
+fill in, and the thoradm Jobs the operator runs (schema apply and status, migrations, record reads
+and writes) take the API's proxy variables, so give the API a `no_proxy` that covers the backends
+whenever its `env` sets a proxy. The operator sets each of `http_proxy`, `https_proxy`, `no_proxy`,
+and `all_proxy` in both cases: a variable set in one case gets the same value in the other, and
+when the two cases disagree the upper-case value wins, since Thorium's HTTP client reads it first.
 
 ## Pod security
 

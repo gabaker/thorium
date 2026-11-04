@@ -76,6 +76,15 @@ components:
       - { name: NO_PROXY, value: "localhost,127.0.0.1,.svc,.svc.cluster.local,cluster.local" }
 ```
 
+The Thorium image carries no proxy settings, so every container gets its proxy from a component's
+`env` alone. The operator sets each proxy variable (`http_proxy`, `https_proxy`, `no_proxy`,
+`all_proxy`) in both cases: one set in a single case gets the same value in the other, and when
+the two cases disagree the upper-case value wins, since Thorium's HTTP client reads it first. The
+thoradm Jobs the operator runs (schema apply and status, migrations, and record reads and writes)
+have no `env` of their own: they take the API's proxy variables, and none of its other variables,
+so they reach Elasticsearch the way the API does. An API `env` without proxy variables
+gives the Jobs none. Node provision pods take the API's whole `env`.
+
 ### Config merging
 
 Each `config_secrets` document is parsed as plain YAML and merged over `config` as a JSON merge
