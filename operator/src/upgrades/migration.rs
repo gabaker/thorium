@@ -23,6 +23,7 @@ use thorium::models::upgrades::{
     PlannedStep, RESET_STATE_STEP, RESTORED_STEP, Reversibility, RevisionId, StepDef, StepLoss,
     StepState, UpgradeApproval, UpgradeConditionType, UpgradeState, Work,
 };
+use tracing::{Level, event, instrument};
 
 use super::lossy;
 use super::pause;
@@ -815,9 +816,11 @@ async fn collect(
     // the report is cached, so the Job (found by the operator's own labels) and its pod go now; a
     // delete that fails leaves it to its TTL
     if let Err(error) = jobs::delete(meta, &name(job)).await {
-        println!(
-            "Failed to delete the read check Job {}: {error}",
-            created.name
+        event!(
+            Level::WARN,
+            msg = "Failed to delete a read check Job",
+            job = created.name,
+            error = crate::trace::describe(&error)
         );
     }
     Ok(None)
@@ -1005,6 +1008,7 @@ fn show(pending: &mut Pending, index: usize, step: &'static StepDef, report: &Ch
 ///
 /// * `meta` - Thorium cluster client and metadata
 /// * `pending` - The upgrade being run, whose steps show the reports
+#[instrument(name = "migration::preflight", skip_all)]
 pub(super) async fn preflight(meta: &ClusterMeta, pending: &mut Pending) -> Result<(), Error> {
     // check each gated step in plan order
     let approvals = meta.cluster.spec.upgrade.approvals.clone();
@@ -1215,6 +1219,7 @@ fn stop_recorded(state: &UpgradeState, open: &AppliedStep, job: &str) -> bool {
 ///
 /// * `meta` - Thorium cluster client and metadata
 /// * `stored` - The recorded upgrade state, which every record is saved in
+#[instrument(name = "migration::stop_open_runs", skip_all)]
 pub(super) async fn stop_open_runs(
     meta: &ClusterMeta,
     stored: &mut StoredState,
@@ -2206,6 +2211,7 @@ fn reverses_dual_write(step: &StepDef) -> bool {
 /// * `pending` - The upgrade being run
 /// * `index` - The index of the planned step
 /// * `step` - The step
+#[instrument(name = "migration::advance", skip_all, fields(step = step.id))]
 pub(super) async fn advance(
     meta: &ClusterMeta,
     pending: &mut Pending,

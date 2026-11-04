@@ -9,6 +9,9 @@ pub struct Args {
     /// The sub command to execute
     #[clap(subcommand)]
     pub cmd: SubCommands,
+    /// The arguments controlling the operator's logs
+    #[clap(flatten)]
+    pub trace: crate::trace::TraceArgs,
 }
 
 /// The sub commands for cluster operation
@@ -59,6 +62,7 @@ pub struct OperateCluster {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use thorium::conf::LogLevel;
 
     /// The operate, crd, and uninstall subcommands parse with their flags
     #[test]
@@ -125,5 +129,32 @@ mod tests {
         assert!(Args::try_parse_from(["thorium-operator", "uninstall"]).is_err());
         // a subcommand is required
         assert!(Args::try_parse_from(["thorium-operator"]).is_err());
+    }
+
+    /// The log flags parse before or after the subcommand, so the chart's appended args work
+    #[test]
+    fn log_args_parse() {
+        // the level and tracing file follow the subcommand
+        let args = Args::try_parse_from([
+            "thorium-operator",
+            "operate",
+            "--namespace",
+            "thorium",
+            "--log-level",
+            "debug",
+            "--trace",
+            "/conf/tracing.yml",
+        ])
+        .expect("operate with log flags should parse");
+        assert_eq!(args.trace.log_level, Some(LogLevel::Debug));
+        assert_eq!(args.trace.trace.as_deref(), Some("/conf/tracing.yml"));
+        // or come before it
+        let args = Args::try_parse_from(["thorium-operator", "--log-level", "Warn", "crd"])
+            .expect("log flags before the subcommand should parse");
+        assert_eq!(args.trace.log_level, Some(LogLevel::Warn));
+        // an unknown level is refused
+        assert!(
+            Args::try_parse_from(["thorium-operator", "operate", "--log-level", "loud"]).is_err()
+        );
     }
 }

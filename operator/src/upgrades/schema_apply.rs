@@ -26,6 +26,7 @@ use thorium::models::upgrades::{
     APPLY_KEY_MARKER, DEPLOYMENT_MARKER, HELD_FAILURE_MARKER, JobFailure, RETRY_VALUE_MARKER,
     RevisionId, UpgradeConditionType, UpgradeState,
 };
+use tracing::{Level, event, instrument};
 
 use super::Pending;
 use super::rebucket::{self, ATTEMPT_FLOOR_MARKER};
@@ -572,7 +573,7 @@ async fn record(
             schema.remove(DEPLOYMENT_MARKER);
         }
     }
-    println!("Recorded the schema apply for {key} in {}", meta.namespace);
+    event!(Level::INFO, msg = "Recorded the schema apply", key = key);
     // save at the version read, like every state write
     state::save(&meta.client, &meta.namespace, stored).await
 }
@@ -634,7 +635,7 @@ async fn old_key_deleting(meta: &ClusterMeta, job: &str) -> Action {
 /// * `message` - What the rollout waits on
 async fn hold(meta: &ClusterMeta, message: String) -> Action {
     // log and report what the rollout waits on
-    println!("{message}");
+    event!(Level::INFO, msg = message);
     crds::set_status(
         &meta.client,
         &meta.status,
@@ -744,7 +745,7 @@ async fn report_failure(meta: &ClusterMeta, job: &str, reason: &str, refused: &[
          change what its trigger key covers (the image, the revision, or the data-shaping \
          settings)"
     );
-    println!("{message}");
+    event!(Level::ERROR, msg = message, job = job, reason = reason);
     crds::set_status(
         &meta.client,
         &meta.status,
@@ -809,6 +810,7 @@ async fn clear_old_keys(meta: &ClusterMeta, found: &[Job]) -> Result<Option<Acti
 /// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
+#[instrument(name = "schema_apply::ensure", skip_all)]
 pub async fn ensure(meta: &ClusterMeta) -> Result<Option<Action>, Error> {
     // compare against this build's fingerprint
     ensure_at(meta, Some(&build_fingerprint())).await
@@ -849,6 +851,7 @@ pub(super) async fn ensure_at(
 ///
 /// * `meta` - Thorium cluster client and metadata
 /// * `pending` - The upgrade being run, whose state records the apply
+#[instrument(name = "schema_apply::run_step", skip_all)]
 pub(super) async fn run_step(
     meta: &ClusterMeta,
     pending: &mut Pending,

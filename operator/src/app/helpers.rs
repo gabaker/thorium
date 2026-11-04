@@ -8,6 +8,7 @@ use std::time::Duration;
 use thorium::client::ClientSettings;
 use thorium::utils::helpers::redact_url;
 use thorium::{Error, Thorium, conf::S3};
+use tracing::{Level, event, instrument};
 
 use aws_sdk_s3::config::http::HttpResponse;
 use aws_sdk_s3::error::SdkError;
@@ -167,10 +168,20 @@ pub fn get_thorium_host(meta: &ClusterMeta, url: Option<&String>) -> String {
 ///
 /// * `error` - The error to describe
 pub fn error_chain(error: &dyn std::error::Error) -> String {
-    // start with the error's own message
-    let mut chain = error.to_string();
+    // follow the error's own message with each of its causes
+    append_causes(error.to_string(), error.source())
+}
+
+/// Append a chain of causes to an error's description
+///
+/// A cause whose message the description already contains is skipped.
+///
+/// # Arguments
+///
+/// * `chain` - The description to append to
+/// * `source` - The first cause to append, if there is one
+pub fn append_causes(mut chain: String, mut source: Option<&dyn std::error::Error>) -> String {
     // append each cause that adds something new
-    let mut source = error.source();
     while let Some(cause) = source {
         let message = cause.to_string();
         if !chain.contains(&message) {
@@ -429,12 +440,20 @@ async fn try_create_bucket(
     // without create rights work against pre-created buckets
     match client.head_bucket().bucket(bucket_name).send().await {
         Ok(_) => {
-            println!("Bucket already exists: {bucket_name}");
+            event!(
+                Level::INFO,
+                msg = "Bucket already exists",
+                bucket = bucket_name
+            );
             return Ok(());
         }
         Err(error) => match head_failure(&error) {
             // only a missing bucket is created below
-            HeadFailure::Missing => println!("Bucket {bucket_name} doesn't exist, creating it"),
+            HeadFailure::Missing => event!(
+                Level::INFO,
+                msg = "Bucket doesn't exist, creating it",
+                bucket = bucket_name
+            ),
             // an S3 that can't be reached yet is waited on
             HeadFailure::Unreachable(chain) => {
                 return Err(s3_waiting(
@@ -465,7 +484,7 @@ async fn try_create_bucket(
     match response {
         // bucket was created
         Ok(_) => {
-            println!("Created S3 bucket {bucket_name}");
+            event!(Level::INFO, msg = "Created S3 bucket", bucket = bucket_name);
             Ok(())
         }
         // an S3 that can't be reached yet is waited on
@@ -486,7 +505,11 @@ async fn try_create_bucket(
                 )),
                 // Bucket already exists and we likely have permissions to write
                 CreateBucketError::BucketAlreadyOwnedByYou(_msg) => {
-                    println!("Bucket already exists: {bucket_name}");
+                    event!(
+                        Level::INFO,
+                        msg = "Bucket already exists",
+                        bucket = bucket_name
+                    );
                     Ok(())
                 }
                 // any other service error fails bucket creation
@@ -593,7 +616,11 @@ async fn try_verify_buckets(
     if let Some(message) = missing_buckets_error(&config.endpoint, &results) {
         return Err(Error::new(message).into());
     }
-    println!("Every required S3 bucket exists: {}", buckets.join(", "));
+    event!(
+        Level::INFO,
+        msg = "Every required S3 bucket exists",
+        buckets = buckets.join(", ")
+    );
     Ok(())
 }
 
@@ -606,6 +633,7 @@ async fn try_verify_buckets(
 /// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
+#[instrument(name = "helpers::create_all_buckets", skip_all)]
 pub async fn create_all_buckets(meta: &ClusterMeta) -> Result<(), CheckError> {
     // get s3 portion of config
     let s3 = &meta.conf.thorium.s3;

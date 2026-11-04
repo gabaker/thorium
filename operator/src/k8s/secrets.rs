@@ -6,6 +6,7 @@ use rand::distr::Alphanumeric;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use thorium::{Conf, Error};
+use tracing::{Level, event, instrument};
 
 use super::clusters::{ClusterMeta, get_secret_bytes};
 
@@ -32,16 +33,13 @@ pub async fn create_or_update(
     let params = PostParams::default();
     match meta.secret_api.create(&params, secret).await {
         Ok(_) => {
-            println!("Created {name} secret in namespace {}", meta.namespace);
+            event!(Level::INFO, msg = "Created secret", secret = name);
             Ok(true)
         }
         // an existing secret is patched when updates are allowed and left alone otherwise
         Err(kube::Error::Api(error)) if error.reason == "AlreadyExists" => {
             if !update {
-                println!(
-                    "Warning: secret {name} in namespace {} already exists",
-                    meta.namespace
-                );
+                event!(Level::WARN, msg = "Secret already exists", secret = name);
                 return Ok(false);
             }
             // overwrite the keys and labels we manage, leaving any others in place
@@ -58,7 +56,7 @@ pub async fn create_or_update(
             let params: PatchParams = PatchParams::default();
             match meta.secret_api.patch(name, &params, &patch).await {
                 Ok(_) => {
-                    println!("Patched {name} secret in namespace {}", meta.namespace);
+                    event!(Level::INFO, msg = "Patched secret", secret = name);
                     Ok(true)
                 }
                 Err(error) => Err(Error::new(format!(
@@ -150,6 +148,7 @@ pub fn render_thorium_config(conf: &Conf) -> Result<RenderedConfig, Error> {
 ///
 /// * `meta` - Thorium cluster client and metadata
 /// * `rendered` - The rendered config to write
+#[instrument(name = "secrets::write_thorium_config", skip_all)]
 pub async fn write_thorium_config(
     meta: &ClusterMeta,
     rendered: &RenderedConfig,
@@ -200,6 +199,7 @@ pub async fn mounted_content(meta: &ClusterMeta, name: &str, key: &str) -> Resul
 /// * `username` - Name of user
 /// * `password` - Password for user
 /// * `secret_name` - Optional name of secret
+#[instrument(name = "secrets::create_keys", skip_all, fields(user = username))]
 pub async fn create_keys(
     meta: &ClusterMeta,
     username: &str,
@@ -405,11 +405,19 @@ async fn delete_registry_auth(secret_api: &Api<Secret>) -> Result<(), Error> {
             ..DeleteParams::default()
         };
         match secret_api.delete(name, &params).await {
-            Ok(_) => println!("Deleted {name} secret rendered from registry_auth"),
+            Ok(_) => event!(
+                Level::INFO,
+                msg = "Deleted secret rendered from registry_auth",
+                secret = name
+            ),
             // a Secret already gone or changed since it was checked is left for the next
             // reconcile
             Err(kube::Error::Api(error)) if error.code == 404 || error.code == 409 => {
-                println!("Secret {name} changed or is gone, skipping deletion");
+                event!(
+                    Level::INFO,
+                    msg = "Secret changed or is gone, skipping deletion",
+                    secret = name
+                );
             }
             Err(error) => {
                 return Err(Error::new(format!(
@@ -429,6 +437,7 @@ async fn delete_registry_auth(secret_api: &Api<Secret>) -> Result<(), Error> {
 /// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
+#[instrument(name = "secrets::create_or_update_registry_auth", skip_all)]
 pub async fn create_or_update_registry_auth(meta: &ClusterMeta) -> Result<(), Error> {
     // check if registry auth tokens have been provided
     let Some(registries) = &meta.cluster.spec.registry_auth else {
@@ -450,7 +459,7 @@ pub async fn create_or_update_registry_auth(meta: &ClusterMeta) -> Result<(), Er
         &meta.namespace,
     );
     // create or update the skopeo secret
-    println!("Creating skopeo registry secret");
+    event!(Level::INFO, msg = "Creating skopeo registry secret");
     create_or_update(meta, &skopeo_secret, true).await?;
     // build a container pull secret
     let mut pull_secret = build_registry_secret(
@@ -460,7 +469,7 @@ pub async fn create_or_update_registry_auth(meta: &ClusterMeta) -> Result<(), Er
         &meta.namespace,
     );
     // pull secrets need the dockerconfigjson type instead of the default Opaque
-    println!("Creating registry pull secret");
+    event!(Level::INFO, msg = "Creating registry pull secret");
     pull_secret.type_ = Some("kubernetes.io/dockerconfigjson".to_string());
     // create the secret and force update
     create_or_update(meta, &pull_secret, true).await?;
@@ -476,6 +485,7 @@ pub async fn create_or_update_registry_auth(meta: &ClusterMeta) -> Result<(), Er
 /// # Arguments
 ///
 /// * `secret_api` - The Secret API for the `ThoriumCluster`'s namespace
+#[instrument(name = "secrets::delete", skip_all)]
 pub async fn delete(secret_api: &Api<Secret>) -> Result<(), Error> {
     // use default delete params
     let params: DeleteParams = DeleteParams::default();
@@ -490,10 +500,14 @@ pub async fn delete(secret_api: &Api<Secret>) -> Result<(), Error> {
     // delete each of them by name
     for secret_name in secrets_names {
         match secret_api.delete(secret_name, &params).await {
-            Ok(_) => println!("Deleted {secret_name} secret"),
+            Ok(_) => event!(Level::INFO, msg = "Deleted secret", secret = secret_name),
             // a missing secret is already in the state we want
             Err(kube::Error::Api(error)) if error.code == 404 => {
-                println!("Secret {secret_name} does not exist, skipping deletion");
+                event!(
+                    Level::INFO,
+                    msg = "Secret does not exist, skipping deletion",
+                    secret = secret_name
+                );
             }
             Err(error) => {
                 return Err(Error::new(format!(

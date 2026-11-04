@@ -4,6 +4,7 @@
 use kube::{Api, Client, api::DeleteParams};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
+use tracing::{Level, event, instrument};
 
 use super::crds::ThoriumCluster;
 
@@ -23,6 +24,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// * `name` - The name of the `ThoriumCluster`
 /// * `timeout` - How long to wait for the operator to clean up
 /// * `interval` - How long to wait between checks
+#[instrument(name = "uninstall::delete_and_wait", skip_all, fields(cluster = name, namespace = namespace))]
 pub async fn delete_and_wait(
     client: &Client,
     namespace: &str,
@@ -34,13 +36,20 @@ pub async fn delete_and_wait(
     let api: Api<ThoriumCluster> = Api::namespaced(client.clone(), namespace);
     // ask for the delete, which the operator's finalizer holds until it has cleaned up
     match api.delete(name, &DeleteParams::default()).await {
-        Ok(_) => println!("Deleting the ThoriumCluster; waiting for the operator to clean up"),
+        Ok(_) => event!(
+            Level::INFO,
+            msg = "Deleting the ThoriumCluster; waiting for the operator to clean up"
+        ),
         Err(kube::Error::Api(response)) if response.code == 404 => {
-            println!("The ThoriumCluster is already gone");
+            event!(Level::INFO, msg = "The ThoriumCluster is already gone");
             return ExitCode::SUCCESS;
         }
         Err(error) => {
-            eprintln!("Failed to delete the ThoriumCluster {namespace}/{name}: {error}");
+            event!(
+                Level::ERROR,
+                msg = "Failed to delete the ThoriumCluster",
+                error = crate::app::helpers::error_chain(&error)
+            );
             return ExitCode::FAILURE;
         }
     }
@@ -50,12 +59,16 @@ pub async fn delete_and_wait(
     loop {
         match api.get_opt(name).await {
             Ok(None) => {
-                println!("The ThoriumCluster has been cleaned up");
+                event!(Level::INFO, msg = "The ThoriumCluster has been cleaned up");
                 return ExitCode::SUCCESS;
             }
             Ok(Some(cluster)) => last = Some(cluster),
             // a failed check may be the API server briefly unavailable, so keep waiting
-            Err(error) => eprintln!("Failed to check the ThoriumCluster: {error}"),
+            Err(error) => event!(
+                Level::WARN,
+                msg = "Failed to check the ThoriumCluster",
+                error = crate::app::helpers::error_chain(&error)
+            ),
         }
         // stop once another wait would pass the deadline
         if Instant::now() + interval > deadline {
@@ -68,11 +81,12 @@ pub async fn delete_and_wait(
         .and_then(|cluster| cluster.status)
         .and_then(|status| serde_json::to_string(&status).ok())
         .unwrap_or_else(|| "{}".to_owned());
-    eprintln!(
-        "Timed out after {}s waiting for the operator to clean up the ThoriumCluster",
-        timeout.as_secs()
+    event!(
+        Level::ERROR,
+        msg = "Timed out waiting for the operator to clean up the ThoriumCluster",
+        timeout_secs = timeout.as_secs(),
+        last_status = status
     );
-    eprintln!("Last status: {status}");
     ExitCode::FAILURE
 }
 
@@ -90,7 +104,11 @@ pub async fn run(namespace: &str, name: &str, timeout: Duration) -> ExitCode {
     let client = match Client::try_default().await {
         Ok(client) => client,
         Err(error) => {
-            eprintln!("Failed to connect to Kubernetes: {error}");
+            event!(
+                Level::ERROR,
+                msg = "Failed to connect to Kubernetes",
+                error = crate::app::helpers::error_chain(&error)
+            );
             return ExitCode::FAILURE;
         }
     };

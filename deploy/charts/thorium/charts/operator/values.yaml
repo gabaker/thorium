@@ -32,6 +32,11 @@ controller:
   # have the operator manage a ThoriumCluster in another namespace; it still manages just one,
   # since Thorium supports one deployment per Kubernetes cluster
   watchOwnNamespaceOnly: true
+  # How much the operator logs: Off, Error, Warn, Setup (the same as Warn here), Info, Debug, or
+  # Trace (THORIUM_OPERATOR_LOG_LEVEL).
+  # Each line names the reconcile, upgrade step, Job, or component it belongs to; Debug and
+  # Trace also show the Kubernetes client's own messages
+  logLevel: Info
   # the operator container's resources block
   resources:
     requests: { cpu: "0", memory: "0" }

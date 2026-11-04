@@ -7,6 +7,7 @@ use kube::runtime::{conditions, wait::await_condition};
 use sha2::{Digest, Sha256};
 use thorium::Error;
 use thorium::conf::K8sCluster;
+use tracing::{Level, event, instrument};
 
 use super::clusters::ClusterMeta;
 use super::crds;
@@ -189,7 +190,11 @@ async fn resolve_local_nodes(meta: &ClusterMeta) -> Result<Vec<String>, Error> {
     for (name, k8s_cluster) in &meta.conf.thorium.scaler.k8s.clusters {
         // skip clusters the operator can't reach
         if k8s_cluster.api_url.is_some() {
-            println!("Skipping nodes in {name} as it has a custom API url");
+            event!(
+                Level::INFO,
+                msg = "Skipping nodes in a cluster with a custom API url",
+                k8s_cluster = name
+            );
             continue;
         }
         // add this cluster's nodes
@@ -247,7 +252,12 @@ async fn resolve_local_node_states(meta: &ClusterMeta) -> Result<Vec<LocalNode>,
 /// * `version` - The version of Thorium provisioned on this node
 pub async fn label_node(meta: &ClusterMeta, node: &str, version: &str) -> Result<(), Error> {
     // log which node we are labelling
-    println!("labeling {node} with thorium_version={version}");
+    event!(
+        Level::INFO,
+        msg = "Labeling node with thorium_version",
+        node = node,
+        version = version
+    );
     // build a label json template; the labels don't name the ThoriumCluster since Thorium
     // supports one deployment per Kubernetes cluster (the operator manages only the oldest
     // ThoriumCluster), so a single cluster ever sets or removes them
@@ -266,14 +276,21 @@ pub async fn label_node(meta: &ClusterMeta, node: &str, version: &str) -> Result
         .await
     {
         Ok(_) => {
-            println!(
-                "Node {node} labeled successfully with thorium=enabled and thorium_version={version}"
+            event!(
+                Level::INFO,
+                msg = "Node labeled successfully with thorium=enabled and thorium_version",
+                node = node,
+                version = version
             );
             Ok(())
         }
         // a node deleted since it was listed has nothing left to label
         Err(kube::Error::Api(error)) if error.code == 404 => {
-            println!("Node {node} no longer exists, skipping labelling it");
+            event!(
+                Level::INFO,
+                msg = "Node no longer exists, skipping labelling it",
+                node = node
+            );
             Ok(())
         }
         Err(error) => Err(Error::new(format!("Failed to label node {node}: {error}"))),
@@ -296,6 +313,7 @@ pub async fn label_node(meta: &ClusterMeta, node: &str, version: &str) -> Result
 /// * `meta` - Thorium cluster client and metadata
 /// * `version` - The Thorium version the API reports
 /// * `failed` - The nodes that failed to provision
+#[instrument(name = "nodes::label_nodes", skip_all)]
 pub async fn label_nodes(
     meta: &ClusterMeta,
     version: &str,
@@ -305,12 +323,21 @@ pub async fn label_nodes(
     for node in resolve_local_node_states(meta).await? {
         // a node that can't run its provision pod keeps the labels it has
         if let Some(reason) = &node.unavailable {
-            println!("Not labelling node {} as {reason}", node.name);
+            event!(
+                Level::INFO,
+                msg = "Not labelling node",
+                node = node.name,
+                reason = reason
+            );
             continue;
         }
         // a node that failed to provision isn't marked as provisioned
         if failed.contains(&node.name) {
-            println!("Not labelling node {} as it failed to provision", node.name);
+            event!(
+                Level::INFO,
+                msg = "Not labelling node as it failed to provision",
+                node = node.name
+            );
             continue;
         }
         // label this node
@@ -328,6 +355,7 @@ pub async fn label_nodes(
 /// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
+#[instrument(name = "nodes::delete_node_labels", skip_all)]
 pub async fn delete_node_labels(meta: &ClusterMeta) -> Result<(), Error> {
     // patch node labels with the default params
     let params = PatchParams::default();
@@ -366,7 +394,11 @@ pub async fn delete_node_labels(meta: &ClusterMeta) -> Result<(), Error> {
     for node in names {
         // keep an admin's opt-out in place
         if disabled.contains(&node) {
-            println!("Leaving labels on node {node} as it is disabled for Thorium");
+            event!(
+                Level::INFO,
+                msg = "Leaving labels on node as it is disabled for Thorium",
+                node = node
+            );
             continue;
         }
         // patch the node to remove the label
@@ -376,11 +408,19 @@ pub async fn delete_node_labels(meta: &ClusterMeta) -> Result<(), Error> {
             .await
         {
             Ok(_) => {
-                println!("Patched node to remove labels thorium and thorium_version from {node}");
+                event!(
+                    Level::INFO,
+                    msg = "Patched node to remove labels thorium and thorium_version",
+                    node = node
+                );
             }
             // a node that no longer exists has no label to remove
             Err(kube::Error::Api(error)) if error.code == 404 => {
-                println!("Node {node} not found to remove label, skipping node update");
+                event!(
+                    Level::INFO,
+                    msg = "Node not found to remove label, skipping node update",
+                    node = node
+                );
             }
             Err(error) => {
                 return Err(Error::new(format!(
@@ -446,7 +486,7 @@ async fn delete_provision_pod(
     // attempt deletion of the pod
     match meta.pod_api.delete(&name, &params).await {
         Ok(deleted) => {
-            println!("Cleaning up {name} pod");
+            event!(Level::INFO, msg = "Cleaning up pod", pod = name);
             // a pod that is still terminating has to be waited on unless it was forced out
             Ok(deleted
                 .left()
@@ -486,6 +526,7 @@ async fn cleanup_provision_pod_specific(meta: &ClusterMeta, node: &str) -> Resul
 /// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
+#[instrument(name = "nodes::cleanup_provision_pods", skip_all)]
 pub async fn cleanup_provision_pods(meta: &ClusterMeta) -> Result<(), Error> {
     // delete the provision pod on every node in our local clusters
     let mut deleted = Vec::new();
@@ -697,6 +738,7 @@ fn pod_hash(pod: &Pod) -> Option<&str> {
 /// * `meta` - Thorium cluster client and metadata
 /// * `node` - Name of node to deploy pod
 /// * `version` - The Thorium version the API reports
+#[instrument(name = "nodes::deploy_provision_pod", skip_all, fields(node = node))]
 pub async fn deploy_provision_pod(
     meta: &ClusterMeta,
     node: &str,
@@ -758,7 +800,7 @@ async fn create_provision_pod(meta: &ClusterMeta, pod: &Pod) -> Result<Created, 
     // create the pod
     match meta.pod_api.create(&PostParams::default(), pod).await {
         Ok(_) => {
-            println!("Node provision pod created: {name}");
+            event!(Level::INFO, msg = "Node provision pod created", pod = name);
             Ok(Created::Current)
         }
         // another pod took this name, so check whether it is the one we wanted
@@ -772,7 +814,11 @@ async fn create_provision_pod(meta: &ClusterMeta, pod: &Pod) -> Result<Created, 
                 Some(existing) if provision_pod_current(&existing, pod) => Ok(Created::Current),
                 // a different pod, or one already gone again, still needs replacing
                 _ => {
-                    println!("Node provision pod {name} already exists with another spec");
+                    event!(
+                        Level::INFO,
+                        msg = "Node provision pod already exists with another spec",
+                        pod = name
+                    );
                     Ok(Created::Outdated)
                 }
             }
@@ -856,6 +902,7 @@ impl ProvisionFailures {
 ///
 /// * `meta` - Thorium cluster client and metadata
 /// * `version` - The Thorium version the API reports
+#[instrument(name = "nodes::provision_nodes", skip_all, fields(version = version))]
 pub async fn provision_nodes(
     meta: &ClusterMeta,
     version: &str,
@@ -866,9 +913,11 @@ pub async fn provision_nodes(
         .into_iter()
         .filter(|node| match &node.unavailable {
             Some(reason) => {
-                println!(
-                    "Not provisioning node {} as {reason}; it is provisioned once it is ready",
-                    node.name
+                event!(
+                    Level::INFO,
+                    msg = "Not provisioning node; it is provisioned once it is ready",
+                    node = node.name,
+                    reason = reason
                 );
                 false
             }
@@ -883,7 +932,12 @@ pub async fn provision_nodes(
             match deploy_provision_pod(meta, &node.name, version).await {
                 Ok(()) => None,
                 Err(error) => {
-                    println!("Failed to provision node {}: {error}", node.name);
+                    event!(
+                        Level::ERROR,
+                        msg = "Failed to provision node",
+                        node = node.name,
+                        error = crate::trace::describe(&error)
+                    );
                     // keep the plain message since the status already marks the cluster as
                     // errored
                     Some((node.name, crds::error_message(&error)))

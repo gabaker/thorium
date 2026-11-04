@@ -2438,7 +2438,7 @@ async fn refused_setting_plans_no_step(setting: &str) {
             .await
             .expect("ensure")
     };
-    run(&cluster).await;
+    Box::pin(run(&cluster)).await;
     let apply = sim.jobs("schema-apply").remove(0);
     sim.finish(
         &apply,
@@ -2454,7 +2454,7 @@ async fn refused_setting_plans_no_step(setting: &str) {
     );
     // the refusal is read, and no check, migration, or pause follows
     for _ in 0..3 {
-        run(&cluster).await;
+        Box::pin(run(&cluster)).await;
     }
     assert_eq!(sim.created_of("migration-check").len(), 0);
     assert_eq!(sim.created_of("migration").len(), 0);

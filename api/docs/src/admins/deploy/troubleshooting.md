@@ -26,6 +26,45 @@ kubectl -n thorium get pods
 `metadata.generation` hasn't caught up with your latest change yet. See [Operating a
 Deployment](./operate.md#status) and the [status reference](./thoriumcluster.md#status).
 
+### Reading the operator's logs
+
+Each operator log line starts with a timestamp, the level, and the steps it happened in,
+outermost first, each with its fields, then the module that logged it, the message, and the
+message's own fields:
+
+```text
+2026-11-04T16:53:15.070067Z  INFO reconciling object{object.ref="ThoriumCluster.v1.sandia.gov/thorium.thorium" object.reason="object updated"}:ThoriumCluster::reconcile{cluster="thorium" namespace="thorium" generation=4}:operate::roll_api:deployments::deploy{component="api"}: thorium_operator::k8s::deployments: msg="Deployment created" deployment="api"
+```
+
+The steps say where the operator is: `reconciling object{object.ref=... object.reason=...}` is
+added by the Kubernetes controller runtime around every reconcile and says why it ran (`object
+updated`, `reconciler requested retry`, `error policy requested retry`, and so on),
+`ThoriumCluster::reconcile` is one pass over a cluster (`Reconciled ThoriumCluster` at its end
+says when it is looked at next), `upgrades::gate` and
+`upgrades::run{start=... target=...}` with `upgrades::run_step{step=... revision=...}` are an
+upgrade, `schema_apply::*`, `migration::*`, and `record::*` are the thoradm Jobs, `operate::prepare`
+and `operate::check_backends` are the backends, `deployments::deploy{component=...}` and
+`deployments::wait_for_rollouts` are the components, and `Node::reconcile{node=...}` and
+`nodes::*` are node provisioning. A failed reconcile is logged as `Controller error` with its
+causes, followed by when it is retried; these two lines carry only the `reconciling object` step,
+since the controller runtime logs them after the reconcile has ended:
+
+```text
+ERROR reconciling object{object.ref="ThoriumCluster.v1.sandia.gov/thorium.thorium" object.reason="object updated"}: thorium_operator::k8s::watchers::thorium_cr: msg="Controller error" cluster="thorium" namespace="thorium" error="Error: Failed to list ThoriumClusters: ..."
+ INFO reconciling object{object.ref="ThoriumCluster.v1.sandia.gov/thorium.thorium" object.reason="object updated"}: thorium_operator::k8s::watchers::thorium_cr: msg="Requeuing ThoriumCluster reconciliation" cluster="thorium" requeue_secs=60
+```
+
+To see more, raise `operator.controller.logLevel` (`Off`, `Error`, `Warn`, `Setup`, `Info`,
+`Debug`, or `Trace`; default `Info`; `Setup` logs the same as `Warn` in the operator), or pass
+`--log-level` (see [Operator command line](./thoriumcluster.md#operator-command-line)). `Debug`
+and `Trace` also show the internals of the libraries the operator uses (the Kubernetes and HTTP
+clients and the Scylla driver), which are verbose, so lower the level again when you are done.
+Requests that carry a password (Scylla role statements, Elastic and Thorium user requests) are
+never recorded at any level. Set `NO_COLOR=1` on the operator Deployment to drop the color codes
+from the levels; the chart has no value for it, so a Helm upgrade removes it again. The
+operator's `--trace <file>` flag (or `THORIUM_OPERATOR_TRACE`) takes a tracing config in the
+format the other components use, which can also send its traces to a gRPC (OTLP) collector.
+
 The Thorium image is published for linux/amd64 and linux/arm64 under one tag, and each node pulls
 its own architecture. Only the amd64 image includes `curl`, `jq`, and `lsof`. To use them in a
 pod on an arm64 node, attach a debug container that has them:

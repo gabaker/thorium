@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 use thorium::Error;
 use thorium::models::upgrades::{RevisionId, StepState, UpgradeState, UpgradeStatus};
+use tracing::{Level, event, instrument};
 
 use super::state::StoredState;
 use super::{FIRST_HELM_REVISION, HOLD_REQUEUE_SECS, Pending, catalog, pause, state};
@@ -237,6 +238,7 @@ pub(super) async fn strip_spec(client: &Client, cluster: &ThoriumCluster) -> Res
 /// * `meta` - Thorium cluster client and metadata
 /// * `pending` - The upgrade that just lowered the revision, whose state is rewritten
 /// * `target` - The revision the cluster was reverted to
+#[instrument(name = "handover::finish", skip_all)]
 pub(super) async fn finish(
     meta: &ClusterMeta,
     pending: &mut Pending,
@@ -274,7 +276,11 @@ pub(super) async fn finish(
 pub(super) async fn hold(client: &Client, tracker: &StatusTracker, state: &UpgradeState) -> Action {
     // a spec that gained newer fields since is stripped again
     if let Err(error) = strip_spec(client, tracker.cluster()).await {
-        println!("{error}");
+        event!(
+            Level::WARN,
+            msg = "Failed to strip the newer spec fields",
+            error = crate::trace::describe(&error)
+        );
     }
     // the status stays in the previous layout
     let paused = pause::paused(state);

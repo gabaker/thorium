@@ -20,6 +20,7 @@ use thorium::models::upgrades::{
     APPLY_KEY_MARKER, AppliedStep, DEPLOYMENT_MARKER, MAX_HISTORY, RECORD_MARKER, RESET_STATE_STEP,
     RESTORED_STEP, RevisionId, StepState, UpgradeState,
 };
+use tracing::{Level, event, instrument};
 
 use super::detect::{self, Detected};
 use super::drift;
@@ -817,9 +818,10 @@ async fn act(meta: &ClusterMeta, report: StatusReport) -> Result<Option<Action>,
         RecordStatus::Recorded { record, .. } => {
             let mirrored = mirror(&record, loaded.as_ref().map(|loaded| &loaded.state));
             save_mirror(meta, mirrored, loaded.as_ref()).await?;
-            println!(
-                "Rebuilt the upgrade state of {} from the record at revision {}",
-                meta.namespace, record.revision
+            event!(
+                Level::INFO,
+                msg = "Rebuilt the upgrade state from the record",
+                revision = %record.revision
             );
             Ok(None)
         }
@@ -830,9 +832,10 @@ async fn act(meta: &ClusterMeta, report: StatusReport) -> Result<Option<Action>,
             fresh
                 .schema
                 .insert(RECORD_MARKER.to_owned(), "scylla".to_owned());
-            println!(
-                "Starting {} at revision {} as a fresh install",
-                meta.namespace, fresh.revision
+            event!(
+                Level::INFO,
+                msg = "Starting at the latest revision as a fresh install",
+                revision = %fresh.revision
             );
             save_mirror(meta, fresh, loaded.as_ref()).await?;
             Ok(None)
@@ -905,6 +908,7 @@ async fn act(meta: &ClusterMeta, report: StatusReport) -> Result<Option<Action>,
 /// * `meta` - Thorium cluster client and metadata
 /// * `prepare` - Writes the `thorium` Secret and bootstraps Thorium's Scylla role, returning an
 ///   action while a backend isn't ready
+#[instrument(name = "record::recover", skip_all)]
 pub async fn recover_with(
     meta: &ClusterMeta,
     prepare: impl AsyncFnOnce(&ClusterMeta) -> Result<Option<Action>, Error>,
@@ -951,6 +955,7 @@ pub async fn recover_with(
 ///
 /// * `meta` - Thorium cluster client and metadata
 /// * `pending` - The upgrade about to run, whose state and steps are replaced
+#[instrument(name = "record::refresh", skip_all)]
 pub async fn refresh(meta: &ClusterMeta, pending: &mut Pending) -> Result<Option<Action>, Error> {
     // a recent read of the record by the same image still holds, a future date never does
     let acks = drift::acknowledgements(meta)?;
@@ -1115,6 +1120,7 @@ pub(super) fn read_again_within(state: &mut UpgradeState, secs: i64) -> bool {
 /// * `meta` - Thorium cluster client and metadata
 /// * `pending` - The upgrade whose state is mirrored once the revision moved
 /// * `revision` - The revision to record
+#[instrument(name = "record::move_revision", skip_all, fields(revision = %revision))]
 pub async fn move_revision(
     meta: &ClusterMeta,
     pending: &mut Pending,

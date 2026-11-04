@@ -34,6 +34,7 @@ use thorium::conf::Elastic;
 use thorium::models::{ElasticIndex, ScrubbedUser, UserCreate, UserRole};
 use thorium::utils::helpers::redact_url;
 use thorium::{Error, client};
+use tracing::{Level, event, instrument};
 
 use super::helpers::{CheckError, error_chain};
 use crate::k8s::clusters::ClusterMeta;
@@ -381,7 +382,10 @@ pub(crate) async fn scylla_connect_anonymous(
     scylla_session(SessionBuilder::new(), nodes, "an anonymous user").await
 }
 
-/// Run a single CQL statement
+/// Run a single role statement, which may carry a password
+///
+/// The driver records each statement's text in a trace-level span, so the statement runs
+/// unrecorded to keep role passwords out of the logs and any external collector.
 ///
 /// # Arguments
 ///
@@ -393,9 +397,8 @@ async fn scylla_execute(
     statement: String,
     description: &str,
 ) -> Result<(), Error> {
-    // run this statement
-    session
-        .query_unpaged(statement, &[])
+    // run this statement without recording its text
+    crate::trace::unrecorded(session.query_unpaged(statement, &[]))
         .await
         .map_err(|error| Error::new(format!("Failed to {description} in Scylla: {error}")))?;
     Ok(())
@@ -625,7 +628,11 @@ async fn drop_replaced_role(
     )
     .await?;
     // drop the previous role as Thorium's role
-    println!("Dropping the previous Scylla role {role}");
+    event!(
+        Level::INFO,
+        msg = "Dropping the previous Scylla role",
+        role = role
+    );
     scylla_execute(
         session,
         format!("DROP ROLE IF EXISTS {}", cql_identifier(&role)),
@@ -662,7 +669,10 @@ async fn drop_default_role(
     )
     .await?;
     // drop the default role as Thorium's role
-    println!("Dropping the default Scylla cassandra role");
+    event!(
+        Level::INFO,
+        msg = "Dropping the default Scylla cassandra role"
+    );
     scylla_execute(
         session,
         "DROP ROLE IF EXISTS cassandra".to_owned(),
@@ -705,6 +715,7 @@ fn alter_role_statement(username: &str, password: &str, admin_username: &str) ->
 /// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
+#[instrument(name = "bootstrap::scylla", skip_all)]
 pub async fn scylla(meta: &ClusterMeta) -> Result<(), CheckError> {
     // skip this step unless scylla bootstrapping is enabled
     let Some(bootstrap) = meta
@@ -728,7 +739,11 @@ pub async fn scylla(meta: &ClusterMeta) -> Result<(), CheckError> {
     // check if Thorium's role already works
     match scylla_connect(nodes, &auth.username, &auth.password).await {
         Ok(session) => {
-            println!("Scylla role {} already exists", auth.username);
+            event!(
+                Level::INFO,
+                msg = "Scylla role already exists",
+                role = auth.username
+            );
             // drop the default role if a previous run created our role but didn't finish
             drop_default_role(bootstrap, &auth.username, &session).await?;
             // drop the role Thorium used before, which a previous run may not have finished
@@ -736,7 +751,7 @@ pub async fn scylla(meta: &ClusterMeta) -> Result<(), CheckError> {
             return Ok(());
         }
         // a rejected login means Thorium's role still has to be created
-        Err(ScyllaConnectError::Auth(details)) => println!("{details}"),
+        Err(ScyllaConnectError::Auth(details)) => event!(Level::INFO, msg = details),
         // a Scylla that isn't accepting connections can't be bootstrapped yet
         Err(error) => return Err(error.into()),
     }
@@ -747,7 +762,11 @@ pub async fn scylla(meta: &ClusterMeta) -> Result<(), CheckError> {
     let role = cql_identifier(&auth.username);
     let password = cql_literal(&auth.password);
     // create Thorium's role
-    println!("Creating Scylla role {}", auth.username);
+    event!(
+        Level::INFO,
+        msg = "Creating Scylla role",
+        role = auth.username
+    );
     scylla_execute(
         &session,
         format!("CREATE ROLE IF NOT EXISTS {role} WITH PASSWORD = {password} AND LOGIN = true AND SUPERUSER = true"),
@@ -1026,6 +1045,7 @@ async fn elastic_identity_ready(conf: &Elastic) -> Result<bool, CheckError> {
 /// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
+#[instrument(name = "bootstrap::elastic_identity", skip_all)]
 pub async fn elastic_identity(meta: &ClusterMeta) -> Result<StepOutcome, CheckError> {
     // skip this step unless external elastic bootstrapping is enabled
     let Some(bootstrap) = meta
@@ -1041,9 +1061,10 @@ pub async fn elastic_identity(meta: &ClusterMeta) -> Result<StepOutcome, CheckEr
     let conf = &meta.conf.elastic;
     // skip the superuser entirely when Thorium's role and user are already in place
     if elastic_identity_ready(conf).await? {
-        println!(
-            "Elastic user {} already has the privileges it needs",
-            conf.username
+        event!(
+            Level::INFO,
+            msg = "Elastic user already has the privileges it needs",
+            user = conf.username
         );
         return Ok(StepOutcome::Done);
     }
@@ -1065,7 +1086,11 @@ pub async fn elastic_identity(meta: &ClusterMeta) -> Result<StepOutcome, CheckEr
     // build a client for Elastic as the superuser
     let client = elastic_client(conf, &admin).await?;
     // create or update Thorium's role
-    println!("Ensuring Elastic role {}", conf.username);
+    event!(
+        Level::INFO,
+        msg = "Ensuring Elastic role",
+        role = conf.username
+    );
     let role = serde_json::json!({
         "indices": [{"names": elastic_index_patterns(conf), "privileges": ["all"]}]
     });
@@ -1078,17 +1103,23 @@ pub async fn elastic_identity(meta: &ClusterMeta) -> Result<StepOutcome, CheckEr
         .map_err(elastic_send_error(conf, "create Thorium's Elastic role"))?;
     elastic_check(response, &format!("create Elastic role {}", conf.username)).await?;
     // create or update Thorium's user so its password always matches our config
-    println!("Ensuring Elastic user {}", conf.username);
+    event!(
+        Level::INFO,
+        msg = "Ensuring Elastic user",
+        user = conf.username
+    );
     let user = serde_json::json!({
         "password": conf.password,
         "roles": [conf.username],
         "full_name": "Thorium",
     });
-    let response = client
-        .security()
+    // send the user's password without recording the request
+    let security = client.security();
+    let request = security
         .put_user(SecurityPutUserParts::Username(&conf.username))
         .body(user)
-        .send()
+        .send();
+    let response = crate::trace::unrecorded(request)
         .await
         .map_err(elastic_send_error(conf, "create Thorium's Elastic user"))?;
     elastic_check(response, &format!("create Elastic user {}", conf.username)).await?;
@@ -1483,6 +1514,7 @@ fn rejected_credentials(
 /// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
+#[instrument(name = "bootstrap::elastic_access", skip_all)]
 pub async fn elastic_access(meta: &ClusterMeta) -> Result<Vec<String>, CheckError> {
     // get the Elastic config for this cluster
     let conf = &meta.conf.elastic;
@@ -1591,7 +1623,7 @@ pub async fn elastic_access(meta: &ClusterMeta) -> Result<Vec<String>, CheckErro
         if state == IndexState::Exists
             && let Some(note) = check_index_mapping(&client, name).await?
         {
-            println!("Warning: {note}");
+            event!(Level::WARN, msg = note, index = name);
             notes.push(note);
         }
     }
@@ -1645,6 +1677,7 @@ fn admin_exists<'a>(
 /// * `meta` - Thorium cluster client and metadata
 /// * `url` - The url of the Thorium API
 /// * `operator` - A Thorium client for the operator's admin user
+#[instrument(name = "bootstrap::admin", skip_all)]
 pub async fn admin(
     meta: &ClusterMeta,
     url: &str,
@@ -1672,9 +1705,10 @@ pub async fn admin(
             .iter()
             .map(|user: &ScrubbedUser| (user.username.as_str(), &user.role));
         if admin_exists(roles, username) {
-            println!(
-                "Admin Secret {} is missing but the admin user already exists",
-                bootstrap.secret.name
+            event!(
+                Level::INFO,
+                msg = "Admin Secret is missing but the admin user already exists",
+                secret = bootstrap.secret.name
             );
             return Ok(StepOutcome::Done);
         }
@@ -1689,23 +1723,27 @@ pub async fn admin(
         .role(UserRole::Admin)
         .skip_verification()
         .local();
-    // create this user with our secret key
+    // create this user with our secret key, without recording the request carrying its password
     let settings = super::helpers::client_settings();
-    let result = client::Users::create(
+    let result = crate::trace::unrecorded(client::Users::create(
         url,
         user_req,
         Some(&meta.conf.thorium.secret_key),
         &settings,
-    )
+    ))
     .await;
     // an existing user is left alone
     match result {
         Ok(_) => {
-            println!("Created admin user {username}");
+            event!(Level::INFO, msg = "Created admin user", user = username);
             Ok(StepOutcome::Done)
         }
         Err(error) if error.status() == Some(StatusCode::CONFLICT) => {
-            println!("Admin user {username} already exists");
+            event!(
+                Level::INFO,
+                msg = "Admin user already exists",
+                user = username
+            );
             Ok(StepOutcome::Done)
         }
         Err(error) => Err(Error::new(format!(
@@ -1724,6 +1762,7 @@ mod tests {
     use base64::Engine;
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tracing::Instrument;
 
     /// Scylla connection failures other than a rejected login are waited on
     #[test]
@@ -3226,6 +3265,90 @@ mod tests {
         let header = format!("authorization: basic {}", auth.to_lowercase());
         assert!(role.head.contains(&header), "{}", role.head);
         assert!(user.head.contains(&header), "{}", user.head);
+    }
+
+    /// Creating Thorium's Elastic role and user at the trace level logs no password, not the
+    /// admin Secret's, Thorium's user's, or the basic auth header built from them
+    #[tokio::test]
+    async fn elastic_identity_keeps_passwords_out_of_trace_logs() {
+        // capture every span and event at the trace level, the kube and HTTP clients' included
+        let (captured, guard) = crate::trace::capture::capture_at(Level::TRACE);
+        // an Elastic rejecting Thorium's user with an admin Secret to fix it
+        let fake = fake_with_secret("elastic-admin", "1", &[("password", "admin-pass")]);
+        let (meta, requests) = elastic_bootstrap_meta(&fake, unready_elastic).await;
+        assert_eq!(
+            elastic_identity(&meta).await.expect("step"),
+            StepOutcome::Done
+        );
+        drop(guard);
+        // the user was created with its password, so the credential path ran
+        let requests = requests.lock().expect("requests lock").clone();
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.path == "/_security/user/thorium"
+                    && request.body.contains("elastic-pass")),
+            "{requests:?}"
+        );
+        // the trace was recorded, but none of the credentials are in it
+        let text = captured.text();
+        assert!(text.contains("Ensuring Elastic user"), "{text}");
+        let engine = base64::engine::general_purpose::STANDARD;
+        for secret in [
+            "admin-pass".to_owned(),
+            "elastic-pass".to_owned(),
+            engine.encode("admin-pass"),
+            engine.encode("elastic:admin-pass"),
+        ] {
+            assert!(!text.contains(&secret), "{secret} was logged:\n{text}");
+        }
+    }
+
+    /// A role statement carrying a password runs unrecorded, so the request span the Scylla
+    /// driver opens around it at the trace level never reaches the logs
+    #[tokio::test]
+    async fn role_passwords_stay_out_of_trace_logs() {
+        /// Opens a span like the driver's unprepared request span, with an event inside it
+        ///
+        /// # Arguments
+        ///
+        /// * `statement` - The statement the span records as its contents
+        async fn driver_request(statement: String) {
+            let span = tracing::trace_span!("Request", kind = "unprepared", contents = statement);
+            async { event!(Level::TRACE, msg = "Sending request") }
+                .instrument(span)
+                .await;
+        }
+        // the role statements the bootstrap runs for Thorium's role
+        let password = "Zq9!role-pass";
+        let create = format!(
+            "CREATE ROLE IF NOT EXISTS {} WITH PASSWORD = {} AND LOGIN = true AND SUPERUSER = true",
+            cql_identifier("thorium"),
+            cql_literal(password)
+        );
+        let alter = alter_role_statement("thorium", password, "cassandra");
+        // recorded normally, the driver's span carries the password
+        let (captured, guard) = crate::trace::capture::capture_at(Level::TRACE);
+        driver_request(alter.clone()).await;
+        drop(guard);
+        assert!(captured.text().contains(password), "{}", captured.text());
+        // run the statements the way scylla_execute does, inside a bootstrap span
+        let (captured, guard) = crate::trace::capture::capture_at(Level::TRACE);
+        async {
+            for statement in [create, alter] {
+                crate::trace::unrecorded(driver_request(statement)).await;
+            }
+            event!(Level::INFO, msg = "Created role", role = "thorium");
+        }
+        .instrument(tracing::info_span!("bootstrap::scylla"))
+        .await;
+        drop(guard);
+        // the operator's own events still log, but no statement or password does
+        let text = captured.text();
+        assert!(text.contains("bootstrap::scylla"), "{text}");
+        assert!(text.contains("Created role"), "{text}");
+        assert!(!text.contains(password), "{text}");
+        assert!(!text.contains("WITH PASSWORD"), "{text}");
     }
 
     /// An Elastic that rejects Thorium's user after bootstrap.elastic set it up fails the access

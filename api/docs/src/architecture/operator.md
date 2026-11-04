@@ -57,6 +57,15 @@ Deleting a `ThoriumCluster` runs the operator's cleanup before its finalizer is 
 labels, provision pods, and the resources it created are deleted, while databases and their data
 are kept.
 
+## Logs
+
+The operator logs with the same tracing setup as the other components. Every line names the
+steps it happened in, such as the reconcile of a cluster (with its name, namespace, and
+generation), an upgrade step (with its step and revision), a thoradm Job, or a component's
+rollout, so the logs show which part of a deployment the operator is in. See [Reading the
+operator's logs](../admins/deploy/troubleshooting.md#reading-the-operators-logs) for the format and
+how to raise the level.
+
 ## Revisions
 
 Each deployment records the upgrade revision it is at, and the history of every step applied, in
