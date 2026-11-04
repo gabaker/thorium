@@ -72,7 +72,7 @@ pub async fn probe_elastic(
             .get_mapping(IndicesGetMappingParts::Index(&[name]))
             .send()
             .await
-            .map_err(|err| ProbeError::query(&what, err))?;
+            .map_err(|err| ProbeError::query(&what, crate::utils::helpers::error_chain(&err)))?;
         // a missing index is absent from what was observed
         let status = response.status_code();
         if status.as_u16() == 404 {
@@ -85,7 +85,7 @@ pub async fn probe_elastic(
         let body = response
             .json::<Value>()
             .await
-            .map_err(|err| ProbeError::query(&what, err))?;
+            .map_err(|err| ProbeError::query(&what, crate::utils::helpers::error_chain(&err)))?;
         objects.push(mapping_object(index, &body)?);
     }
     Ok(objects)

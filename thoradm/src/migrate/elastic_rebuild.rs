@@ -21,6 +21,7 @@ use thorium::models::schema::{
     RunMode, Slice, SnapshotObject, elastic_client, probe_elastic,
 };
 use thorium::models::upgrades::Record;
+use thorium::utils::helpers::error_chain;
 
 /// What the rebuild reads and changes in Elastic and Redis
 ///
@@ -172,7 +173,9 @@ impl Rebuild for Live {
             .delete(IndicesDeleteParts::Index(&[name]))
             .send()
             .await
-            .map_err(|error| MigrateError::Backend(format!("delete {name}: {error}")))?;
+            .map_err(|error| {
+                MigrateError::Backend(format!("delete {name}: {}", error_chain(&error)))
+            })?;
         let status = response.status_code();
         if status.is_success() || status.as_u16() == 404 {
             Ok(())
