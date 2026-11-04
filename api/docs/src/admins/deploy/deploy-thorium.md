@@ -485,8 +485,9 @@ helm template thorium oci://ghcr.io/cisagov/thorium/charts/thorium --version $VE
 
 ## Ingress
 
-Route `/` to the `thorium-api` Service on port 80 (the API serves the UI too). With nginx, allow
-large uploads:
+Route `/` to the `thorium-api` Service on port 80 (the API serves the UI too), and `/api/mcp` to the
+`thorium-mcp` Service on port 80: the MCP server keeps its sessions in the memory of the one API pod
+that Service selects. With nginx, allow large uploads:
 
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -505,6 +506,13 @@ spec:
     - host: thorium.example.com
       http:
         paths:
+          - path: /api/mcp
+            pathType: Prefix
+            backend:
+              service:
+                name: thorium-mcp
+                port:
+                  number: 80
           - path: /
             pathType: Prefix
             backend:
@@ -535,6 +543,12 @@ spec:
   entryPoints:
     - websecure
   routes:
+    # the longer rule has the higher default priority, so it wins over the next one
+    - match: Host(`thorium.example.com`) && PathPrefix(`/api/mcp`)
+      kind: Rule
+      services:
+        - name: thorium-mcp
+          port: 80
     - match: Host(`thorium.example.com`)
       kind: Rule
       services:
@@ -731,7 +745,8 @@ deployment with a namespace prefix.
 
 11. **Replace the ingress.** The pre-Helm ingress (an nginx `thorium-default-ingress`, or a Traefik
     `thorium-ingress` with a `ui-prefix-prepend` middleware) routes through a `/ui` prefix. Replace
-    it with a route of `/` to `thorium-api:80` (see [Ingress](#ingress)).
+    it with a route of `/` to `thorium-api:80` and `/api/mcp` to `thorium-mcp:80` (see
+    [Ingress](#ingress)).
 
 12. **Remove the pre-Helm leftovers** once the new components run: the
     `thorium-operator-binding` ClusterRoleBinding (`thorium-operator-binding-<prefix>` for a
