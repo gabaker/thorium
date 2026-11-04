@@ -47,7 +47,7 @@ use crate::backup::s3::S3BackupShared;
 use crate::backup::s3::{ComponentIndex, STAGING_DIR, clear_staging, remove_staging, sync_dirs};
 use crate::backup::schema::{BackupSchemaRecord, SCHEMA_FILE};
 use crate::backup::sink::{
-    PRIVATE_DIR_MODE, PRIVATE_FILE_MODE, SinkFactory, TokioFs, create_private_dir,
+    BackupAccess, BackupSinks, PRIVATE_FILE_MODE, SinkFactory, TokioFs, create_private_dir,
 };
 use crate::backup::tables::Association;
 use crate::backup::tables::Entity;
@@ -69,7 +69,7 @@ use crate::shared::scylla::build_token_ranges;
 use crate::shared::workers::{WorkerHandle, join_workers, spawn_worker};
 
 /// The file the Redis state is written to; it holds every password hash and API token, so it is
-/// created 0600
+/// created 0600, or with the group's read and write bits in a root shared with its group
 const REDIS_FILE: &str = "redis.json";
 
 /// How many keys named outside any archive one order to a worker carries
@@ -193,8 +193,8 @@ impl<B: Backup> TableBackup<B> {
         let data_path = path.join("data");
         let map_path = path.join("maps");
         // create our data dir
-        create_private_dir(&data_path).await?;
-        create_private_dir(&map_path).await?;
+        self.sinks.create_dir(&data_path).await?;
+        self.sinks.create_dir(&map_path).await?;
         // build the style for our progress bar
         let bar_style = ProgressStyle::with_template(
             "{spinner:.green} Backed Up Rows: {msg} {bytes} {binary_bytes_per_sec}",
@@ -529,7 +529,7 @@ impl<S: S3Backup> S3BackupController<S> {
         // build the path to our object directory
         path.push("objects");
         // create the dir for object storage if doesn't yet exist
-        create_private_dir(path).await?;
+        self.shared.sinks.create_dir(path).await?;
         // build the style for our progress bar
         let bar_style = ProgressStyle::with_template(
             "{spinner:.green} Backed Up S3 Objects: {msg} {bytes} {binary_bytes_per_sec}",
@@ -741,7 +741,7 @@ impl<S: S3Backup> S3BackupController<S> {
         // nest our path by our table name
         path.push(S::name());
         // start the object index, reading the one an interrupted run left
-        create_private_dir(&path).await?;
+        self.shared.sinks.create_dir(&path).await?;
         let index_path = path.join(INDEX_FILE);
         let index =
             Arc::new(ComponentIndex::start(&index_path, self.shared.sinks.as_ref(), resume).await?);
@@ -749,7 +749,7 @@ impl<S: S3Backup> S3BackupController<S> {
         self.shared.forget_claims();
         // empty the staging directory of downloads an interrupted run never finished
         let staging = path.join(STAGING_DIR);
-        clear_staging(&staging).await?;
+        clear_staging(&staging, self.shared.sinks.as_ref()).await?;
         let objects = path.join("objects");
         // start our archive map updater
         let handle = self.start_global_tracker();
@@ -1034,7 +1034,7 @@ impl BackupController {
         let component = BackupComponents::Redis.to_string();
         info!("Backing up redis");
         // create our data dir
-        create_private_dir(&path).await?;
+        self.sinks.create_dir(&path).await?;
         // the icons this run's state names are known only once the state is written
         self.graphic_keys.clear();
         // the state is fetched again, so an interrupted run's files never outlive a failed fetch
@@ -1104,7 +1104,8 @@ impl BackupController {
         // serialize our backup to json
         // we use json instead of rkyv because datetimes seem to be causing problems
         let backup_str = serde_json::to_string(&backup)?;
-        // write it privately and atomically through the seam, recording a write that fails
+        // write it with the backup's file mode and atomically through the seam, recording a write
+        // that fails
         match write_atomic(
             &path,
             REDIS_FILE,
@@ -1186,7 +1187,7 @@ impl BackupController {
             lines.push_str(&line);
             lines.push('\n');
         }
-        // write it privately and atomically, recording a write that fails
+        // write it with the backup's file mode and atomically, recording a write that fails
         match write_atomic(path, PRUNED_FILE, lines.as_bytes(), self.sinks.as_ref()).await {
             Ok(()) => {
                 self.pruned = Some(PrunedEntry {
@@ -1535,21 +1536,50 @@ fn resumable(layout: Layout, root: &Path) -> Result<Option<InProgressMarker>, Er
 /// refusing a root another run holds
 ///
 /// The lock is an `flock` on `backup.lock` in the root, released when the returned file is
-/// dropped or the process exits, however it ends. The file itself stays.
+/// dropped or the process exits, however it ends. The file itself stays, with the backup's file
+/// mode. A `backup.lock` that isn't a regular file (a symlink a group member planted, for
+/// example) is refused and never followed.
 ///
 /// # Arguments
 ///
 /// * `root` - The backup root, which exists
-fn lock_root(root: &Path) -> Result<std::fs::File, Error> {
-    // open the lock file, creating it private to this user
+/// * `access` - The access taken from the backup root
+fn lock_root(root: &Path, access: BackupAccess) -> Result<std::fs::File, Error> {
+    // open the lock file, creating it with the backup's file mode; a symlink is refused rather
+    // than followed, and a FIFO fails at once rather than waiting for a reader
     let path = root.join(LOCK_FILE);
+    let mode = access.file_mode(PRIVATE_FILE_MODE);
+    let foreign = || {
+        Error::new(format!(
+            "{} isn't a regular file, so it isn't a lock thoradm made; remove it and run again",
+            path.display()
+        ))
+    };
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(false)
-        .mode(PRIVATE_FILE_MODE)
+        .mode(mode)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(&path)
-        .map_err(|error| Error::new(format!("{} can't be opened: {error}", path.display())))?;
+        .map_err(|error| match error.raw_os_error() {
+            Some(libc::ELOOP | libc::ENXIO) => foreign(),
+            _ => Error::new(format!("{} can't be opened: {error}", path.display())),
+        })?;
+    // only a regular file is a lock this or another thoradm run made
+    let metadata = file
+        .metadata()
+        .map_err(|error| Error::new(format!("{} can't be read: {error}", path.display())))?;
+    if !metadata.is_file() {
+        return Err(foreign());
+    }
+    // a shared backup's lock file gets the group's bits the umask may have stripped, changing it
+    // only when it lacks them, since a group member can't change another member's file
+    let current = metadata.permissions().mode();
+    if access.is_shared() && current & 0o777 != mode {
+        file.set_permissions(std::fs::Permissions::from_mode(mode))
+            .map_err(|error| Error::new(format!("{} can't be shared: {error}", path.display())))?;
+    }
     // take the lock without waiting, so a second run refuses rather than queues
     match file.try_lock() {
         Ok(()) => Ok(file),
@@ -1566,41 +1596,65 @@ fn lock_root(root: &Path) -> Result<std::fs::File, Error> {
     }
 }
 
-/// Creates a backup root private to this user, or makes one that exists private
+/// Creates a backup root private to this user, or keeps one that exists from other users, and
+/// returns the access the root gives its group
 ///
-/// A root other users can read or enter gets mode 0700 before anything is written in it; a root
-/// whose mode can't be set (it belongs to another user, for example) refuses the run.
+/// A new root (and any missing parents) is created 0700. An existing setgid root is shared with
+/// its group: its group bits and setgid bit are kept, and only the bits other users have are
+/// removed, before anything is written in it. Any other existing root is made 0700. A root whose
+/// mode can't be changed (it belongs to another user, for example) refuses the run. A setgid root
+/// whose group has access but no search bit is accepted with a warning, since group members can't
+/// enter it.
 ///
 /// # Arguments
 ///
 /// * `root` - The backup root
-async fn make_root_private(root: &Path) -> Result<(), Error> {
+async fn prepare_root(root: &Path) -> Result<BackupAccess, Error> {
     // a new root, and any missing parents, are created private
     if !tokio::fs::try_exists(root).await? {
         create_private_dir(root).await?;
-        return Ok(());
+        return Ok(BackupAccess::PRIVATE);
     }
-    // an existing root other users can reach is made private first
-    let mode = tokio::fs::metadata(root).await?.permissions().mode();
-    if mode & 0o077 != 0 {
-        let private = std::fs::Permissions::from_mode(PRIVATE_DIR_MODE);
-        tokio::fs::set_permissions(root, private)
+    // an existing setgid root loses other users' bits, and any other root everyone's but its
+    // owner's, before anything is written
+    let mode = tokio::fs::metadata(root).await?.permissions().mode() & 0o7777;
+    let kept = BackupAccess::root_mode(mode);
+    if kept != mode {
+        tokio::fs::set_permissions(root, std::fs::Permissions::from_mode(kept))
             .await
             .map_err(|error| {
                 Error::new(format!(
-                    "{} can be read by other users ({:o}) and couldn't be made private: {error}; \
-                     back up into a directory you own, or make it 0700",
+                    "{} can be used by others ({mode:o}) and its mode couldn't be changed to \
+                     {kept:o}: {error}; back up into a directory you own, or set its mode \
+                     yourself (chmod 700, or chmod 2770 to share it with its group)",
                     root.display(),
-                    mode & 0o7777
                 ))
             })?;
-        info!(
-            "Made {} private to this user (it was {:o})",
+        // name the old and new modes, and say how to share when the root lost its group's access
+        if kept & 0o2000 == 0 {
+            info!(
+                "Made {} private to you (it was {mode:o}, now {kept:o}); a backup is shared with \
+                 its group only in a setgid directory (chmod 2770)",
+                root.display(),
+            );
+        } else {
+            info!(
+                "Removed other users' access to {} (it was {mode:o}, now {kept:o})",
+                root.display(),
+            );
+        }
+    }
+    // a group that can't enter the root can't use what it shares
+    let access = BackupAccess::from_root_mode(kept);
+    if access.group_cannot_enter() {
+        warn!(
+            "{} gives its group access ({kept:o}) without the search bit, so group members can't \
+             enter it or the directories the backup creates; use 2770 or 2750 to share a backup \
+             with a group",
             root.display(),
-            mode & 0o7777
         );
     }
-    Ok(())
+    Ok(access)
 }
 
 /// Moves an interrupted run's failures file to `reports/backup-<its start time>/`, so the
@@ -1629,7 +1683,7 @@ async fn set_aside_failures(
     // name the report directory for the interrupted run's start, as restore names its own
     let started = marker.started.format("%Y%m%dT%H%M%S%.3fZ");
     let reports = root.join("reports").join(format!("backup-{started}"));
-    create_private_dir(&reports).await?;
+    sinks.create_dir(&reports).await?;
     sinks
         .rename(&failures, &reports.join(FAILURES_FILE))
         .await?;
@@ -1695,10 +1749,12 @@ pub async fn run(
     } else {
         None
     };
-    // the backup root is private to this user, whether this run creates it or not
-    make_root_private(root).await?;
+    // the backup root is kept from other users, whether this run creates it or not, and what the
+    // backup creates in it gets the access it gives its group
+    let access = prepare_root(root).await?;
+    let sinks: Arc<dyn SinkFactory> = Arc::new(BackupSinks::new(sinks, access));
     // one run at a time writes into a backup root, holding its lock until the run ends
-    let _lock = lock_root(root)?;
+    let _lock = lock_root(root, access)?;
     // what the root holds under the lock decides whether the run starts or resumes, since
     // another run may have started or finished in it since it was first looked at
     let resumed = resumable(manifest::classify(root).await?, root)?;
@@ -1879,5 +1935,154 @@ fn unparsable_records(error: &thorium::Error) -> Option<Vec<BackupProblem>> {
             .map(|body| body.problems)
             .filter(|problems| !problems.is_empty()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{lock_root, prepare_root};
+    use crate::backup::manifest::{self, LOCK_FILE, Layout};
+    use crate::backup::sink::BackupAccess;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+
+    /// Builds a fresh scratch directory under the system temp directory
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The test's name for the directory
+    fn scratch(name: &str) -> PathBuf {
+        // name the directory by test and process so parallel runs never share it
+        let dir = std::env::temp_dir().join(format!("thoradm-root-{name}-{}", std::process::id()));
+        // start from an empty directory
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Builds a shared root holding only a planted `backup.lock` symlink to a private file outside
+    /// it, and returns the root and the outside file
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The test's name for its directories
+    fn root_with_planted_lock(name: &str) -> (PathBuf, PathBuf) {
+        // a shared root and a private file outside it
+        let root = scratch(name);
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o2770)).unwrap();
+        let outside = scratch(&format!("{name}-outside")).join("secret");
+        std::fs::write(&outside, b"SECRET").unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o600)).unwrap();
+        // the planted lock names the outside file
+        std::os::unix::fs::symlink(&outside, root.join(LOCK_FILE)).unwrap();
+        (root, outside)
+    }
+
+    /// A root holding only a `backup.lock` that isn't a regular file holds a foreign file, so it
+    /// isn't empty
+    #[tokio::test]
+    async fn a_planted_lock_symlink_makes_a_root_foreign() {
+        // a root whose only entry is a lock symlink
+        let (root, outside) = root_with_planted_lock("classify");
+        let layout = manifest::classify(&root).await.unwrap();
+        assert!(matches!(layout, Layout::Legacy), "{layout:?}");
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::remove_dir_all(outside.parent().unwrap()).unwrap();
+    }
+
+    /// Locking a root refuses a `backup.lock` symlink, leaving the file it names unchanged, and
+    /// never creates the file a dangling one names
+    #[test]
+    fn locking_refuses_a_lock_symlink() {
+        // a lock symlink to a private file is refused and the file keeps its mode and bytes
+        let (root, outside) = root_with_planted_lock("lock");
+        let access = BackupAccess::from_root_mode(0o2770);
+        assert!(lock_root(&root, access).is_err());
+        let mode = std::fs::metadata(&outside).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(std::fs::read(&outside).unwrap(), b"SECRET");
+        // a dangling lock symlink is refused and its target never created
+        let dangling = outside.with_file_name("made");
+        std::fs::remove_file(root.join(LOCK_FILE)).unwrap();
+        std::os::unix::fs::symlink(&dangling, root.join(LOCK_FILE)).unwrap();
+        assert!(lock_root(&root, access).is_err());
+        assert!(!dangling.exists());
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::remove_dir_all(outside.parent().unwrap()).unwrap();
+    }
+
+    /// Locking a root refuses a `backup.lock` that is a FIFO rather than waiting on it
+    #[test]
+    fn locking_refuses_a_lock_fifo() {
+        // a FIFO where the lock file goes
+        let root = scratch("fifo");
+        let path =
+            std::ffi::CString::new(root.join(LOCK_FILE).into_os_string().into_encoded_bytes())
+                .unwrap();
+        // SAFETY: the path is a valid NUL-terminated string that outlives the call
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        assert!(lock_root(&root, BackupAccess::from_root_mode(0o2770)).is_err());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A shared root's lock file gets the group's read and write bits
+    #[test]
+    fn locking_a_shared_root_shares_its_lock() {
+        // a fresh lock file in a shared root gets 0660
+        let root = scratch("shared-lock");
+        let _lock = lock_root(&root, BackupAccess::from_root_mode(0o2770)).unwrap();
+        let mode = std::fs::metadata(root.join(LOCK_FILE))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(mode, 0o660);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A root other users can reach whose bits this user can't change refuses the run
+    #[tokio::test]
+    async fn a_root_whose_other_bits_cant_be_removed_is_refused() {
+        // root may change any directory's mode, so only an unprivileged run can check this
+        // SAFETY: geteuid only reads the process's effective user id
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        // the system temp directory is open to everyone and belongs to root
+        let tmp = PathBuf::from("/tmp");
+        let before = std::fs::metadata(&tmp).unwrap().permissions().mode();
+        let error = prepare_root(&tmp).await.unwrap_err();
+        assert!(error.to_string().contains("couldn't be"), "{error}");
+        assert_eq!(
+            std::fs::metadata(&tmp).unwrap().permissions().mode(),
+            before
+        );
+    }
+
+    /// A setgid root whose group has read and write but no search bit is kept as it is and
+    /// flagged as one its group can't enter
+    #[tokio::test]
+    async fn a_group_root_without_search_is_kept() {
+        // a 2760 root has no other bits to remove
+        let root = scratch("no-search");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o2760)).unwrap();
+        let access = prepare_root(&root).await.unwrap();
+        assert!(access.group_cannot_enter());
+        let mode = std::fs::metadata(&root).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o2760);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A root its group may use without the setgid bit is made private before the backup starts
+    #[tokio::test]
+    async fn a_group_root_without_setgid_is_made_private() {
+        // a 0770 root becomes 0700 and shares nothing
+        let root = scratch("no-setgid");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o770)).unwrap();
+        let access = prepare_root(&root).await.unwrap();
+        assert_eq!(access, BackupAccess::PRIVATE);
+        let mode = std::fs::metadata(&root).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o700);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

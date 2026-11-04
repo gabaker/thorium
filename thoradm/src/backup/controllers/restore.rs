@@ -9,6 +9,7 @@ use kanal::{AsyncReceiver, AsyncSender};
 use scylla::client::session::Session;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -35,7 +36,9 @@ use crate::backup::manifest::{self, FORMAT_VERSION};
 use crate::backup::s3::S3RestoreShared;
 use crate::backup::schema::BackupSchemaRecord;
 use crate::backup::schema_restore::{self, ConvergeTo, Origin, RecordRestored};
-use crate::backup::sink::{SinkFactory, TokioFs, create_private_dir};
+use crate::backup::sink::{
+    BackupAccess, PRIVATE_DIR_MODE, SinkFactory, TokioFs, create_backup_dir,
+};
 use crate::backup::tables::{
     Association, Comment, Commitish, CommitishList, Entity, NetworkPolicy, Node, Notification,
     Output, OutputStream, RepoData, RepoList, S3Id, SamplesList, Tag,
@@ -1431,6 +1434,10 @@ const OBJECT_STEPS: [BackupComponents; 4] = [
 
 /// Builds a fresh report directory for one run under the backup it reads
 ///
+/// The backup's `reports/` directory gets the backup's group access, as the directories a backup
+/// creates do, so every member of a group the backup is shared with can make a report directory in
+/// it. Each run's own report directory is private to the user running it.
+///
 /// # Arguments
 ///
 /// * `backup` - The backup being read
@@ -1441,8 +1448,19 @@ pub async fn report_dir(backup: &Path, operation: &str) -> Result<PathBuf, Error
     let dir = backup
         .join("reports")
         .join(format!("{operation}-{started}"));
-    // create it, private like the rest of the backup, so the failures file can be opened in it
-    create_private_dir(&dir).await?;
+    // the reports directory mirrors the backup's group access; a backup that can't be read
+    // shares nothing, and creating its reports directory reports why
+    let access = match tokio::fs::metadata(backup).await {
+        Ok(metadata) => BackupAccess::from_root_mode(metadata.permissions().mode()),
+        Err(_) => BackupAccess::PRIVATE,
+    };
+    let reports = backup.join("reports");
+    create_backup_dir(&reports, access).await?;
+    // create the run's own directory private to this user, refusing anything already at its path
+    tokio::fs::DirBuilder::new()
+        .mode(PRIVATE_DIR_MODE)
+        .create(&dir)
+        .await?;
     Ok(dir)
 }
 
@@ -1983,9 +2001,10 @@ pub async fn handle(restore_args: &RestoreBackup, args: &Args) -> Result<RunOutc
 
 #[cfg(test)]
 mod tests {
-    use super::{RecordRestored, record_steps, restore_warnings};
+    use super::{RecordRestored, record_steps, report_dir, restore_warnings};
     use crate::args::RestoreBackup;
     use clap::Parser;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use thorium::Conf;
 
@@ -2119,5 +2138,26 @@ mod tests {
             .unwrap_or_else(|| panic!("no flush warning in {warnings:?}"));
         assert!(flush.contains("may still have run"), "{flush}");
         assert!(!flush.contains("nothing was deleted"), "{flush}");
+    }
+
+    /// A shared backup's `reports/` directory gets the backup's group access, so every group
+    /// member can make a report directory in it, while each run's own report directory stays
+    /// private to the user running it
+    #[tokio::test]
+    async fn report_dirs_share_their_parent_with_the_backups_group() {
+        // a setgid backup its group may read and write
+        let backup = std::env::temp_dir().join(format!("thoradm-reports-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&backup);
+        std::fs::create_dir_all(&backup).unwrap();
+        std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o2770)).unwrap();
+        // two runs make their report directories
+        let verify = report_dir(&backup, "verify").await.unwrap();
+        let scrub = report_dir(&backup, "scrub").await.unwrap();
+        // the parent mirrors the backup's group access and each run's directory is private
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&backup.join("reports")), 0o770);
+        assert_eq!(mode(&verify), 0o700);
+        assert_eq!(mode(&scrub), 0o700);
+        std::fs::remove_dir_all(&backup).unwrap();
     }
 }

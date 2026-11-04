@@ -16,6 +16,7 @@ use bb8_redis::RedisConnectionManager;
 use bb8_redis::bb8::Pool;
 use rand::Rng;
 use scylla::client::session::Session;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -857,7 +858,8 @@ impl Harness {
         thoradm_command(cluster_conf, &self.ctl_conf)
     }
 
-    /// Makes a fresh scratch directory for one test
+    /// Makes a fresh scratch directory for one test, private to this user like a backup directory
+    /// thoradm creates, so a backup into it doesn't take its group bits from the umask
     ///
     /// # Arguments
     ///
@@ -869,6 +871,9 @@ impl Harness {
         // start from an empty directory
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("failed to create a scratch directory");
+        // start private like a directory thoradm creates, so no test sees its root change mode
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .expect("failed to make a scratch directory private");
         dir
     }
 

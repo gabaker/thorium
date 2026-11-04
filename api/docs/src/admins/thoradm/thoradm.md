@@ -153,12 +153,14 @@ thoradm backup new --output /mnt/backups/thorium-2026-10-17
 The [Taking Backups](./taking_backups.md) guide covers taking a backup in full: pausing the writers
 first, the configs and access thoradm needs, the components and every flag of `backup new` with its
 default, the output directory (a finished backup directory is never reused, so each backup needs a
-new one), resuming an interrupted backup, the exit codes and `failures.jsonl`, and every file a
-backup writes. A Redis record the API can't parse (an image hash missing its `group` field, for
-example) is left out of `redis.json` and recorded as a `skipped` record in `failures.jsonl`, so the
-backup exits 2 and a restore of it needs `--accept-failures`. A backup whose Redis records don't fit
-together (a group member or a user's group that no longer exists, or one that names a skipped user
-or group, for example) fails its `redis` component until the records are repaired;
+new one; it is made private to the user running thoradm unless it has the setgid bit, which shares
+it with its group, for example `chgrp thorium-admins DIR && chmod 2770 DIR`), resuming an
+interrupted backup, the exit codes and `failures.jsonl`, and every file a backup writes. A Redis
+record the API can't parse (an image hash missing its `group` field, for example) is left out of
+`redis.json` and recorded as a `skipped` record in `failures.jsonl`, so the backup exits 2 and a
+restore of it needs `--accept-failures`. A backup whose Redis records don't fit together (a group
+member or a user's group that no longer exists, or one that names a skipped user or group, for
+example) fails its `redis` component until the records are repaired;
 `backup new --prune-dangling` (off by default) drops the dangling user and group references
 instead, lists each change in `pruned.jsonl`, and exits 2, and a restore of such a backup needs
 `--accept-failures` (see [Pruning dangling
@@ -507,7 +509,7 @@ table archives and listed in the manifest's `siblings`: every row of the `schema
 fingerprint and layout version of each backend, the revision and the full applied history, the
 state of each migration pass, the consumed lossy-approval codes, any history an earlier restore
 archived, and the data-shaping settings. The file also names the thoradm version that wrote it, and
-holds the files password's salted hash, so it is as private as the rest of the backup. Rows of a kind this thoradm doesn't know, such as the audit row a later release writes when it
+holds the files password's salted hash, so it gets the same mode as the rest of the backup. Rows of a kind this thoradm doesn't know, such as the audit row a later release writes when it
 drops a legacy object, are carried as they are under `other` and written back by a restore, merged
 with the target's own rows of those kinds. A deployment
 whose keyspace has no `schema_migrations` table has no record, and its backup has no `schema.json`.

@@ -1001,6 +1001,16 @@ mod tests {
             // truncation isn't recorded; pass it through
             self.inner.truncate(len).await
         }
+
+        /// Gives the real file a mode
+        ///
+        /// # Arguments
+        ///
+        /// * `mode` - The permission bits the file must have
+        async fn set_mode(&mut self, mode: u32) -> std::io::Result<()> {
+            // mode changes aren't recorded; pass them through
+            self.inner.set_mode(mode).await
+        }
     }
 
     #[async_trait::async_trait]
