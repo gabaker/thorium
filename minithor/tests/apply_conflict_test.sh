@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Checks that deploy explains a server-side apply conflict in a failed thorium chart upgrade with
-# the exact command that fixes it, and that --force-conflicts is only offered when the helm in
-# use has the flag. Runs offline with stub helm commands.
+# the exact command that fixes it, that --force-conflicts is only offered when the helm in use has
+# the flag, and that an existing ThoriumCluster CRD is skipped. Runs offline with stub helm commands.
 #   usage: minithor/tests/apply_conflict_test.sh
 set -uo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -21,7 +21,7 @@ printf '#!/usr/bin/env bash\necho "      --force-conflicts   if set server-side 
 printf '#!/usr/bin/env bash\necho "      --force   force resource updates through a replacement strategy"\n' > "$work/bin/helm3"
 chmod +x "$work/bin/helm4" "$work/bin/helm3"
 # load minithor's helpers without running its command dispatch
-for fn in helm_supports_force_conflicts deploy_retry_command report_apply_conflicts; do
+for fn in helm_supports_force_conflicts deploy_retry_command report_apply_conflicts thorium_crd_args; do
     sed -n "/^${fn}() /,/^}/p" "$minithor" >> "$work/funcs.sh"
     grep -q "^${fn}() " "$minithor"
     check "minithor defines $fn" $?
@@ -141,12 +141,24 @@ check "Helm 4 supports --force-conflicts" $?
 ! with_helm helm3 helm_supports_force_conflicts > /dev/null
 check "Helm 3 doesn't support --force-conflicts" $?
 
+# the chart's CRD is skipped only when the cluster already has it, since Helm 4 would apply it
+# server-side over the operator's fields while a fresh cluster needs it from the chart
+out="$(bash -c ". $work/funcs.sh; kctl() { return 0; }; thorium_crd_args" 2>&1)"
+grep -qx -- --skip-crds <<<"$out"
+check "an existing ThoriumCluster CRD is skipped (is: $out)" $?
+out="$(bash -c ". $work/funcs.sh; kctl() { return 1; }; thorium_crd_args" 2>&1)"
+! grep -q . <<<"$out"
+check "a missing ThoriumCluster CRD is installed from the chart (is: $out)" $?
+
 # deploy wires it up (the patterns are literal minithor text)
 # shellcheck disable=SC2016
 grep -q -- '--force-conflicts) *force_conflicts=true' "$minithor" \
     && grep -q 'conflict_args=(--server-side=true --force-conflicts)' "$minithor" \
     && grep -A6 'helm_cmd upgrade --install "$THORIUM_RELEASE"' "$minithor" | grep -q 'report_apply_conflicts'
 check "deploy parses --force-conflicts and reports conflicts when helm fails" $?
+# shellcheck disable=SC2016
+grep -A3 'helm_cmd upgrade --install "$THORIUM_RELEASE"' "$minithor" | grep -qF '${crd_args[@]+"${crd_args[@]}"}'
+check "deploy passes the CRD arguments to the thorium chart install" $?
 bash "$minithor" deploy --help | grep -q -- "--force-conflicts"
 check "deploy --help documents --force-conflicts" $?
 exit "$fails"

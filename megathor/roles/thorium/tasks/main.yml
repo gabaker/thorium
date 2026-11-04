@@ -7,6 +7,18 @@
          else (playbook_dir ~ '/files/thorium-' ~ thorium_chart_version ~ '.tgz') if offline | bool
          else thorium_chart_repo ~ '/thorium' }}
 
+# Helm 3 leaves an existing CRD from a chart's crds/ alone, but Helm 4 applies it server-side and
+# fails on the fields the operator's field manager owns, so the chart's ThoriumCluster CRD is
+# skipped once the cluster has it (from the operator, an earlier install, or convert-to-helm.sh);
+# the pre-upgrade CRD hook and the operator keep it current. A cluster without it still gets it
+# from the chart, which the ThoriumCluster the chart renders needs
+- name: Find the ThoriumCluster CRD
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: thoriumclusters.sandia.gov
+  register: thorium_crd
+
 # The generated values hold every backend credential, so they only exist on disk while helm runs
 - name: Install the thorium chart
   block:
@@ -28,6 +40,7 @@
         release_namespace: "{{ thorium_namespace }}"
         create_namespace: true
         values_files: "{{ ['./artifacts/thorium-values.yaml'] + thorium_values_files }}"
+        skip_crds: "{{ thorium_crd.resources | default([]) | length > 0 }}"
       register: thorium_helm
       ignore_errors: true
       no_log: true

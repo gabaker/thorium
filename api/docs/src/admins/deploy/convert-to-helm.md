@@ -87,8 +87,13 @@ dev, which Helm doesn't manage. ..."), and minithor and megathor refuse to deplo
 
    ```bash
    helm upgrade --install thorium oci://ghcr.io/cisagov/thorium/charts/thorium --version $VERSION \
-     -n thorium -f site.yaml -f thorium-converted-values.yaml
+     -n thorium -f site.yaml -f thorium-converted-values.yaml --skip-crds
    ```
+
+   `--skip-crds` leaves the `ThoriumCluster` CRD as the conversion applied it (the chart's own).
+   Helm 3 skips an existing CRD anyway, but Helm 4 applies the chart's CRDs server-side and fails
+   with `conflicts with "thorium_cluster_apply"` on the fields the operator's field manager owns
+   (see [Troubleshooting](./troubleshooting.md#helm-install-conflicts)).
 
    With minithor or megathor, see [minithor](#minithor) and [megathor](#megathor) below.
 
@@ -216,7 +221,8 @@ deploy/charts/scripts/convert-to-helm.sh --context minikube --admin-user test
 minithor deploy --skip-operators --no-toolbox --values thorium-converted-values.yaml
 ```
 
-minithor sets `autoTargetDev`, so the operator upgrades the converted deployment at once. Its
+minithor sets `autoTargetDev`, so the operator upgrades the converted deployment at once, and
+skips the chart's CRD since the conversion applied it. Its
 databases stay where the old minithor put them. Those namespaces have the names the current
 minithor uses, except the default instance's Elasticsearch in `elastic-system`, which
 `expose --dev` and `get-config --local` skip; `cleanup` leaves what the old minithor created
@@ -236,6 +242,7 @@ playbook with:
   step needs it.
 
 The converted values are applied after megathor's own, so their admin bootstrap setting wins.
+megathor skips the chart's CRD since the conversion applied it.
 Pass an existing admin's login to the conversion (`--admin-user` with `THORIUM_ADMIN_PASSWORD` or
 `--admin-password-stdin`); without one the bootstrap stays off, megathor's generated
 `thorium_admin_password` creates no user, and the playbook's final message says that no admin user

@@ -550,7 +550,9 @@ the download URL's port. A backup holds every credential in plaintext; see
   and a field another field manager owns conflicts: an operator that updated it (such as
   `elastic-operator` on the `Elasticsearch` node sets) or `before-first-apply`, which holds the
   fields an earlier client-side (Helm 3) apply set. `deploy` names the fields and prints the same
-  command with `--force-conflicts`, which has Helm take them over.
+  command with `--force-conflicts`, which has Helm take them over. `deploy` passes Helm
+  `--skip-crds` when the cluster already has the `ThoriumCluster` CRD, since Helm 4 would apply the
+  chart's copy over the fields the operator owns.
 - **Pods of a `--local-image` deployment never start on an Apple-silicon Mac.** The nodes are arm64,
   and an amd64 image Docker runs through Rosetta or QEMU emulation can't run on them; `deploy`
   names both architectures and stops, whether `minikube image load` refused the image or loaded it. Pass `--image` with a registry image that has an arm64

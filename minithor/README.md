@@ -105,7 +105,9 @@ comparison (a failed chart render, for example).
 With Helm 4, which applies charts server-side, an upgrade can fail with `Apply failed with ...
 conflict` when another field manager (an operator, or `before-first-apply` for fields a Helm 3
 install set) owns a field the chart changes. `deploy` names the fields and prints the same command
-with `--force-conflicts`, which has Helm take them over.
+with `--force-conflicts`, which has Helm take them over. `deploy` passes Helm `--skip-crds` when
+the cluster already has the `ThoriumCluster` CRD, which Helm 4 would otherwise apply over the
+fields the operator owns.
 
 ## Existing minithor deployments
 

@@ -301,6 +301,15 @@ A new image pushed under the same tag doesn't roll anything out; restart the com
 | namespace `<ns>` already holds ThoriumCluster `<name>` from this release, but operator.cluster.name is `<other>`; set operator.cluster.name to `<name>` ... | `operator.cluster.name` is fixed after the first install; set it back |
 | ThoriumCluster `<ns>/<name>` already exists. Thorium supports one deployment per Kubernetes cluster, and namespace prefixes only rename namespaces; uninstall that deployment before installing this one in namespace `<ns>` | Another deployment owns this Kubernetes cluster |
 
+## Helm install conflicts
+
+Helm 4 applies charts server-side, so it fails when another field manager owns a field the chart
+sets. Helm 3 creates and patches objects client-side without checking field ownership.
+
+| Message | Cause and fix |
+|---------|---------------|
+| failed to install CRD crds/thoriumcluster.yaml: conflict occurred while applying object /thoriumclusters.sandia.gov ... conflicts with "thorium_cluster_apply": .spec.names.categories, .spec.names.shortNames | The `ThoriumCluster` CRD already exists, applied by the operator (field manager `thorium_cluster_apply`) or by `convert-to-helm.sh`, and Helm 4 installs a chart's `crds/` with server-side apply. This happens on the first install after a conversion, or on an install over a cluster that kept the CRD (`helm uninstall` leaves it). Run the install again with `--skip-crds`, which leaves the existing CRD alone as Helm 3 does; the operator applies its own CRD when it starts, and the chart's pre-upgrade hook applies it on every upgrade. minithor and megathor pass it whenever the CRD exists |
+
 ## Uninstalling
 
 | Symptom | Cause and fix |

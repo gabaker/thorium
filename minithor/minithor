@@ -2252,6 +2252,17 @@ keep_live_infra() {
 # Succeed when this helm can force server-side apply conflicts (--force-conflicts, Helm 4 and later)
 helm_supports_force_conflicts() { "$HELM" upgrade --help 2>/dev/null | grep -q -- '--force-conflicts'; }
 
+# Print --skip-crds when the ThoriumCluster CRD already exists (applied by the operator, an earlier
+# install, or convert-to-helm.sh). Helm 3 leaves an existing CRD from crds/ alone, but Helm 4
+# applies it server-side and fails on the fields the operator's field manager owns; the pre-upgrade
+# CRD hook and the operator keep it current. A cluster without it still gets it from the chart,
+# which the ThoriumCluster the chart renders needs
+thorium_crd_args() {
+    if kctl get crd thoriumclusters.sandia.gov &>/dev/null; then
+        echo --skip-crds
+    fi
+}
+
 # Print the minithor deploy command with the given options and --force-conflicts, keeping the
 # global options and hiding credentials: a --password value, the password of any URL with one
 # (such as a --proxy or --toolbox URL, hidden up to the last @ before the host), and the value of
@@ -2841,9 +2852,14 @@ cmd_deploy() {
     # helm's output is kept to explain a failure
     local helm_output
     helm_output="${MINITHOR_STATE_DIR}/helm-upgrade$(profile_suffix).log"
+    local -a crd_args=()
+    local crd_arg
+    while IFS= read -r crd_arg; do
+        crd_args+=("$crd_arg")
+    done < <(thorium_crd_args)
     if ! helm_cmd upgrade --install "$THORIUM_RELEASE" "$THORIUM_CHART" ${THORIUM_CHART_ARGS[@]+"${THORIUM_CHART_ARGS[@]}"} \
         -n "$THORIUM_NAMESPACE" --create-namespace "${values_args[@]}" --reset-values --timeout "${timeout}s" \
-        ${conflict_args[@]+"${conflict_args[@]}"} 2>&1 | tee "$helm_output"; then
+        ${conflict_args[@]+"${conflict_args[@]}"} ${crd_args[@]+"${crd_args[@]}"} 2>&1 | tee "$helm_output"; then
         report_apply_conflicts "$helm_output" ${deploy_args[@]+"${deploy_args[@]}"}
         report_crd_hook_failure "$THORIUM_NAMESPACE"
         exit 1

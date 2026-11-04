@@ -689,7 +689,9 @@ fi
 ########################################
 # Helm never updates a CRD that already exists, and the new operator only applies its own once
 # the chart installed it, so the pre-Helm schema (which rejects the chart's ThoriumCluster) is
-# replaced here, with the field manager the operator applies it with
+# replaced here, with the field manager the operator applies it with. The chart is then installed
+# with --skip-crds: Helm 4 installs crds/ with server-side apply, which conflicts with the fields
+# this field manager owns
 step "Updating the ThoriumCluster CRD to the chart's"
 crd=$(helm show crds "$chart" ${chart_version:+--version "$chart_version"} | awk '
     /^---/ { if (doc ~ /name: thoriumclusters\.sandia\.gov/) print doc; doc = ""; next }
@@ -810,10 +812,14 @@ cat <<EOF
 Conversion complete. Thorium's components keep running unmanaged until the thorium chart is
 deployed with the values in $values_out (pass it after any other values so it wins):
 
-  helm upgrade --install $release <thorium chart> -n $namespace -f $values_out
+  helm upgrade --install $release <thorium chart> -n $namespace -f $values_out --skip-crds
   minithor ${prefix:+--namespace-prefix $prefix }deploy --skip-operators --no-toolbox --values $values_out
   megathor: thorium_deployment_name=$cluster_name, infra_operators_enabled=false, and
             thorium_values_files=[$values_out]
+
+--skip-crds keeps Helm off the ThoriumCluster CRD, which this script already replaced with the
+chart's: Helm 4 would otherwise apply it server-side and fail on the fields the operator's field
+manager owns (minithor and megathor skip it whenever the CRD exists).
 
 The operator then waits in the UpgradeRequired phase until a target revision is set (minithor
 sets autoTargetDev), runs the upgrade steps, and deploys the new components. Once the
