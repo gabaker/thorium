@@ -3,7 +3,7 @@ import { useParams, useLocation } from 'react-router';
 import styled from 'styled-components';
 
 // project imports
-import { Tabs, TabItem, TabsAlign } from '@components/shared/tabs';
+import { Tabs, TabItem } from '@components/shared/tabs';
 const AssociationGraph = React.lazy(() => import('@components/associations/graph/AssociationGraph'));
 const Results = React.lazy(() => import('@components/pages/files/Results'));
 const FileEntities = React.lazy(() => import('@components/pages/files/FileEntities'));
@@ -207,14 +207,7 @@ const FileDetails = () => {
             onNavigateTab={jumpToTab}
           />
           <div ref={tabsRef}>
-            <Tabs
-              tabs={FILE_TABS}
-              active={activeTab}
-              onChange={handleTabChange}
-              aria-label="File details sections"
-              className="mt-4"
-              align={TabsAlign.Center}
-            />
+            <Tabs tabs={FILE_TABS} active={activeTab} onChange={handleTabChange} aria-label="File details sections" className="mt-4" />
           </div>
           <GraphDataProvider initial={associationInitial}>
             <TabPanels className="mt-4">
