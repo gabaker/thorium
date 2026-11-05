@@ -578,7 +578,7 @@ async fn a_rerun_by_hand_of_the_reverse_step_records_an_outcome() {
 ///
 /// * `world` - The world to seed
 async fn seed_converted_record(world: &World) {
-    // the revision row replaces the one the world's apply recorded, and each conversion is done
+    // the revision row replaces the one the world's apply recorded
     let newest = upgrades::latest().to_string();
     let mut revision = record::blank(MigrationRecordKind::Revision, "deployment");
     revision.revision = Some(newest.clone());
@@ -595,8 +595,12 @@ async fn seed_converted_record(world: &World) {
     .enumerate()
     {
         let minute = u32::try_from(minute).expect("few steps") + 1;
+        // each conversion is done at the revision of the catalog edge holding it, since the
+        // planner matches finished steps by revision and step
+        let (edge, _) = upgrades::step(step).expect("the conversion step is in the catalog");
+        let revision = edge.revision().to_string();
         rows.migrations
-            .push(record::history_row(&record::step(&newest, step, minute)));
+            .push(record::history_row(&record::step(&revision, step, minute)));
     }
     record::insert(world.session(), &world.ns, &rows).await;
 }
