@@ -59,10 +59,11 @@ pub(super) const STEPS: &[StepDef] = &[
                   nothing, and is skipped when nothing is in flight",
         thoradm_migration: Some(DRAIN_REACTIONS_STEP),
         manual_procedure: Some(
-            "Stop submitting reactions and let the unfinished ones finish, or delete a stuck one with \
-         `thorctl reactions delete --group <group> --pipeline <pipeline> --status started` (and \
-         `--status created`) while the previous API is still running; do not restart or delete API pods meanwhile. \
-         The step is done once no reaction is Created or Started.",
+            "Stop submitting reactions, list the reactions and stage-path workers that hold the \
+         drain with `thoradm migrate check --id drain-reactions`, and let them finish, or delete a \
+         stuck reaction with `thorctl reactions delete --group <group> <id>` while the previous API \
+         is still running; do not restart or delete API pods meanwhile. The step is done once no \
+         reaction is Created or Started and no stage-path worker is registered.",
         ),
         phase: Some(MigrationPhase::Migrate),
         needs_running: DRAIN_NEEDS,

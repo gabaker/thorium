@@ -312,9 +312,11 @@ Workflows](../agentic/upgrading.md) covers them in full.
    thoradm --cluster-conf thorium.yml migrate check --id images-to-tools --all --samples
    ```
 
-   Delete stuck reactions while the previous API still runs, and don't restart API pods meanwhile.
-   When the wait doesn't end although nothing seems to run, see [A drain that doesn't
-   end](#a-drain-that-doesnt-end).
+   The drain check names each reaction and stage-path worker that holds the drain on stderr,
+   orphans (reactions the status listings miss) and workers on unregistered nodes marked (see
+   [The drain](../agentic/upgrading.md#the-drain)). Delete stuck reactions while the previous API
+   still runs, and don't restart API pods meanwhile. When the wait doesn't end although nothing
+   seems to run, see [A drain that doesn't end](#a-drain-that-doesnt-end).
 
 **Check.** Phase `Ready` at `2026-10-v05` and every component back at its replica count;
 `thoradm --cluster-conf thorium.yml schema diff` exits 0, or 7 with only the drift
@@ -713,32 +715,28 @@ The schema apply sets the `scan_stats` TTL from `thorium.events.stats_retention`
 ### A drain that doesn't end
 
 `drain-reactions` counts every reaction whose data hash in Redis says `Created` or `Started`, and
-every registered worker without a tool instance; `thoradm migrate check --id drain-reactions`
-prints the same counts and names neither. When `thorctl reactions get` (or `delete --status`)
-finds none of what it counts, look in Redis (`redis-cli`, keys under `thorium.namespace`):
+every registered worker without a tool instance. `thoradm migrate check --id drain-reactions` names
+each of them on stderr (see [The drain](../agentic/upgrading.md#the-drain)). When `thorctl
+reactions get --status` (or `delete --status`) finds none of what it names:
 
-- **A reaction the listings can't see.** Find the hashes the drain counts, then delete each
-  reaction by its id while the previous API still runs:
+- **A reaction the status listings miss**, marked `no (orphan)` in the check's reactions table.
+  Delete it by the group and id the table names while the previous API still runs:
 
   ```bash
-  redis-cli --scan --pattern '<namespace>:reaction_data:*' | while read -r key; do
-    echo "$key $(redis-cli HGET "$key" status)"; done | grep -E 'Created|Started'
-  # the key ends in <group>:<id>
   thorctl reactions delete --group <group> <id>
   ```
 
 - **Stale worker registrations**, such as workers that stayed `Spawning` or name a cluster or node
-  the scaler no longer has. Nothing removes a registration whose agent never ran or died without
-  unregistering. List them, then delete them through the API under the scaler each names:
+  the scaler no longer has (the check's workers table marks a node that isn't registered). Nothing
+  removes a registration whose agent never ran or died without unregistering. Delete them through
+  the API under the scaler the table names for each:
 
   ```bash
-  redis-cli --scan --pattern '<namespace>:worker_data:*' | while read -r key; do
-    [ "$(redis-cli HEXISTS "$key" tool_instance)" = 0 ] && echo "$key" && redis-cli HGETALL "$key"; done
   curl -X DELETE "<THORIUM_URL>/api/system/worker/<scaler>" -H "Authorization: token $TOKEN" \
     -H "content-type: application/json" -d '{"workers": ["<name>", "<name>"]}'
   ```
 
-  `<scaler>` is the worker's `scaler` field (`K8s`, `BareMetal`, `Windows`, `Kvm`, or `External`),
+  `<scaler>` is the table's SCALER column (`K8s`, `BareMetal`, `Windows`, `Kvm`, or `External`),
   and `$TOKEN` an admin token as in [Logins](#logins).
 
 ### Logins

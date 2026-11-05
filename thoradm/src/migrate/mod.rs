@@ -466,7 +466,8 @@ mod tests {
     }
 
     /// The drain is registered as a check that waits, and its step has no pause list, no
-    /// approval work, and a procedure that names the command that clears reactions
+    /// approval work, and a procedure that names the check that lists what holds it and the
+    /// command that clears reactions
     #[test]
     fn the_drain_is_a_check_with_a_waiting_step() {
         // the registration is a check only
@@ -475,9 +476,14 @@ mod tests {
         // its step pauses nothing, reads nothing after another step, and says how to clear reactions
         let step = step_for("drain-reactions").expect("a catalog step");
         assert!(step.pause.is_empty() && step.reads_after.is_empty());
+        let procedure = step.manual_procedure.expect("a procedure");
         assert!(
-            step.manual_procedure
-                .is_some_and(|text| text.contains("thorctl reactions delete"))
+            procedure.contains("thorctl reactions delete"),
+            "{procedure}"
+        );
+        assert!(
+            procedure.contains("thoradm migrate check --id drain-reactions"),
+            "{procedure}"
         );
     }
 

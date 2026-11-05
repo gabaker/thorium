@@ -116,14 +116,54 @@ leaves the decision about unfinished work to you. The step runs **before any com
 (first on a deployment at `2026-10-v03`, right after `schema-apply` on one at `2026-10-v02`, where
 it also runs ahead of the `users-settings-theme` step that pauses the API), so Thorium keeps running
 normally while it waits. Its check
-reads Redis and writes nothing:
+reads Redis and Scylla and writes nothing:
 
 - Nothing in flight and no workers of the previous release: the step is `Skipped`.
 - Reactions `Created` or `Started`, or workers of the previous release still registered: the step
   shows `Waiting`. Its reason gives the counts, for example `2 reaction(s) are still Created or
-  Started and 1 stage-path worker(s) are still registered`, and the check runs again every 15
-  seconds. The reason never contains a reaction id, name, or group. Workers exit on their own once
-  they find no job, so after the last reaction ends a worker may stay registered for a while.
+  Started and 1 stage-path worker(s) are still registered`, points to
+  `thoradm migrate check --id drain-reactions`, and the check runs again every 15 seconds. The
+  reason never contains a reaction id, name, or group. Workers exit on their own once they find no
+  job, so after the last reaction ends a worker may stay registered for a while.
+
+To see what holds the drain, run its check with the cluster config:
+
+```bash
+thoradm --cluster-conf thorium.yml migrate check --id drain-reactions
+```
+
+It prints the JSON report on stdout, as every check does, and names each reaction and worker in two
+tables on stderr. The tables reach your terminal or the check Job's log, never the stored report or
+the cluster status. Each table shows at most 50 rows, orphans and workers on unregistered nodes
+first, and ends with a line such as `... and 120 more reaction(s) not shown, 3 of them orphans` when
+there are more. The exit code is 0, as for any check that asks to wait:
+
+```text
+$ thoradm --cluster-conf thorium.yml migrate check --id drain-reactions
+drain-reactions waits: 2 reaction(s) Created or Started, 2 stage-path worker(s) registered
+
+Reactions holding the drain
+ID                                    GROUP  PIPELINE  STATUS   AGE     LAST ACTIVITY               LISTED
+5e0f8a90-1d3b-4f0e-8c6a-7b2d9e4f3c10  wheat  strings   Created  -       2026-10-29T08:00:03Z (sla)  no (orphan)
+0b6d1c3e-6f2a-4c55-9a51-2f4c3e8d1a77  corn   unpack    Started  17h26m  2026-11-04T10:02:11Z        yes
+
+Stage-path workers
+NAME               SCALER  CLUSTER  NODE    STATUS   HEARTBEAT             NODE REGISTERED
+corn-unpack-a41d0  K8s     prod     node-9  Running  -                     no
+corn-unpack-7f9c2  K8s     prod     node-3  Running  2026-11-04T10:02:40Z  yes
+{"migration":"drain-reactions","counts":{...},"families":["reactions","workers"],...,"wait":{"reason":"2 reaction(s) are still Created or Started and 2 stage-path worker(s) are still registered. The conversion waits until none remain, with Thorium running normally. See which ones with `thoradm migrate check --id drain-reactions`; ...","retry_after_secs":15},...}
+```
+
+- **AGE** is the time since the reaction's first status log entry (the reaction holds no creation
+  time), and **LAST ACTIVITY** is its newest entry. A reaction without a status log shows `-` and
+  its SLA deadline, marked `(sla)`.
+- **LISTED** says whether the reaction is in its pipeline's set for its status. A reaction marked
+  `no (orphan)` is missed by the status listings, so `thorctl reactions get --status` and
+  `thorctl reactions delete --status` won't find it. `thorctl reactions get --group <group>
+  --pipeline <pipeline>` without `--status` may still list it; delete it by id.
+- **NODE REGISTERED** says whether the worker's cluster and node are among the API's registered
+  nodes. A worker whose node isn't registered may be a leftover registration rather than a
+  running worker.
 
 To let the wait end:
 
@@ -141,14 +181,12 @@ To let the wait end:
    thorctl reactions delete --group <group> --pipeline <pipeline> --status started --no-limit
    ```
 
-   `delete` also takes reaction ids (`thorctl reactions delete --group <group> <id> <id>`).
-   Without `--pipeline`, `--status` is refused with an invalid argument combination error.
+   `delete` also takes reaction ids (`thorctl reactions delete --group <group> <id> <id>`), which
+   is how an orphan from the named report is deleted. Without `--pipeline`, `--status` is refused
+   with an invalid argument combination error.
 3. Watch the step with `kubectl -n thorium describe thoriumcluster thorium`. It becomes `Skipped`
-   when nothing is left, and the conversion steps follow. You can run the same check yourself:
-
-   ```bash
-   thoradm --cluster-conf thorium.yml migrate check --id drain-reactions
-   ```
+   when nothing is left, and the conversion steps follow. Run the check above again to see what
+   is still left.
 
 Keep the previous API running while the drain waits: it is what you delete stuck reactions with. The
 operator changes no Deployment while a step waits, so pods that are running keep running, but don't

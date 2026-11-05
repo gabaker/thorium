@@ -936,8 +936,11 @@ changes data, the component it `scales down`, and the `migration` it runs:
 The `needs approval + backup` note comes from a step's kind: every `Data` step carries it, though
 a step is approved only when it has work to do (see [Approvals](../deploy/upgrades.md#approvals)).
 `drain-reactions` is `check only`: `thoradm migrate check --id drain-reactions` reports the
-reactions in flight, the step never asks for an approval, deletes nothing, and finishes once none
-is left, and `run` and `verify` refuse it.
+counts of reactions in flight and stage-path workers on stdout and names each of them on stderr
+(id, group, pipeline, status, age, last activity, and whether its status set lists it; name,
+scaler, cluster, node, status, heartbeat, and whether its node is registered; at most 50 rows a
+table; see [The drain](../agentic/upgrading.md#the-drain)). The step never asks for an approval,
+deletes nothing, and finishes once none is left, and `run` and `verify` refuse it.
 
 `plan` prints the steps from one revision to another (the latest by default), for example
 `thoradm migrate plan --from 2026-10-v01`. Find a cluster's revision in the `Revision` column of
