@@ -18,7 +18,7 @@ mod traces;
 use dispatch::Dispatcher;
 use interface::{
     DEFAULT_TIMEOUT_SECS, HarnessPaths, HarnessStatus, NetworkSettings, RunFiles, RunPlan,
-    TIMEOUT_ENV, write_file,
+    StatusTool, TIMEOUT_ENV, write_file,
 };
 use traces::Recorder;
 
@@ -187,6 +187,11 @@ async fn run(args: &[String]) -> i32 {
         Ok(plan) => plan,
         Err(error) => return refuse(&paths, &error),
     };
+    // log the tools mapped into the run so the workflow's mapping shows in the stage logs
+    let tools = plan.status_tools();
+    for tool in &tools {
+        eprintln!("thorpal-harness: {tool}");
+    }
     // log the samples ThorPal isn't given
     for skipped in &plan.skipped {
         eprintln!("thorpal-harness: ThorPal analyzes one sample, so sample {skipped} is skipped");
@@ -214,7 +219,7 @@ async fn run(args: &[String]) -> i32 {
             code: EXIT_TIMED_OUT,
         },
     };
-    finish(&paths, &recorder, ending)
+    finish(&paths, &recorder, tools, ending)
 }
 
 /// Write a run's outputs and pick its exit code
@@ -223,8 +228,14 @@ async fn run(args: &[String]) -> i32 {
 ///
 /// * `paths` - Where the outputs go
 /// * `recorder` - The run's recorded events
+/// * `tools` - The tools mapped into the run
 /// * `ending` - How the run ended
-fn finish(paths: &HarnessPaths, recorder: &Arc<Mutex<Recorder>>, ending: Ending) -> i32 {
+fn finish(
+    paths: &HarnessPaths,
+    recorder: &Arc<Mutex<Recorder>>,
+    tools: Vec<StatusTool>,
+    ending: Ending,
+) -> i32 {
     // take what was recorded, even from a run that timed out
     let recorder = match recorder.lock() {
         Ok(recorder) => recorder.clone(),
@@ -260,6 +271,7 @@ fn finish(paths: &HarnessPaths, recorder: &Arc<Mutex<Recorder>>, ending: Ending)
     let mut status = recorder.status();
     status.success = code == EXIT_OK;
     status.reason = reason;
+    status.tools = tools;
     write_status(paths, &status);
     code
 }

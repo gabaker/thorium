@@ -699,6 +699,76 @@ pub fn plan(files: &RunFiles, samples: &Path) -> Result<RunPlan, String> {
     })
 }
 
+/// One tool mapped into a run, as `status.json` and the logs list it
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct StatusTool {
+    /// The name the model calls the tool by
+    pub function_name: String,
+    /// The tool instance the run's agent is bound to
+    pub tool_instance: Uuid,
+    /// What carries out the tool's calls: `ThoriumMcp <MCP tool>` or `Container <Image tool
+    /// instance>`
+    pub backing: String,
+}
+
+impl StatusTool {
+    /// Describe one of a run's tools
+    ///
+    /// # Arguments
+    ///
+    /// * `tool_instance` - The tool instance the agent is bound to
+    /// * `entry` - The tool's `tools.json` entry
+    #[must_use]
+    pub fn new(tool_instance: Uuid, entry: &HarnessToolEntry) -> Self {
+        // name the backing and what it points at; tools.json holds no secrets
+        let backing = match &entry.invocation {
+            ToolInvocation::ThoriumApi { backing, .. } => match backing {
+                AgenticToolBacking::ThoriumMcp { tool } => format!("ThoriumMcp {tool}"),
+                AgenticToolBacking::Container(container) => {
+                    format!("Container {}", container.tool_instance)
+                }
+                AgenticToolBacking::HarnessNative { tool, .. } => format!("HarnessNative {tool}"),
+            },
+            ToolInvocation::Native { .. } => "Native".to_owned(),
+            ToolInvocation::Cli { .. } => "Cli".to_owned(),
+            ToolInvocation::Mcp { .. } => "Mcp".to_owned(),
+        };
+        StatusTool {
+            function_name: entry.function_name.clone(),
+            tool_instance,
+            backing,
+        }
+    }
+}
+
+impl std::fmt::Display for StatusTool {
+    /// Write this tool as the line the harness logs for it
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write to
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // the name, the instance, and the backing
+        write!(
+            f,
+            "tool {} (instance {}): {}",
+            self.function_name, self.tool_instance, self.backing
+        )
+    }
+}
+
+impl RunPlan {
+    /// List the entry agent's tools, in tools.json order, for the logs and `status.json`
+    #[must_use]
+    pub fn status_tools(&self) -> Vec<StatusTool> {
+        // describe each tool the agent was given
+        self.tools
+            .iter()
+            .map(|(id, entry)| StatusTool::new(*id, entry))
+            .collect()
+    }
+}
+
 /// The run status the harness writes to `status.json`
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct HarnessStatus {
@@ -714,6 +784,9 @@ pub struct HarnessStatus {
     pub input_tokens: u64,
     /// The output tokens of every model call
     pub output_tokens: u64,
+    /// The tools mapped into the run, in tools.json order; empty for a run refused before its
+    /// tools were checked
+    pub tools: Vec<StatusTool>,
 }
 
 impl HarnessStatus {

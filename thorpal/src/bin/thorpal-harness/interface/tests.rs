@@ -8,14 +8,15 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use thorium::models::{
-    AwsRoleSource, AzureClientAuth, CredentialKind, CredentialType, ModelApi, ModelProvider,
-    ToolInvocation, ToolMechanism,
+    AgenticToolBacking, AwsRoleSource, AzureClientAuth, ContainerToolBacking, CredentialKind,
+    CredentialType, ModelApi, ModelProvider, ToolInvocation, ToolMechanism,
 };
 use thorpal::AiProviderConfig;
 use uuid::Uuid;
 
 use super::{
-    ConversionError, EnvSetting, NetworkSettings, RunFiles, capabilities, plan, provider_config,
+    ConversionError, EnvSetting, HarnessStatus, NetworkSettings, RunFiles, StatusTool,
+    capabilities, plan, provider_config,
 };
 
 #[path = "../../../../tests/common/fixtures.rs"]
@@ -621,4 +622,94 @@ fn network_settings_check_the_ca_files() {
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert!(warnings[0].contains("SSL_CERT_DIR"), "{warnings:?}");
     assert!(warnings[0].contains("gone"), "{warnings:?}");
+}
+
+/// The planned run lists every tool the entry agent was given, in tools.json order, with its
+/// tool instance and what backs it
+#[test]
+fn plan_lists_the_mapped_tools() {
+    // the fixture run with a Container tool bound beside its MCP tool
+    let dir = tempfile::tempdir().unwrap();
+    let mut fixture = RunFixture::new(BASE_URL, "http://127.0.0.1:9");
+    let instance = Uuid::new_v4();
+    let image = Uuid::new_v4();
+    let mut strings = fixtures::mcp_tool();
+    strings.function_name = "strings".to_owned();
+    strings.invocation = ToolInvocation::ThoriumApi {
+        tool_instance: instance,
+        backing: AgenticToolBacking::Container(ContainerToolBacking {
+            tool_instance: image,
+            inputs: thorium::models::ToolInputMapping::default(),
+            outputs: thorium::models::ToolOutputDelivery::default(),
+        }),
+    };
+    fixture.tools.insert(instance, strings);
+    fixture.agent.agent.bindings.push(
+        serde_json::from_value(serde_json::json!({
+            "tool_instance": instance,
+            "mechanism": "ThoriumApi",
+        }))
+        .unwrap(),
+    );
+    // a tool in tools.json that the entry agent isn't bound to is left out
+    let unbound = Uuid::new_v4();
+    let mut other = fixtures::mcp_tool();
+    other.function_name = "unbound_tool".to_owned();
+    fixture.tools.insert(unbound, other);
+    // plan the run and list its tools
+    let planned = plan(&load(&fixture, dir.path()), &dir.path().join("samples")).unwrap();
+    let listed = planned.status_tools();
+    let expected: Vec<StatusTool> = fixture
+        .tools
+        .iter()
+        .filter(|(id, _)| **id != unbound)
+        .map(|(id, tool)| StatusTool {
+            function_name: tool.function_name.clone(),
+            tool_instance: *id,
+            backing: if tool.function_name == "strings" {
+                format!("Container {image}")
+            } else {
+                "ThoriumMcp get_file".to_owned()
+            },
+        })
+        .collect();
+    assert_eq!(listed, expected);
+    assert_eq!(listed.len(), 2);
+    // each tool's log line names it, its instance, and its backing
+    let line = listed
+        .iter()
+        .find(|tool| tool.function_name == "strings")
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        line,
+        format!("tool strings (instance {instance}): Container {image}")
+    );
+}
+
+/// The status lists the run's tools when it is serialized, and a refused run lists none
+#[test]
+fn status_includes_the_tools() {
+    // a refused run has an empty tool list
+    let refused = serde_json::to_value(HarnessStatus::refused("no sample")).unwrap();
+    assert_eq!(refused["tools"], serde_json::json!([]), "{refused}");
+    // a run's tools are serialized with their instance and backing
+    let instance = Uuid::new_v4();
+    let status = HarnessStatus {
+        tools: vec![StatusTool {
+            function_name: "sample_info".to_owned(),
+            tool_instance: instance,
+            backing: "ThoriumMcp get_sample".to_owned(),
+        }],
+        ..HarnessStatus::default()
+    };
+    let value = serde_json::to_value(&status).unwrap();
+    assert_eq!(
+        value["tools"],
+        serde_json::json!([{
+            "function_name": "sample_info",
+            "tool_instance": instance,
+            "backing": "ThoriumMcp get_sample",
+        }])
+    );
 }

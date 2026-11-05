@@ -173,6 +173,7 @@ async fn run_calls_the_models_file_endpoint_and_writes_outputs() {
     assert_eq!(status["model_calls"], json!(2), "{status}");
     assert_eq!(status["tool_calls"], json!(1), "{status}");
     assert_eq!(status["input_tokens"], json!(22), "{status}");
+    check_status_tools(&fixture, &status, &logs);
     // the conversation holds the prompt and the answer
     let conversation =
         std::fs::read_to_string(dir.path().join("result-files/conversation.jsonl")).unwrap();
@@ -252,6 +253,30 @@ async fn run_calls_the_models_file_endpoint_and_writes_outputs() {
     }
     // the tool and its result went to the model as the renderers render them
     check_rendering(&fixture, &server, &calls);
+}
+
+/// Check that the status and the logs name the fixture's tool, its instance, and its backing
+///
+/// # Arguments
+///
+/// * `fixture` - The run
+/// * `status` - The run's `status.json`
+/// * `logs` - What the harness wrote to stdout and stderr
+fn check_status_tools(fixture: &RunFixture, status: &Value, logs: &str) {
+    // the status lists the one tool mapped into the run
+    let (instance, _) = fixture.tools.iter().next().unwrap();
+    assert_eq!(
+        status["tools"],
+        json!([{
+            "function_name": TOOL,
+            "tool_instance": instance,
+            "backing": "ThoriumMcp get_file",
+        }]),
+        "{status}"
+    );
+    // the logs carry the same tool
+    let line = format!("thorpal-harness: tool {TOOL} (instance {instance}): ThoriumMcp get_file");
+    assert!(logs.contains(&line), "{logs}");
 }
 
 /// Check that the fixture's tool was offered to the model as `render_tool` renders it, that its

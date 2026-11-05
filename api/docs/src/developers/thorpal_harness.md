@@ -360,3 +360,21 @@ thorctl results show <REACTION>
 The answer is stored as a result on the sample under the workflow instance's key (`analyze#r1`),
 with `conversation.jsonl`, `traces.jsonl`, and `status.json` as its result files. Each `Container`
 tool call is a sub run of the workflow run, and the harness's output is in the run's stage logs.
+
+`status.json` records how the run went:
+
+| Field | Meaning |
+| ----- | ------- |
+| `success` | Whether the run finished with an answer |
+| `reason` | Why the run failed or was refused, if it was |
+| `model_calls`, `tool_calls` | How many model and tool calls were made |
+| `input_tokens`, `output_tokens` | The tokens of every model call |
+| `tools` | The tools mapped into the run, in `tools.json` order: each one's `function_name`, `tool_instance`, and `backing` (`ThoriumMcp <MCP tool>` or `Container <Image tool instance>`). Empty for a run refused before its tools were checked |
+
+Once its start checks pass, the harness also logs one line per tool, so the workflow's mapping
+shows in `thorctl runs logs` after the pod is gone:
+
+```text
+thorpal-harness: tool sample_info (instance 5b0d...): ThoriumMcp get_sample
+thorpal-harness: tool scan (instance 9e41...): Container 0c7a...
+```
