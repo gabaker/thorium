@@ -33,6 +33,7 @@ mod queries_runtime;
 mod rebucket;
 mod record;
 mod registry;
+mod released;
 #[cfg(feature = "upgrades-runtime")]
 mod runner;
 #[cfg(feature = "upgrades-runtime")]
@@ -99,8 +100,7 @@ pub use apply::{
     member_build, redact_trigger_key, render, table_cql, view_build_statuses, view_cql,
     views_built,
 };
-pub(crate) use baseline::object_added_later;
-pub use baseline::{ADDED_OBJECTS, BASELINE_REVISIONS};
+pub use baseline::BASELINE_REVISIONS;
 pub use changes::{ChangeClass, ChangeKind, SchemaChange, ViewChange, rebuilds, views_read};
 pub use check::{SchemaCheckError, SchemaCheckPass, check_startup, judge_applied};
 pub use classes::{
@@ -182,6 +182,8 @@ pub use record::{
     record_family_layout, record_revision, seed_from_state, write_job_result,
 };
 pub use registry::{Keyspace, RegistryError, SchemaDefinition, SchemaObject, validate};
+pub use released::LATER_REVISION_OBJECTS;
+pub(crate) use released::introduced_by_later_revision;
 #[cfg(feature = "upgrades-runtime")]
 pub use runner::{
     Batch, MigrateError, MigrationRunner, Outcome, RunBackends, RunContext, RunLimits, RunMode,
