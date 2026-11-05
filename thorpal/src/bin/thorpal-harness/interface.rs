@@ -460,6 +460,9 @@ pub fn capabilities() -> HarnessCapabilities {
     }
 }
 
+/// The header the harness's Anthropic client sends the API key in
+const ANTHROPIC_KEY_HEADER: &str = "x-api-key";
+
 /// Why a run's model can't be turned into a `ThorPal` provider config
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConversionError {
@@ -467,6 +470,8 @@ pub enum ConversionError {
     Api(ModelApi),
     /// The harness can't reach this provider
     Provider(ModelProviderKind),
+    /// The endpoint sends its key in a header the harness's Anthropic client can't send it in
+    KeyHeader(String),
     /// The harness can't authenticate with this kind of credential
     Credential(CredentialType),
     /// The model has no credential
@@ -491,7 +496,11 @@ impl std::fmt::Display for ConversionError {
             ),
             ConversionError::Provider(provider) => write!(
                 f,
-                "thorpal-harness can't call models of the {provider} provider; it supports only Anthropic"
+                "thorpal-harness can't call models of the {provider} provider; it supports only Anthropic and LiteLlm"
+            ),
+            ConversionError::KeyHeader(header) => write!(
+                f,
+                "thorpal-harness sends the API key in the x-api-key header, but the LiteLlm endpoint sets key_header to {header}; set key_header to x-api-key or leave it unset"
             ),
             ConversionError::Credential(kind) => write!(
                 f,
@@ -511,6 +520,10 @@ impl std::fmt::Display for ConversionError {
 
 /// Turn a run's model into `ThorPal`'s provider config
 ///
+/// An `Anthropic` endpoint or a `LiteLlm` gateway called with the Anthropic Messages API becomes
+/// `ThorPal`'s Anthropic config with the endpoint's base url, the credential's key, and the model
+/// id; nothing else in the models file or the environment changes it.
+///
 /// # Arguments
 ///
 /// * `entry` - The model from the models file
@@ -521,10 +534,22 @@ pub fn provider_config(entry: &HarnessModelEntry) -> Result<AiProviderConfig, Co
         return Err(ConversionError::Api(entry.api));
     }
     // ThorPal's Anthropic client takes only the base url from the provider
-    let ModelProvider::Anthropic { base_url, .. } = &entry.provider else {
-        return Err(ConversionError::Provider(ModelProviderKind::from(
-            &entry.provider,
-        )));
+    let endpoint = match &entry.provider {
+        ModelProvider::Anthropic { base_url, .. } => base_url.clone(),
+        // a LiteLLM gateway serves the Messages API itself, and the client always sends the key
+        // in x-api-key, so the endpoint must not ask for another header
+        ModelProvider::LiteLlm {
+            base_url,
+            key_header,
+        } => {
+            if let Some(header) = key_header
+                && !header.eq_ignore_ascii_case(ANTHROPIC_KEY_HEADER)
+            {
+                return Err(ConversionError::KeyHeader(header.clone()));
+            }
+            Some(base_url.clone())
+        }
+        other => return Err(ConversionError::Provider(ModelProviderKind::from(other))),
     };
     // the credential must be a kind the harness declares and hold a secret
     let Some(credential) = &entry.credential else {
@@ -543,7 +568,7 @@ pub fn provider_config(entry: &HarnessModelEntry) -> Result<AiProviderConfig, Co
         return Err(ConversionError::NoSecret);
     };
     Ok(AiProviderConfig::Anthropic {
-        endpoint: base_url.clone(),
+        endpoint,
         api_key: secret.expose().to_owned(),
         model: entry.model_id.clone(),
     })

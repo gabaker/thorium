@@ -9,7 +9,7 @@ What it supports:
 
 | Area | Supported |
 | ---- | --------- |
-| Model | `AnthropicMessages` on an `Anthropic` endpoint, with an `ApiKey` credential |
+| Model | `AnthropicMessages` on an `Anthropic` or `LiteLlm` endpoint, with an `ApiKey` credential |
 | Tools | `ThoriumMcp` and `Container` tools, bound to the `ThoriumApi` mechanism |
 | Agents | The entry agent only: a run whose entry agent delegates to sub-agents fails at start |
 | Inputs | The run's first sample; a run without a sample fails at start |
@@ -281,6 +281,42 @@ thorctl models credentials create --spec credential.yaml --name model-key --grou
 thorctl models endpoints create --spec endpoint.yaml --name model-endpoint --group <GROUP>
 thorctl models profiles create --spec profile.yaml --name haiku --group <GROUP>
 ```
+
+A [LiteLLM](https://docs.litellm.ai/) gateway serves the Anthropic Messages API itself, so it can
+be a `LiteLlm` endpoint whose profile uses `AnthropicMessages` (Thorium then lists its models from
+the gateway's `/model/info`). The harness calls `<base_url>/v1/messages` (a trailing `/v1` on the
+base url is dropped) and always sends the key in `x-api-key`, so `key_header` must be unset or
+`x-api-key`; any other value, and any other API on a `LiteLlm` endpoint, is refused before the first
+model call. The deployment's allowed endpoint list needs a `LiteLlm` entry for the gateway (for
+example `{"provider": "LiteLlm", "base_url": "https://litellm.example.com"}` in the settings patch
+above):
+
+```yaml
+# litellm-endpoint.yaml
+provider:
+  LiteLlm:
+    base_url: https://litellm.example.com
+credential: <CREDENTIAL_ID>
+models:
+  - model_id: claude-haiku
+    capabilities: {tool_calling: true}
+```
+
+```yaml
+# litellm-profile.yaml
+endpoint: <ENDPOINT_ID>
+model_id: claude-haiku
+api: AnthropicMessages
+```
+
+The model id is the gateway's model name. For either provider the harness takes the base url, the
+key, and the model id from the run's models file and nothing else: an `Anthropic` endpoint's
+`version` and `betas` are not sent (the client sends `anthropic-version: 2023-06-01`), and profile
+parameters such as `max_output_tokens` are not applied. Every model call asks for up to 16,384
+output tokens and sets no thinking budget of its own. A gateway that turns thinking on must keep
+its `budget_tokens` below 16,384, since the Messages API requires `max_tokens` to be larger than the
+budget. The signed and redacted thinking blocks of a model that thinks are sent back unchanged with
+the tool results, as the Messages API requires.
 
 A user can instead set their own credential for the group's endpoint:
 

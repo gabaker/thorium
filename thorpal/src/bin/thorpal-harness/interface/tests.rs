@@ -151,19 +151,20 @@ fn conversion_follows_declared_capabilities() {
             }
         }
     }
-    // an Anthropic API on another provider names the provider
+    // an Anthropic API on a provider other than Anthropic or LiteLlm names the provider
     let mut entry = fixtures::model(
         BASE_URL,
         ModelApi::AnthropicMessages,
         CredentialKind::ApiKey,
     );
-    entry.provider = ModelProvider::LiteLlm {
+    entry.provider = ModelProvider::OpenAiCompatible {
         base_url: BASE_URL.to_owned(),
+        extra_headers: std::collections::BTreeMap::new(),
         key_header: None,
     };
     let error = provider_config(&entry).unwrap_err();
     assert!(matches!(error, ConversionError::Provider(_)), "{error:?}");
-    assert!(error.to_string().contains("LiteLlm"), "{error}");
+    assert!(error.to_string().contains("OpenAiCompatible"), "{error}");
     // a model without a credential or secret fails
     let mut entry = fixtures::model(
         BASE_URL,
@@ -203,6 +204,95 @@ fn conversion_follows_declared_capabilities() {
         provider_config(&entry),
         Ok(AiProviderConfig::Anthropic { endpoint: None, .. })
     ));
+}
+
+/// Build the fixture model on a `LiteLlm` endpoint
+///
+/// # Arguments
+///
+/// * `api` - The protocol to call the model with
+/// * `key_header` - The header the endpoint sends its key in, if it sets one
+fn litellm(api: ModelApi, key_header: Option<&str>) -> thorium::models::HarnessModelEntry {
+    // the fixture model with only its provider swapped
+    let mut entry = fixtures::model(BASE_URL, api, CredentialKind::ApiKey);
+    entry.provider = ModelProvider::LiteLlm {
+        base_url: BASE_URL.to_owned(),
+        key_header: key_header.map(str::to_owned),
+    };
+    entry
+}
+
+/// A `LiteLlm` endpoint called with the Anthropic Messages API converts to the Anthropic config
+/// at its base url, with the key and model from the models file
+#[test]
+fn litellm_over_anthropic_messages_converts() {
+    // no key header and an x-api-key header in any case both convert
+    for key_header in [None, Some("x-api-key"), Some("X-Api-Key")] {
+        let entry = litellm(ModelApi::AnthropicMessages, key_header);
+        match provider_config(&entry) {
+            Ok(AiProviderConfig::Anthropic {
+                endpoint,
+                api_key,
+                model,
+            }) => {
+                assert_eq!(endpoint.as_deref(), Some(BASE_URL));
+                assert_eq!(api_key, KEY);
+                assert_eq!(model, MODEL);
+            }
+            other => panic!("{key_header:?} converted to {other:?}"),
+        }
+    }
+}
+
+/// A `LiteLlm` endpoint is refused with any API but Anthropic Messages, with a key header the
+/// Anthropic client can't send, and with a credential the harness can't use
+#[test]
+fn litellm_refusals_name_the_reason() {
+    // every other model API is refused, naming it
+    for api in all_apis()
+        .into_iter()
+        .filter(|api| *api != ModelApi::AnthropicMessages)
+    {
+        let error = provider_config(&litellm(api, None)).unwrap_err();
+        assert_eq!(error, ConversionError::Api(api));
+        assert!(error.to_string().contains(&api.name()), "{error}");
+    }
+    // a key header other than x-api-key is refused, naming the header and the fix
+    let error =
+        provider_config(&litellm(ModelApi::AnthropicMessages, Some("Authorization"))).unwrap_err();
+    assert_eq!(
+        error,
+        ConversionError::KeyHeader("Authorization".to_owned())
+    );
+    let message = error.to_string();
+    assert!(message.contains("Authorization"), "{message}");
+    assert!(message.contains("x-api-key"), "{message}");
+    // a credential that isn't an API key is refused, naming its kind
+    for kind in all_kinds()
+        .into_iter()
+        .filter(|kind| kind.cred_type() != CredentialType::ApiKey)
+    {
+        let named = kind.cred_type().to_string();
+        let mut entry = litellm(ModelApi::AnthropicMessages, None);
+        entry.credential = fixtures::model(BASE_URL, ModelApi::AnthropicMessages, kind).credential;
+        let error = provider_config(&entry).unwrap_err();
+        assert!(error.to_string().contains(&named), "{error}");
+    }
+    // a LiteLlm model without a credential or a secret is refused
+    let mut entry = litellm(ModelApi::AnthropicMessages, None);
+    entry.credential = None;
+    assert_eq!(
+        provider_config(&entry).unwrap_err(),
+        ConversionError::NoCredential
+    );
+    let mut entry = litellm(ModelApi::AnthropicMessages, None);
+    if let Some(credential) = entry.credential.as_mut() {
+        credential.secrets.primary = None;
+    }
+    assert_eq!(
+        provider_config(&entry).unwrap_err(),
+        ConversionError::NoSecret
+    );
 }
 
 /// Load a fixture's files the way the harness does

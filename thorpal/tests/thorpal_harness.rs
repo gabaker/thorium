@@ -5,7 +5,9 @@ use serde_json::{Value, json};
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
-use thorium::models::{AwsRoleSource, AzureClientAuth, CredentialKind, HarnessToolEntry, ModelApi};
+use thorium::models::{
+    AwsRoleSource, AzureClientAuth, CredentialKind, HarnessToolEntry, ModelApi, ModelProvider,
+};
 use thorium::tools::render::{
     RenderOptions, ToolCallOutput, ToolCallResult, encode_result, render_tool,
 };
@@ -308,6 +310,159 @@ fn check_rendering(fixture: &RunFixture, server: &MockServer, calls: &[Recorded]
         content_text(&returned["content"]),
         encoded["content"].as_str().unwrap()
     );
+}
+
+/// A run on a `LiteLlm` endpoint called with the Anthropic Messages API sends every model call to
+/// the gateway's `/v1/messages` with the key in `x-api-key`, even when its base url ends in `/v1`
+#[tokio::test(flavor = "multi_thread")]
+async fn litellm_endpoints_are_called_with_anthropic_messages() {
+    // a fixture run whose model is on a LiteLlm gateway at the recording server
+    let server = model_and_mcp().await;
+    let mut fixture = RunFixture::new(&server.url, &server.url);
+    fixture.entry_model().provider = ModelProvider::LiteLlm {
+        base_url: format!("{}/v1", server.url),
+        key_header: Some("x-api-key".to_owned()),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let args = fixture.write(dir.path());
+    // run the harness off the test's runtime
+    let (code, logs) = tokio::task::spawn_blocking(move || harness_output(&args, &[]))
+        .await
+        .unwrap();
+    assert_eq!(code, 0, "{logs}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("results")).unwrap(),
+        "final answer from io"
+    );
+    // every model call went to the gateway's Messages route with the key and model
+    let calls = server.on("/v1/messages");
+    assert_eq!(calls.len(), 2, "{:?}", server.requests);
+    for call in &calls {
+        assert_eq!(call.headers.get("x-api-key").map(String::as_str), Some(KEY));
+        assert_eq!(call.body["model"], Value::from(MODEL));
+    }
+    // the key stays out of the logs
+    assert!(!logs.contains(KEY), "{logs}");
+    // a LiteLlm endpoint with another key header is refused before any model call
+    let mut fixture = RunFixture::new(&server.url, &server.url);
+    fixture.entry_model().provider = ModelProvider::LiteLlm {
+        base_url: server.url.clone(),
+        key_header: Some("Authorization".to_owned()),
+    };
+    let refused = tempfile::tempdir().unwrap();
+    let args = fixture.write(refused.path());
+    let before = server.on("/v1/messages").len();
+    let code = tokio::task::spawn_blocking(move || harness(&args, &[]))
+        .await
+        .unwrap();
+    assert_eq!(code, 2);
+    assert_eq!(server.on("/v1/messages").len(), before);
+    let status = read_json(&refused.path().join("result-files/status.json"));
+    assert!(
+        status["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("key_header"),
+        "{status}"
+    );
+}
+
+/// The signature of the fixture model's thinking block
+const SIGNATURE: &str = "sig-europa-thinking-k3f9";
+
+/// The data of the fixture model's redacted thinking block
+const REDACTED: &str = "opaque-io-redacted-k3f9";
+
+/// Find a request's last assistant message, the turn the harness sends back
+///
+/// # Arguments
+///
+/// * `request` - The model request
+fn last_assistant_turn(request: &Recorded) -> Vec<Value> {
+    // the content blocks of the last message the assistant sent
+    request.body["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .rfind(|message| message["role"] == "assistant")
+        .and_then(|message| message["content"].as_array().cloned())
+        .unwrap_or_default()
+}
+
+/// A model with extended thinking on answers with signed thinking blocks (with no thinking text,
+/// as Claude models behind `LiteLLM` on Bedrock do) and a redacted one before its tool call; the
+/// harness parses them, sends them back unchanged before the tool use in the next request, and
+/// asks for enough output tokens that the answer follows the thinking
+#[tokio::test(flavor = "multi_thread")]
+async fn thinking_blocks_are_returned_unchanged_during_tool_use() {
+    // the model thinks, then calls the tool; after the result it thinks again and answers
+    let server = MockServer::start(Arc::new(|request: &Recorded, _| {
+        if request.path == "/api/mcp" {
+            return mock::mcp(request, &mcp_result());
+        }
+        let thinking = json!({"type": "thinking", "thinking": "", "signature": SIGNATURE});
+        if request.body["messages"].to_string().contains("tool_result") {
+            mock::anthropic(
+                request,
+                &[
+                    thinking,
+                    json!({"type": "text", "text": "final answer from io"}),
+                ],
+                "end_turn",
+            )
+        } else {
+            mock::anthropic(
+                request,
+                &[
+                    thinking,
+                    json!({"type": "redacted_thinking", "data": REDACTED}),
+                    json!({"type": "tool_use", "id": "toolu_mock", "name": TOOL,
+                           "input": {"sha256": "a".repeat(64)}}),
+                ],
+                "tool_use",
+            )
+        }
+    }))
+    .await;
+    // a LiteLlm run, the way the demo model is reached
+    let mut fixture = RunFixture::new(&server.url, &server.url);
+    fixture.entry_model().provider = ModelProvider::LiteLlm {
+        base_url: server.url.clone(),
+        key_header: None,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let args = fixture.write(dir.path());
+    let (code, logs) = tokio::task::spawn_blocking(move || harness_output(&args, &[]))
+        .await
+        .unwrap();
+    // the run answered with the text that followed the thinking
+    assert_eq!(code, 0, "{logs}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("results")).unwrap(),
+        "final answer from io"
+    );
+    // every call asks for room beyond the thinking
+    let calls = server.on("/v1/messages");
+    assert_eq!(calls.len(), 2, "{:?}", server.requests);
+    for call in &calls {
+        let max_tokens = call.body["max_tokens"].as_u64().unwrap_or_default();
+        assert!(max_tokens >= 16_384, "max_tokens {max_tokens}");
+    }
+    // the second call sends the thinking back unchanged, ahead of the tool use
+    let turn = last_assistant_turn(&calls[1]);
+    let kinds: Vec<&str> = turn
+        .iter()
+        .filter_map(|block| block["type"].as_str())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["thinking", "redacted_thinking", "tool_use"],
+        "{turn:?}"
+    );
+    assert_eq!(turn[0]["signature"], SIGNATURE, "{turn:?}");
+    assert_eq!(turn[0]["thinking"], "", "{turn:?}");
+    assert_eq!(turn[1]["data"], REDACTED, "{turn:?}");
+    assert_eq!(turn[2]["id"], "toolu_mock", "{turn:?}");
 }
 
 /// Model env vars in the harness's environment change nothing: the run still calls only the

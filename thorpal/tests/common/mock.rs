@@ -194,7 +194,7 @@ async fn serve(
 /// * `request` - The request being answered
 /// * `content` - The message's content blocks
 /// * `stop_reason` - Why the message stopped
-fn anthropic(request: &Recorded, content: &[Value], stop_reason: &str) -> Reply {
+pub fn anthropic(request: &Recorded, content: &[Value], stop_reason: &str) -> Reply {
     // the reply names the model the request asked for
     let model = request.body["model"].clone();
     // a request that doesn't stream gets the whole message
@@ -223,25 +223,43 @@ fn anthropic(request: &Recorded, content: &[Value], stop_reason: &str) -> Reply 
         }}),
     )];
     for (index, block) in content.iter().enumerate() {
-        let (start, delta) = if block["type"] == "text" {
-            (
+        // each block opens empty and arrives in deltas, the way the Messages API streams it
+        let (start, deltas) = match block["type"].as_str() {
+            Some("text") => (
                 json!({"type": "text", "text": ""}),
-                json!({"type": "text_delta", "text": block["text"]}),
-            )
-        } else {
-            (
+                vec![json!({"type": "text_delta", "text": block["text"]})],
+            ),
+            // a thinking block streams its text, if any, then its whole signature
+            Some("thinking") => {
+                let mut deltas = Vec::new();
+                if block["thinking"]
+                    .as_str()
+                    .is_some_and(|text| !text.is_empty())
+                {
+                    deltas.push(json!({"type": "thinking_delta", "thinking": block["thinking"]}));
+                }
+                deltas.push(json!({"type": "signature_delta", "signature": block["signature"]}));
+                (json!({"type": "thinking", "thinking": ""}), deltas)
+            }
+            // a redacted thinking block arrives whole in its start event
+            Some("redacted_thinking") => (block.clone(), Vec::new()),
+            _ => (
                 json!({"type": "tool_use", "id": block["id"], "name": block["name"], "input": {}}),
-                json!({"type": "input_json_delta", "partial_json": block["input"].to_string()}),
-            )
+                vec![
+                    json!({"type": "input_json_delta", "partial_json": block["input"].to_string()}),
+                ],
+            ),
         };
         events.push((
             "content_block_start",
             json!({"type": "content_block_start", "index": index, "content_block": start}),
         ));
-        events.push((
-            "content_block_delta",
-            json!({"type": "content_block_delta", "index": index, "delta": delta}),
-        ));
+        for delta in deltas {
+            events.push((
+                "content_block_delta",
+                json!({"type": "content_block_delta", "index": index, "delta": delta}),
+            ));
+        }
         events.push((
             "content_block_stop",
             json!({"type": "content_block_stop", "index": index}),
