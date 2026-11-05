@@ -9,8 +9,8 @@ use thoradm::migrate::fixture;
 use thoradm::migrate::registry::MigrationDef;
 use thorium::Conf;
 use thorium::models::schema::{
-    ADDED_OBJECTS, MigrationRunStatus, PassSpec, PassStore, RunBackends, RunContext, RunLimits,
-    RunMode, SchemaObject, WriterLease, apply_objects,
+    LATER_REVISION_OBJECTS, MigrationRunStatus, PassSpec, PassStore, RunBackends, RunContext,
+    RunLimits, RunMode, SchemaObject, WriterLease, apply_objects,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -96,7 +96,7 @@ impl World {
             .filter(|object| {
                 // an object a later revision added isn't in an older revision's schema
                 !revision.is_some_and(|revision| {
-                    ADDED_OBJECTS.iter().any(|(added, backend, name)| {
+                    LATER_REVISION_OBJECTS.iter().any(|(added, backend, name)| {
                         object.backend == *backend && object.name == *name && revision < *added
                     })
                 })

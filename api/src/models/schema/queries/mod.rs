@@ -41,7 +41,7 @@ use std::collections::BTreeSet;
 #[cfg(feature = "api")]
 use super::apply::read_texts;
 #[cfg(feature = "api")]
-use super::object_added_later;
+use super::introduced_by_later_revision;
 #[cfg(feature = "api")]
 use crate::models::upgrades::SchemaBackend;
 #[cfg(feature = "api")]
@@ -53,8 +53,9 @@ use crate::utils::ApiError;
 /// An upgrade runs an earlier revision's conversion steps before the operator applies the schema
 /// of the image it deploys, so a writer running inside one of those steps can find the schema the
 /// upgrade started from. Each object here has an optional field in [`ScyllaQueries`], and every
-/// Scylla object `ADDED_OBJECTS` lists must be here. Which objects are missing is read through
-/// `ADDED_OBJECTS` itself; a unit test holds this list to it, so each one has an optional field.
+/// Scylla object `LATER_REVISION_OBJECTS` lists must be here. Which objects are missing is read
+/// through `LATER_REVISION_OBJECTS` itself; a unit test holds this list to it, so each one has an
+/// optional field.
 pub const ADDED_LATER: [&str; 2] = ["entities_by_name", "scan_stats"];
 
 /// Every queries struct, prepared against one keyspace
@@ -357,7 +358,7 @@ async fn present_objects(session: &Session, ns: &str) -> Result<BTreeSet<String>
         present.extend(
             rows.into_iter()
                 .map(|[name]| name)
-                .filter(|name| object_added_later(SchemaBackend::Scylla, name)),
+                .filter(|name| introduced_by_later_revision(SchemaBackend::Scylla, name)),
         );
     }
     Ok(present)

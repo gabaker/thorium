@@ -25,10 +25,12 @@ impl LegacyObjects for Registered {
         if is_legacy(backend, name) {
             return true;
         }
-        // an object this build declares that a recorded revision's snapshot predates is the
-        // declared schema arriving early, not drift: long-lived keyspaces already hold the
-        // re-declared entities_by_name view while their revision's snapshot doesn't list it
-        crate::models::schema::object_added_later(backend, name)
+        // an object this build declares that a later revision introduced is the declared schema
+        // arriving early when the recorded revision's snapshot predates it, not drift: long-lived
+        // keyspaces already hold the re-declared entities_by_name view while their revision's
+        // snapshot doesn't list it (membership is enough, since a snapshot that lists the object
+        // raises no extra)
+        crate::models::schema::introduced_by_later_revision(backend, name)
     }
 }
 

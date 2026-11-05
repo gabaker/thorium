@@ -13,7 +13,7 @@ use super::scylla::{
     ResultsStreamTable, ResultsTable, S3IdsTable, SamplesListTable, ScanStatsTable,
     SchemaMigrationIssuesTable, SchemaMigrationsTable, TagsTable,
 };
-use super::{ADDED_OBJECTS, InKind, InList, Projection, TableStatements, plan_in_chunks};
+use super::{InKind, InList, LATER_REVISION_OBJECTS, Projection, TableStatements, plan_in_chunks};
 use crate::models::upgrades::SchemaBackend;
 use crate::models::{
     AssociationListRow, BasicSubmissionRow, CommentIdRow, CommentRow, CommitishDataRow,
@@ -852,8 +852,8 @@ fn search_statements_match_todays_text() {
 /// a writer inside an upgrade starts on the schema the upgrade began from
 #[test]
 fn later_objects_have_optional_statements() {
-    // the Scylla objects the baseline module lists as added after older revisions
-    let added = ADDED_OBJECTS
+    // the Scylla objects the released module lists as introduced by later revisions
+    let added = LATER_REVISION_OBJECTS
         .iter()
         .filter(|(_, backend, _)| *backend == SchemaBackend::Scylla)
         .map(|(_, _, name)| *name)
