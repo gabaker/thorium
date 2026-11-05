@@ -32,11 +32,24 @@ const CONF_TEMPLATE: &str = "../api/tests/thorium-testing.yml";
 /// How long the harness waits for each backing service before naming it as down
 const READY_DEADLINE: Duration = Duration::from_secs(120);
 
+/// The seconds the in-process API gives each attempt at setting up its Scylla schema
+///
+/// Other tests of a binary create whole keyspaces on the same Scylla while the API applies its
+/// schema, and an attempt that runs out of time is aborted and rerun from scratch, so the budget
+/// is long enough for a slow apply to finish.
+const API_SETUP_TIME: u32 = 600;
+
+/// How long past the API's schema setup budget the harness waits for it to bind its port
+const API_BIND_GRACE: Duration = Duration::from_secs(120);
+
 /// The name of the admin the harness bootstraps in every namespace
 pub const ADMIN: &str = "thorium";
 
 /// The harness for this test binary, started by the first test that asks for it
-static HARNESS: OnceCell<Harness> = OnceCell::const_new();
+///
+/// A failed start is kept too, so every later test reports it at once instead of starting a
+/// second API in the same process.
+static HARNESS: OnceCell<Result<Harness, String>> = OnceCell::const_new();
 
 /// Shared by every test of a binary that restores, and held alone by each restoring test
 ///
@@ -687,7 +700,12 @@ fn spawn_api(conf: Conf) {
 ///
 /// * `api_url` - The API's URL
 /// * `secret_key` - The API's secret key
-async fn bootstrap_admin(api_url: &str, secret_key: &str) -> Result<String, String> {
+/// * `deadline` - How long to keep trying before giving up
+async fn bootstrap_admin(
+    api_url: &str,
+    secret_key: &str,
+    deadline: Duration,
+) -> Result<String, String> {
     // keep trying while the API sets up its schema and binds its port
     let start = Instant::now();
     loop {
@@ -706,7 +724,7 @@ async fn bootstrap_admin(api_url: &str, secret_key: &str) -> Result<String, Stri
             Ok(AuthResponse::VerifyEmail(_)) => {
                 return Err("the bootstrapped admin needs email verification".to_owned());
             }
-            Err(err) if start.elapsed() > Duration::from_secs(300) => {
+            Err(err) if start.elapsed() > deadline => {
                 return Err(format!("failed to bootstrap the API at {api_url}: {err}"));
             }
             Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
@@ -728,14 +746,12 @@ impl Harness {
     ///
     /// * `adjust` - Changes the namespace's config before anything starts
     pub async fn get_with(adjust: fn(&mut Conf)) -> &'static Harness {
-        // start the harness once per binary; every later test reuses it
+        // start the harness once per binary; every later test reuses it or its start error
         HARNESS
-            .get_or_init(|| async {
-                Harness::start(adjust)
-                    .await
-                    .unwrap_or_else(|err| panic!("failed to start the test harness: {err}"))
-            })
+            .get_or_init(|| Harness::start(adjust))
             .await
+            .as_ref()
+            .unwrap_or_else(|err| panic!("failed to start the test harness: {err}"))
     }
 
     /// Starts an isolated namespace and its API
@@ -747,6 +763,8 @@ impl Harness {
         // name everything for this run and binary
         let id = format!("{}_{}", run_id(), binary_name());
         let mut conf = namespace_conf(&id, free_port());
+        // let the API's schema setup outlast the keyspaces other tests create meanwhile
+        conf.scylla.setup_time = API_SETUP_TIME;
         adjust(&mut conf);
         // refuse anything that isn't a test keyspace or bucket
         guard(&conf)?;
@@ -763,7 +781,9 @@ impl Harness {
         // start the API and bootstrap its admin
         let api_url = format!("http://127.0.0.1:{}", conf.thorium.port);
         spawn_api(conf.clone());
-        let token = bootstrap_admin(&api_url, &conf.thorium.secret_key).await?;
+        // wait at least as long as the API may spend on one schema setup attempt
+        let deadline = Duration::from_secs(u64::from(conf.scylla.setup_time)) + API_BIND_GRACE;
+        let token = bootstrap_admin(&api_url, &conf.thorium.secret_key, deadline).await?;
         // initialize the system the way a fresh deployment does
         let client = Thorium::build(api_url.clone())
             .token(&token)
