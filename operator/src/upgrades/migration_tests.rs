@@ -2877,3 +2877,120 @@ async fn the_drain_waits_before_anything_is_paused_and_skips_when_nothing_is_in_
     assert_eq!(migrations(&scene).len(), 0);
     assert_eq!(scene.sim.scaled(), Vec::<(String, i32)>::new());
 }
+
+/// A check Job expires an hour after it ends and is deleted in the foreground once its report is
+/// read, while run Jobs keep their week; a failed check Job is left for its hour; and the run Jobs'
+/// attempt numbers and names count only run Jobs, so the deleted check Jobs change neither
+#[tokio::test]
+async fn a_read_check_job_is_deleted_and_expires_within_an_hour() {
+    // a gated step whose check is read
+    let mut scene = Scene::new(ONE, &json!([]), &[]);
+    let report = check_report("users-v2", 3, &[], None);
+    scene.settle_checks(&report, 3).await;
+    let checks = scene.sim.created_of("migration-check");
+    assert_eq!(checks.len(), 1, "{checks:#?}");
+    assert_eq!(checks[0]["spec"]["ttlSecondsAfterFinished"], 3600);
+    // the check Job was deleted in the foreground once its report was cached
+    let check = checks[0]["metadata"]["name"]
+        .as_str()
+        .expect("a name")
+        .to_owned();
+    let gone = scene.sim.jobs("migration-check");
+    assert!(gone.is_empty(), "{gone:?}");
+    let deletes = scene
+        .sim
+        .fake()
+        .writes()
+        .into_iter()
+        .filter(|request| request.method == "DELETE" && request.path.ends_with(&check))
+        .collect::<Vec<_>>();
+    assert_eq!(deletes.len(), 1, "{deletes:?}");
+    assert_eq!(deletes[0].body["propagationPolicy"], "Foreground");
+    // the cached report still holds the step, and no check runs again for the missing Job
+    scene.rounds(5).await;
+    assert_eq!(scene.sim.created_of("migration-check").len(), 1);
+    let step = scene.step("users-v2");
+    assert_eq!(step.state, StepState::Blocked, "{step:?}");
+    assert!(
+        step.message
+            .as_deref()
+            .is_some_and(|message| message.contains("3 of 10 objects")),
+        "{step:?}"
+    );
+    // the first run is attempt 0 with the week-long TTL, and breaks no lease
+    scene.approve(&approved());
+    scene.rounds(2).await;
+    let created = migrations(&scene);
+    assert_eq!(created.len(), 1, "{created:#?}");
+    assert_eq!(
+        created[0]["metadata"]["annotations"]["thorium.sandia.gov/attempt"],
+        "0"
+    );
+    assert_eq!(created[0]["spec"]["ttlSecondsAfterFinished"], 7 * 86_400);
+    assert!(!Scene::args(&created[0]).contains(&"--force-break-lease".to_owned()));
+    // a failed run counts once for the next run, which breaks the lease the failed pod left
+    let first = scene.sim.jobs("migration").remove(0);
+    scene.sim.finish(
+        &first,
+        &Finish::Failed {
+            reason: "BackoffLimitExceeded".to_owned(),
+            summary: None,
+            log_lines: 1,
+        },
+    );
+    scene.rounds(3).await;
+    scene.approve(&json!([{"step": "users-v2", "backup": "snap-2"}]));
+    scene.rounds(3).await;
+    let created = migrations(&scene);
+    assert_eq!(created.len(), 2, "{created:#?}");
+    assert_eq!(
+        created[1]["metadata"]["annotations"]["thorium.sandia.gov/attempt"],
+        "1"
+    );
+    assert!(Scene::args(&created[1]).contains(&"--force-break-lease".to_owned()));
+}
+
+/// A failed check Job is left for its hour, so the step keeps naming why it failed, and a check run
+/// again once it is gone gets a name of its own
+#[tokio::test]
+async fn a_failed_check_job_is_kept_and_a_new_check_gets_its_own_name() {
+    // a gated step whose check fails
+    let scene = Scene::new(ONE, &json!([]), &[]);
+    scene.rounds(2).await;
+    let check = scene.sim.active("migration-check").remove(0);
+    scene.sim.finish(
+        &check,
+        &Finish::Failed {
+            reason: "BackoffLimitExceeded".to_owned(),
+            summary: None,
+            log_lines: 2,
+        },
+    );
+    scene.rounds(3).await;
+    // the failed Job stays and the step says it failed
+    assert_eq!(
+        scene.sim.jobs("migration-check"),
+        std::slice::from_ref(&check)
+    );
+    let step = scene.step("users-v2");
+    assert!(
+        step.message
+            .as_deref()
+            .is_some_and(|message| message.contains("failed")),
+        "{step:?}"
+    );
+    // once its TTL removes it, the next check gets a new name and is deleted once read
+    scene.sim.reap(&check);
+    scene.rounds(2).await;
+    let created = scene.sim.created_of("migration-check");
+    assert_eq!(created.len(), 2, "{created:#?}");
+    assert_ne!(
+        created[1]["metadata"]["name"],
+        created[0]["metadata"]["name"]
+    );
+    scene
+        .settle_checks(&check_report("users-v2", 3, &[], None), 3)
+        .await;
+    assert_eq!(scene.sim.jobs("migration-check"), Vec::<String>::new());
+    assert_eq!(scene.step("users-v2").state, StepState::Blocked);
+}

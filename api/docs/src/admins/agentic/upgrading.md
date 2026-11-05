@@ -134,9 +134,11 @@ thoradm --cluster-conf thorium.yml migrate check --id drain-reactions
 
 It prints the JSON report on stdout, as every check does, and names each reaction and worker in two
 tables on stderr. The tables reach your terminal or the check Job's log, never the stored report or
-the cluster status. Each table shows at most 50 rows, orphans and workers on unregistered nodes
-first, and ends with a line such as `... and 120 more reaction(s) not shown, 3 of them orphans` when
-there are more. The exit code is 0, as for any check that asks to wait:
+the cluster status. The operator deletes each check Job once it has read the report, so run the
+check yourself to see the tables. Each table shows at most 50 rows, orphans and workers on
+unregistered nodes first, and ends with a line such as
+`... and 120 more reaction(s) not shown, 3 of them orphans` when there are more. The exit code is 0,
+as for any check that asks to wait:
 
 ```text
 $ thoradm --cluster-conf thorium.yml migrate check --id drain-reactions

@@ -23,7 +23,7 @@ use thorium::models::upgrades::{
     PlannedStep, RESET_STATE_STEP, RESTORED_STEP, Reversibility, RevisionId, StepDef, StepLoss,
     StepState, UpgradeApproval, UpgradeConditionType, UpgradeState, Work,
 };
-use tracing::instrument;
+use tracing::{Level, event, instrument};
 
 use super::lossy;
 use super::pause;
@@ -40,6 +40,10 @@ pub(super) const APPROVAL_ANNOTATION: &str = "thorium.sandia.gov/approval";
 
 /// The annotation on a migration or check Job holding its attempt counter
 const ATTEMPT_ANNOTATION: &str = "thorium.sandia.gov/attempt";
+
+/// How long a finished check Job is kept when it isn't deleted first, in seconds; a check that asks
+/// to wait runs about every 15 seconds, so a week-long TTL would pile its Jobs up
+const CHECK_TTL_SECS: i32 = 3600;
 
 /// The annotation on a migration Job holding the approval's backup reference
 const BACKUP_ANNOTATION: &str = "thorium.sandia.gov/backup";
@@ -723,6 +727,7 @@ fn check_spec(
     )?;
     // a check is short next to a migration, and nothing waits on its logs for long
     spec.active_deadline_seconds = 3600;
+    spec.ttl_seconds_after_finished = CHECK_TTL_SECS;
     spec.annotations.extend([
         (ATTEMPT_ANNOTATION.to_owned(), runs),
         (CHECK_KEY_ANNOTATION.to_owned(), base.to_owned()),
@@ -752,9 +757,11 @@ async fn failed_text(meta: &ClusterMeta, job: &Job) -> Result<String, Error> {
     Ok(format!("{reason} {tail}").trim().to_owned())
 }
 
-/// Read a finished check Job's report through a status Job and cache it
+/// Read a finished check Job's report through a status Job, cache it, and delete the check Job
 ///
-/// Returns what to wait on or fail with when the report isn't cached yet.
+/// Returns what to wait on or fail with when the report isn't cached yet. The check Job is deleted
+/// in the foreground once its report is cached, so check Jobs don't pile up while a step that
+/// asks to wait is checked again and again; a failed check Job isn't read and stays for its TTL.
 ///
 /// # Arguments
 ///
@@ -806,6 +813,16 @@ async fn collect(
         report: check,
     });
     save_mark(meta, pending, step.id, remembered).await?;
+    // the report is cached, so the Job (found by the operator's own labels) and its pod go now; a
+    // delete that fails leaves it to its TTL
+    if let Err(error) = jobs::delete(meta, &name(job)).await {
+        event!(
+            Level::WARN,
+            msg = "Failed to delete a read check Job",
+            job = created.name,
+            error = crate::trace::describe(&error)
+        );
+    }
     Ok(None)
 }
 
@@ -886,8 +903,11 @@ async fn poll_check(
                 JobPhase::Failed { .. } if created.base == base => {
                     let why = failed_text(meta, job).await?;
                     return Ok(Check::Failed(format!(
-                        "The check Job {} failed ({why}); set the {REFRESH_ANNOTATION} annotation \
-                         on the ThoriumCluster to a new value to check again",
+                        "The check Job {} failed ({why}); it runs again once the Job expires (an \
+                         hour after it ended for a check Job this operator made, while one an \
+                         older operator made keeps its original retention), or set the \
+                         {REFRESH_ANNOTATION} annotation on the ThoriumCluster to a new value to \
+                         check again now",
                         created.name
                     )));
                 }
@@ -911,11 +931,12 @@ async fn poll_check(
             }
         }
     }
-    // check Jobs run one at a time in a namespace, since they share the cluster with live traffic
+    // check Jobs run one at a time in a namespace, since they share the cluster with live traffic;
+    // a read check Job that is still being deleted has finished, so it doesn't hold the next one
     let active = jobs::find_kind(meta, JobKind::MigrationCheck)
         .await?
         .into_iter()
-        .filter(|job| jobs::phase(job) == JobPhase::Active)
+        .filter(|job| jobs::phase(job) == JobPhase::Active && !jobs::ended(job))
         .map(|job| name(&job))
         .collect::<Vec<_>>();
     if let Some(other) = active.first() {

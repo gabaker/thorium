@@ -307,8 +307,13 @@ token, with the config Secret read-only. The step goes through these stages.
    recorded revision, or the image), when the approvals set for the step changed, when a check
    that asked to wait comes due, and when you set the `thorium.sandia.gov/refresh-check`
    annotation on the `ThoriumCluster` to a value it didn't hold before. Checks run one at a time.
-   To see every group and sample keys, run `thoradm migrate check --id <migration> --all
-   --samples` yourself.
+   The operator deletes a check Job, with its pod, once it has read the report; a check Job it
+   doesn't read, such as a failed one, is deleted an hour after it ends, and a failed check runs
+   again then. A check Job made by an older operator keeps the retention it was made with, up to
+   seven days, so a failed one from before an operator upgrade holds its check until it expires or
+   you set the refresh annotation. Migration, schema-apply, and record Jobs are kept for seven days
+   after they end. To see every group and sample keys, run
+   `thoradm migrate check --id <migration> --all --samples` yourself.
 2. **Approval.** The message names the backup to take first: take it with `thoradm backup new`,
    and read the backup limitations in [Taking Backups](../thoradm/taking_backups.md) first. Then
    approve the step with `{step, backup}`. A step whose check finds nothing to change is skipped
