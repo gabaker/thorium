@@ -7,6 +7,7 @@ use scylla::frame::response::result::{CollectionType, ColumnType, NativeType};
 use scylla::value::{CqlTimestamp, CqlValue};
 use thorium::Error;
 use thorium::models::backends::setup::Scylla;
+use thorium::models::schema::queries::migrations::CONDITIONAL_STATEMENTS;
 use thorium::models::schema::statements::{prepare_all, registry};
 use thorium::test_utilities::{self, CONF};
 use thorium::utils::StartupOpts;
@@ -52,6 +53,35 @@ async fn started_keyspace(session: &Session, suffix: &str) -> Result<String, Err
     Ok(keyspace)
 }
 
+/// Whether a keyspace is on tablets, read from its `initial_tablets` in
+/// `system_schema.scylla_keyspaces`; a Scylla without that table, or a keyspace with no row or no
+/// `initial_tablets`, uses vnodes
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to use
+/// * `keyspace` - The keyspace to check
+async fn on_tablets(session: &Session, keyspace: &str) -> Result<bool, Error> {
+    // a Scylla that can't read the table has no tablets
+    let Ok(result) = session
+        .query_unpaged(
+            "SELECT initial_tablets FROM system_schema.scylla_keyspaces WHERE keyspace_name = ?",
+            (keyspace,),
+        )
+        .await
+    else {
+        return Ok(false);
+    };
+    // a row with an initial tablet count means the keyspace is on tablets
+    let rows = result
+        .into_rows_result()
+        .map_err(|err| Error::new(format!("the tablet setting doesn't read: {err}")))?;
+    let tablets = rows
+        .maybe_first_row::<(Option<i32>,)>()
+        .map_err(|err| Error::new(format!("the tablet setting doesn't parse: {err}")))?;
+    Ok(matches!(tablets, Some((Some(_),))))
+}
+
 /// A sample value of a bind marker's CQL type
 ///
 /// # Arguments
@@ -88,7 +118,9 @@ fn sample(typ: &ColumnType<'_>, text: &str) -> Result<CqlValue, String> {
 
 /// Every registered statement (the API's, the census, the search streamer's, and thoradm's
 /// full-row statements) prepares against the schema the API's startup creates, and runs once
-/// with a sample value of each marker's type
+/// with a sample value of each marker's type; on a keyspace on tablets the conditional
+/// statements, which the drain request store runs only on a keyspace without tablets, are
+/// prepared but not run
 #[tokio::test]
 async fn every_registered_statement_prepares_and_runs() -> Result<(), Error> {
     // build the schema with the API's own startup
@@ -107,6 +139,8 @@ async fn every_registered_statement_prepares_and_runs() -> Result<(), Error> {
             .any(|statement| statement.name.starts_with("search.")),
         "the search streamer's statements aren't registered"
     );
+    // tablet keyspaces refuse lightweight transactions when they run, not when they prepare
+    let tablets = on_tablets(&session, &keyspace).await?;
     // run each statement once, binding a sample of each marker's type, and keep every failure
     let text = format!("registry-{}", Uuid::new_v4());
     let mut failures = Vec::new();
@@ -123,6 +157,10 @@ async fn every_registered_statement_prepares_and_runs() -> Result<(), Error> {
                 .iter()
                 .map(|spec| sample(spec.typ(), &text))
                 .collect::<Result<Vec<_>, _>>()?;
+            // a conditional statement isn't run on tablets, as the store never runs it there
+            if tablets && CONDITIONAL_STATEMENTS.contains(&statement.name.as_str()) {
+                return Ok(());
+            }
             // run it once with those values
             session
                 .execute_unpaged(&prepared, binds)

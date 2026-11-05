@@ -206,10 +206,28 @@ pub struct RunContext {
     /// The attempt of the pass this context runs in, set by the runner when it ends the pass, so
     /// a migration's own progress can be tied to the attempt that made it
     pub attempt: Option<String>,
+    /// The options `migrate run` passes through to the migrations that read them
+    pub flags: RunFlags,
+}
+
+/// The options of one `migrate run` that only some migrations read; each defaults to off
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunFlags {
+    /// The drain attempt a run inside the operator's conversion pause belongs to (the `at` of the
+    /// drain's `Running` entry); set only on a Job the operator creates while it holds the pause
+    pub in_pause: Option<String>,
+    /// Whether a hand run also takes requests marked stale, still through every check
+    pub include_stale: bool,
+    /// The most requests a drain cancel records, in place of the default cap
+    pub max_requests: Option<usize>,
+    /// The `at` of the drain step's `Running` entry the operator passes on the cancel's Job,
+    /// recorded as each request's attempt; a hand run without it records requests no attempt
+    /// window matches
+    pub step_attempt: Option<String>,
 }
 
 impl RunContext {
-    /// A context with the default limits
+    /// A context with the default limits and no flags
     ///
     /// # Arguments
     ///
@@ -218,13 +236,14 @@ impl RunContext {
     /// * `cancel` - Cancelled by SIGTERM
     #[must_use]
     pub fn new(mode: RunMode, backends: RunBackends, cancel: CancellationToken) -> Self {
-        // every limit starts at its default
+        // every limit and flag starts at its default
         RunContext {
             mode,
             backends,
             cancel,
             limits: RunLimits::default(),
             attempt: None,
+            flags: RunFlags::default(),
         }
     }
 }

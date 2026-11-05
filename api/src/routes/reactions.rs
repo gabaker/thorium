@@ -76,16 +76,9 @@ async fn create(
 ) -> Result<Json<ReactionIdResponse>, ApiError> {
     // a run token runs only its run's own tools, never a pipeline
     refuse_run_token(&user)?;
-    // get pipeline
-    let (group, pipeline) = Pipeline::get(&user, &req.group, &req.pipeline, &state.shared).await?;
-    // refrain from running the reaction if the pipeline has a ban
-    if !pipeline.bans.is_empty() {
-        return bad!(format!(
-            "The reaction cannot be created because pipeline '{}' in group '{}' has one or more bans! \
-            See the pipeline's notifications for more details.",
-            req.pipeline, req.group,
-        ));
-    }
+    // make the checks every reaction create shares, getting the group and pipeline
+    let (group, pipeline) =
+        Reaction::authorize_create(&user, &req.group, &req.pipeline, &state.shared).await?;
     // build reaction object and inject it into the backend
     let reaction = Reaction::create(&user, &group, &pipeline, req, &state.shared).await?;
     Ok(Json(ReactionIdResponse { id: reaction.id }))

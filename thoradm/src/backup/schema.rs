@@ -3,10 +3,12 @@
 //!
 //! The record carries what a restore needs to bring the deployment's schema version and upgrade
 //! position back: the applied fingerprints and layout versions, the revision and the full applied
-//! history, the data-shaping settings, and each migration pass's rows. A `job_result` row isn't
-//! carried: it expires after seven days, which a restore would turn into a permanent row. The
-//! record is JSON rather than an rkyv archive so it can gain fields with defaults without
-//! making older backups unreadable.
+//! history, the data-shaping settings, each migration pass's rows, and the drain requests a drain
+//! recorded. A `job_result` row isn't carried: it expires after seven days, which a restore would
+//! turn into a permanent row. A `drain_request_args` row isn't carried either: it holds a
+//! cancelled reaction's arguments, which may hold credentials, and it expires too. The record is
+//! JSON rather than an rkyv archive so it can gain fields with defaults without making older
+//! backups unreadable.
 
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
@@ -45,7 +47,9 @@ pub struct BackupSchemaRecord {
     /// The thoradm version that wrote the backup, which a restore across revisions uses
     #[serde(default)]
     pub thoradm_version: Option<String>,
-    /// Every `schema_migrations` row of a kind this thoradm knows, except `job_result` rows
+    /// Every `schema_migrations` row of a kind this thoradm knows, except the `job_result` and
+    /// `drain_request_args` rows, which aren't carried, and the `drain_request` rows, which
+    /// `drain_requests` carries
     pub migrations: Vec<SchemaMigrationsTable>,
     /// Every `schema_migration_issues` row
     #[serde(default)]
@@ -54,6 +58,14 @@ pub struct BackupSchemaRecord {
     /// release's audit rows, carried as the cells the table holds so a restore can write it back
     #[serde(default)]
     pub other: Vec<RawRow>,
+    /// Every `drain_request` row, as the cells the table holds, since its status and cells aren't
+    /// the typed row's
+    ///
+    /// A field of its own rather than rows of `migrations` or `other`: a thoradm that predates
+    /// the kind ignores the field, so its restore never writes a backup's request over the
+    /// target's, which may have moved further.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drain_requests: Vec<RawRow>,
 }
 
 /// A `schema_migrations` row of any kind, read and written cell by cell with no knowledge of what
@@ -232,8 +244,38 @@ async fn read_issues(
     Ok(issues)
 }
 
+/// Reads every `schema_migrations` row of one kind as the cells the table holds, redacting any
+/// trigger key that still holds the password's unsalted hash
+///
+/// # Arguments
+///
+/// * `scylla` - The session to read with
+/// * `namespace` - The keyspace
+/// * `kind` - The kind, as the table stores it
+async fn read_raw(scylla: &Session, namespace: &str, kind: &str) -> Result<Vec<RawRow>, Error> {
+    let migrations_table = <SchemaMigrationsTable as ScyllaObject>::NAME;
+    // the kind's partition, cell by cell
+    let cql = format!("SELECT {RAW_COLUMNS} FROM {namespace}.{migrations_table} WHERE kind = ?");
+    let mut rows = scylla
+        .query_iter(cql, (kind,))
+        .await?
+        .rows_stream::<RawRow>()
+        .map_err(|error| Error::new(format!("failed to read {migrations_table}: {error}")))?;
+    let mut read = Vec::new();
+    while let Some(row) = rows.next().await {
+        let mut row = row.map_err(|error| {
+            Error::new(format!("failed to read a {migrations_table} row: {error}"))
+        })?;
+        // an earlier writer's key may still hold the password's unsalted hash
+        row.apply_key = row.apply_key.map(|key| redact_trigger_key(&key));
+        read.push(row);
+    }
+    Ok(read)
+}
+
 impl BackupSchemaRecord {
-    /// Reads every row of both migration-state tables, leaving out the `job_result` rows
+    /// Reads every row of both migration-state tables, leaving out the `job_result` and
+    /// `drain_request_args` rows
     ///
     /// # Arguments
     ///
@@ -270,10 +312,17 @@ impl BackupSchemaRecord {
         }
         let mut migrations = Vec::new();
         let mut other = Vec::new();
+        let mut drain_requests = Vec::new();
         for kind in kinds {
             match kind.parse::<MigrationRecordKind>() {
-                // a Job's result expires, so it isn't carried
-                Ok(MigrationRecordKind::JobResult) => (),
+                // a Job's result and a drain request's arguments expire, and the arguments may
+                // hold credentials, so neither is carried
+                Ok(MigrationRecordKind::JobResult | MigrationRecordKind::DrainRequestArgs) => (),
+                // a drain request's status and cells aren't the typed row's, so its rows are
+                // carried raw
+                Ok(MigrationRecordKind::DrainRequest) => {
+                    drain_requests.extend(read_raw(scylla, namespace, &kind).await?);
+                }
                 // every row of a kind this thoradm knows, as the projection its readers use
                 Ok(_) => {
                     let cql = format!(
@@ -302,27 +351,12 @@ impl BackupSchemaRecord {
                         "{migrations_table} holds rows of kind {kind}, which this thoradm doesn't \
                          know; carrying them in {SCHEMA_FILE} as they are"
                     );
-                    let cql = format!(
-                        "SELECT {RAW_COLUMNS} FROM {namespace}.{migrations_table} WHERE kind = ?"
-                    );
-                    let mut rows = scylla
-                        .query_iter(cql, (kind.as_str(),))
-                        .await?
-                        .rows_stream::<RawRow>()
-                        .map_err(|error| {
-                            Error::new(format!("failed to read {migrations_table}: {error}"))
-                        })?;
-                    while let Some(row) = rows.next().await {
-                        let mut row = row.map_err(|error| {
-                            Error::new(format!("failed to read a {migrations_table} row: {error}"))
-                        })?;
-                        row.apply_key = row.apply_key.map(|key| redact_trigger_key(&key));
-                        other.push(row);
-                    }
+                    other.extend(read_raw(scylla, namespace, &kind).await?);
                 }
             }
         }
         other.sort_by(|left, right| (&left.kind, &left.id).cmp(&(&right.kind, &right.id)));
+        drain_requests.sort_by(|left, right| left.id.cmp(&right.id));
         // every row of the pass table, when the keyspace holds it
         let mut issues = read_issues(scylla, namespace).await?;
         // order the rows by key, so two reads of one state write the same file
@@ -343,6 +377,7 @@ impl BackupSchemaRecord {
             migrations,
             issues,
             other,
+            drain_requests,
         }))
     }
 
@@ -677,5 +712,34 @@ mod tests {
         let older: BackupSchemaRecord =
             serde_json::from_value(json!({"format": 1, "migrations": []})).unwrap();
         assert_eq!(older.other, Vec::new());
+    }
+
+    /// Drain requests round trip through their own field, which a record without any leaves out
+    /// and a record written before the field existed loads with none
+    #[test]
+    fn drain_requests_round_trip_in_their_own_field() {
+        // a record carrying one recorded request
+        let text = json!({
+            "format": 1, "migrations": [],
+            "drain_requests": [{
+                "kind": "drain_request", "id": "r-1", "value": "{}", "status": "recorded",
+                "attempt": "2026-10-01T00:05:00Z", "entry": null, "result": null,
+                "revision": "2026-10-v04", "started": "2026-10-01T00:08:00Z", "finished": null,
+                "updated": "2026-10-01T00:10:00Z",
+            }],
+        });
+        let loaded: BackupSchemaRecord = serde_json::from_value(text).unwrap();
+        assert_eq!(loaded.drain_requests.len(), 1);
+        assert_eq!(loaded.drain_requests[0].status.as_deref(), Some("recorded"));
+        assert!(loaded.migrations.is_empty() && loaded.other.is_empty());
+        let again: BackupSchemaRecord =
+            serde_json::from_str(&serde_json::to_string(&loaded).unwrap()).unwrap();
+        assert_eq!(again, loaded);
+        // a record without requests doesn't name the field, so an older reader sees nothing new
+        let older: BackupSchemaRecord =
+            serde_json::from_value(json!({"format": 1, "migrations": []})).unwrap();
+        assert_eq!(older.drain_requests, Vec::new());
+        let written = serde_json::to_value(&older).unwrap();
+        assert!(written.get("drain_requests").is_none(), "{written}");
     }
 }

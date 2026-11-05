@@ -35,6 +35,53 @@ pub struct SchemaMigrationsQueries {
     delete_kind: Delete,
 }
 
+/// Insert a `schema_migrations` row only when no row has its kind and id, the write of a
+/// recorded drain request; the result's `[applied]` column says whether it was written
+///
+/// The derived statements have no conditional form, so this one is written out here and
+/// registered beside them.
+///
+/// # Arguments
+///
+/// * `ns` - The keyspace the statement targets
+#[must_use]
+pub fn insert_if_absent(ns: &str) -> String {
+    // every column a drain request row uses, bound in this order
+    format!(
+        "INSERT INTO {ns}.schema_migrations (kind, id, value, attempt, status, entry, result, \
+         revision, started, finished, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         IF NOT EXISTS"
+    )
+}
+
+/// Update a `schema_migrations` row's status and outcome only while its status is still the one
+/// the writer read, the write of a drain request's every later change; the result's `[applied]`
+/// column says whether it was written
+///
+/// # Arguments
+///
+/// * `ns` - The keyspace the statement targets
+#[must_use]
+pub fn update_status_if(ns: &str) -> String {
+    // the new values, then the row's key, then the status it must still hold
+    format!(
+        "UPDATE {ns}.schema_migrations SET status = ?, entry = ?, result = ?, value = ?, \
+         finished = ?, updated = ? WHERE kind = ? AND id = ? IF status = ?"
+    )
+}
+
+/// The names of the conditional statements on `schema_migrations`, which the statement
+/// validation lets through
+///
+/// Lightweight transactions run only on a keyspace without tablets: Scylla 6.x may put Thorium's
+/// keyspace on tablets, where its views work but lightweight transactions are refused, so the
+/// drain request store prepares these only after reading that the keyspace uses vnodes and
+/// otherwise writes with a read then a plain write under the namespace's writer lease.
+pub const CONDITIONAL_STATEMENTS: [&str; 2] = [
+    "schema_migrations.insert_if_absent",
+    "schema_migrations.update_status_if",
+];
+
 /// Statements on the `schema_migration_issues` table
 #[thorium::table_queries(table = SchemaMigrationIssuesTable)]
 pub struct SchemaMigrationIssuesQueries {
@@ -116,9 +163,13 @@ impl SchemaStateQueries {
     /// * `ns` - The keyspace the statements target
     #[must_use]
     pub fn statements(ns: &str) -> Vec<(String, String)> {
+        // the derived statements on `schema_migrations`, then its conditional writes
+        let mut migrations = SchemaMigrationsQueries::statements(ns);
+        migrations.push(("insert_if_absent", insert_if_absent(ns)));
+        migrations.push(("update_status_if", update_status_if(ns)));
         // list each table's statements under its name
         let groups = [
-            ("schema_migrations", SchemaMigrationsQueries::statements(ns)),
+            ("schema_migrations", migrations),
             (
                 "schema_migration_issues",
                 SchemaMigrationIssuesQueries::statements(ns),

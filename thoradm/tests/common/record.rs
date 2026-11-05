@@ -9,6 +9,7 @@ use futures::StreamExt;
 use scylla::client::session::Session;
 use std::collections::{BTreeMap, BTreeSet};
 use thoradm::backup::schema::{BackupSchemaRecord, issue_row, migrations_row};
+use thorium::models::schema::drain_requests::{DrainRequestRow, DrainRequestStore};
 use thorium::models::schema::scylla::{
     SchemaMigrationIssueRow, SchemaMigrationIssuesTable, SchemaMigrationRow, SchemaMigrationsTable,
 };
@@ -358,8 +359,12 @@ pub async fn read(harness: &Harness) -> Rows {
     let columns = <SchemaMigrationRow as Projection>::COLUMNS.join(", ");
     let mut rows = Rows::default();
     // only the kinds this build knows, one partition each, since a row of another kind can't be
-    // read as a typed row
-    for kind in MigrationRecordKind::ALL {
+    // read as a typed row; a drain request's status and cells aren't the typed row's, so its rows
+    // are read with `drain_rows`
+    for kind in MigrationRecordKind::ALL
+        .into_iter()
+        .filter(|kind| *kind != MigrationRecordKind::DrainRequest)
+    {
         let mut stream = scylla
             .query_iter(
                 format!("SELECT {columns} FROM {ns}.schema_migrations WHERE kind = ?"),
@@ -387,6 +392,34 @@ pub async fn read(harness: &Harness) -> Rows {
         rows.issues.push(issue_row(row.unwrap()));
     }
     rows.sort();
+    rows
+}
+
+/// Reads every `drain_request` row of the harness's namespace through the drain request store,
+/// keyed by id
+///
+/// # Arguments
+///
+/// * `harness` - The harness naming the namespace
+pub async fn drain_rows(harness: &Harness) -> BTreeMap<String, DrainRequestRow> {
+    // the store reads the rows as the raw text columns they are written as
+    let store = DrainRequestStore::prepare(harness.scylla().await, &harness.conf.thorium.namespace)
+        .await
+        .expect("the drain request statements prepare");
+    // page through the rows in id order
+    let mut rows = BTreeMap::new();
+    let mut after: Option<String> = None;
+    loop {
+        let page = store
+            .list_page(after.as_deref(), 500)
+            .await
+            .expect("the drain requests read");
+        let Some(last) = page.last() else {
+            break;
+        };
+        after = Some(last.id.clone());
+        rows.extend(page.into_iter().map(|row| (row.id.clone(), row)));
+    }
     rows
 }
 

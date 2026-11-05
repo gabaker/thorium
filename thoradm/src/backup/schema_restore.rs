@@ -1,6 +1,7 @@
 //! What a restore does with the schema: converging the keyspace to the backup's revision before
 //! and after it loads, checking the files password against the backup's recorded identity, and
-//! writing the backup's schema record back while keeping the history it replaces
+//! writing the backup's schema record back while keeping the history it replaces and merging the
+//! drain requests with the target's
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use futures::StreamExt;
@@ -8,16 +9,19 @@ use scylla::client::session::Session;
 use scylla::statement::batch::{Batch, BatchType};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::time::Duration;
 use strum::IntoEnumIterator;
 use thorium::Conf;
+use thorium::models::schema::drain_requests::{DrainRequestRow, DrainRequestStore, DrainStatus};
 use thorium::models::schema::scylla::{
     SchemaMigrationIssuesTable, SchemaMigrationRow, SchemaMigrationsTable,
 };
 use thorium::models::schema::{
     ApplyError, ApplyOptions, ApplyReport, ApplyTarget, CLASSES, DEFAULT_VIEW_WAIT_SECS,
-    MigrationRecordKind, Projection, REVISION_ROW, RevisionSnapshot, ScyllaObject, SnapshotRun,
-    Store, TableStatements, apply, apply_snapshot, verify_files_password, with_keyspace,
+    MigrateError, MigrationRecordKind, Projection, REVISION_ROW, RevisionSnapshot, ScyllaObject,
+    SnapshotRun, Store, TableStatements, apply, apply_snapshot, verify_files_password,
+    with_keyspace,
 };
 use thorium::models::upgrades::{
     AppliedStep, Catalog, FIRST_HELM_REVISION, RESTORED_STEP, RevisionId, StepState, UpgradeError,
@@ -86,9 +90,17 @@ pub struct RecordPlan {
     pub migrations: Vec<SchemaMigrationsTable>,
     /// The worker and issue rows written over the target's
     pub issues: Vec<SchemaMigrationIssuesTable>,
-    /// The rows of kinds this thoradm has no variant for, written back beside the target's own
-    /// rows of those kinds, since they are audit rows and a restore never discards one
+    /// The rows of kinds this thoradm has no variant for, or of written-back kinds the backup's
+    /// writer didn't know, written back beside the target's own rows of those kinds, since they
+    /// are audit rows and a restore never discards one
     pub other: Vec<RawRow>,
+    /// The backup's drain requests, from the record's own field and from the rows of that kind an
+    /// older writer carried among its unknown kinds, merged with the target's so none moves
+    /// backward
+    pub drain_requests: Vec<RawRow>,
+    /// How many drain request argument rows an older writer carried among its unknown kinds,
+    /// which the restore drops: arguments are never restored
+    pub args_dropped: usize,
     /// The revision the target had recorded, which the restore replaced
     pub replaced_revision: Option<String>,
 }
@@ -114,12 +126,20 @@ pub struct RecordRestored {
     /// as `<revision> <step>`, when the restore recorded the baseline
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub planned: Vec<String>,
+    /// How many of the backup's drain requests the merge wrote: the ones the target lacked or held
+    /// at a status that ranks lower
+    #[serde(default)]
+    pub drain_requests: usize,
+    /// How many drain request argument rows from an older backup the restore dropped
+    #[serde(default)]
+    pub drain_args_dropped: usize,
 }
 
 /// The kinds of row a restore writes back from the record: the data-shaping settings stay the
-/// restoring cluster's, and a Job's result is never in a record; a legacy drop's audit row is
-/// written back beside the target's own, never replacing them
-const WRITTEN_BACK: [MigrationRecordKind; 7] = [
+/// restoring cluster's, and a Job's result or a drain request's arguments are never in a record;
+/// a legacy drop's audit row is written back beside the target's own, never replacing them, and a
+/// drain request is merged with the target's row (see [`MERGED`])
+const WRITTEN_BACK: [MigrationRecordKind; 8] = [
     MigrationRecordKind::Backend,
     MigrationRecordKind::Run,
     MigrationRecordKind::Revision,
@@ -127,9 +147,19 @@ const WRITTEN_BACK: [MigrationRecordKind; 7] = [
     MigrationRecordKind::ConsumedCode,
     MigrationRecordKind::ArchivedHistory,
     MigrationRecordKind::LegacyDrop,
+    MigrationRecordKind::DrainRequest,
 ];
 
-/// The kinds of row a restore replaces outright
+/// The written-back kinds a restore merges with the target's rows through conditional writes
+/// instead of writing over them, so a row the target moved further is never moved back
+const MERGED: [MigrationRecordKind; 1] = [MigrationRecordKind::DrainRequest];
+
+/// How many times the merge reads a drain request again after the target's row changed between
+/// its read and its conditional write
+const MERGE_ATTEMPTS: usize = 8;
+
+/// The kinds of row a restore replaces outright: a row of these kinds the target holds and the
+/// backup lacks is deleted
 const REPLACED: [MigrationRecordKind; 3] = [
     MigrationRecordKind::Backend,
     MigrationRecordKind::Run,
@@ -336,6 +366,7 @@ pub fn baseline_record(
         migrations,
         issues: Vec::new(),
         other: Vec::new(),
+        drain_requests: Vec::new(),
     }
 }
 
@@ -518,13 +549,28 @@ pub fn plan_record(
             ..row.clone()
         })
         .collect();
-    // the backup's rows come back as they were, except the settings and Job results
+    // the backup's rows come back as they were, except the settings and Job results, and the
+    // merged kinds, which the merge writes
     let mut migrations: Vec<SchemaMigrationsTable> = record
         .migrations
         .iter()
-        .filter(|row| WRITTEN_BACK.contains(&row.kind))
+        .filter(|row| WRITTEN_BACK.contains(&row.kind) && !MERGED.contains(&row.kind))
         .cloned()
         .collect();
+    // a raw row of a kind this thoradm knows is handled as that kind: a drain request goes
+    // through the merge, its arguments and the kinds that aren't written back are dropped, and
+    // the rest are written as they are, as are the kinds this thoradm still doesn't know
+    let mut drain_requests = record.drain_requests.clone();
+    let mut other = Vec::new();
+    let mut args_dropped = 0;
+    for row in &record.other {
+        match row.kind.parse::<MigrationRecordKind>() {
+            Ok(MigrationRecordKind::DrainRequest) => drain_requests.push(row.clone()),
+            Ok(MigrationRecordKind::DrainRequestArgs) => args_dropped += 1,
+            Ok(kind) if !WRITTEN_BACK.contains(&kind) => (),
+            _ => other.push(row.clone()),
+        }
+    }
     // and the history ends with the Restored entry
     if let Some(entry) = restored_entry(record, existing.revision.as_deref(), origin) {
         let revision = entry.revision.clone();
@@ -591,9 +637,142 @@ pub fn plan_record(
         delete_issues,
         migrations,
         issues: record.issues.clone(),
-        other: record.other.clone(),
+        other,
+        drain_requests,
+        args_dropped,
         replaced_revision: existing.revision.clone(),
     }
+}
+
+/// What a restore does with one of a backup's drain requests, given the target's row
+#[derive(Debug, Clone, PartialEq)]
+pub enum DrainMerge {
+    /// The target holds no row, so the backup's is written unless one appears first
+    Insert(DrainRequestRow),
+    /// The backup's row ranks higher, so it is written while the target's still holds the status
+    /// read
+    Update {
+        /// The row to write, holding the target's reservation when the target's row has one
+        row: DrainRequestRow,
+        /// The status the target's row held when it was read
+        expected: DrainStatus,
+    },
+    /// The target's row ranks as high or higher, so it stands
+    Keep,
+}
+
+/// Decides what a restore does with one of a backup's drain requests so no request's status moves
+/// backward: the backup's row is written only where the target has none or ranks lower, and a
+/// written row keeps the reservation the target's row holds
+///
+/// # Arguments
+///
+/// * `backup` - The backup's row
+/// * `target` - The target's row with the same id, if it holds one
+#[must_use]
+pub fn merge_drain(backup: &DrainRequestRow, target: Option<&DrainRequestRow>) -> DrainMerge {
+    // a request the target never recorded comes back as the backup has it
+    let Some(target) = target else {
+        return DrainMerge::Insert(backup.clone());
+    };
+    // a tie keeps the target's, so a stale row never turns back into a recorded one
+    if backup.status.rank() <= target.status.rank() {
+        return DrainMerge::Keep;
+    }
+    // the reservation is set once, so the target's still names the reaction that may exist
+    let mut row = backup.clone();
+    if target.entry.is_some() {
+        row.entry.clone_from(&target.entry);
+    }
+    DrainMerge::Update {
+        row,
+        expected: target.status,
+    }
+}
+
+/// Reads a backup's raw drain request row as the row the drain request store writes
+///
+/// # Arguments
+///
+/// * `raw` - The row as the backup's record carries it
+pub fn drain_row(raw: &RawRow) -> Result<DrainRequestRow, String> {
+    // a request row always holds its request
+    let value = raw
+        .value
+        .clone()
+        .ok_or_else(|| format!("the backup's drain request {} holds no request", raw.id))?;
+    // and a status this thoradm can rank, without which the merge can't keep it from moving back
+    let status = raw
+        .status
+        .as_deref()
+        .unwrap_or_default()
+        .parse::<DrainStatus>()
+        .map_err(|error| {
+            format!(
+                "the backup's drain request {} has status `{}`, which this thoradm doesn't know; \
+                 restore the backup with the thoradm version that took it",
+                raw.id, error.0
+            )
+        })?;
+    Ok(DrainRequestRow {
+        id: raw.id.clone(),
+        value,
+        attempt: raw.attempt.clone(),
+        status,
+        entry: raw.entry.clone(),
+        result: raw.result.clone(),
+        revision: raw.revision.clone(),
+        started: raw.started,
+        finished: raw.finished,
+        updated: raw.updated,
+    })
+}
+
+/// Converts a drain request store error into thoradm's error
+///
+/// # Arguments
+///
+/// * `error` - The store's error
+fn migrate_error(error: MigrateError) -> Error {
+    match error {
+        // a backend that refused or couldn't be reached may answer when the restore runs again
+        MigrateError::Backend(_) => Error::Transient(error.to_string()),
+        other => Error::new(other.to_string()),
+    }
+}
+
+/// Merges one of a backup's drain requests into the target, returning whether it was written
+///
+/// Every write is conditional on the row the merge read, so a resubmission that moves the row in
+/// between is never overwritten: the write isn't applied, and the merge reads the row again and
+/// decides again.
+///
+/// # Arguments
+///
+/// * `store` - The drain request store of the target
+/// * `backup` - The backup's row
+async fn merge_drain_request(
+    store: &DrainRequestStore,
+    backup: &DrainRequestRow,
+) -> Result<bool, Error> {
+    for _ in 0..MERGE_ATTEMPTS {
+        // decide against what the target holds now
+        let target = store.get(&backup.id).await.map_err(migrate_error)?;
+        // a write that isn't applied means the target's row changed since it was read
+        let applied = match merge_drain(backup, target.as_ref()) {
+            DrainMerge::Keep => return Ok(false),
+            DrainMerge::Insert(row) => store.insert_if_absent(&row).await,
+            DrainMerge::Update { row, expected } => store.update_status_if(&row, expected).await,
+        }
+        .map_err(migrate_error)?;
+        if applied {
+            return Ok(true);
+        }
+    }
+    Err(Error::Transient(format!(
+        "drain request {} kept changing while the restore merged it; run the restore again",
+        backup.id
+    )))
 }
 
 /// A `schema_migrations` row with nothing set, to build rows from
@@ -774,8 +953,9 @@ async fn write_partition<R: scylla::serialize::row::SerializeRow>(
 
 /// Writes a backup's record into the target's record tables, keeping the history it replaces
 ///
-/// Raw rows go first, since a row no write can take should fail before anything changes. The
-/// replaced history is then written as archived history, every row of the record is written over
+/// The backup's drain requests are read first and raw rows written first, since a row no write
+/// can take should fail before anything changes. The drain requests are then merged with the
+/// target's, never moving one backward, and the replaced history is written as archived history, every row of the record is written over
 /// the target's one partition at a time, with the revision row last, and only then are the rows
 /// the backup lacks deleted. A restore that stops partway therefore leaves the old record, with
 /// some of the new rows beside it, and one run again finishes the job under the same archive keys.
@@ -787,7 +967,7 @@ async fn write_partition<R: scylla::serialize::row::SerializeRow>(
 /// * `record` - The backup's schema record
 /// * `origin` - Where the record comes from and who restored it
 pub async fn restore_record(
-    scylla: &Session,
+    scylla: &Arc<Session>,
     namespace: &str,
     record: &BackupSchemaRecord,
     origin: &Origin<'_>,
@@ -795,6 +975,13 @@ pub async fn restore_record(
     // plan against what the target holds now
     let existing = read_existing(scylla, namespace).await?;
     let plan = plan_record(&existing, record, origin);
+    // a drain request this thoradm can't read stops the restore before anything is written
+    let drains = plan
+        .drain_requests
+        .iter()
+        .map(drain_row)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Error::new)?;
     let table = <SchemaMigrationsTable as ScyllaObject>::NAME;
     let issues = <SchemaMigrationIssuesTable as ScyllaObject>::NAME;
     let insert_migrations = scylla
@@ -810,6 +997,16 @@ pub async fn restore_record(
     }
     for rows in others.values() {
         write_partition(scylla, &insert_migrations, rows).await?;
+    }
+    // the drain requests, merged with the target's so none moves backward
+    let mut drains_written = 0;
+    if !drains.is_empty() {
+        let store = DrainRequestStore::prepare(scylla.clone(), namespace)
+            .await
+            .map_err(migrate_error)?;
+        for drain in &drains {
+            drains_written += usize::from(merge_drain_request(&store, drain).await?);
+        }
     }
     // the replaced history, kept before it is replaced
     let archive: Vec<&SchemaMigrationsTable> = plan.archive.iter().collect();
@@ -862,6 +1059,8 @@ pub async fn restore_record(
         issues: plan.issues.len(),
         baseline: origin.baseline,
         planned: Vec::new(),
+        drain_requests: drains_written,
+        drain_args_dropped: plan.args_dropped,
     })
 }
 
@@ -938,11 +1137,14 @@ mod tests {
     use thorium::models::schema::{MigrationRecordKind, hash_files_password};
 
     use super::{
-        ConvergeTo, Existing, Origin, RecordPlan, baseline_record, blank_row, check_files_password,
-        converge_target, plan_record, planned_after, record_trusted, recordless_baseline,
-        restores_files, skipped_objects,
+        ConvergeTo, DrainMerge, Existing, MERGED, Origin, REPLACED, RecordPlan, WRITTEN_BACK,
+        baseline_record, blank_row, check_files_password, converge_target, drain_row, merge_drain,
+        plan_record, planned_after, record_trusted, recordless_baseline, restores_files,
+        skipped_objects,
     };
     use crate::backup::schema::BackupSchemaRecord;
+    use crate::backup::schema::RawRow;
+    use thorium::models::schema::drain_requests::{DrainRequestRow, DrainStatus};
     use thorium::models::upgrades::{CATALOG, Catalog, RevisionId, SupportFloor};
 
     /// The name serde gives a record kind, which is the variant's name
@@ -1628,5 +1830,149 @@ mod tests {
             planned_after(&latest, &latest, &production),
             Vec::<String>::new()
         );
+    }
+
+    /// A drain request row with a status and an optional reservation
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - How far its resubmission got
+    /// * `entry` - The reserved new reaction id, if one was reserved
+    fn drain(status: DrainStatus, entry: Option<&str>) -> DrainRequestRow {
+        // a request of one id whose cells the merge carries
+        DrainRequestRow {
+            id: "r-1".to_owned(),
+            value: format!("{{\"status\":\"{status}\"}}"),
+            attempt: Some("a".to_owned()),
+            status,
+            entry: entry.map(ToOwned::to_owned),
+            result: entry.map(ToOwned::to_owned),
+            revision: Some("2026-10-v04".to_owned()),
+            started: None,
+            finished: None,
+            updated: None,
+        }
+    }
+
+    /// A raw `schema_migrations` row of a kind with a value and a status
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - The kind, as the table stores it
+    /// * `id` - The row's id
+    /// * `status` - The row's status, if it has one
+    fn raw(kind: &str, id: &str, status: Option<&str>) -> RawRow {
+        // only the key, the value, and the status set
+        serde_json::from_value(json!({
+            "kind": kind, "id": id, "value": "{}", "status": status,
+        }))
+        .unwrap()
+    }
+
+    /// Drain requests are written back through the merge and never replaced, and their arguments
+    /// are never written back
+    #[test]
+    fn drain_requests_are_merged_and_their_args_never_written_back() {
+        // the request kind is written back, merged, and not replaced
+        let request = MigrationRecordKind::DrainRequest;
+        assert!(WRITTEN_BACK.contains(&request) && MERGED.contains(&request));
+        assert!(!REPLACED.contains(&request));
+        // the arguments kind is in none of them
+        let args = MigrationRecordKind::DrainRequestArgs;
+        assert!(!WRITTEN_BACK.contains(&args) && !MERGED.contains(&args));
+        assert!(!REPLACED.contains(&args));
+        // every merged kind is written back
+        assert!(MERGED.iter().all(|kind| WRITTEN_BACK.contains(kind)));
+    }
+
+    /// The merge writes a backup's request only where the target has none or ranks lower, and a
+    /// written row keeps the target's reservation
+    #[test]
+    fn the_merge_never_moves_a_drain_request_backward() {
+        // a request the target lacks is inserted as the backup has it
+        let recorded = drain(DrainStatus::Recorded, None);
+        assert_eq!(
+            merge_drain(&recorded, None),
+            DrainMerge::Insert(recorded.clone())
+        );
+        // a backup row behind the target's, or tied with it, leaves the target's
+        let resubmitted = drain(DrainStatus::Resubmitted, Some("new"));
+        let stale = drain(DrainStatus::Stale, None);
+        let refused = drain(DrainStatus::Refused, None);
+        assert_eq!(merge_drain(&recorded, Some(&resubmitted)), DrainMerge::Keep);
+        assert_eq!(merge_drain(&recorded, Some(&stale)), DrainMerge::Keep);
+        assert_eq!(merge_drain(&refused, Some(&resubmitted)), DrainMerge::Keep);
+        // a backup row ahead of the target's is written while the target's status holds
+        assert_eq!(
+            merge_drain(&resubmitted, Some(&recorded)),
+            DrainMerge::Update {
+                row: resubmitted.clone(),
+                expected: DrainStatus::Recorded,
+            }
+        );
+        // a written row keeps the target's set reservation, and its own result
+        let reserved = drain(DrainStatus::Resubmitting, Some("target-id"));
+        let DrainMerge::Update { row, expected } = merge_drain(&resubmitted, Some(&reserved))
+        else {
+            panic!("the backup's final row ranks higher");
+        };
+        assert_eq!(expected, DrainStatus::Resubmitting);
+        assert_eq!(row.entry.as_deref(), Some("target-id"));
+        assert_eq!(row.result.as_deref(), Some("new"));
+    }
+
+    /// The plan merges the drain requests of both the record's field and an older writer's
+    /// unknown rows, drops the argument rows and counts them, and writes back only the rest
+    #[test]
+    fn the_plan_merges_drain_rows_and_drops_their_args() {
+        // a record with one request in its field, and an older writer's unknown rows
+        let mut backup = record(&[row(
+            "revision",
+            "deployment",
+            &json!({"revision": "2026-10-v04"}),
+        )]);
+        backup.drain_requests = vec![raw("drain_request", "r-1", Some("recorded"))];
+        backup.other = vec![
+            raw("drain_request", "r-2", Some("resubmitted")),
+            raw("drain_request_args", "r-1", None),
+            raw("drain_request_args", "r-2", None),
+            raw("job_result", "uid", None),
+            raw("later_kind", "x", None),
+            raw("legacy_drop", "y", None),
+        ];
+        let plan = plan_record(&Existing::default(), &backup, &origin());
+        // both requests are merged and both argument rows dropped
+        let merged: Vec<&str> = plan
+            .drain_requests
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect();
+        assert_eq!(merged, ["r-1", "r-2"]);
+        assert_eq!(plan.args_dropped, 2);
+        // a kind this thoradm doesn't know, and a known written-back kind, are written as they are
+        let other: Vec<&str> = plan.other.iter().map(|row| row.kind.as_str()).collect();
+        assert_eq!(other, ["later_kind", "legacy_drop"]);
+    }
+
+    /// A backup's raw drain request reads as a store row, and one without a request or with a
+    /// status this thoradm doesn't know is refused, naming the row
+    #[test]
+    fn a_raw_drain_row_reads_as_a_store_row() {
+        // every cell carried over
+        let parsed = drain_row(&raw("drain_request", "r-1", Some("resubmitting"))).unwrap();
+        assert_eq!(
+            (parsed.id.as_str(), parsed.value.as_str(), parsed.status),
+            ("r-1", "{}", DrainStatus::Resubmitting)
+        );
+        // an unknown status is refused
+        let unknown = drain_row(&raw("drain_request", "r-2", Some("later"))).unwrap_err();
+        assert!(
+            unknown.contains("r-2") && unknown.contains("later"),
+            "{unknown}"
+        );
+        // and so is a row without its request
+        let mut empty = raw("drain_request", "r-3", Some("recorded"));
+        empty.value = None;
+        assert!(drain_row(&empty).unwrap_err().contains("r-3"));
     }
 }

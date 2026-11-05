@@ -334,6 +334,10 @@ fn run_args(migration: &str, entry: &AppliedStep, cmd: &RevertMigrations) -> Run
         checkpoint_ms: 1000,
         retries: 12,
         backoff_ms: 250,
+        in_pause: None,
+        include_stale: false,
+        max_requests: None,
+        step_attempt: None,
     }
 }
 

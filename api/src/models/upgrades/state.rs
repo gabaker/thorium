@@ -3,6 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::borrow::Borrow;
 use std::collections::BTreeMap;
 
 use super::plan::has_transform;
@@ -148,6 +149,42 @@ const FIRST_SCHEMA_VERSION: u32 = 1;
 fn default_schema_version() -> u32 {
     // state without a recorded layout version predates the field, so it is the first layout
     FIRST_SCHEMA_VERSION
+}
+
+/// Find where the attempt of one of a step's runs starts: the `Running` entry of the step's first
+/// run since the step last finished or the newest stop, restore, or state reset
+///
+/// A run whose Job failed doesn't finish its step, so the retry records another `Running` entry in
+/// the same attempt, and what the failed run did belongs to the attempt the retry finishes.
+///
+/// # Arguments
+///
+/// * `entries` - The history entries, oldest first
+/// * `step` - The step's id
+/// * `running` - The index in `entries` of one of the step's `Running` entries
+#[must_use]
+pub fn attempt_start<E: Borrow<AppliedStep>>(entries: &[E], step: &str, running: usize) -> usize {
+    // walk back from the run to the first entry that ends an earlier attempt
+    let mut start = running;
+    for (index, entry) in entries.iter().enumerate().take(running).rev() {
+        let entry = entry.borrow();
+        // a stop, a restore, or a reset ends the attempt before it
+        if [UPGRADE_STOPPED_STEP, RESTORED_STEP, RESET_STATE_STEP].contains(&entry.step.as_str()) {
+            break;
+        }
+        if entry.step != step {
+            continue;
+        }
+        // an entry that finishes the step ends the attempt before it, and an earlier run of the
+        // same attempt starts it
+        if entry.outcome.finishes() {
+            break;
+        }
+        if entry.outcome == StepState::Running {
+            start = index;
+        }
+    }
+    start
 }
 
 /// Make a string safe to use as a Kubernetes label value

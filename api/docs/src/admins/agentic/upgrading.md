@@ -200,6 +200,34 @@ operator records an `upgrade-stopped` entry, and the next attempt drains again b
 conversion step, since reactions may have been submitted in between. A conversion step that
 finished before the stop stays finished.
 
+Instead of waiting, `thoradm migrate run --id drain-reactions` cancels the reactions in flight:
+it records each one's request, deletes its jobs, fails it, and removes the stage-path workers'
+registrations. `thoradm migrate run --id resubmit-reactions` creates the recorded requests again as
+their creators, and `thoradm migrate report --id drain-reactions` and `--id resubmit-reactions`
+list what each did. [Cancelling and Resubmitting
+Reactions](../thoradm/thoradm.md#cancelling-and-resubmitting-reactions) describes both, their
+flags, and the reasons a request is refused. A cancel run by hand records its requests outside any
+drain attempt, so nothing resubmits them; the report lists what to submit again.
+
+**Backups and restores while requests are recorded.** The recorded requests are `drain_request`
+rows in the schema record, and their arguments are rows that expire after 14 days. While any
+`drain_request` row exists, take and restore backups with a thoradm of this release or newer. An
+older thoradm copies the arguments rows into the backup with the rest of the record and writes
+them back with no expiry on restore. A restore with this release merges the backup's
+`drain_request` rows with the target's without moving any request's status backward, and never
+restores arguments. If you restore a backup taken between the cancel and the resubmission, the
+restore closes the drain attempt, so the operator doesn't resubmit those requests: run the
+resubmission by hand once revision `2026-10-v04` is recorded again (see [After a
+Restore](../thoradm/thoradm.md#after-a-restore)). A run without `--include-stale` only marks the
+requests `stale`; `--include-stale` takes them, still through every check, so a request with
+arguments, or one the conversion pause never bound to its stage tools, is refused and has to be
+submitted again with `thorctl`:
+
+```bash
+thoradm --cluster-conf thorium.yml migrate run --id resubmit-reactions --include-stale
+thoradm --cluster-conf thorium.yml migrate report --id resubmit-reactions
+```
+
 ## The outage
 
 The conversion steps (`images-to-tools`, `pipelines-to-tool-stages`, and
@@ -393,8 +421,8 @@ shows the pipeline's `stage_tools`; once it names a tool for every stage, reacti
 
 ## Running a step by hand
 
-Every `Data` step except `drain-reactions` (which has nothing to run) can be run by hand with
-thoradm instead of by the operator, for example to run it again for objects you fixed. Run it from
+Every `Data` step can be run by hand with thoradm instead of by the operator, for example to run it
+again for objects you fixed. Run it from
 a `thoradm` of the new version that has the cluster config (see
 [Admin Command Line Tool](../thoradm/thoradm.md#config)):
 
@@ -406,8 +434,8 @@ The command takes the namespace's writer lease, so it is refused while a migrati
 operator holds it, and it prints a JSON result with the pass's status (`done`, or `done_with_issues`),
 counts, and issue groups. Stop the components the step lists (see `thoradm migrate list`) first,
 since the operator pauses them only for its own runs. When the operator next checks the step it
-finds nothing left to migrate and skips it. `thoradm migrate run --id drain-reactions` and
-`verify --id drain-reactions` print the manual procedure and exit with code 3. See
+finds nothing left to migrate and skips it. `thoradm migrate run --id drain-reactions` cancels the
+reactions in flight instead of waiting for them (see [The drain](#the-drain)). See
 [Migrate](../thoradm/thoradm.md#migrate) for every flag and the exit codes.
 
 ## Interruptions and reruns

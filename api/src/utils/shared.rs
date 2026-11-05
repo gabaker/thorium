@@ -474,7 +474,11 @@ impl Shared {
     /// Redis pool, and the Scylla session and statements. Nothing here connects to Elastic or
     /// an OAuth provider, builds an email transport, or checks the applied schema, and no DDL
     /// runs. The Elastic client points at nothing reachable, so a write that begins to need
-    /// search fails loudly instead of silently. The S3 clients are built but never used.
+    /// search fails loudly instead of silently.
+    ///
+    /// Offline writers may delete objects in the S3 buckets the config names, such as a failed
+    /// reaction's ephemeral and cache files, so the Job running one needs the cluster config's S3
+    /// endpoint and credentials, as the API has.
     ///
     /// This is the one place a writer outside the API builds a `Shared`; a trait over only the
     /// data backends the writers use could replace it later without changing what they write.

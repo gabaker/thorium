@@ -14,7 +14,8 @@ use crate::models::upgrades::{IssueReason, RevisionId, StepLoss};
 ///
 /// Stored as text through `ScyllaStoreAsStr`, which calls the hand-written `as_str` and `FromStr`
 /// below, not serde; the stored text is `backend`, `run`, `revision`, `history`, `config`,
-/// `consumed_code`, `archived_history`, `job_result`, or `legacy_drop`
+/// `consumed_code`, `archived_history`, `job_result`, `legacy_drop`, `drain_request`, or
+/// `drain_request_args`
 ///
 /// It has no `Unknown` catch-all: a reader that queries one kind's partition by name never sees a
 /// kind added later, but a reader that scans the whole table, as a backup of `schema_migrations`
@@ -43,11 +44,18 @@ pub enum MigrationRecordKind {
     /// The audit row of one legacy object `thoradm schema drop-legacy` dropped: who, when, the
     /// object's id and its row count; append-only; stored as `legacy_drop`
     LegacyDrop,
+    /// One reaction a drain cancelled, recorded so it can be resubmitted: the request as JSON
+    /// without its arguments, and how far its resubmission got; written only with conditional
+    /// statements and read as raw text columns; stored as `drain_request`
+    DrainRequest,
+    /// The arguments of one recorded drain request as JSON, always written with a time-to-live
+    /// and never backed up; stored as `drain_request_args`
+    DrainRequestArgs,
 }
 
 impl MigrationRecordKind {
     /// Every record kind, in the order they are declared
-    pub const ALL: [MigrationRecordKind; 9] = [
+    pub const ALL: [MigrationRecordKind; 11] = [
         Self::Backend,
         Self::Run,
         Self::Revision,
@@ -57,6 +65,8 @@ impl MigrationRecordKind {
         Self::ArchivedHistory,
         Self::JobResult,
         Self::LegacyDrop,
+        Self::DrainRequest,
+        Self::DrainRequestArgs,
     ];
 
     /// The text this kind is stored as in Scylla, which never changes once released
@@ -73,6 +83,8 @@ impl MigrationRecordKind {
             Self::ArchivedHistory => "archived_history",
             Self::JobResult => "job_result",
             Self::LegacyDrop => "legacy_drop",
+            Self::DrainRequest => "drain_request",
+            Self::DrainRequestArgs => "drain_request_args",
         }
     }
 }
@@ -359,6 +371,56 @@ pub struct AppliedReport {
     pub notes: Vec<ReportNote>,
     /// How many mappings (an item and what it became) the migration made; counted, never listed
     pub mappings_total: u64,
+    /// What a drain cancel did, set only by the `drain-reactions` run; its worker list is bounded
+    /// by [`MAX_DRAIN_WORKERS`] rather than by [`MAX_REPORT_BYTES`]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drain: Option<DrainCancelReport>,
+}
+
+/// The most workers a drain cancel's report lists for the operator's pod deletion; workers past it
+/// still lose their registrations and are only counted
+pub const MAX_DRAIN_WORKERS: usize = 5_000;
+
+/// What a drain cancel did: counts, and the workers whose pods the operator deletes
+///
+/// It names no reaction, creator, pipeline, or argument: the worker list is the only list.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DrainCancelReport {
+    /// How many in-flight reactions this run failed
+    pub cancelled: u64,
+    /// How many requests this run recorded to be resubmitted
+    pub recorded: u64,
+    /// How many requests this run recorded as refused, never resubmitted on their own
+    pub refused: u64,
+    /// How many requests this run recorded as stale, idle too long to be resubmitted on their own
+    pub stale: u64,
+    /// How many requests an earlier run recorded that this run kept as they were: those of the
+    /// reactions it cancelled, and the `recorded` ones of its step attempt whose reactions a failed
+    /// earlier run of the attempt already cancelled
+    pub kept: u64,
+    /// How many stage-path worker registrations this run removed
+    pub workers_removed: u64,
+    /// How many removed workers are past [`MAX_DRAIN_WORKERS`] and so not listed for pod deletion
+    pub workers_not_listed: u64,
+    /// The removed workers whose pods the operator deletes, at most [`MAX_DRAIN_WORKERS`]
+    pub workers: Vec<DrainWorker>,
+}
+
+/// One stage-path worker whose registration a drain cancel removed
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DrainWorker {
+    /// The group the worker ran jobs for
+    pub group: String,
+    /// The worker's name, which is its pod's name
+    pub name: String,
+    /// The scaler that spawned it, such as `K8s`
+    pub scaler: String,
+    /// The cluster it ran in
+    pub cluster: String,
+    /// The node it ran on
+    pub node: String,
 }
 
 /// One item a pass skipped
@@ -421,6 +483,17 @@ impl AppliedReport {
             cut(&mut note.group);
             cut(&mut note.item);
             cut(&mut note.note);
+        }
+        // a drain cancel's worker list keeps its own cap, with every string cut like the others
+        if let Some(drain) = &mut self.drain {
+            drain.workers.truncate(MAX_DRAIN_WORKERS);
+            for worker in &mut drain.workers {
+                cut(&mut worker.group);
+                cut(&mut worker.name);
+                cut(&mut worker.scaler);
+                cut(&mut worker.cluster);
+                cut(&mut worker.node);
+            }
         }
         // the size of the stored form
         let size =

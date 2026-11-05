@@ -4,7 +4,7 @@ use chrono::Utc;
 use serde_json::json;
 use std::time::Duration;
 use thorium::models::schema::{
-    AppliedReport, GroupTotal, MigrateError, MigrationRunStatus, PassCounts, PassOutcome,
+    AppliedReport, GroupTotal, MigrateError, MigrationRunStatus, PassCounts, PassOutcome, RunFlags,
     RunLimits, RunMode, RunOptions, append_history, claim_consumed_code, reingests, run_pass,
 };
 use thorium::models::upgrades::{AppliedStep, CONSUMED_REFUSAL, IssueSummary, StepState};
@@ -99,6 +99,21 @@ fn limits(cmd: &RunMigration) -> RunLimits {
     }
 }
 
+/// Build the options only some migrations read from the command's flags
+///
+/// # Arguments
+///
+/// * `cmd` - The migration to run
+fn flags(cmd: &RunMigration) -> RunFlags {
+    // each option is off unless its flag was given
+    RunFlags {
+        in_pause: cmd.in_pause.clone(),
+        include_stale: cmd.include_stale,
+        max_requests: cmd.max_requests,
+        step_attempt: cmd.step_attempt.clone(),
+    }
+}
+
 /// How many objects a reason's group holds, summed across workers
 ///
 /// # Arguments
@@ -181,7 +196,7 @@ fn in_job() -> bool {
 }
 
 /// Who a step's entry says ran it: this thoradm, and the OS user for a run by hand
-fn ran_by() -> String {
+pub(super) fn ran_by() -> String {
     // a Job is named by its Job; a run by hand by the user who ran it
     let version = env!("CARGO_PKG_VERSION");
     if in_job() {
@@ -391,7 +406,9 @@ pub(super) async fn run(
         objects: cmd.objects.clone(),
         reason: cmd.reason.clone(),
     };
-    let ctx = context::context(&env, RunMode::Run, cancel, limits(cmd));
+    let mut ctx = context::context(&env, RunMode::Run, cancel, limits(cmd));
+    // the options only some migrations read
+    ctx.flags = flags(cmd);
     // a re-run of one group prints the group's count before and after, and names a group that
     // exists
     let before = match &cmd.reason {
@@ -696,6 +713,40 @@ mod tests {
         let done =
             finished_entry(def, &command, Some(&running), false, &resumed).expect("an entry");
         assert_eq!(done.outcome, StepState::Done);
+    }
+
+    /// The drain and resubmission options given to `migrate run` reach the run's context, and a
+    /// run given none of them has every option off
+    #[test]
+    fn the_run_flags_reach_the_context() {
+        // every option given
+        let args = crate::args::Args::try_parse_from([
+            "thoradm",
+            "migrate",
+            "run",
+            "--id",
+            "resubmit-reactions",
+            "--in-pause",
+            "2026-11-05T01:02:03Z",
+            "--include-stale",
+            "--max-requests",
+            "12000",
+            "--step-attempt",
+            "2026-11-05T00:00:00Z",
+        ])
+        .expect("run should parse");
+        let crate::args::SubCommands::Migrate(crate::args::MigrateSubCommands::Run(given)) =
+            args.cmd
+        else {
+            panic!("expected migrate run");
+        };
+        let given = flags(&given);
+        assert_eq!(given.in_pause.as_deref(), Some("2026-11-05T01:02:03Z"));
+        assert!(given.include_stale);
+        assert_eq!(given.max_requests, Some(12_000));
+        assert_eq!(given.step_attempt.as_deref(), Some("2026-11-05T00:00:00Z"));
+        // none given
+        assert_eq!(flags(&command("resubmit-reactions")), RunFlags::default());
     }
 
     /// The summary a Job leaves says whether its pass resumed an earlier pod's, so the operator

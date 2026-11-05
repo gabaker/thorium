@@ -115,7 +115,7 @@ notifications, and nodes (the materialized views are rebuilt from them); the use
 tokens (run-scoped tokens excepted, see below), groups, network-policy sets, images, pipelines,
 system settings, and the average runtime of each tool instance held in Redis; and the objects in
 the `files`, `repos`, `attachments`, `results`, and `graphics` buckets. It also holds the deployment's schema record, every row of the `schema_migrations` and `schema_migration_issues`
-Scylla tables except the Job results, as `schema.json` beside the archives (see [The Schema
+Scylla tables except the Job results and drain request arguments, as `schema.json` beside the archives (see [The Schema
 Record](#the-schema-record)). The Taking Backups guide lists every resource and the component that
 backs it up, generated from thoradm's coverage registry, in [What Is Backed
 Up](./taking_backups.md#what-is-backed-up). To read the same
@@ -505,7 +505,8 @@ row is restored records its failure with operation `pre-restore` and key `schema
 
 A backup holds the deployment's schema record as `schema.json` in the backup directory, beside the
 table archives and listed in the manifest's `siblings`: every row of the `schema_migrations` and
-`schema_migration_issues` Scylla tables except the Job results, which expire. It is the applied
+`schema_migration_issues` Scylla tables except the Job results and the arguments of the requests a
+drain recorded, which expire. It is the applied
 fingerprint and layout version of each backend, the revision and the full applied history, the
 state of each migration pass, the consumed lossy-approval codes, any history an earlier restore
 archived, and the data-shaping settings. The file also names the thoradm version that wrote it, and
@@ -549,6 +550,17 @@ A restore with a record:
   thoradm's version and the OS user. Consumed lossy-approval codes are merged, never replaced, so a
   code used after the backup was taken still counts as used. A backup of the restored deployment
   carries the archived rows and the `restored` entry.
+- **Merges the requests a drain recorded** (see [Cancelling and Resubmitting
+  Reactions](#cancelling-and-resubmitting-reactions)) with the target's instead of replacing them.
+  A request the target lacks comes back as the backup has it, and one the target holds is written
+  only when the backup's status is further along (`resubmitted` and `refused` past `resubmitting`,
+  which is past `recorded` and `stale`), keeping the new id the target's row reserved, so no
+  request moves backward. Their arguments are never restored: a backup this release takes holds
+  none, and the arguments rows of a backup an older thoradm took are dropped and counted as
+  `drain_args_dropped` in the summary. Take and restore the backups of a deployment that holds
+  drain requests with a thoradm of this release or newer: an older thoradm copies the expiring
+  arguments rows into the backup with the record's other rows, and its restore writes them back
+  with no expiry and restores none of the requests of a backup this release took.
 - **Leaves the data-shaping settings as the restoring cluster has them.** A restore re-buckets
   every row with the cluster's partition sizes, so the settings recorded afterward are the
   cluster's, not the backup's.
@@ -619,7 +631,15 @@ restore replaces the bootstrapped admin with the backup's users, whose logins wo
    queued chunk events are runtime state the backup doesn't hold, so it makes no progress and
    counts against the active-hunt quotas until it is cancelled (`HuntStatus=Running` and
    `HuntStatus=Created` tags list them). Recreate it to scan its window again.
-6. **Resume the writers and users.** Nodes restored from the backup check in again on their own.
+6. **Resubmit the reactions a drain cancelled** when the backup was taken between a drain's cancel
+   and its resubmission (`thoradm migrate report --id resubmit-reactions` lists requests still
+   `recorded`). The restore's `restored` entry closes the drain attempt, so the operator never
+   resubmits them: once revision `2026-10-v04` is recorded again, run
+   `thoradm migrate run --id resubmit-reactions --include-stale` by hand. A run without
+   `--include-stale` only marks them `stale`. Each request still goes through every check, so a
+   request with arguments is refused (a restore never brings arguments back), as is one the
+   conversion pause never bound to its stage tools; submit those again with `thorctl`.
+7. **Resume the writers and users.** Nodes restored from the backup check in again on their own.
 
 `verify --cluster` writes its report like `verify` and checks:
 
@@ -939,10 +959,10 @@ thoradm migrate plan --from <revision> [--to <revision>]
 thoradm migrate check --id <migration> [--all] [--samples] [--slices <n>] [--batch-rows <n>]
 thoradm migrate run --id <migration> [--objects <keys>] [--reason <code>] [--accept-issues <code>]
                     [--confirm <code>] [--backup <ref>] [--slices <n>] [--batch-rows <n>]
-                    [--force-break-lease]
+                    [--force-break-lease] [--max-requests <n>] [--include-stale]
 thoradm migrate verify --id <migration>
 thoradm migrate issues --id <migration> [--reason <code>]
-thoradm migrate report --id <migration>
+thoradm migrate report --id <migration> [--json]
 thoradm migrate revert --to <revision> [--dry-run] [--backup <ref>] [--confirm <code>]
                        [--accept-backup-gaps]
 thoradm migrate reset-state --to <revision> --i-restored-data
@@ -969,7 +989,7 @@ changes data, the component it `scales down`, and the `migration` it runs:
 2026-10-v02 (released with Thorium 1.8.1; from 2026-10-v03; revert): Revert the revision that applies the schema first
   - users-settings-theme-reverse [Data, needs approval + backup, scales down api, migration users-settings-theme-reverse]: Move the theme of any user stored in its own field into the user's settings, the layout the first Helm revision reads; users already there are skipped
 2026-10-v04 (released with Thorium 1.8.1; from 2026-10-v03): Images, pipeline stages, and provenance are converted for tools
-  - drain-reactions [Data, needs approval + backup, migration drain-reactions (check only; manual procedure)]: Wait until no reaction is Created or Started and no stage-path worker is registered, with Thorium running normally; the step only checks and deletes nothing, and is skipped when nothing is in flight
+  - drain-reactions [Data, needs approval + backup, migration drain-reactions]: Wait until no reaction is Created or Started and no stage-path worker is registered, with Thorium running normally; the step only checks and deletes nothing, and is skipped when nothing is in flight
   - images-to-tools [Data, needs approval + backup, scales down api, scaler, baremetal-scaler, event-handler, search-streamer, migration images-to-tools]: Create a tool and its first tool instance for every image, tagged as migrated from that image
   - pipelines-to-tool-stages [Data, needs approval + backup, scales down api, scaler, baremetal-scaler, event-handler, search-streamer, migration pipelines-to-tool-stages]: Pin each image stage of every pipeline to the first tool instance created from its image
   - provenance-to-legacy-tools [Data, needs approval + backup, scales down api, scaler, baremetal-scaler, event-handler, search-streamer, migration provenance-to-legacy-tools]: Move the tool names stored in file system, decompiled function, and process tree provenance into their legacy tools field
@@ -984,12 +1004,14 @@ changes data, the component it `scales down`, and the `migration` it runs:
 
 The `needs approval + backup` note comes from a step's kind: every `Data` step carries it, though
 a step is approved only when it has work to do (see [Approvals](../deploy/upgrades.md#approvals)).
-`drain-reactions` is `check only`: `thoradm migrate check --id drain-reactions` reports the
+The `drain-reactions` step only checks: `thoradm migrate check --id drain-reactions` reports the
 counts of reactions in flight and stage-path workers on stdout and names each of them on stderr
 (id, group, pipeline, status, age, last activity, and whether its status set lists it; name,
 scaler, cluster, node, status, heartbeat, and whether its node is registered; at most 50 rows a
 table; see [The drain](../agentic/upgrading.md#the-drain)). The step never asks for an approval,
-deletes nothing, and finishes once none is left, and `run` and `verify` refuse it.
+deletes nothing, and finishes once none is left. `thoradm migrate run --id drain-reactions`
+cancels that work instead of waiting for it (see [Cancelling and Resubmitting
+Reactions](#cancelling-and-resubmitting-reactions)).
 
 `plan` prints the steps from one revision to another (the latest by default), for example
 `thoradm migrate plan --from 2026-10-v01`. Find a cluster's revision in the `Revision` column of
@@ -1006,16 +1028,18 @@ theme between its own field and the user's `settings` (`users-settings-theme` on
 every user already in the layout `2026-10-v02` reads); `drain-reactions`, `images-to-tools`,
 `pipelines-to-tool-stages`, and `provenance-to-legacy-tools`, which wait for the reactions in flight and
 convert the images, pipelines, and provenance of earlier releases (see [Upgrading to Agentic
-Workflows](../agentic/upgrading.md)); and the six
+Workflows](../agentic/upgrading.md)); `resubmit-reactions`, which creates the reactions a drain
+cancelled again and belongs to no step (see [Cancelling and Resubmitting
+Reactions](#cancelling-and-resubmitting-reactions)); and the six
 `rebucket-<data type>` migrations (`rebucket-files`, `rebucket-repos`, `rebucket-results`,
 `rebucket-entities`, `rebucket-associations`, `rebucket-tags`) that the operator plans when a
 partition size changes (see [Changing a partition size](../deploy/upgrades.md#changing-a-partition-size)).
-Thoradm can check, run, and verify every one of them but `drain-reactions`, `elastic-rebuild` included, which the operator
+Thoradm can check, run, and verify every one of them, `elastic-rebuild` included, which the operator
 runs as the migration Job of the Elasticsearch reindex step (see [Reindexing
 Elasticsearch](../deploy/upgrades.md#reindexing-elasticsearch)). An unknown id exits 1. A
 migration thoradm can't perform prints its manual procedure and exits 3 on `check`, `run`, and
 `verify`, and one it can only check does so on `run` and `verify`; this release registers none of
-the first kind, and `drain-reactions` is the one of the second kind.
+either kind.
 
 | Subcommand | What it does |
 |---|---|
@@ -1027,9 +1051,12 @@ the first kind, and `drain-reactions` is the one of the second kind.
 | `run --confirm <code>` | The confirmation code of a lossy step. Thoradm records the code as consumed before anything else, and refuses a code already consumed (see [Accepting loss](../deploy/upgrades.md#accepting-loss)) |
 | `run --force-break-lease` | Takes the writer lease although another writer holds it (see [The Writer Lease](#the-writer-lease)) |
 | `run --backup <ref>`, `--running-entry <json>` | Passed by the operator: the approval's backup reference, recorded in the pass, and the step's `Running` history entry with its paused replica counts, written before anything else |
+| `run --max-requests <n>` | `drain-reactions` only: the most reactions one cancel fails and records, in place of the default of 10,000. A cancel that finds more refuses before it touches anything |
+| `run --include-stale` | `resubmit-reactions` only: also resubmits the requests marked `stale`, still through every check |
+| `run --step-attempt <at>`, `--in-pause <attempt>` | Passed by the operator, never by hand: the drain attempt a cancel records each request under, and the attempt whose requests a resubmission inside the conversion pause creates. A value that doesn't name the open drain attempt fails the run |
 | `verify` | Loads every object of the migration's family through the API's own deserialization. Exits 0 when all load, and 5 when some don't |
 | `issues` | Lists the issue groups of the current attempt, summed across workers. `--reason <code>` shows one group: its class, count, resolved count, whether it was accepted, and its sample keys from every worker |
-| `report` | Prints what the migration's last pass applied, as JSON; exits 1 when the pass hasn't ended |
+| `report` | Prints what the migration's last pass applied, as JSON; exits 1 when the pass hasn't ended. For `drain-reactions` and `resubmit-reactions` it prints the recorded requests as tables instead, or as JSON with `--json` (see [Cancelling and Resubmitting Reactions](#cancelling-and-resubmitting-reactions)) |
 | `revert` | Moves a cluster back to an older revision: it reads the recorded revision and history, plans the reverse path, and runs each step's migration in turn. `--dry-run` prints the steps, what each loses, and the confirmation code of each lossy one, and changes nothing. `--dry-run` also shows whether `thoradm backup` covers each lost field, and names the components a step expects to be stopped while it runs; the revert stops none of them, so scale them to zero first. A step that loses data runs only with `--confirm <its code>` (and `--backup`), one lossy step per run: the next code exists once this step's entries are recorded. A step that loses a field no `thoradm backup` covers, which a backup can't restore, is refused unless `--accept-backup-gaps` is also given, the way the operator's approval needs `acceptBackupGaps`. A step thoradm doesn't run stops the revert with that step's manual procedure. An interrupted step exits 4; run the revert again to resume it. An interrupted lossy step's code changed when its run was recorded, so run `--dry-run` again for its new code and rerun with that code. When every step has run it records the older revision |
 | `reset-state` | Rewrites the recorded revision after data was restored or wiped other than by `backup restore`, when the record names a revision the data isn't at; refuses with exit 2 without `--i-restored-data` (see below) |
 | `record` | Run by the operator to copy its entries into the record and move the recorded revision once every step is recorded; `--seed` records the revision and history of the `--state` ConfigMap when the keyspace holds none |
@@ -1048,6 +1075,80 @@ events wait in Redis for the event handler to start.
 instance of that tool, and `provenance-to-legacy-tools` moves the tool names stored on filesystems,
 decompiled functions, and process trees to `legacy_tools`. The upgrade runs the three as steps; see
 [Upgrading to Agentic Workflows](../agentic/upgrading.md).
+
+### Cancelling and Resubmitting Reactions
+
+`drain-reactions` and `resubmit-reactions` cancel the reactions still `Created` or `Started` when
+an upgrade reaches the conversion, and create them again afterwards (see [The
+drain](../agentic/upgrading.md#the-drain)). Run them by hand with the cluster config:
+
+```bash
+thoradm --cluster-conf thorium.yml migrate check --id drain-reactions
+thoradm --cluster-conf thorium.yml migrate run --id drain-reactions [--max-requests <n>]
+thoradm --cluster-conf thorium.yml migrate report --id drain-reactions [--json]
+thoradm --cluster-conf thorium.yml migrate check --id resubmit-reactions
+thoradm --cluster-conf thorium.yml migrate run --id resubmit-reactions [--include-stale]
+thoradm --cluster-conf thorium.yml migrate report --id resubmit-reactions [--json]
+```
+
+**The cancel.** `migrate run --id drain-reactions` first counts the reactions in flight, and when
+there are more than 10,000 (or the `--max-requests` you give) it fails with exit code 6, naming the
+count, before it touches anything. Otherwise it takes each reaction, children before parents, and:
+
+1. records its request as a `drain_request` row in the schema record: the group, pipeline, samples,
+   repos, tags, parent, creator, the status it had, its last activity, the creator's role in the
+   group, and the pipeline's creator and stage order. The arguments go into their own row, which
+   expires after 14 days, and the request names them only by hash and size;
+2. deletes its jobs from every queue and index the previous release kept them in;
+3. fails it, with `cancelled by the upgrade to 2026-10-v04` and what becomes of it in its status
+   log.
+
+It then removes the registrations of the stage-path workers. A request is recorded `refused` when
+its arguments are larger than 64 KiB, when a system account or a user without an owner, manager,
+or user role in the group created it, when files were uploaded with it or it used a cache, or when
+its pipeline is gone. It is recorded `stale` when it was idle for more than 30 days. Every other
+request is recorded `recorded`, ready to resubmit. A request already recorded is kept as it is,
+so a cancel that stops partway finishes when run again. The run removes worker registrations but
+deletes no pods; delete the pods of the workers its report lists. A request the cancel records by
+hand has no drain attempt, so no resubmission ever creates it, the operator's or yours: check
+`migrate report --id drain-reactions` and submit what is still wanted with `thorctl`.
+
+**The resubmission.** `migrate run --id resubmit-reactions` creates each `recorded` request of the
+open drain attempt again, once, as its creator, with the tag `resubmitted-from:<old id>` and no
+parent. It has no step in the catalog: the operator runs it inside the conversion pause. The
+operator passes the time of the drain step's `Running` entry to the cancel as `--step-attempt`,
+which records it as each request's attempt, and to the resubmission as `--in-pause`. A run whose
+Job failed leaves its attempt open: the retry gets the first run's time too, and its report counts
+the requests the failed run recorded as kept, so the resubmission creates what either run
+cancelled. Never pass `--in-pause` or `--step-attempt` by hand. The run refuses (exit
+code 6) until revision `2026-10-v04` is recorded. A drain attempt stays open from the drain's
+`Done` until an `upgrade-stopped`, `restored`, or `reset-state` entry follows it. A `recorded`
+request outside the open attempt, or any `recorded` request when none is open, is marked `stale`
+and not resubmitted; `--include-stale` takes the `stale` and `recorded` requests too. Each request,
+stale or not, still goes through every check, and is marked `refused` with the reason when one
+fails:
+
+- the creator no longer exists, is a system account, or holds no owner, manager, or user role in
+  the group, now or when the request was recorded;
+- the group or pipeline no longer exists, or the pipeline was changed or recreated since the
+  cancel, isn't converted to tools, wasn't bound to its stage tools inside the conversion pause,
+  or has other stage tools than it was bound to;
+- the request used uploaded files or a cache, or is a sub reaction of a recorded parent, which the
+  parent's resubmission creates again;
+- the create route refuses it (the reason is the route's);
+- its arguments expired, weren't restored, or don't match the recorded hash.
+
+Each request moves forward only, `recorded` or `stale` to `resubmitting` (with the new id reserved
+before anything is created) to `resubmitted` or `refused`, so a rerun or an overlapping run never
+creates a request twice. A resubmitted request's arguments row is deleted, and the old reaction's
+status log names the new id.
+
+**The reports.** `migrate report --id drain-reactions` lists every recorded request (id, group,
+pipeline, creator, the status it had, when it was recorded, the attempt, and its status), then the
+counts of the last cancel and the worker registrations it removed (at most 5,000 named; the rest
+are counted). `migrate report --id resubmit-reactions` lists each request's outcome with its new id
+or the reason it was refused, then the counts of each status. `--json` prints either as one JSON
+object. Neither reads the arguments rows or prints an argument, its hash, or its size.
 
 Exit codes of the `migrate` and `schema` subcommands:
 

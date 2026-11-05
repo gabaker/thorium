@@ -1,26 +1,48 @@
-//! The `drain-reactions` check
+//! The `drain-reactions` check and cancel
 //!
 //! Reactions that are still `Created` or `Started` hold queued jobs and running workers shaped for
 //! the stage path, which the tool path can't read, so the conversions must not start while any
-//! exist. This migration only checks: it reads Redis and Scylla, writes nothing, never deletes a
-//! reaction, and asks the operator to wait while any reaction is in flight or any stage-path worker
-//! is still registered. The wait it reports holds counts only, since it reaches the cluster's
-//! status; the reactions and workers that hold the drain are named on stderr, which reaches the
-//! admin's terminal or the check Job's logs but never the stored report. The admin lets them
-//! finish or deletes the stuck ones with `thorctl reactions delete` while the previous API still
-//! runs.
+//! exist. The check only reads Redis and Scylla and asks the operator to wait while any reaction
+//! is in flight or any stage-path worker is still registered. The wait it reports holds counts
+//! only, since it reaches the cluster's status; the reactions and workers that hold the drain are
+//! named on stderr, which reaches the admin's terminal or the check Job's logs but never the
+//! stored report. The admin lets them finish or deletes the stuck ones with
+//! `thorctl reactions delete` while the previous API still runs.
+//!
+//! The run, which the operator starts once an admin approves cancelling in-flight work, cancels
+//! that work: for each in-flight reaction, children before parents, it records the reaction's
+//! request as a `drain_request` row (its arguments in their own expiring row, named in the
+//! request only by hash and size), deletes its jobs from every index the previous release kept
+//! them in, and fails it with the reason. It then removes the stage-path workers' registrations.
+//! A request already recorded is kept as it is, so an interrupted run finishes on the next one.
+//! Its applied report, which is also the Job's result row, holds counts and the removed workers
+//! the operator deletes pods for, and never a reaction id, creator, pipeline, or argument.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use redis::aio::MultiplexedConnection;
-use std::collections::BTreeMap;
-use thorium::models::schema::{
-    Batch, CheckWait, MigrateError, MigrationRunner, Outcome, PassCounts, RunContext, RunMode,
-    Slice, backend_error,
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Arc, LazyLock, Mutex};
+use thorium::models::backends::db;
+use thorium::models::schema::drain_requests::{
+    CreatorMembership, DrainRequest, DrainRequestRow, DrainRequestStore, DrainStatus, IDLE_DAYS,
+    MAX_ARGS_BYTES, MAX_REQUESTS, PipelineIdentity, SERVICE_USERS, args_sha256,
 };
-use thorium::models::upgrades::Record;
+use thorium::models::schema::{
+    AppliedReport, Batch, CheckWait, DrainCancelReport, DrainWorker, IssueReport,
+    MAX_DRAIN_WORKERS, MigrateError, MigrationRunner, ObjectClass, Outcome, PassCounts, RunContext,
+    RunMode, Slice, backend_error, write_job_result,
+};
+use thorium::models::upgrades::{IssueCategory, IssueReason, Record};
+use thorium::models::{
+    ImageScaler, Reaction, ReactionStatus, RepoDependencyRequest, WorkerDeleteMap,
+};
+use thorium::utils::{ApiError, Shared};
+use tracing::info;
+use uuid::Uuid;
 
 use super::registry::{Backend, MigrationDef, Support};
+use crate::shared::termination::job_uid;
 
 /// The id of this migration
 pub const ID: &str = "drain-reactions";
@@ -707,28 +729,943 @@ fn more(total: usize, what: &str, marked: usize, mark: &str) -> String {
     }
 }
 
-/// The runner of the `drain-reactions` check, which converts and writes nothing
+/// Where the test fault hook stops a reaction's cancel
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelFault {
+    /// A backend error after the reaction's request is recorded and before the reaction is failed
+    AfterRecord,
+}
+
+/// The armed cancel faults: per namespace, the reaction's id and where to fail; each fires once
+#[cfg(feature = "test-support")]
+static CANCEL_FAULTS: std::sync::Mutex<BTreeMap<String, (String, CancelFault)>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+/// Arm a one-shot fault for one reaction's cancel in a namespace
+///
+/// # Arguments
+///
+/// * `ns` - The namespace the run works in
+/// * `id` - The reaction's id
+/// * `fault` - Where the cancel fails
+#[cfg(feature = "test-support")]
+pub fn arm_cancel_fault(ns: &str, id: &str, fault: CancelFault) {
+    // a poisoned lock still holds the map
+    CANCEL_FAULTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(ns.to_owned(), (id.to_owned(), fault));
+}
+
+/// Fire the fault armed for a reaction's cancel at a point, once
+///
+/// # Arguments
+///
+/// * `ns` - The namespace the run works in
+/// * `id` - The reaction's id
+/// * `at` - Where the cancel stands
+#[cfg(feature = "test-support")]
+fn fire_cancel_fault(ns: &str, id: &str, at: CancelFault) -> Result<(), MigrateError> {
+    // take the namespace's fault only when it names this reaction and point
+    let mut faults = CANCEL_FAULTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if faults.get(ns) != Some(&(id.to_owned(), at)) {
+        return Ok(());
+    }
+    faults.remove(ns);
+    // a systematic stop isn't retried, so the run ends with the cancel half done
+    Err(MigrateError::Systematic(format!(
+        "the armed {at:?} fault stopped the cancel"
+    )))
+}
+
+/// The Job UIDs tests stand in for a pod's own, per namespace, so a run in a test leaves its result
+/// row as a run in a Job does
+#[cfg(feature = "test-support")]
+static RESULT_UIDS: std::sync::Mutex<BTreeMap<String, String>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+/// Make the cancel runs in a namespace leave their result row under a UID, as a run in a Job does
+///
+/// # Arguments
+///
+/// * `ns` - The namespace the runs work in
+/// * `uid` - The UID to write the result row under
+#[cfg(feature = "test-support")]
+pub fn set_result_uid(ns: &str, uid: &str) {
+    // a poisoned lock still holds the map
+    RESULT_UIDS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(ns.to_owned(), uid.to_owned());
+}
+
+/// Get the UID of the Job a run is in, which its result row is written under; a run by hand has none
+///
+/// # Arguments
+///
+/// * `ns` - The namespace the run works in, which a test may have set a UID for
+fn result_uid(ns: &str) -> Option<String> {
+    // a test's stand-in for the namespace, when one is set
+    #[cfg(feature = "test-support")]
+    if let Some(uid) = RESULT_UIDS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(ns)
+        .cloned()
+    {
+        return Some(uid);
+    }
+    // the pod's own label, passed in by the Job's spec
+    let _ = ns;
+    job_uid()
+}
+
+/// The revision whose drain this is, named in each cancelled reaction's status log when the
+/// catalog doesn't place the migration
+const REVISION: &str = "2026-10-v04";
+
+/// Why a request whose creator is a system account or holds no role in the group is refused
+const NO_ROLE: &str = "created by a system account or by a user without a role in the group; \
+                       re-run the hunt or resubmit by hand";
+
+/// The group roles a creator's membership is read from, in order, with the name a request
+/// records for each; only the first [`HELD_ROLES`] hold a role
+const ROLES: [(&str, &str); 4] = [
+    ("owners", "owner"),
+    ("managers", "manager"),
+    ("users", "user"),
+    ("monitors", "monitor"),
+];
+
+/// How many of [`ROLES`] hold a role in the group
+const HELD_ROLES: usize = 3;
+
+/// The record field naming what a record is
+const KIND: &str = "kind";
+
+/// The record kind of an in-flight reaction
+const KIND_REACTION: &str = "reaction";
+
+/// The record kind of a stage-path worker
+const KIND_WORKER: &str = "worker";
+
+/// The record field saying whether a reaction's parent is in flight too, so failing the
+/// reaction doesn't proceed it
+const PARENT_IN_SET: &str = "parent_in_set";
+
+/// What a cancel pass builds once per namespace
+struct PassTools {
+    /// The offline `Shared` the API's own reaction and worker writes go through
+    shared: Arc<Shared>,
+    /// The drain request rows
+    store: Arc<DrainRequestStore>,
+}
+
+/// The tools each namespace's pass built, dropped when the pass finishes
+static TOOLS: LazyLock<tokio::sync::Mutex<HashMap<String, Arc<PassTools>>>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
+
+/// What a cancel pass did so far
+#[derive(Default)]
+struct Progress {
+    /// The counts and worker list the applied report carries
+    report: DrainCancelReport,
+    /// The reactions whose request this pass inserted, so a retried cancel isn't counted as
+    /// keeping its own row
+    inserted: HashSet<String>,
+    /// The reactions this pass cancelled, so the requests an earlier run of the attempt recorded
+    /// are counted once
+    cancelled: HashSet<String>,
+}
+
+/// What each namespace's cancel pass did so far, reset when a pass starts
+static PROGRESS: LazyLock<Mutex<HashMap<String, Progress>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Change what a namespace's cancel pass did so far
+///
+/// # Arguments
+///
+/// * `ns` - The namespace
+/// * `change` - The change to make
+fn with_progress<T>(ns: &str, change: impl FnOnce(&mut Progress) -> T) -> T {
+    // a poisoned lock still holds the counts
+    let mut all = PROGRESS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    change(all.entry(ns.to_owned()).or_default())
+}
+
+/// Get the tools a namespace's cancel works with, building them on first use
+///
+/// # Arguments
+///
+/// * `ctx` - The run's context
+async fn tools(ctx: &RunContext) -> Result<Arc<PassTools>, MigrateError> {
+    // reuse the ones built for this namespace, holding the lock so only one set is ever built
+    let mut all = TOOLS.lock().await;
+    let ns = &ctx.backends.namespace;
+    if let Some(tools) = all.get(ns) {
+        return Ok(tools.clone());
+    }
+    // the writer from the run's config and Redis pool; an unreachable Scylla is worth retrying
+    let shared = Box::pin(Shared::for_offline_writer(
+        (*ctx.backends.conf).clone(),
+        ctx.backends.redis.clone(),
+    ))
+    .await
+    .map_err(|err| MigrateError::Backend(format!("the reaction writer didn't start: {err}")))?;
+    // and the drain request statements
+    let store = DrainRequestStore::prepare(ctx.backends.scylla.clone(), ns).await?;
+    let tools = Arc::new(PassTools {
+        shared: Arc::new(shared),
+        store: Arc::new(store),
+    });
+    all.insert(ns.clone(), tools.clone());
+    Ok(tools)
+}
+
+/// An in-flight reaction as the cancel's listing sees it
+struct InFlight {
+    /// The key of its data hash
+    key: String,
+    /// Its parent's id, if it is a sub reaction
+    parent: Option<String>,
+}
+
+/// Read every in-flight reaction's data key and parent, by reaction id
+///
+/// # Arguments
+///
+/// * `ctx` - The run's context
+async fn in_flight(ctx: &RunContext) -> Result<HashMap<String, InFlight>, MigrateError> {
+    // walk the reaction data hashes a page at a time, reading each one's status and parent
+    let pattern = format!("{}:reaction_data:*", ctx.backends.namespace);
+    let mut conn = ctx.backends.redis.get().await.map_err(redis_error)?;
+    let mut found = HashMap::new();
+    let mut cursor = 0_u64;
+    loop {
+        let (next, keys) = scan_page(&mut conn, &pattern, cursor).await?;
+        cursor = next;
+        let mut pipe = redis::pipe();
+        for key in &keys {
+            pipe.cmd("HMGET").arg(key).arg(&["status", "parent"][..]);
+        }
+        let fields: Vec<(Option<String>, Option<String>)> = if keys.is_empty() {
+            Vec::new()
+        } else {
+            pipe.query_async(&mut *conn).await.map_err(redis_error)?
+        };
+        // keep the unfinished ones, by the id that ends their key
+        for (key, (status, parent)) in keys.into_iter().zip(fields) {
+            if status.as_deref().is_some_and(is_in_flight) {
+                let id = key.rsplit(':').next().unwrap_or_default().to_owned();
+                let parent = parent
+                    .map(|parent| unquote(&parent).to_owned())
+                    .filter(|parent| !parent.is_empty() && parent != "null");
+                found.insert(id, InFlight { key, parent });
+            }
+        }
+        // a cursor back at the start ends the scan
+        if cursor == 0 {
+            break;
+        }
+    }
+    Ok(found)
+}
+
+/// How many in-flight ancestors a reaction has, so children are cancelled before their parents
+///
+/// # Arguments
+///
+/// * `id` - The reaction's id
+/// * `found` - Every in-flight reaction by id
+fn depth(id: &str, found: &HashMap<String, InFlight>) -> usize {
+    // follow the parents while they are in flight, stopping at a cycle
+    let mut seen = HashSet::from([id]);
+    let mut at = found
+        .get(id)
+        .and_then(|reaction| reaction.parent.as_deref());
+    let mut depth = 0;
+    while let Some(parent) = at {
+        if !seen.insert(parent) {
+            break;
+        }
+        let Some(reaction) = found.get(parent) else {
+            break;
+        };
+        depth += 1;
+        at = reaction.parent.as_deref();
+    }
+    depth
+}
+
+/// Read the keys of every registered worker the tool path can't read
+///
+/// # Arguments
+///
+/// * `ctx` - The run's context
+async fn stage_worker_keys(ctx: &RunContext) -> Result<Vec<String>, MigrateError> {
+    // walk the worker data hashes a page at a time
+    let pattern = format!("{}:worker_data:*", ctx.backends.namespace);
+    let mut conn = ctx.backends.redis.get().await.map_err(redis_error)?;
+    let mut found = Vec::new();
+    let mut cursor = 0_u64;
+    loop {
+        let (next, keys) = scan_page(&mut conn, &pattern, cursor).await?;
+        cursor = next;
+        let mut pipe = redis::pipe();
+        for key in &keys {
+            pipe.cmd("HMGET")
+                .arg(key)
+                .arg(&["tool_instance", "name", "cluster"][..]);
+        }
+        let fields: Vec<(Option<String>, Option<String>, Option<String>)> = if keys.is_empty() {
+            Vec::new()
+        } else {
+            pipe.query_async(&mut *conn).await.map_err(redis_error)?
+        };
+        // a worker the previous release registered has no tool instance; one deleted since the
+        // scan has no fields
+        for (key, (tool_instance, name, cluster)) in keys.into_iter().zip(fields) {
+            if tool_instance.is_none() && (name.is_some() || cluster.is_some()) {
+                found.push(key);
+            }
+        }
+        // a cursor back at the start ends the scan
+        if cursor == 0 {
+            break;
+        }
+    }
+    Ok(found)
+}
+
+/// Read the next batch of what the cancel works on: in-flight reactions, children first, then
+/// stage-path workers, each after the position a batch ended at
+///
+/// Everything is listed again for each batch, so a reaction finished or a worker gone since the
+/// last batch is never read, and the position only keeps a record left as an issue from being
+/// read twice.
+///
+/// # Arguments
+///
+/// * `after` - The position the last batch ended at, the sort key of its last record
+/// * `ctx` - The run's context
+async fn cancel_batch(after: &serde_json::Value, ctx: &RunContext) -> Result<Batch, MigrateError> {
+    // the in-flight reactions, each sorted by how deep it is so children come first
+    let found = in_flight(ctx).await?;
+    let mut sorted = found
+        .iter()
+        .map(|(id, reaction)| {
+            let sort = format!(
+                "r:{:04}:{}",
+                9999_usize.saturating_sub(depth(id, &found)),
+                reaction.key
+            );
+            let parent_in_set = reaction
+                .parent
+                .as_ref()
+                .is_some_and(|parent| found.contains_key(parent));
+            let fields = BTreeMap::from([
+                (KIND.to_owned(), KIND_REACTION.to_owned()),
+                (PARENT_IN_SET.to_owned(), parent_in_set.to_string()),
+            ]);
+            (
+                sort,
+                Record::Redis {
+                    key: reaction.key.clone(),
+                    fields,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    // then the stage-path workers, once every reaction is failed
+    for key in stage_worker_keys(ctx).await? {
+        let fields = BTreeMap::from([(KIND.to_owned(), KIND_WORKER.to_owned())]);
+        sorted.push((format!("w:{key}"), Record::Redis { key, fields }));
+    }
+    // keep what comes after the last batch, in order, up to a batch
+    let after = after.as_str().unwrap_or_default();
+    sorted.retain(|(sort, _)| sort.as_str() > after);
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    let done = sorted.len() <= ctx.limits.batch_rows;
+    sorted.truncate(ctx.limits.batch_rows);
+    let next = sorted.last().map_or_else(
+        || serde_json::Value::String(after.to_owned()),
+        |(sort, _)| serde_json::Value::String(sort.clone()),
+    );
+    Ok(Batch {
+        records: sorted.into_iter().map(|(_, record)| record).collect(),
+        next,
+        done,
+    })
+}
+
+/// An issue for a reaction hash the API can't read
+///
+/// # Arguments
+///
+/// * `key` - The hash's key
+fn unreadable(key: &str) -> Outcome {
+    // the reaction is left as it is, and counted in its own group
+    Outcome::Issue(IssueReport {
+        key: key.to_owned(),
+        transform: ID.to_owned(),
+        class: ObjectClass::Error,
+        reason: IssueReason::new(IssueCategory::MalformedJson, "unreadable-reaction"),
+    })
+}
+
+/// Read the creator's role in the reaction's group from the group's combined role sets
+///
+/// An admin's or analyst's bypass and the creator's own list of groups are never read.
+///
+/// # Arguments
+///
+/// * `group` - The reaction's group
+/// * `creator` - The reaction's creator
+/// * `ctx` - The run's context
+async fn membership(
+    group: &str,
+    creator: &str,
+    ctx: &RunContext,
+) -> Result<CreatorMembership, MigrateError> {
+    // whether each role's combined set, which holds metagroup members too, has the creator
+    let ns = &ctx.backends.namespace;
+    let mut pipe = redis::pipe();
+    for (set, _) in ROLES {
+        pipe.cmd("SISMEMBER")
+            .arg(format!("{ns}:groups_combined:{group}:{set}"))
+            .arg(creator);
+    }
+    let mut conn = ctx.backends.redis.get().await.map_err(redis_error)?;
+    let held: Vec<bool> = pipe.query_async(&mut *conn).await.map_err(redis_error)?;
+    // the first role held names it
+    let first = held.iter().position(|held| *held);
+    Ok(CreatorMembership {
+        held_role: first.is_some_and(|index| index < HELD_ROLES),
+        role: first.map_or("none", |index| ROLES[index].1).to_owned(),
+    })
+}
+
+/// The identity of the pipeline a reaction runs, or why its request can't be resubmitted when
+/// the pipeline can't be read
+///
+/// # Arguments
+///
+/// * `reaction` - The reaction
+/// * `shared` - The offline writer
+async fn identity(
+    reaction: &Reaction,
+    shared: &Shared,
+) -> Result<(PipelineIdentity, Option<String>), MigrateError> {
+    // the pipeline as the API reads it
+    match db::pipelines::get(&reaction.group, &reaction.pipeline, shared).await {
+        Ok(pipeline) => Ok((PipelineIdentity::of(&pipeline), None)),
+        Err(ApiError::Redis(err)) => Err(redis_error(err)),
+        Err(err) => {
+            // a pipeline that is gone or unreadable can't be checked again at resubmission
+            let reason = if err.status().as_u16() == 404 {
+                "the pipeline no longer exists"
+            } else {
+                "the pipeline can't be read"
+            };
+            let identity = PipelineIdentity {
+                group: reaction.group.clone(),
+                name: reaction.pipeline.clone(),
+                creator: String::new(),
+                order_sha256: String::new(),
+            };
+            Ok((identity, Some(reason.to_owned())))
+        }
+    }
+}
+
+/// Build the request row a reaction is recorded as, classified as recorded, refused, or stale
+///
+/// # Arguments
+///
+/// * `reaction` - The reaction
+/// * `raw_args` - Its argument JSON exactly as its hash stores it
+/// * `ctx` - The run's context
+/// * `shared` - The offline writer
+async fn request_row(
+    reaction: &Reaction,
+    raw_args: Option<&str>,
+    ctx: &RunContext,
+    shared: &Shared,
+) -> Result<DrainRequestRow, MigrateError> {
+    // its newest activity is its newest status log entry, or its SLA when it has none, and an
+    // orphan is missing from its pipeline's status set
+    let ns = &ctx.backends.namespace;
+    let id = reaction.id.to_string();
+    let status = unquote(&serde_json::to_string(&reaction.status).unwrap_or_default()).to_owned();
+    let mut conn = ctx.backends.redis.get().await.map_err(redis_error)?;
+    let (newest, listed): (Option<String>, bool) = redis::pipe()
+        .cmd("LINDEX")
+        .arg(format!("{ns}:logs:{}:{id}", reaction.group))
+        .arg(-1)
+        .cmd("SISMEMBER")
+        .arg(format!(
+            "{ns}:reactions:{}:{}:{status}",
+            reaction.group, reaction.pipeline
+        ))
+        .arg(&id)
+        .query_async(&mut *conn)
+        .await
+        .map_err(redis_error)?;
+    drop(conn);
+    let last_activity = log_time(newest.as_deref()).or(Some(reaction.sla));
+    // the args are named only by the hash and size of their stored text
+    let raw_args = raw_args.filter(|raw| !matches!(raw.trim(), "" | "{}" | "null"));
+    let args_bytes = raw_args.map_or(0, str::len);
+    // who created it, and the pipeline it runs
+    let membership = membership(&reaction.group, &reaction.creator, ctx).await?;
+    let (identity, pipeline_refused) = identity(reaction, shared).await?;
+    let buffers = !reaction.ephemeral.is_empty();
+    // classify it: refused for what a resubmission can never carry, stale when idle too long
+    let idle = last_activity.is_some_and(|at| at < Utc::now() - chrono::Duration::days(IDLE_DAYS));
+    let (row_status, result) = if args_bytes > MAX_ARGS_BYTES {
+        (
+            DrainStatus::Refused,
+            Some(format!(
+                "arguments too large to record ({args_bytes} bytes)"
+            )),
+        )
+    } else if SERVICE_USERS.contains(&reaction.creator.as_str()) || !membership.held_role {
+        (DrainStatus::Refused, Some(NO_ROLE.to_owned()))
+    } else if buffers || reaction.has_cache {
+        let reason = "the reaction had files uploaded with it or a cache, which a resubmission \
+                      can't carry; resubmit by hand";
+        (DrainStatus::Refused, Some(reason.to_owned()))
+    } else if let Some(reason) = pipeline_refused {
+        (DrainStatus::Refused, Some(reason))
+    } else if idle {
+        let reason =
+            format!("idle for more than {IDLE_DAYS} days; resubmit by hand if still wanted");
+        (DrainStatus::Stale, Some(reason))
+    } else {
+        (DrainStatus::Recorded, None)
+    };
+    // the request holds the reaction as it was, never its args
+    let request = DrainRequest {
+        group: reaction.group.clone(),
+        pipeline: reaction.pipeline.clone(),
+        samples: reaction.samples.clone(),
+        repos: reaction
+            .repos
+            .iter()
+            .map(|repo| RepoDependencyRequest {
+                url: repo.url.clone(),
+                commitish: repo.commitish.clone(),
+                kind: repo.kind,
+            })
+            .collect(),
+        tags: reaction.tags.clone(),
+        parent: reaction.parent,
+        trigger_depth: reaction.trigger_depth,
+        creator: reaction.creator.clone(),
+        old_status: reaction.status.clone(),
+        last_activity,
+        orphan: !listed,
+        args_sha256: raw_args.map(args_sha256),
+        args_bytes: u64::try_from(args_bytes).unwrap_or(u64::MAX),
+        buffers,
+        cache: reaction.has_cache,
+        identity,
+        membership,
+        binding: None,
+    };
+    let value = request
+        .to_json()
+        .map_err(|err| MigrateError::Systematic(format!("a drain request didn't render: {err}")))?;
+    // the row carries the drain step's attempt, and a final status is finished now
+    let now = Utc::now();
+    Ok(DrainRequestRow {
+        id,
+        value,
+        attempt: ctx.flags.step_attempt.clone(),
+        status: row_status,
+        entry: None,
+        result,
+        revision: Some(super::revision_of(ID).unwrap_or_else(|| REVISION.to_owned())),
+        started: Some(now),
+        finished: (row_status != DrainStatus::Recorded).then_some(now),
+        updated: Some(now),
+    })
+}
+
+/// Remove a reaction's jobs from the indexes the previous release kept them in that the API's
+/// job deletion no longer names: the status queue by pipeline and stage, and the scaler's
+/// deadline stream entry without a tool instance
+///
+/// # Arguments
+///
+/// * `reaction` - The reaction whose jobs to remove
+/// * `ctx` - The run's context
+async fn remove_old_job_entries(reaction: &Reaction, ctx: &RunContext) -> Result<(), MigrateError> {
+    // a reaction without jobs holds no entries
+    if reaction.jobs.is_empty() {
+        return Ok(());
+    }
+    // the fields each entry is built from, in one round trip
+    let ns = &ctx.backends.namespace;
+    let mut conn = ctx.backends.redis.get().await.map_err(redis_error)?;
+    let mut pipe = redis::pipe();
+    for job in &reaction.jobs {
+        pipe.cmd("HMGET")
+            .arg(format!("{ns}:job_data:{job}"))
+            .arg(&["group", "pipeline", "stage", "creator", "status", "scaler"][..]);
+    }
+    let jobs: Vec<Vec<Option<String>>> = pipe.query_async(&mut *conn).await.map_err(redis_error)?;
+    // each entry exactly as the previous release formatted it
+    let rid = reaction.id;
+    let mut pipe = redis::pipe();
+    for (job, fields) in reaction.jobs.iter().zip(jobs) {
+        let [group, pipeline, stage, creator, status, scaler]: [Option<String>; 6] =
+            fields.try_into().unwrap_or_default();
+        let (Some(group), Some(pipeline), Some(stage), Some(creator)) =
+            (group, pipeline, stage, creator)
+        else {
+            continue;
+        };
+        if let Some(status) = status {
+            pipe.cmd("ZREM")
+                .arg(format!(
+                    "{ns}:job_queue:{group}:{pipeline}:{stage}:{creator}:{}",
+                    unquote(&status)
+                ))
+                .arg(format!("{{\"job\":\"{job}\",\"reaction\":\"{rid}\"}}"));
+        }
+        if let Some(scaler) = scaler {
+            pipe.cmd("ZREM")
+                .arg(format!(
+                    "{ns}:streams:system:{}:deadlines",
+                    unquote(&scaler)
+                ))
+                .arg(format!(
+                    "{{\"group\":\"{group}\",\"pipeline\":\"{pipeline}\",\"stage\":\"{stage}\",\
+                     \"creator\":\"{creator}\",\"job_id\":\"{job}\",\"reaction\":\"{rid}\"}}"
+                ));
+        }
+    }
+    // remove them together
+    let _: () = pipe
+        .atomic()
+        .query_async(&mut *conn)
+        .await
+        .map_err(redis_error)?;
+    Ok(())
+}
+
+/// The status log message of a cancelled reaction
+///
+/// # Arguments
+///
+/// * `row` - Its request row as stored
+fn cancel_reason(row: &DrainRequestRow) -> String {
+    // the revision, and whether the request will be resubmitted
+    let revision = super::revision_of(ID).unwrap_or_else(|| REVISION.to_owned());
+    match (row.status, &row.result) {
+        (DrainStatus::Recorded | DrainStatus::Resubmitting, _) => format!(
+            "cancelled by the upgrade to {revision}; recorded to be resubmitted once the upgrade \
+             finishes"
+        ),
+        (_, Some(result)) => {
+            format!("cancelled by the upgrade to {revision}; not resubmitted: {result}")
+        }
+        (_, None) => format!("cancelled by the upgrade to {revision}; not resubmitted"),
+    }
+}
+
+/// Cancel one in-flight reaction: record its request and args, delete its jobs, and fail it
+///
+/// Every step can be repeated, so a cancel interrupted at any point finishes on the next run: a
+/// request already recorded is kept as it is.
+///
+/// # Arguments
+///
+/// * `record` - The reaction's record
+/// * `ctx` - The run's context
+async fn cancel_reaction(record: &Record, ctx: &RunContext) -> Result<Outcome, MigrateError> {
+    // the group and id end the data key
+    let Record::Redis { key, fields } = record else {
+        return Ok(Outcome::Current);
+    };
+    let ns = &ctx.backends.namespace;
+    let mut parts = key.rsplitn(3, ':');
+    let (Some(id), Some(group)) = (parts.next(), parts.next()) else {
+        return Ok(unreadable(key));
+    };
+    let Ok(uuid) = Uuid::parse_str(id) else {
+        return Ok(unreadable(key));
+    };
+    // the reaction as the API reads it; one gone or finished since it was listed is left alone
+    let tools = Box::pin(tools(ctx)).await?;
+    let reaction = match db::reactions::get(group, &uuid, &tools.shared).await {
+        Ok(reaction) => reaction,
+        Err(err) if err.status().as_u16() == 404 => return Ok(Outcome::Current),
+        Err(ApiError::Redis(err)) => return Err(redis_error(err)),
+        Err(_) => return Ok(unreadable(key)),
+    };
+    if !matches!(
+        reaction.status,
+        ReactionStatus::Created | ReactionStatus::Started
+    ) {
+        return Ok(Outcome::Current);
+    }
+    // its args exactly as stored, never a re-rendering, so a rerun hashes the same text
+    let mut conn = ctx.backends.redis.get().await.map_err(redis_error)?;
+    let raw_args: Option<String> = redis::cmd("HGET")
+        .arg(key)
+        .arg("args")
+        .query_async(&mut *conn)
+        .await
+        .map_err(redis_error)?;
+    drop(conn);
+    // record its request; a row already there is kept as it is
+    let row = request_row(&reaction, raw_args.as_deref(), ctx, &tools.shared).await?;
+    let inserted = tools.store.insert_if_absent(&row).await?;
+    let stored = if inserted {
+        with_progress(ns, |progress| progress.inserted.insert(row.id.clone()));
+        row
+    } else {
+        tools.store.get(id).await?.ok_or_else(|| {
+            MigrateError::Backend("a drain request row vanished after its insert".to_owned())
+        })?
+    };
+    let kept = !with_progress(ns, |progress| progress.inserted.contains(id));
+    // its args go in their own expiring row when the stored request names exactly these args
+    let stored_sha = stored
+        .request()
+        .ok()
+        .and_then(|request| request.args_sha256);
+    if let Some(raw) = raw_args.as_deref()
+        && matches!(stored.status, DrainStatus::Recorded | DrainStatus::Stale)
+        && raw.len() <= MAX_ARGS_BYTES
+        && stored_sha.as_deref() == Some(args_sha256(raw).as_str())
+    {
+        tools.store.put_args(id, raw).await?;
+    }
+    // the test fault hook may stop the cancel between the record and the cleanup
+    #[cfg(feature = "test-support")]
+    fire_cancel_fault(ns, id, CancelFault::AfterRecord)?;
+    // its jobs leave the previous release's indexes, then the API deletes them
+    remove_old_job_entries(&reaction, ctx).await?;
+    db::reactions::delete_jobs(&reaction, &tools.shared)
+        .await
+        .map_err(|err| MigrateError::Backend(format!("a reaction's jobs didn't delete: {err}")))?;
+    // fail it with the reason, proceeding its parent only when the parent isn't cancelled too
+    let parent_in_set = fields
+        .get(PARENT_IN_SET)
+        .is_some_and(|value| value == "true");
+    let reason = cancel_reason(&stored);
+    db::reactions::fail_with_reason(reaction, &reason, !parent_in_set, &tools.shared)
+        .await
+        .map_err(|err| MigrateError::Backend(format!("a reaction didn't fail: {err}")))?;
+    info!(
+        reaction = id,
+        group,
+        status = stored.status.as_str(),
+        kept,
+        "cancelled an in-flight reaction"
+    );
+    // count it
+    with_progress(ns, |progress| {
+        progress.cancelled.insert(id.to_owned());
+        let report = &mut progress.report;
+        report.cancelled += 1;
+        match (kept, stored.status) {
+            (false, DrainStatus::Recorded) => report.recorded += 1,
+            (false, DrainStatus::Refused) => report.refused += 1,
+            (false, DrainStatus::Stale) => report.stale += 1,
+            _ => report.kept += 1,
+        }
+    });
+    Ok(Outcome::Write(record.clone()))
+}
+
+/// Whether two attempt times name the same instant, comparing them as times when both parse
+///
+/// # Arguments
+///
+/// * `left` - One attempt's text
+/// * `right` - The other attempt's text
+fn same_attempt(left: &str, right: &str) -> bool {
+    // the operator writes RFC 3339 times, which may be spelled differently for the same instant
+    match (
+        DateTime::parse_from_rfc3339(left),
+        DateTime::parse_from_rfc3339(right),
+    ) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+/// Count the requests still `recorded` under an attempt whose reactions this pass didn't cancel:
+/// those an earlier run of the attempt recorded before failing their reactions
+///
+/// # Arguments
+///
+/// * `ctx` - The run's context
+/// * `store` - The drain request rows
+/// * `attempt` - The step attempt this run records under
+async fn earlier_requests(
+    ctx: &RunContext,
+    store: &DrainRequestStore,
+    attempt: &str,
+) -> Result<u64, MigrateError> {
+    // the reactions this pass cancelled, which it counted already
+    let cancelled = with_progress(&ctx.backends.namespace, |progress| {
+        progress.cancelled.clone()
+    });
+    // page through every row, counting the attempt's recorded ones this pass didn't see
+    let limit = ctx.limits.batch_rows.max(1);
+    let mut after: Option<String> = None;
+    let mut earlier = 0;
+    loop {
+        let page = store.list_page(after.as_deref(), limit).await?;
+        let found = page
+            .iter()
+            .filter(|row| {
+                row.status == DrainStatus::Recorded
+                    && !cancelled.contains(&row.id)
+                    && row
+                        .attempt
+                        .as_deref()
+                        .is_some_and(|row_attempt| same_attempt(row_attempt, attempt))
+            })
+            .count();
+        earlier += u64::try_from(found).unwrap_or(u64::MAX);
+        if page.len() < limit {
+            return Ok(earlier);
+        }
+        after = page.last().map(|row| row.id.clone());
+    }
+}
+
+/// Remove one stage-path worker's registration and list it for the operator's pod deletion
+///
+/// # Arguments
+///
+/// * `record` - The worker's record
+/// * `ctx` - The run's context
+async fn remove_worker(record: &Record, ctx: &RunContext) -> Result<Outcome, MigrateError> {
+    // the name ends the data key
+    let Record::Redis { key, .. } = record else {
+        return Ok(Outcome::Current);
+    };
+    let ns = &ctx.backends.namespace;
+    let prefix = format!("{ns}:worker_data:");
+    let name = key.strip_prefix(&prefix).unwrap_or(key);
+    // the fields the operator needs to find its pod
+    let mut conn = ctx.backends.redis.get().await.map_err(redis_error)?;
+    let fields: Vec<Option<String>> = redis::cmd("HMGET")
+        .arg(key)
+        .arg(&["group", "cluster", "node", "scaler", "tool_instance"][..])
+        .query_async(&mut *conn)
+        .await
+        .map_err(redis_error)?;
+    let [group, cluster, node, scaler, tool_instance]: [Option<String>; 5] =
+        fields.try_into().unwrap_or_default();
+    drop(conn);
+    // a worker gone since it was listed, or of the tool path, is left alone
+    let (Some(cluster), Some(node), None) = (cluster, node, tool_instance) else {
+        return Ok(Outcome::Current);
+    };
+    let Some(scaler_text) = scaler else {
+        return Ok(Outcome::Current);
+    };
+    let Ok(scaler) = serde_json::from_str::<ImageScaler>(&scaler_text)
+        .or_else(|_| unquote(&scaler_text).parse::<ImageScaler>())
+    else {
+        return Ok(Outcome::Issue(IssueReport {
+            key: key.clone(),
+            transform: ID.to_owned(),
+            class: ObjectClass::Error,
+            reason: IssueReason::new(IssueCategory::InvalidValue, "scaler"),
+        }));
+    };
+    // remove its registration the way the API does; one removed meanwhile is done already
+    let tools = Box::pin(tools(ctx)).await?;
+    let deletes = WorkerDeleteMap {
+        workers: vec![name.to_owned()],
+    };
+    match db::system::delete_workers(scaler, deletes, &tools.shared).await {
+        Ok(()) => {}
+        Err(err) if err.status().as_u16() == 404 => return Ok(Outcome::Current),
+        Err(err) => {
+            return Err(MigrateError::Backend(format!(
+                "a worker registration didn't delete: {err}"
+            )));
+        }
+    }
+    // list it, up to the cap, and count the rest
+    let worker = DrainWorker {
+        group: group.map_or_else(String::new, |group| unquote(&group).to_owned()),
+        name: name.to_owned(),
+        scaler: unquote(&scaler_text).to_owned(),
+        cluster: unquote(&cluster).to_owned(),
+        node: unquote(&node).to_owned(),
+    };
+    with_progress(ns, |progress| {
+        let report = &mut progress.report;
+        report.workers_removed += 1;
+        if report.workers.len() < MAX_DRAIN_WORKERS {
+            report.workers.push(worker);
+        } else {
+            report.workers_not_listed += 1;
+        }
+    });
+    Ok(Outcome::Write(record.clone()))
+}
+
+/// The runner of `drain-reactions`: its check waits while work is in flight, and its run cancels
+/// that work, recording each reaction's request for the resubmission
 pub struct DrainReactions;
 
 #[async_trait]
 impl MigrationRunner for DrainReactions {
-    /// Make one empty slice, since the check reads its own keys
+    /// Make one slice, since the drain reads its own keys; a run first refuses more in-flight
+    /// reactions than its cap, before anything is touched
     ///
     /// # Arguments
     ///
     /// * `n` - How many slices were asked for
     /// * `ctx` - The run's context
     async fn slices(&self, n: u32, ctx: &RunContext) -> Result<Vec<Slice>, MigrateError> {
-        // one slice is enough for a check that classifies no record
-        let _ = (n, ctx);
-        Ok(vec![Slice {
+        // one slice, so children are always failed before their parents
+        let _ = n;
+        let slice = Slice {
             index: 0,
             start: serde_json::Value::Null,
             end: serde_json::Value::Null,
-        }])
+        };
+        // a check classifies no record
+        if ctx.mode == RunMode::Check {
+            return Ok(vec![slice]);
+        }
+        // a run starts its counts afresh and counts what it would cancel
+        let ns = &ctx.backends.namespace;
+        with_progress(ns, |progress| *progress = Progress::default());
+        let count = in_flight(ctx).await?.len();
+        let cap = ctx.flags.max_requests.unwrap_or(MAX_REQUESTS);
+        if count > cap {
+            return Err(MigrateError::Systematic(format!(
+                "{count} reactions are Created or Started, more than the {cap} one drain cancels; \
+                 nothing was cancelled. Let them finish, delete stuck ones with `thorctl \
+                 reactions delete` while the previous API still runs, or run the cancel by hand \
+                 with `thoradm migrate run --id {ID} --max-requests <n>`"
+            )));
+        }
+        Ok(vec![slice])
     }
 
-    /// Read no records
+    /// Read the next batch: nothing in a check, and in a run the in-flight reactions, children
+    /// first, then the stage-path workers
     ///
     /// # Arguments
     ///
@@ -741,16 +1678,20 @@ impl MigrationRunner for DrainReactions {
         after: &serde_json::Value,
         ctx: &RunContext,
     ) -> Result<Batch, MigrateError> {
-        // the counts are read when the check decides whether to wait, not record by record
-        let _ = (slice, ctx);
-        Ok(Batch {
-            records: Vec::new(),
-            next: after.clone(),
-            done: true,
-        })
+        // a check's counts are read when it decides whether to wait, not record by record
+        let _ = slice;
+        if ctx.mode == RunMode::Check {
+            return Ok(Batch {
+                records: Vec::new(),
+                next: after.clone(),
+                done: true,
+            });
+        }
+        // a run reads what it cancels
+        cancel_batch(after, ctx).await
     }
 
-    /// Leave a record as it is
+    /// Cancel a reaction or remove a worker's registration; a check classifies nothing
     ///
     /// # Arguments
     ///
@@ -763,19 +1704,100 @@ impl MigrationRunner for DrainReactions {
         mode: RunMode,
         ctx: &RunContext,
     ) -> Result<Outcome, MigrateError> {
-        // nothing is ever converted
-        let _ = (record, mode, ctx);
-        Ok(Outcome::Current)
+        // a check never reads a record, and changes nothing
+        if mode == RunMode::Check {
+            return Ok(Outcome::Current);
+        }
+        // the record's kind says what to do
+        let kind = match record {
+            Record::Redis { fields, .. } => fields.get(KIND).map(String::as_str),
+            _ => None,
+        };
+        match kind {
+            Some(KIND_REACTION) => Box::pin(cancel_reaction(record, ctx)).await,
+            Some(KIND_WORKER) => Box::pin(remove_worker(record, ctx)).await,
+            _ => Ok(Outcome::Current),
+        }
     }
 
-    /// Nothing to record once every slice is done
+    /// Nothing is left to write: the cancel did its work as it processed each record
+    ///
+    /// # Arguments
+    ///
+    /// * `record` - The record processed
+    /// * `ctx` - The run's context
+    async fn write(&self, record: &Record, ctx: &RunContext) -> Result<(), MigrateError> {
+        // the record only counts what was done
+        let _ = (record, ctx);
+        Ok(())
+    }
+
+    /// Release the writer and statements the pass held, and count the requests an earlier run of
+    /// the step's attempt recorded for reactions it already failed as kept
     ///
     /// # Arguments
     ///
     /// * `ctx` - The run's context
     async fn finish(&self, ctx: &RunContext) -> Result<(), MigrateError> {
-        // the check leaves nothing behind
-        let _ = ctx;
+        // they are only valid for this pass
+        let ns = &ctx.backends.namespace;
+        let tools = TOOLS.lock().await.remove(ns);
+        // a run of a step attempt counts the requests a failed earlier run of it left, which the
+        // resubmission of the attempt creates though this run never saw their reactions
+        if ctx.mode == RunMode::Run
+            && let Some(attempt) = ctx.flags.step_attempt.as_deref()
+        {
+            let store = match tools {
+                Some(tools) => tools.store.clone(),
+                None => {
+                    Arc::new(DrainRequestStore::prepare(ctx.backends.scylla.clone(), ns).await?)
+                }
+            };
+            let earlier = earlier_requests(ctx, &store, attempt).await?;
+            with_progress(ns, |progress| progress.report.kept += earlier);
+        }
+        Ok(())
+    }
+
+    /// Put what the cancel did in the applied report, drop the skipped samples and notes that
+    /// would name reactions, and leave the report as the Job's result for the operator
+    ///
+    /// # Arguments
+    ///
+    /// * `report` - The report the runner built
+    /// * `ctx` - The run's context
+    async fn finish_report(
+        &self,
+        report: &mut AppliedReport,
+        ctx: &RunContext,
+    ) -> Result<(), MigrateError> {
+        // only a run cancels anything
+        if ctx.mode != RunMode::Run {
+            return Ok(());
+        }
+        // the counts and worker list, and no list that names a reaction
+        let ns = &ctx.backends.namespace;
+        let progress = PROGRESS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(ns)
+            .unwrap_or_default();
+        report.drain = Some(progress.report);
+        report.skipped.clear();
+        report.notes.clear();
+        // the operator reads the worker list from the Job's result row
+        if let Some(uid) = result_uid(ns) {
+            let mut result = report.clone();
+            result.bound();
+            let value = serde_json::to_value(&result).map_err(|err| {
+                MigrateError::Systematic(format!("the drain report didn't render: {err}"))
+            })?;
+            write_job_result(&ctx.backends.scylla, &ctx.backends.conf, &uid, &value)
+                .await
+                .map_err(|err| {
+                    MigrateError::Backend(format!("the Job's result didn't write: {err}"))
+                })?;
+        }
         Ok(())
     }
 
@@ -808,11 +1830,12 @@ impl MigrationRunner for DrainReactions {
     }
 }
 
-/// The migration's registry entry: checked, never run, since it only waits
+/// The migration's registry entry: the check waits for in-flight work, and the run the operator
+/// starts on approval cancels it
 pub const DRAIN_REACTIONS: MigrationDef = MigrationDef {
     id: ID,
     backend: Backend::Redis,
-    support: Support::CheckOnly,
+    support: Support::Yes,
     runner: &DrainReactions,
     pass: ID,
     chain: &[ID],

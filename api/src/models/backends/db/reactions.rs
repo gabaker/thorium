@@ -214,7 +214,9 @@ pub async fn get_parent_ephemeral(
 /// * `plan` - The stages resolved for this [`Reaction`]
 /// * `provenance` - The exact versions of the tool instances the plan runs
 /// * `memo` - The tool instances already read for this request
+/// * `reserved` - An id the caller reserved for this [`Reaction`], or `None` to mint a new one
 /// * `shared` - Shared Thorium objects
+#[allow(clippy::too_many_arguments)]
 #[instrument(name = "db::reactions::create", skip_all, err(Debug))]
 pub async fn create(
     user: &User,
@@ -223,20 +225,50 @@ pub async fn create(
     plan: ReactionPlan,
     provenance: RunProvenance,
     memo: &mut ToolInstanceMemo,
+    reserved: Option<Uuid>,
     shared: &Shared,
 ) -> Result<Reaction, ApiError> {
     // get any ephemeral files from any parent reactions
     let map = HashMap::default();
     let ephemeral = get_parent_ephemeral(&request.group, &request.parent, map, shared).await?;
-    // cast to a reaction
+    // cast to a reaction with the reserved id or a new one
+    let id = reserved.unwrap_or_else(Uuid::new_v4);
     let (cast, cache, _) = request
-        .cast(user, pipeline, plan, provenance, ephemeral, shared)
+        .cast(user, pipeline, id, plan, provenance, ephemeral, shared)
         .await?;
     // build reaction creation pipeline
     let mut pipe = redis::pipe();
     let (reaction, _) = build(&mut pipe, cast.clone(), cache, memo, None, shared).await?;
-    // create reaction along with its jobs in redis
-    let _: () = pipe.atomic().query_async(conn!(shared)).await?;
+    // the reaction and its jobs are written in one transaction
+    pipe.atomic();
+    // a new id can't collide, so its reaction is created at once
+    if reserved.is_none() {
+        let _: () = pipe.query_async(conn!(shared)).await?;
+        return Ok(reaction);
+    }
+    // a reserved id is created only if no reaction holds it yet: watch its data key on one
+    // connection, so a reaction created under it before the pipeline runs aborts the pipeline
+    let key = ReactionKeys::data(&reaction.group, &reaction.id, shared);
+    let mut conn = helpers::get_conn(shared).await?;
+    cmd("watch").arg(&key).exec_async(&mut *conn).await?;
+    let exists: bool = match cmd("exists").arg(&key).query_async(&mut *conn).await {
+        Ok(exists) => exists,
+        Err(error) => {
+            // clear the watch so this connection goes back to the pool clean
+            let _ = cmd("unwatch").exec_async(&mut *conn).await;
+            return Err(ApiError::from(error));
+        }
+    };
+    if exists {
+        // clear the watch so this connection goes back to the pool clean
+        cmd("unwatch").exec_async(&mut *conn).await?;
+        return conflict!("reserved reaction already exists".to_owned());
+    }
+    // the pipeline answers nil when the key changed after it was watched
+    let created: Option<redis::Value> = pipe.query_async(&mut *conn).await?;
+    if created.is_none() {
+        return conflict!("reserved reaction already exists".to_owned());
+    }
     Ok(reaction)
 }
 
@@ -305,6 +337,7 @@ pub async fn create_bulk<S: std::hash::BuildHasher>(
                 .cast(
                     user,
                     pipeline,
+                    Uuid::new_v4(),
                     plan.clone(),
                     provenance.clone(),
                     ephemeral,
@@ -1367,7 +1400,7 @@ async fn end_run(reaction: &Reaction, shared: &Shared) -> Result<(), ApiError> {
             // remove its unclaimed jobs and fail it without proceeding the ending run, boxing
             // the recursive future
             dequeue_jobs(&sub, shared).await?;
-            Box::pin(fail_inner(sub, false, shared)).await?;
+            Box::pin(fail_inner(sub, None, false, shared)).await?;
         }
     }
     Ok(())
@@ -1382,10 +1415,32 @@ async fn end_run(reaction: &Reaction, shared: &Shared) -> Result<(), ApiError> {
 #[instrument(name = "db::reactions::fail", skip_all, err(Debug))]
 pub async fn fail(reaction: Reaction, shared: &Shared) -> Result<ReactionStatus, ApiError> {
     // fail the reaction and proceed its parent if this finished the parent's sub reactions
-    fail_inner(reaction, true, shared).await
+    fail_inner(reaction, None, true, shared).await
 }
 
-/// Fails a reaction, optionally proceeding its parent
+/// Fails a reaction with a reason written as its failed status log entry's message
+///
+/// A caller failing a parent and its children together passes `proceed_parent` false for a child
+/// whose parent it is also failing, so the parent isn't proceeded.
+///
+/// # Arguments
+///
+/// * `reaction` - The reaction to fail
+/// * `reason` - Why the reaction failed, written to its status log
+/// * `proceed_parent` - Whether to proceed the parent once its sub reactions are all finished
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::reactions::fail_with_reason", skip_all, err(Debug))]
+pub async fn fail_with_reason(
+    reaction: Reaction,
+    reason: &str,
+    proceed_parent: bool,
+    shared: &Shared,
+) -> Result<ReactionStatus, ApiError> {
+    // fail the reaction with the reason as its status log message
+    fail_inner(reaction, Some(reason.to_owned()), proceed_parent, shared).await
+}
+
+/// Fails a reaction, optionally with a reason and optionally proceeding its parent
 ///
 /// A run that is ending fails its unfinished sub reactions without proceeding itself, since
 /// proceeding would complete the run that is being failed or deleted.
@@ -1393,11 +1448,13 @@ pub async fn fail(reaction: Reaction, shared: &Shared) -> Result<ReactionStatus,
 /// # Arguments
 ///
 /// * `reaction` - The reaction to fail
+/// * `reason` - The message of the failed status log entry, if any
 /// * `proceed_parent` - Whether to proceed the parent once its sub reactions are all finished
 /// * `shared` - Shared Thorium objects
 #[rustfmt::skip]
 async fn fail_inner(
     mut reaction: Reaction,
+    reason: Option<String>,
     proceed_parent: bool,
     shared: &Shared,
 ) -> Result<ReactionStatus, ApiError> {
@@ -1441,10 +1498,10 @@ async fn fail_inner(
        .cmd("zadd").arg(ReactionKeys::group_set(&reaction.group, &reaction.status, shared))
             .arg(timestamp).arg(&reaction_id);
 
-    // create status log for failing out this reaction
+    // create status log for failing out this reaction, with the reason when one is given
     let update_cast = StatusUpdate::new(
         StatusRequest::from_reaction(&reaction, ReactionActions::Failed),
-        None,
+        reason,
     );
     super::logs::build(&mut pipe, &[update_cast], shared)?;
     // handle parent reaction incrementing if we have a parent
@@ -1692,6 +1749,50 @@ pub async fn list_jobs(
 pub async fn delete(reaction: &Reaction, shared: &Shared) -> Result<(), ApiError> {
     // a deleted run ends, so its unfinished sub reactions fail while its data is still there
     end_run(reaction, shared).await?;
+    // delete every job of this reaction
+    delete_jobs(reaction, shared).await?;
+    // build this reaction's data keys
+    let keys = ReactionKeys::new(reaction, shared);
+    // get our reaction id as a string
+    let reaction_id = reaction.id.to_string();
+    // build pipeline to delete this reactions data
+    let mut pipe = redis::pipe();
+    // add commands to clear remove this reaction from the tag lists
+    reaction.tags.iter()
+        .fold(&mut pipe, |pipe, tag| {
+            pipe.cmd("srem").arg(ReactionKeys::tag(&reaction.group, tag, shared))
+                    .arg(&reaction_id)
+        });
+
+    // execute pipeline to delete our reaction specific data
+    let _: () = pipe.atomic()
+        .cmd("del").arg(&keys.data)
+        .cmd("del").arg(&keys.logs)
+        .cmd("zrem").arg(ReactionKeys::group_set(&reaction.group, &reaction.status, shared))
+            .arg(&reaction_id)
+        .cmd("srem").arg(&keys.set).arg(&reaction_id)
+        .cmd("srem").arg(ReactionKeys::status(&reaction.group, &reaction.pipeline, &reaction.status, shared))
+            .arg(&reaction_id)
+        .query_async(conn!(shared)).await?;
+    // a deleted run ends, so its token stops working
+    delete_run_token(reaction, shared).await?;
+    Ok(())
+}
+
+/// Deletes every job of a reaction: each job's data, its place in its status queue and its
+/// scaler's deadline stream, its stage logs' legacy Redis key, and a running job's entry in the
+/// running stream
+///
+/// Stage logs live in Scylla, but a reaction from a release that kept them in Redis may still
+/// have that key, so it is deleted too.
+///
+/// # Arguments
+///
+/// * `reaction` - The reaction whose jobs to delete
+/// * `shared` - Shared Thorium objects
+#[rustfmt::skip]
+#[instrument(name = "db::reactions::delete_jobs", skip_all, err(Debug))]
+pub async fn delete_jobs(reaction: &Reaction, shared: &Shared) -> Result<(), ApiError> {
     // loop until jobs in this stage are deleted
     let mut cursor = 0;
     loop {
@@ -1725,30 +1826,6 @@ pub async fn delete(reaction: &Reaction, shared: &Shared) -> Result<(), ApiError
         // update cursor
         cursor = next;
     }
-    let keys = ReactionKeys::new(reaction, shared);
-    // get our reaction id as a string
-    let reaction_id = reaction.id.to_string();
-    // build pipeline to delete this reactions data
-    let mut pipe = redis::pipe();
-    // add commands to clear remove this reaction from the tag lists
-    reaction.tags.iter()
-        .fold(&mut pipe, |pipe, tag| {
-            pipe.cmd("srem").arg(ReactionKeys::tag(&reaction.group, tag, shared))
-                    .arg(&reaction_id)
-        });
-
-    // execute pipeline to delete our reaction specific data
-    let _: () = pipe.atomic()
-        .cmd("del").arg(&keys.data)
-        .cmd("del").arg(&keys.logs)
-        .cmd("zrem").arg(ReactionKeys::group_set(&reaction.group, &reaction.status, shared))
-            .arg(&reaction_id)
-        .cmd("srem").arg(&keys.set).arg(&reaction_id)
-        .cmd("srem").arg(ReactionKeys::status(&reaction.group, &reaction.pipeline, &reaction.status, shared))
-            .arg(&reaction_id)
-        .query_async(conn!(shared)).await?;
-    // a deleted run ends, so its token stops working
-    delete_run_token(reaction, shared).await?;
     Ok(())
 }
 
