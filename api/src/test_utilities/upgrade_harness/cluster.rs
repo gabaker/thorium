@@ -298,6 +298,7 @@ impl ClusterDriver {
             .find(|planned| planned.step == step)
             .and_then(|planned| match planned.blocked.as_ref()? {
                 BlockReason::LossAcceptance { confirm }
+                | BlockReason::CancelApproval { confirm }
                 | BlockReason::ConfirmationRefused { confirm, .. } => Some(confirm.clone()),
                 _ => None,
             })

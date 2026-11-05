@@ -3124,7 +3124,11 @@ pub fn parse_namespace(namespace: &str) -> Result<String, String> {
 }
 
 /// Provide a default set of namespaces to not allow Thorium to create
-fn default_namespace_blacklist() -> BTreeSet<String> {
+///
+/// The operator also refuses to touch pods in these namespaces whatever a cluster's own
+/// `namespace_blacklist` says, since a cluster's config replaces the list wholesale.
+#[must_use]
+pub fn default_namespace_blacklist() -> BTreeSet<String> {
     [
         default_namespace(),
         "scylla".to_string(),

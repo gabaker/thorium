@@ -21,12 +21,14 @@ use thorium::models::schema::{CatalogIdentity, CheckReport, PassCounts, catalog_
 use thorium::models::upgrades::{
     AppliedStep, BlockReason, CONSUMED_REFUSAL, CatalogEntry, IssueSummary, JobFailure,
     PlannedStep, RESET_STATE_STEP, RESTORED_STEP, Reversibility, RevisionId, StepDef, StepLoss,
-    StepState, UpgradeApproval, UpgradeConditionType, UpgradeState, Work,
+    StepState, UpgradeApproval, UpgradeConditionType, UpgradeState, Work, attempt_start,
 };
 use tracing::{Level, event, instrument};
 
+use super::cancel::{self, Collected};
 use super::lossy;
 use super::pause;
+use super::quiesce;
 use super::record::{self, Read};
 use super::state::{self, StoredState};
 use super::steps;
@@ -263,16 +265,25 @@ fn spent(state: &UpgradeState, step: &'static StepDef, approval: &UpgradeApprova
 /// Get the approval that lets a step run now: the first for it that names a backup no finished
 /// run of the step used up
 ///
+/// A step that cancels on approval also needs the approval to opt in with `cancel_in_flight` and
+/// to repeat the step's current confirmation code.
+///
 /// # Arguments
 ///
 /// * `state` - The recorded upgrade state
 /// * `step` - The step
+/// * `target` - The revision the upgrade moves to
 /// * `approvals` - The approvals set on the cluster
 pub(super) fn usable_now<'a>(
     state: &UpgradeState,
     step: &'static StepDef,
+    target: &RevisionId,
     approvals: &'a [UpgradeApproval],
 ) -> Option<&'a UpgradeApproval> {
+    // a step that cancels on approval needs the opt-in and its code
+    if step.cancels_on_approval {
+        return quiesce::usable(state, step, target, approvals);
+    }
     // an approval with a backup counts until a finished run of the step used it
     approvals.iter().find(|approval| {
         approval.step == step.id
@@ -675,7 +686,8 @@ fn approval_message(step: &'static StepDef, found: &str, approvals: &[UpgradeApp
             format_args!(
                 " See every issue group and sample keys with `thoradm migrate check --id {migration} \
              --all --samples`; to run the step despite a group of issues, add its code to the \
-             approval's acceptIssues (Helm value operator.cluster.upgrade.approvals[].acceptIssues)."
+             approval's acceptIssues (Helm value operator.cluster.upgrade.approvals[].acceptIssues, \
+             accept_issues in the ThoriumCluster)."
             ),
         );
     }
@@ -824,6 +836,40 @@ async fn collect(
         );
     }
     Ok(None)
+}
+
+/// Delete a step's check Job that was never read and forget it, once the step has a run
+///
+/// A step with a run is no longer checked, so a check Job created in the reconcile that opens the
+/// run (as when a cancel's grace ends right after the step's wait lapsed) would otherwise wait out
+/// its TTL and stay remembered as the step's unread check.
+///
+/// # Arguments
+///
+/// * `meta` - Thorium cluster client and metadata
+/// * `pending` - The upgrade being run, whose state remembers the check Job
+/// * `step` - The step's id
+async fn drop_unread_check(
+    meta: &ClusterMeta,
+    pending: &mut Pending,
+    step: &str,
+) -> Result<(), Error> {
+    // only a check Job that is remembered and unread is left to drop
+    let mut remembered = mark(&pending.stored.state, step);
+    let Some(created) = remembered.job.take() else {
+        return Ok(());
+    };
+    // delete the Job and its pod; a delete that fails leaves it to its TTL
+    if let Err(error) = jobs::delete(meta, &created.name).await {
+        event!(
+            Level::WARN,
+            msg = "Failed to delete an unread check Job",
+            job = created.name,
+            error = crate::trace::describe(&error)
+        );
+    }
+    // forget the Job, keeping the step's last report and its count of check Jobs
+    save_mark(meta, pending, step, &remembered).await
 }
 
 /// Ask for a step's check report: the cached one, or a check Job's, creating the Job when none runs
@@ -1027,11 +1073,14 @@ pub(super) async fn preflight(meta: &ClusterMeta, pending: &mut Pending) -> Resu
         else {
             continue;
         };
-        // a step already run through is shown no scope, and one with a Job running needs no check
+        // a step already run through is shown no scope, and one with a Job running needs no check,
+        // so a check Job it never read goes
         if open_run(&pending.stored.state, step.id).is_some() {
+            drop_unread_check(meta, pending, step.id).await?;
             continue;
         }
-        let approved = usable_now(&pending.stored.state, step, &approvals).is_some();
+        let approved =
+            usable_now(&pending.stored.state, step, &pending.target, &approvals).is_some();
         if let Check::Ready(report) = ensure_check(meta, pending, step, migration, approved).await?
         {
             show(pending, index, step, &report);
@@ -1042,8 +1091,8 @@ pub(super) async fn preflight(meta: &ClusterMeta, pending: &mut Pending) -> Resu
 
 /// What retries a failed run of a step that loses no data
 const NOT_RETRIED: &str = "It is not retried by itself: change the approval's backup (normally to a \
-                           newer backup) or its acceptIssues to run it again, resuming from its \
-                           checkpoints";
+                           newer backup) or its acceptIssues (accept_issues in the \
+                           ThoriumCluster) to run it again, resuming from its checkpoints";
 
 /// What a failed run of a step that loses data says of its retry, which needs a new approval
 pub(super) const NOT_RETRIED_BY_ITSELF: &str = "It is not retried by itself";
@@ -1072,6 +1121,25 @@ pub(super) fn open_run<'a>(state: &'a UpgradeState, step: &str) -> Option<&'a Ap
         }
     }
     None
+}
+
+/// Get the `at` of the `Running` entry that started the attempt of a step's newest run, which a
+/// retry after a failed run shares with the run that failed
+///
+/// # Arguments
+///
+/// * `state` - The recorded upgrade state
+/// * `step` - The step's id
+#[must_use]
+pub(super) fn attempt_at(state: &UpgradeState, step: &str) -> Option<String> {
+    // the newest run, then the first run of its attempt
+    let newest = state
+        .applied
+        .iter()
+        .rposition(|entry| entry.step == step && entry.outcome == StepState::Running)?;
+    state.applied[attempt_start(&state.applied, step, newest)]
+        .at
+        .clone()
 }
 
 /// Find the open runs of the catalog steps that run as migration Jobs, in the order they started
@@ -1261,7 +1329,7 @@ pub(super) async fn stop_open_runs(
                 // the open run's Job finished, so its outcome is recorded
                 JobPhase::Complete if own => {
                     if let Advance::Finished(entry) =
-                        succeeded(meta, &pending, 0, step, migration, &job).await?
+                        succeeded(meta, &mut pending, 0, step, migration, &job).await?
                     {
                         pending.stored.state.record(*entry);
                         state::save(&meta.client, &meta.namespace, &mut pending.stored).await?;
@@ -1561,6 +1629,15 @@ fn run_spec(
         args.extend(["--accept-issues".to_owned(), accepted_csv.clone()]);
     }
     args.extend(["--running-entry".to_owned(), running]);
+    // a run that cancels on approval tags what it records with the time of the `Running` entry
+    // that started its attempt, which is the attempt the resubmission later reads back from the
+    // record's history; a retry after a failed run gets the failed run's, so the requests of both
+    // are resubmitted together
+    if step.cancels_on_approval
+        && let Some(at) = attempt_at(&pending.stored.state, step.id).or_else(|| entry.at.clone())
+    {
+        args.extend(["--step-attempt".to_owned(), at]);
+    }
     // the operator ran no writer beside this Job, so a lease an earlier pod left is broken
     if attempt > 0 {
         args.push("--force-break-lease".to_owned());
@@ -1777,22 +1854,39 @@ fn unmatched(accepted: &[String], groups: &[(String, String, u64)]) -> Vec<Strin
 
 /// Handle a finished migration Job: record the step and report its issues
 ///
+/// A run that cancels on approval is recorded only once its result is read and the pods of the
+/// workers it names are deleted; until then the step stays running.
+///
 /// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
-/// * `pending` - The upgrade being run
+/// * `pending` - The upgrade being run, asked to look again soon while a cancel's result is read
 /// * `index` - The index of the planned step
 /// * `step` - The step
 /// * `migration` - The migration it ran
 /// * `job` - The finished Job
 async fn succeeded(
     meta: &ClusterMeta,
-    pending: &Pending,
+    pending: &mut Pending,
     index: usize,
     step: &'static StepDef,
     migration: &str,
     job: &Job,
 ) -> Result<Advance, Error> {
+    // a run that cancels on approval names the workers whose pods go before it is recorded
+    let cancelled = if step.cancels_on_approval {
+        match cancel::collect(meta, pending, job).await? {
+            Collected::Wait(message) => {
+                return Ok(Advance::Held {
+                    state: StepState::Running,
+                    message,
+                });
+            }
+            Collected::Done { work, note } => Some((work, note)),
+        }
+    } else {
+        None
+    };
     // read the summary the run left, which holds its counts and groups
     let summary = match jobs::state(meta, job).await? {
         JobState::Succeeded(summary) => summary,
@@ -1815,8 +1909,10 @@ async fn succeeded(
         .get("resumed")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    // a first pass that found nothing to change is a skipped step
-    let nothing = !resumed
+    // a first pass that found nothing to change is a skipped step, except a run that cancels on
+    // approval, which an approval started whatever its check found
+    let nothing = !step.cancels_on_approval
+        && !resumed
         && counts.is_some_and(|counts| {
             counts.migratable == 0 && counts.written == 0 && counts.flagged == 0
         })
@@ -1838,12 +1934,14 @@ async fn succeeded(
         format!("{migration} had nothing to change")
     } else {
         format!(
-            "{migration} finished{}",
+            "{migration} finished{}{}{}",
             if groups.is_empty() {
                 String::new()
             } else {
                 format!(" with issues: {}", groups_text(&groups))
-            }
+            },
+            cancel_note(pending, step),
+            cancelled.as_ref().map_or("", |(_, note)| note.as_str())
         )
     };
     Ok(Advance::Finished(Box::new(AppliedStep {
@@ -1868,12 +1966,30 @@ async fn succeeded(
             .filter(|code| !code.is_empty())
             .map(ToOwned::to_owned),
         loss: open_run(&pending.stored.state, step.id).and_then(|entry| entry.loss.clone()),
-        work: counts.map(|counts| counts.work_text()),
+        work: cancelled
+            .and_then(|(work, _)| work)
+            .or_else(|| counts.map(|counts| counts.work_text())),
         job: Some(name(job)),
         chain: vec![step.id.to_owned()],
         issues: (issues.groups > 0 || !issues.accepted.is_empty()).then_some(issues),
         ..AppliedStep::default()
     })))
+}
+
+/// Describe what a finished run of a step that cancels on approval did besides its migration, for
+/// its entry's message; other steps add nothing
+///
+/// # Arguments
+///
+/// * `pending` - The upgrade being run, whose state still holds the run open
+/// * `step` - The step
+fn cancel_note(pending: &Pending, step: &'static StepDef) -> String {
+    // only a run that cancels on approval did more than its migration
+    if step.cancels_on_approval {
+        quiesce::finished_note(&pending.stored.state, step)
+    } else {
+        String::new()
+    }
 }
 
 /// Record in the history that a step's Job failed, once for each run of the Job
@@ -2259,7 +2375,7 @@ pub(super) async fn advance_with(
         });
     }
     let approvals = meta.cluster.spec.upgrade.approvals.clone();
-    let approval = usable_now(&pending.stored.state, step, &approvals).cloned();
+    let approval = usable_now(&pending.stored.state, step, &pending.target, &approvals).cloned();
     // a lossy step is gated by its loss report and its confirmation code instead
     let lossy = pending.steps[index].loss.is_some();
     // a Job that runs holds the step, or is cancelled when its approval is gone
@@ -2326,6 +2442,10 @@ pub(super) async fn advance_with(
         NOT_RETRIED,
     ) {
         return Ok(held);
+    }
+    // a step that cancels on approval quiesces and then runs, whatever its check reports
+    if open.is_none() && step.cancels_on_approval {
+        return quiesce::advance(meta, pending, index, step, &approval, &accept, found.len()).await;
     }
     // a step that hasn't started is checked first, and skipped when there is nothing to change
     if open.is_none() && check {
@@ -2398,9 +2518,10 @@ async fn unapproved(
     let report = match ensure_check(meta, pending, step, migration, false).await? {
         Check::Ready(report) => report,
         Check::Wait(message) => {
+            let note = code_note(pending, index, step, &approvals);
             return Ok(Advance::Held {
                 state: StepState::Waiting,
-                message,
+                message: format!("{message}{note}"),
             });
         }
         Check::Failed(message) => {
@@ -2411,9 +2532,10 @@ async fn unapproved(
         }
     };
     if let Some(wait) = &report.wait {
+        let note = code_note(pending, index, step, &approvals);
         return Ok(Advance::Held {
             state: StepState::Waiting,
-            message: wait.reason.clone(),
+            message: format!("{}{note}", wait.reason),
         });
     }
     match work(step, &report) {
@@ -2421,11 +2543,35 @@ async fn unapproved(
         Work::Needed(found) => {
             show(pending, index, step, &report);
             pending.steps[index].blocked = Some(BlockReason::Approval);
+            let note = code_note(pending, index, step, &approvals);
             Ok(Advance::Held {
                 state: StepState::Blocked,
-                message: approval_message(step, &found, &approvals),
+                message: format!("{}{note}", approval_message(step, &found, &approvals)),
             })
         }
+    }
+}
+
+/// Show the confirmation code of a step that cancels on approval while it waits, returning what to
+/// add to its message; other steps show nothing
+///
+/// # Arguments
+///
+/// * `pending` - The upgrade being run, whose step shows the code
+/// * `index` - The index of the planned step
+/// * `step` - The step
+/// * `approvals` - The approvals set on the cluster
+fn code_note(
+    pending: &mut Pending,
+    index: usize,
+    step: &'static StepDef,
+    approvals: &[UpgradeApproval],
+) -> String {
+    // only a step that cancels on approval has a code to show
+    if step.cancels_on_approval {
+        quiesce::show_code(pending, index, step, approvals)
+    } else {
+        String::new()
     }
 }
 
@@ -2463,15 +2609,25 @@ pub(super) async fn start(
         ),
         &attempt.to_string(),
     );
-    // record the start with the counts before scaling anything, so they outlive a lost state
-    let entry = running_entry(pending, index, step, approved, &job, &counts);
-    let open = open_run(&pending.stored.state, step.id);
-    if open.is_none_or(|open| open.job.as_deref() != Some(job.as_str())) {
-        pending.stored.state.record(entry.clone());
-        state::save(&meta.client, &meta.namespace, &mut pending.stored).await?;
-    }
-    // the step is no longer waiting on anything an admin can answer
+    // record the start with the counts before scaling anything, so they outlive a lost state; a
+    // start held earlier already recorded this Job's entry, which the Job is given unchanged so the
+    // record and the run name the same start
+    let recorded = open_run(&pending.stored.state, step.id)
+        .filter(|open| open.job.as_deref() == Some(job.as_str()))
+        .cloned();
+    let entry = match recorded {
+        Some(recorded) => recorded,
+        None => {
+            let entry = running_entry(pending, index, step, approved, &job, &counts);
+            pending.stored.state.record(entry.clone());
+            state::save(&meta.client, &meta.namespace, &mut pending.stored).await?;
+            entry
+        }
+    };
+    // the step is no longer waiting on anything an admin can answer, and no longer checked, so a
+    // check Job made before the run opened and never read goes
     pending.steps[index].blocked = None;
+    drop_unread_check(meta, pending, step.id).await?;
     // scale the components down and wait for their pods to stop
     let names = counts.counts.keys().map(String::as_str).collect::<Vec<_>>();
     pause::scale_down(meta, &names).await?;

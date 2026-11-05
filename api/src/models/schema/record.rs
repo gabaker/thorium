@@ -30,9 +30,132 @@ use crate::models::upgrades::{
 /// The id of the revision row, the only row of its kind
 pub const REVISION_ROW: &str = "deployment";
 
-/// The prefix of the one line `thoradm schema status` prints, which the operator picks out of the
-/// Job's log
+/// The prefix of the result lines `thoradm schema status` prints, which the operator picks out of
+/// the Job's log
 pub const RESULT_PREFIX: &str = "THORIUM-RESULT ";
+
+/// The most bytes of a report one result line carries; a larger report is printed in chunks
+pub const RESULT_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Split a status report's JSON into the result lines a status Job prints, each starting with
+/// [`RESULT_PREFIX`]
+///
+/// A report of at most [`RESULT_CHUNK_BYTES`] is one line holding the JSON, which an operator that
+/// reads a single line still understands. A larger one is cut, on character boundaries, into chunks
+/// of at most that many bytes, each printed as `<index>/<count> <chunk>` with the index counted
+/// from 1.
+///
+/// # Arguments
+///
+/// * `json` - The report as JSON text
+#[must_use]
+pub fn result_lines(json: &str) -> Vec<String> {
+    // a report that fits stays one plain line
+    if json.len() <= RESULT_CHUNK_BYTES {
+        return vec![format!("{RESULT_PREFIX}{json}")];
+    }
+    // cut the text into chunks that end on character boundaries
+    let mut chunks = Vec::new();
+    let mut rest = json;
+    while !rest.is_empty() {
+        let mut end = rest.len().min(RESULT_CHUNK_BYTES);
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
+        let (chunk, tail) = rest.split_at(end);
+        chunks.push(chunk);
+        rest = tail;
+    }
+    // number each chunk with its index and the count
+    let count = chunks.len();
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, chunk)| format!("{RESULT_PREFIX}{}/{count} {chunk}", index + 1))
+        .collect()
+}
+
+/// Read the index and count heading a chunked result line, with the chunk after them
+///
+/// Returns nothing for a line that isn't a chunk, such as a report printed whole.
+///
+/// # Arguments
+///
+/// * `line` - The line with its prefix removed
+fn chunk_of(line: &str) -> Option<(usize, usize, &str)> {
+    // `<index>/<count> <chunk>`, where a whole report starts with `{` instead
+    let (head, chunk) = line.split_once(' ')?;
+    let (index, count) = head.split_once('/')?;
+    Some((index.parse().ok()?, count.parse().ok()?, chunk))
+}
+
+/// Join the result lines a status Job printed back into its report's JSON
+///
+/// One line that isn't a chunk is the whole report. Otherwise every line must be a chunk of the
+/// same count, that count must equal the number of lines, and each index from 1 to the count must
+/// appear exactly once; a missing, repeated, or mismatched chunk, or a second whole report, fails
+/// the read, so no line that isn't the Job's own output is trusted.
+///
+/// # Arguments
+///
+/// * `lines` - The result lines in log order, with their prefix removed
+pub fn join_result(lines: &[&str]) -> Result<String, String> {
+    // a single whole report needs no joining
+    match lines {
+        [] => return Err("no result line was printed".to_owned()),
+        [line] if chunk_of(line).is_none() => return Ok((*line).to_owned()),
+        _ => (),
+    }
+    // every line must be a chunk, and all must agree on the count
+    let mut chunks = Vec::with_capacity(lines.len());
+    for line in lines {
+        let Some(chunk) = chunk_of(line) else {
+            return Err("more than one result line was printed".to_owned());
+        };
+        chunks.push(chunk);
+    }
+    let count = chunks[0].1;
+    if count == 0 || chunks.iter().any(|(_, other, _)| *other != count) {
+        return Err("the result's chunks disagree on how many there are".to_owned());
+    }
+    // the count comes from the log, so it must match the lines read before anything is sized by
+    // it; a short result names its first missing chunk, which is at most one past the lines read
+    if count > chunks.len() {
+        let present = chunks
+            .iter()
+            .map(|(index, _, _)| *index)
+            .collect::<BTreeSet<_>>();
+        let missing = (1..=chunks.len() + 1)
+            .find(|index| !present.contains(index))
+            .unwrap_or(count);
+        return Err(format!("result chunk {missing} of {count} is missing"));
+    }
+    if count < chunks.len() {
+        return Err(format!(
+            "the result names {count} chunks but {} were printed",
+            chunks.len()
+        ));
+    }
+    // place each chunk at its index, refusing a repeat or one out of range
+    let mut placed: Vec<Option<&str>> = vec![None; count];
+    for (index, _, chunk) in chunks {
+        let slot = index
+            .checked_sub(1)
+            .and_then(|at| placed.get_mut(at))
+            .ok_or_else(|| format!("result chunk {index} of {count} is out of range"))?;
+        if slot.replace(chunk).is_some() {
+            return Err(format!("result chunk {index} of {count} was printed twice"));
+        }
+    }
+    // every index must have arrived
+    if let Some(missing) = placed.iter().position(Option::is_none) {
+        return Err(format!(
+            "result chunk {} of {count} is missing",
+            missing + 1
+        ));
+    }
+    Ok(placed.into_iter().flatten().collect())
+}
 
 /// The step the `migrate record --revision` Job records for itself when it moves the revision
 /// across an edge that lists it: it is the Job that finalizes the revision, so it never waits for
@@ -235,7 +358,7 @@ pub fn catalog_identity(catalog: &Catalog) -> CatalogIdentity {
                 .steps
                 .iter()
                 .map(|step| {
-                    json!({
+                    let mut described = json!({
                         "id": step.id,
                         "kind": format!("{:?}", step.kind),
                         "migration": step.thoradm_migration,
@@ -243,7 +366,19 @@ pub fn catalog_identity(catalog: &Catalog) -> CatalogIdentity {
                         "phase": step.phase.map(|phase| format!("{phase:?}")),
                         "pause": step.pause.iter().map(|component| component.deployment_name()).collect::<Vec<_>>(),
                         "supersedes": step.supersedes,
-                    })
+                    });
+                    // a step that cancels on approval runs differently, so it is described too;
+                    // the other steps keep the description, and the hash, they had
+                    if step.cancels_on_approval || !step.quiesce.is_empty() {
+                        described["quiesce"] = json!(
+                            step.quiesce
+                                .iter()
+                                .map(|component| component.deployment_name())
+                                .collect::<Vec<_>>()
+                        );
+                        described["cancels_on_approval"] = json!(step.cancels_on_approval);
+                    }
+                    described
                 })
                 .collect::<Vec<_>>();
             json!({

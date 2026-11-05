@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use thorium::Conf;
-use thorium::models::schema::{RecordStatus, StatusReport};
+use thorium::models::schema::{RecordStatus, StatusReport, join_result};
 use thorium::models::upgrades::{AppliedStep, STATE_KEY, StepState, UpgradeState, latest};
 
 #[path = "common/base_namespace.rs"]
@@ -17,7 +17,7 @@ mod base_namespace;
 /// The test config every run starts from; the environment overrides point it at the test cluster
 const CONFIG: &str = "../api/tests/thorium-testing.yml";
 
-/// The prefix of the one line the status Job prints
+/// The prefix of the result lines the status Job prints
 const RESULT_PREFIX: &str = "THORIUM-RESULT ";
 
 /// Build a thoradm command against the test config with a namespace of its own
@@ -135,20 +135,21 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-/// Read the report a status run printed on its one result line
+/// Read the report a status run printed on its result lines, joining a report printed in chunks
 ///
 /// # Arguments
 ///
 /// * `output` - The status command's output
 fn report(output: &Output) -> StatusReport {
-    // exactly one line carries the prefix, and everything after it is the report
+    // the lines that carry the prefix, with it removed
     let stdout = String::from_utf8_lossy(&output.stdout);
     let lines = stdout
         .lines()
-        .filter(|line| line.starts_with(RESULT_PREFIX))
+        .filter_map(|line| line.strip_prefix(RESULT_PREFIX))
         .collect::<Vec<_>>();
-    assert_eq!(lines.len(), 1, "{stdout}");
-    serde_json::from_str(&lines[0][RESULT_PREFIX.len()..]).expect("the line is a report")
+    // they hold the whole report on one line or in numbered chunks
+    let json = join_result(&lines).unwrap_or_else(|why| panic!("{why}:\n{stdout}"));
+    serde_json::from_str(&json).expect("the lines are a report")
 }
 
 /// Run `schema status` and read its report
@@ -431,7 +432,7 @@ async fn record_seed_copies_the_state_once() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let text = std::fs::read_to_string(&log).expect("a summary");
     assert!(text.len() <= 4096, "{} bytes", text.len());
-    // the status line carries the newest 200 entries and the whole count, past 4 KiB
+    // the status lines carry the newest 200 entries and the whole count, past 4 KiB
     let (output, report) = status(&ns, &["--result", uid]);
     assert!(output.stdout.len() > 4096, "{} bytes", output.stdout.len());
     let RecordStatus::Recorded { record, .. } = &report.status else {

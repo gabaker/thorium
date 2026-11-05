@@ -144,9 +144,9 @@ pub fn check_apply(catalog: &Catalog, recorded: &RecordedState) -> Result<(), Er
 /// The run is refused when the recorded revision is one this build's catalog doesn't know, or
 /// when the step names a revision it doesn't know. A catalog step must be in the plan from the
 /// recorded revision to the revision of its edge, so a step the record already moved past or
-/// shows finished is refused. A step the catalog doesn't hold, such as a re-bucket, a re-run of a
-/// pass's issue groups or objects, and a rebuild whose reingest the record still shows in progress
-/// are not checked against the plan.
+/// shows finished is refused. A step the catalog doesn't hold, such as a re-bucket or the
+/// resubmission, a re-run of a pass's issue groups or objects, and a rebuild whose reingest the
+/// record still shows in progress are not checked against the plan.
 ///
 /// # Arguments
 ///

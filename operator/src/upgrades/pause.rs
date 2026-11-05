@@ -9,6 +9,7 @@
 //! action, so they survive a lost state `ConfigMap`.
 
 use k8s_openapi::api::apps::v1::Deployment;
+use kube::Api;
 use kube::api::{Patch, PatchParams};
 use std::collections::BTreeMap;
 use thorium::Error;
@@ -189,11 +190,26 @@ fn declared(meta: &ClusterMeta, component: UpgradeComponent) -> Option<i32> {
 /// * `meta` - Thorium cluster client and metadata
 /// * `name` - The Deployment's name
 async fn get(meta: &ClusterMeta, name: &str) -> Result<Option<Deployment>, Error> {
+    // read it through the cluster's Deployment client
+    get_in(&meta.deploy_api, &meta.namespace, name).await
+}
+
+/// Read a Deployment through a Deployment client, treating a missing one as absent
+///
+/// # Arguments
+///
+/// * `api` - The Deployment client of the namespace
+/// * `namespace` - The namespace, for errors
+/// * `name` - The Deployment's name
+async fn get_in(
+    api: &Api<Deployment>,
+    namespace: &str,
+    name: &str,
+) -> Result<Option<Deployment>, Error> {
     // a component that isn't deployed has nothing to pause
-    meta.deploy_api.get_opt(name).await.map_err(|error| {
+    api.get_opt(name).await.map_err(|error| {
         Error::new(format!(
-            "Failed to read the {name} deployment in namespace {}: {error}",
-            meta.namespace
+            "Failed to read the {name} deployment in namespace {namespace}: {error}"
         ))
     })
 }
@@ -206,15 +222,32 @@ async fn get(meta: &ClusterMeta, name: &str) -> Result<Option<Deployment>, Error
 /// * `name` - The Deployment's name
 /// * `replicas` - The count to scale to
 async fn scale(meta: &ClusterMeta, name: &str, replicas: i32) -> Result<(), Error> {
+    // scale it through the cluster's Deployment client
+    scale_in(&meta.deploy_api, &meta.namespace, name, replicas).await
+}
+
+/// Scale a Deployment to a replica count through a Deployment client
+///
+/// # Arguments
+///
+/// * `api` - The Deployment client of the namespace
+/// * `namespace` - The namespace, for errors
+/// * `name` - The Deployment's name
+/// * `replicas` - The count to scale to
+async fn scale_in(
+    api: &Api<Deployment>,
+    namespace: &str,
+    name: &str,
+    replicas: i32,
+) -> Result<(), Error> {
     // a merge patch of the count alone leaves everything else the rollout set
     let patch = serde_json::json!({"spec": {"replicas": replicas}});
-    meta.deploy_api
-        .patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+    api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
         .await
         .map_err(|error| {
             Error::new(format!(
-                "Failed to scale the {name} deployment in namespace {} to {replicas}: {error}",
-                meta.namespace
+                "Failed to scale the {name} deployment in namespace {namespace} to {replicas}: \
+                 {error}"
             ))
         })?;
     event!(
@@ -307,6 +340,21 @@ pub async fn scale_down(meta: &ClusterMeta, names: &[&str]) -> Result<(), Error>
     Ok(())
 }
 
+/// Read the replica count a Deployment's spec asks for
+///
+/// Returns nothing when the component has no Deployment; a spec that sets no count asks for one.
+///
+/// # Arguments
+///
+/// * `meta` - Thorium cluster client and metadata
+/// * `name` - The Deployment's name
+pub async fn spec_replicas(meta: &ClusterMeta, name: &str) -> Result<Option<i32>, Error> {
+    // a missing Deployment asks for nothing, and Kubernetes defaults an unset count to one
+    Ok(get(meta, name)
+        .await?
+        .map(|deployment| deployment.spec.and_then(|spec| spec.replicas).unwrap_or(1)))
+}
+
 /// Check that the paused components' pods are gone
 ///
 /// Returns what is still running, or nothing once every Deployment has no replicas left.
@@ -377,7 +425,38 @@ pub async fn restore(meta: &ClusterMeta, name: &str) -> Result<(), Error> {
     if count > 0 {
         scale(meta, name, count).await?;
     }
-    record_restored(meta, &mut stored, name, count).await
+    record_restored(&meta.client, &meta.namespace, &mut stored, name, count).await
+}
+
+/// Scale components a pause stopped before its step ran back to their recorded counts, and record
+/// each restore, which ends its pause
+///
+/// A component whose Deployment is gone is recorded restored without a scale, and a recorded count
+/// of zero stays zero. Each restore is saved after its scale, so a crash between the two restores
+/// the component again.
+///
+/// # Arguments
+///
+/// * `client` - The kube client to use
+/// * `namespace` - The namespace the components and the state live in
+/// * `stored` - The recorded upgrade state, which is saved with each restore
+/// * `counts` - The counts to restore, by Deployment name
+pub async fn restore_counts(
+    client: &kube::Client,
+    namespace: &str,
+    stored: &mut StoredState,
+    counts: &BTreeMap<String, i32>,
+) -> Result<(), Error> {
+    // the namespace's Deployments, reached without a resolved cluster config
+    let api: Api<Deployment> = Api::namespaced(client.clone(), namespace);
+    for (name, count) in counts {
+        // scale a deployed component back, then record that it was
+        if *count > 0 && get_in(&api, namespace, name).await?.is_some() {
+            scale_in(&api, namespace, name, *count).await?;
+        }
+        record_restored(client, namespace, stored, name, *count).await?;
+    }
+    Ok(())
 }
 
 /// Whether a rebuild that runs again, after its reingest was lost, holds a component's pause
@@ -399,19 +478,23 @@ fn held_by_rerun(state: &UpgradeState, name: &str) -> bool {
 }
 
 /// Scale a paused component back to its recorded count once its new Deployment is applied, unless a
-/// rebuild that runs again still holds it paused
+/// rebuild that runs again still holds it paused or the resubmission of a drain's requests holds
+/// the pause
 ///
 /// The Deployments are applied while a rebuild runs again after the upgrade, so the run's pause
 /// must outlast those applies or the component would write while the run's Job rebuilds its data.
+/// The resubmission binds each request to the converted pipelines, so nothing may change them
+/// before it ran.
 ///
 /// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
 /// * `name` - The Deployment that was just applied
 pub async fn restore_applied(meta: &ClusterMeta, name: &str) -> Result<(), Error> {
-    // a component a running rebuild paused stays at zero until that run restores it
+    // a component a running rebuild paused stays at zero until that run restores it, and every
+    // component stays paused while the resubmission holds the pause
     if let Some(stored) = state::load(&meta.client, &meta.namespace).await?
-        && held_by_rerun(&stored.state, name)
+        && (held_by_rerun(&stored.state, name) || super::resubmit::holds(&stored.state))
     {
         return Ok(());
     }
@@ -423,12 +506,14 @@ pub async fn restore_applied(meta: &ClusterMeta, name: &str) -> Result<(), Error
 ///
 /// # Arguments
 ///
-/// * `meta` - Thorium cluster client and metadata
+/// * `client` - The kube client to use
+/// * `namespace` - The namespace the state lives in
 /// * `stored` - The recorded upgrade state, which is saved
 /// * `name` - The Deployment that was restored
 /// * `count` - The replica count it was restored to
 async fn record_restored(
-    meta: &ClusterMeta,
+    client: &kube::Client,
+    namespace: &str,
     stored: &mut StoredState,
     name: &str,
     count: i32,
@@ -447,5 +532,5 @@ async fn record_restored(
         paused: BTreeMap::from([(name.to_owned(), count)]),
         ..AppliedStep::default()
     });
-    state::save(&meta.client, &meta.namespace, stored).await
+    state::save(client, namespace, stored).await
 }

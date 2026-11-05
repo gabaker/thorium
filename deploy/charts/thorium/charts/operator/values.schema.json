@@ -347,6 +347,14 @@
                   },
                   "acceptBackupGaps": {
                     "type": "boolean"
+                  },
+                  "cancelInFlight": {
+                    "type": "boolean"
+                  },
+                  "graceSeconds": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 3600
                   }
                 }
               }

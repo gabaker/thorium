@@ -18,7 +18,9 @@ thorium_upgrade_target_revision: ""
 # first: [{step: <step id>, backup: <where the backup is>}]. A step may also set acceptIssues (a list
 # of reason codes of issue groups that don't fail its run), and a downgrade step that loses data
 # needs acceptLoss: true and confirm: <the code its status shows>, plus acceptBackupGaps: true for a
-# lost field no backup covers
+# lost field no backup covers. A step that waits for in-flight work (such as the reaction drain)
+# cancels it instead with cancelInFlight: true and confirm: <the code its status shows>, after
+# stopping the components it quiesces for graceSeconds (0 to 3600, 60 when unset)
 thorium_upgrade_approvals: []
 # Follow the operator's latest upgrade revision without a target (for development clusters). When
 # set, megathor also labels the Thorium namespace thorium.sandia.gov/dev=true, which together with

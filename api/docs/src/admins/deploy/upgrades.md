@@ -264,9 +264,10 @@ backups; the backup is your reference to one you took yourself.
 ```
 
 Approve it by naming the backup you took (an approval with an empty `backup` doesn't count). An
-approval can also carry `acceptIssues` (see [Data migrations](#data-migrations)) and, for a step
+approval can also carry `acceptIssues` (see [Data migrations](#data-migrations)); for a step
 that loses data in a downgrade, `acceptLoss`, `confirm`, and `acceptBackupGaps` (see [Accepting
-loss](#accepting-loss)):
+loss](#accepting-loss)); and for a step that waits for in-flight work, `cancelInFlight`, `confirm`,
+and `graceSeconds` (see [Cancelling in-flight work](#cancelling-in-flight-work)):
 
 ```yaml
 operator:
@@ -280,8 +281,9 @@ operator:
 
 megathor takes the same list as `thorium_upgrade_approvals`, and a `ThoriumCluster` without Helm
 as `spec.upgrade.approvals` (`[{step, backup, acceptLoss, confirm, acceptIssues,
-acceptBackupGaps}]`, the last four optional, in snake case (`accept_loss`, `confirm`,
-`accept_issues`, `accept_backup_gaps`) in the `ThoriumCluster`).
+acceptBackupGaps, cancelInFlight, graceSeconds}]`, all but the first two optional, in snake case
+(`accept_loss`, `confirm`, `accept_issues`, `accept_backup_gaps`, `cancel_in_flight`,
+`grace_seconds`) in the `ThoriumCluster`).
 
 The operator never takes backups itself; `backup` only records where yours is. A step the operator
 can't run on its own reports "Waiting for manual work" with the procedure to follow once approved;
@@ -289,6 +291,37 @@ when the work is done the operator notices on its next check, records the step a
 message that starts "fixed manually", and continues. No step of this release's catalog works this
 way: the operator runs every `Data` step as migration Jobs (see [Data
 migrations](#data-migrations)).
+
+### Cancelling in-flight work
+
+A step that waits for in-flight work (in this release, `drain-reactions` of `2026-10-v04`, which
+waits for reactions) needs no approval: it waits until the work is gone, with Thorium running. An
+approval naming it opts in to cancelling the work instead, and counts only when it has all of:
+
+| Field | Values | Meaning |
+|-------|--------|---------|
+| `backup` | Your reference to a backup | As for any approval |
+| `cancelInFlight` (CRD `cancel_in_flight`) | `true` | Cancel what is in flight instead of waiting; without it the approval changes nothing |
+| `confirm` | The code the waiting step shows | Eight characters (Crockford base32) shown in the step's message and its `blocked` field (`{"CancelApproval":{"confirm":"<code>"}}`), computed from the upgrade history, so they change when it gains an entry. The code is used up when the step starts, so an approval cancels at most once. Nothing is recorded while the step waits, so an approval written before it waits, or left from an attempt stopped before the step started, can still match: add it only when you mean to cancel, and remove it once the step has run |
+| `graceSeconds` (CRD `grace_seconds`) | 0 to 3600, 60 when unset | How long the operator waits after stopping the scalers before it pauses the rest and cancels |
+
+```yaml
+approvals:
+  - step: drain-reactions
+    backup: thoradm backup 2026-11-04 on /mnt/backups
+    cancelInFlight: true
+    confirm: 7KQ2M9XA
+    graceSeconds: 120
+```
+
+With a usable approval, the operator records the scaler and baremetal-scaler replica counts and
+scales them to 0, waits the grace, scales the rest of the step's pause to 0, and runs the step's
+migration Job, which cancels and records the work; the step is `Done`, never `Skipped`. A missing,
+wrong, or used code runs nothing: the step's message says so and shows the current code, and
+`status.upgrade.stale_approvals` lists the approval. Withdrawing the approval during the grace
+scales the scalers back to their recorded counts and the step waits again. [Upgrading to Agentic
+Workflows](../agentic/upgrading.md#cancelling-instead-of-waiting) describes the drain's cancel, its
+resubmission, and its reports.
 
 ## Data migrations
 
@@ -307,13 +340,13 @@ token, with the config Secret read-only. The step goes through these stages.
    recorded revision, or the image), when the approvals set for the step changed, when a check
    that asked to wait comes due, and when you set the `thorium.sandia.gov/refresh-check`
    annotation on the `ThoriumCluster` to a value it didn't hold before. Checks run one at a time.
-   The operator deletes a check Job, with its pod, once it has read the report; a check Job it
-   doesn't read, such as a failed one, is deleted an hour after it ends, and a failed check runs
-   again then. A check Job made by an older operator keeps the retention it was made with, up to
-   seven days, so a failed one from before an operator upgrade holds its check until it expires or
-   you set the refresh annotation. Migration, schema-apply, and record Jobs are kept for seven days
-   after they end. To see every group and sample keys, run
-   `thoradm migrate check --id <migration> --all --samples` yourself.
+   The operator deletes a check Job, with its pod, once it has read the report or once the step's
+   run starts; a check Job it doesn't read before then, such as a failed one, is deleted an hour
+   after it ends, and a failed check runs again then. A check Job made by an older operator keeps
+   the retention it was made with, up to seven days, so a failed one from before an operator
+   upgrade holds its check until it expires or you set the refresh annotation. Migration,
+   schema-apply, and record Jobs are kept for seven days after they end. To see every group and
+   sample keys, run `thoradm migrate check --id <migration> --all --samples` yourself.
 2. **Approval.** The message names the backup to take first: take it with `thoradm backup new`,
    and read the backup limitations in [Taking Backups](../thoradm/taking_backups.md) first. Then
    approve the step with `{step, backup}`. A step whose check finds nothing to change is skipped
@@ -682,7 +715,8 @@ with which image (see the messages in [Setting a target](#setting-a-target)).
 | `MigrationIssues` | A migration finished with issue groups within its limit, or accepted: the message lists up to five steps of the running upgrade that ended with issues (see [Data migrations](#data-migrations)) |
 | `SearchIncomplete` | An Elasticsearch rebuild's reingest hasn't finished, so search results are incomplete (see [Rebuilding Elasticsearch indexes](#rebuilding-elasticsearch-indexes)) |
 | `LossySettingRefused` | `dangerousDowngradeLossy` is set on a cluster that isn't a development cluster, so it is ignored |
-| `CatalogSkew` | The image's thoradm knows a different catalog than the operator (the message names both), so no data-changing step is planned until the operator and the image are of the same release |
+| `CatalogSkew` | The image's thoradm knows a different catalog than the operator (the message names both), so no data-changing step is planned until the operator and the image are of the same release. It can show for a short time while the operator and the image run different builds, such as during a `helm upgrade` that changes both, and clears once they match |
+| `ReactionsResubmitted` | The resubmission of the requests an approved `drain-reactions` cancel recorded: `False` while its Job runs or after a failed Job, `True` once it finished, with counts only (see [Upgrading to Agentic Workflows](../agentic/upgrading.md#cancelling-instead-of-waiting)) |
 | `SchemaSkew` | The schema-apply Job reported a deployment fingerprint different from the one the operator's build declares, so the operator and the image were built from different schemas; the rollout continues, and deploying an operator and image of the same release clears it |
 | `MutableImageTag` | The cluster runs a mutable image tag such as `latest`, so a new image under the same tag changes nothing that triggers the schema apply; use a version tag, or restart the operator and the components to pull the new image and set the `thorium.sandia.gov/retry-schema-apply` annotation on the `ThoriumCluster` to a new value (see [Schema apply and drift](./upgrade-paths.md#schema-apply-and-drift)) |
 
@@ -691,8 +725,9 @@ with which image (see the messages in [Setting a target](#setting-a-target)).
 - The operator never takes backups, and it runs only the `Data` work thoradm performs as a
   migration Job (see [Data migrations](#data-migrations)), the Elasticsearch reindex of
   `2026-10-v02` included (see [Reindexing Elasticsearch](#reindexing-elasticsearch)).
-  `drain-reactions` of `2026-10-v04` runs no migration Job: the operator reruns its check Job until
-  no reaction is in flight (see [Upgrading to Agentic Workflows](../agentic/upgrading.md#the-drain)).
+  `drain-reactions` of `2026-10-v04` runs a migration Job only with an approval that cancels the
+  reactions in flight; otherwise the operator reruns its check Job until no reaction is in flight
+  (see [Upgrading to Agentic Workflows](../agentic/upgrading.md#the-drain)).
 - After `thoradm migrate reset-state` or a `thoradm backup restore` moves the recorded revision,
   the operator keeps the revision its `thorium-upgrade-state` ConfigMap holds until it next reads
   the record, when its hourly drift read is due at a reconcile (at least daily on a `Ready`
@@ -866,7 +901,7 @@ steps when a target is set, and a deployment at `2026-10-v02` runs them after th
 
 | Step | Kind | What it does |
 |------|------|--------------|
-| `drain-reactions` | Data | Waits, with Thorium running normally, until no reaction is `Created` or `Started` and no worker of the previous release is registered; it only checks and deletes nothing, and is skipped when nothing is in flight |
+| `drain-reactions` | Data | Waits, with Thorium running normally, until no reaction is `Created` or `Started` and no worker of the previous release is registered, and is skipped when nothing is in flight. It needs no approval; an approval with `cancelInFlight` and the code the waiting step shows stops the scalers, waits the grace, pauses the API, scalers, event handler, and search streamer, and cancels what is still in flight, recording each request, which is resubmitted once the revision is recorded and before the paused components come back (see [Cancelling in-flight work](#cancelling-in-flight-work)) |
 | `images-to-tools` | Data | Creates a tool and its first tool instance for every image; needs an approval when an image exists |
 | `pipelines-to-tool-stages` | Data | Pins each image stage of every pipeline to the first tool instance created from its image; needs an approval when a stage needs converting |
 | `provenance-to-legacy-tools` | Data | Moves the tool names stored in file system, decompiled function, and process tree provenance into their legacy tools field; needs an approval when a row holds names |
@@ -883,9 +918,11 @@ record. The drain comes before `users-settings-theme` because that step pauses t
 needs components running ahead of the steps that pause them, so the order holds whichever way the
 deployment gets there.
 
-`drain-reactions` never deletes a reaction. While it waits, stop submitting reactions and let the
-unfinished ones finish, or delete a stuck one with `thorctl reactions delete` while the previous
-API is still running, and do not restart or delete API pods meanwhile.
+`drain-reactions` deletes no reaction unless you approve the cancel. While it waits, stop
+submitting reactions and let the unfinished ones finish, or delete a stuck one with `thorctl
+reactions delete` while the previous API is still running, and do not restart or delete API pods
+meanwhile. Or approve the cancel, which fails what is still in flight and resubmits it after the
+conversion (results already written are kept, and every stage runs again).
 `thoradm migrate check --id drain-reactions` names the reactions and workers that hold it. The
 three conversion steps pause the API, the scalers, the event handler, and the search streamer while
 they run, and those components stay at zero until the new release's Deployments are applied.

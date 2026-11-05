@@ -252,6 +252,19 @@ See [Scheduling Tools and Runs](../admins/agentic/scheduling.md).
 - Thorium deploys from Helm charts and the operator runs revision-based upgrades. See
   [Install with Helm](../admins/deploy/deploy-helm.md) and
   [Upgrading Thorium](../admins/deploy/upgrades.md).
+- The `drain-reactions` approval with `cancelInFlight` cancels running analyses and resubmits them.
+  Instead of waiting for the reactions in flight, an approval with `cancelInFlight: true` and the
+  confirmation code the waiting step shows as `confirm` stops the scalers, waits `graceSeconds`
+  (60 by default; `cancel_in_flight` and `grace_seconds` in a `ThoriumCluster` without Helm), pauses
+  Thorium, fails each reaction still in flight with the reason in its status
+  log, and creates it again as its creator once the conversion is recorded, tagged
+  `resubmitted-from:<old id>`. Results already written are kept, and every stage runs again. The
+  `ReactionsResubmitted` condition and `thoradm migrate report --id drain-reactions` and `--id
+  resubmit-reactions` report what happened. See [Cancelling instead of
+  waiting](../admins/agentic/upgrading.md#cancelling-instead-of-waiting).
+- The `CatalogSkew` condition can show for a short time while the operator and the image run
+  different builds, such as during the `helm upgrade` to this release; it clears once both run this
+  release.
 ### Thorctl commands
 ---
 
@@ -332,8 +345,9 @@ view and fails at its deadline (five hours, `thoradm schema apply --view-wait-se
 views and the nodes that haven't built them; bring the node back, or remove it from the cluster,
 first. A node that was removed or replaced no longer holds an apply back.
 
-1. Take a backup, let running reactions finish, and set the target revision `2026-10-v04` with an
-   approval for each conversion step. The upgrade converts every image to a tool, sets the tool of
+1. Take a backup, let running reactions finish (or, once the drain waits, approve cancelling and
+   resubmitting them), and set the target revision `2026-10-v04` with an approval for each
+   conversion step. The upgrade converts every image to a tool, sets the tool of
    each stage of the pipelines it can convert, and moves stored provenance names to
    `legacy_tools`; the API, the scalers, the event handler, and the search streamer are down while
    it does. See [Upgrading to Agentic Workflows](../admins/agentic/upgrading.md) and

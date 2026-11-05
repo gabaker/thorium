@@ -138,6 +138,7 @@ pub(super) fn report(status: RecordStatus, job_result: Option<RecordStatus>) -> 
         },
         job_result,
         check: None,
+        applied: None,
     }
 }
 
@@ -1238,6 +1239,85 @@ async fn a_second_result_line_is_not_trusted() {
     // reading it fails instead of choosing one of the lines
     let read = read_report(&meta, "record", None).await;
     assert!(read.is_err(), "{read:?}");
+}
+
+/// Build the log of a status Job that printed a report in chunks, between lines of other output
+///
+/// # Arguments
+///
+/// * `report` - The report the Job printed
+/// * `drop` - The index of a chunk left out of the log, counted from 1, if one is
+fn chunked_log_of(report: &StatusReport, drop: Option<usize>) -> String {
+    // the lines thoradm prints for the report, less the one left out
+    let json = serde_json::to_string(report).expect("the report serializes");
+    let lines = thorium::models::schema::result_lines(&json);
+    assert!(lines.len() > 1, "the report fits in one line");
+    let kept = lines
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| drop != Some(index + 1))
+        .fold(String::new(), |mut kept, (_, line)| {
+            kept.push_str(line);
+            kept.push('\n');
+            kept
+        });
+    format!("2026-10-22T00:00:00Z INFO connecting\n{kept}2026-10-22T00:00:01Z INFO done\n")
+}
+
+/// Build a report whose applied report lists more workers than fit in one result line
+fn large_report() -> StatusReport {
+    // a cancel's result with a long worker list
+    let workers = (0..3_000)
+        .map(|at| {
+            json!({"group": "corn", "name": format!("worker-{at:05}"), "scaler": "K8s",
+                   "cluster": "thorium", "node": "node-1"})
+        })
+        .collect::<Vec<_>>();
+    let mut report = report(RecordStatus::NoKeyspace, None);
+    report.applied = Some(json!({"groups": {}, "skipped_total": 0, "drain": {"workers": workers}}));
+    report
+}
+
+/// A report printed in chunks is joined before it is parsed, whatever other output lies between
+#[tokio::test]
+async fn a_chunked_result_is_joined_before_parsing() {
+    // the status Job printed a report larger than a chunk
+    let cluster = cluster(json!({}));
+    let finished = large_report();
+    let jobs = [status_job("record", Some("Complete"))];
+    let fake = fake(&cluster, None, &jobs, None).route(
+        "GET",
+        &format!("{PODS_PATH}/{POD}/log"),
+        200,
+        Value::String(chunked_log_of(&finished, None)),
+    );
+    let meta = meta_for(cluster.clone(), &fake.client());
+    // the read joins the chunks into the report the Job printed
+    let read = read_report(&meta, "record", None).await.expect("read");
+    let Read::Report(read) = read else {
+        panic!("no report: {read:?}");
+    };
+    assert_eq!(*read, finished);
+}
+
+/// A log missing one of a report's chunks fails the read instead of parsing what is there
+#[tokio::test]
+async fn a_missing_chunk_fails_the_read() {
+    // the status Job's log lacks the report's second chunk
+    let cluster = cluster(json!({}));
+    let finished = large_report();
+    let jobs = [status_job("record", Some("Complete"))];
+    let fake = fake(&cluster, None, &jobs, None).route(
+        "GET",
+        &format!("{PODS_PATH}/{POD}/log"),
+        200,
+        Value::String(chunked_log_of(&finished, Some(2))),
+    );
+    let meta = meta_for(cluster.clone(), &fake.client());
+    // the read fails and names the missing chunk
+    let read = read_report(&meta, "record", None).await;
+    let error = read.expect_err("a missing chunk fails the read");
+    assert!(error.to_string().contains("chunk 2 of"), "{error}");
 }
 
 /// The record isn't read again for the same plan within a few minutes, so a step blocked on an

@@ -205,7 +205,8 @@ drift](./upgrades.md#schema-drift).
 | `MigrationIssues` | A migration finished with issue groups. `thoradm migrate issues --id <migration>` lists them; fix the objects and run `thoradm migrate run --id <migration> --reason <code>` (see [Data migrations](./upgrades.md#data-migrations)) |
 | `SearchIncomplete` | Search results are incomplete until the search streamer finishes reingesting from Scylla. It clears itself; the message names the sources still reingesting (see [Rebuilding Elasticsearch indexes](./upgrades.md#rebuilding-elasticsearch-indexes)) |
 | `LossySettingRefused` | `dangerousDowngradeLossy` is set but the cluster isn't a development cluster (`autoTargetDev` and the `thorium.sandia.gov/dev=true` label on the namespace). Unset it or label the namespace; lossy steps need their own approvals meanwhile (see [Accepting loss](./upgrades.md#accepting-loss)) |
-| `CatalogSkew` | The image's thoradm knows another revision catalog than the operator, so no data-changing step is planned. Deploy the operator and the image of the same release |
+| `CatalogSkew` | The image's thoradm knows another revision catalog than the operator, so no data-changing step is planned. It can show for a short time while the operator and the image run different builds, such as during a `helm upgrade` that changes both; if it stays, deploy the operator and the image of the same release |
+| `ReactionsResubmitted` | `False`: the resubmission of the requests an approved drain cancel recorded is running, or its last Job failed (the message names it and its counts). After three Jobs inside the conversion pause, set the `thorium.sandia.gov/refresh-check` annotation to a new value to run it again, and read `thoradm migrate report --id resubmit-reactions`. `True`: it finished |
 | `SchemaSkew` | The schema-apply Job reported a schema fingerprint other than the one the operator's build declares; the rollout continues. Deploy the operator and the image of the same release |
 | `MutableImageTag` | The cluster runs a mutable image tag such as `latest`, so a new image under the same tag doesn't run the schema apply again. Use a version tag, or set the `thorium.sandia.gov/retry-schema-apply` annotation on the `ThoriumCluster` to a new value after pulling a new image |
 
@@ -216,10 +217,11 @@ drift](./upgrades.md#schema-drift).
 
 > The approval for `<step>` was refused: ... Repeat the current code `<code>` as confirm
 
-The step needs an approval with `acceptLoss: true` and the code it shows now. A code belongs to one
-block of one step and is used up when the step runs, so a failed run needs a new approval with the
-new code. When the message says a field "isn't covered by thoradm backup", add
-`acceptBackupGaps: true` to accept that a backup can't restore it. See [Accepting
+The step needs an approval with `acceptLoss: true` (`accept_loss` in a `ThoriumCluster` without
+Helm) and the code it shows now. A code belongs to one block of one step and is used up when the
+step runs, so a failed run needs a new approval with the new code. When the message says a field
+"isn't covered by thoradm backup", add `acceptBackupGaps: true` (`accept_backup_gaps`) to accept
+that a backup can't restore it. See [Accepting
 loss](./upgrades.md#accepting-loss).
 
 ### The API refuses to start

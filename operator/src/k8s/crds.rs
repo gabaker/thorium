@@ -1142,6 +1142,34 @@ pub async fn set_upgrade_condition(
     holds: bool,
     message: String,
 ) {
+    // a condition that never held needs no entry
+    let reported = tracker
+        .current()
+        .upgrade
+        .is_some_and(|upgrade| upgrade.conditions.iter().any(|found| found.kind == kind));
+    if !reported && !holds {
+        return;
+    }
+    report_upgrade_condition(client, tracker, kind, holds, message).await;
+}
+
+/// Report a condition in a `ThoriumCluster`'s upgrade status, true or false, even one that never
+/// held, keeping the other conditions
+///
+/// # Arguments
+///
+/// * `client` - The kube client to patch the status with
+/// * `tracker` - The cluster to update and the status last written for it
+/// * `kind` - The condition to report
+/// * `holds` - Whether the condition holds
+/// * `message` - What the condition reports
+pub async fn report_upgrade_condition(
+    client: &Client,
+    tracker: &StatusTracker,
+    kind: UpgradeConditionType,
+    holds: bool,
+    message: String,
+) {
     // get the conditions reported now
     let mut conditions = tracker
         .current()
@@ -1150,10 +1178,6 @@ pub async fn set_upgrade_condition(
     let existing = conditions
         .iter()
         .position(|condition| condition.kind == kind);
-    // a condition that never held needs no entry
-    if existing.is_none() && !holds {
-        return;
-    }
     // build the condition as it should be reported
     let status = if holds { "True" } else { "False" };
     let condition = UpgradeCondition {

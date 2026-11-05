@@ -885,21 +885,23 @@ async fn log_tail(meta: &ClusterMeta, pod: &str) -> Vec<String> {
     }
 }
 
-/// Read the line a finished Job's pod printed that starts with a prefix
+/// Read the lines a finished Job's pod printed that start with a prefix, in log order and with the
+/// prefix removed
 ///
 /// This is how a status Job's report reaches the operator: the whole pod log is read, since the
-/// line is far larger than the termination message, and the one line with the prefix is kept.
+/// report is far larger than the termination message, and every line with the prefix is kept for
+/// the caller to join. Returns nothing when the Job has no pod.
 ///
 /// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
 /// * `job` - The name of the Job
-/// * `prefix` - The prefix of the line to find
-pub async fn result_line(
+/// * `prefix` - The prefix of the lines to find
+pub async fn result_lines(
     meta: &ClusterMeta,
     job: &str,
     prefix: &str,
-) -> Result<Option<String>, Error> {
+) -> Result<Option<Vec<String>>, Error> {
     // the newest pod has the latest output
     let Some(pod) = newest_pod(meta, job).await? else {
         return Ok(None);
@@ -918,16 +920,13 @@ pub async fn result_line(
             meta.namespace
         ))
     })?;
-    // exactly one line may carry the prefix: a second one is not the Job's own output
-    let mut lines = logs.lines().filter_map(|line| line.strip_prefix(prefix));
-    let found = lines.next().map(ToOwned::to_owned);
-    if lines.next().is_some() {
-        return Err(Error::new(format!(
-            "The log of pod {name} holds more than one `{}` line, so none is trusted",
-            prefix.trim_end()
-        )));
-    }
-    Ok(found)
+    // keep every line with the prefix, which the caller joins and vets
+    Ok(Some(
+        logs.lines()
+            .filter_map(|line| line.strip_prefix(prefix))
+            .map(ToOwned::to_owned)
+            .collect(),
+    ))
 }
 
 /// Poll a Job, reading its pod's termination message and, on failure, its log tail

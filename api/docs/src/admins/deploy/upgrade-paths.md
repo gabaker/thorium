@@ -248,7 +248,10 @@ Workflows](../agentic/upgrading.md) covers them in full.
   `UpgradeRequired` instead.
 - The outage is planned and users are told. What creates reactions (triggers, bulk submissions,
   users) is stopped, and running reactions are left to finish: the drain never ends while something
-  keeps submitting.
+  keeps submitting. Decide how the drain ends: wait for the reactions in flight to finish (or
+  delete stuck ones), with Thorium serving meanwhile, or approve the cancel once the drain waits,
+  which fails what is still in flight and resubmits it after the conversion; Thorium is then down
+  from the cancel until the new Deployments are applied.
 - Images whose `env` holds secrets are cleaned up while image writes still work: after the upgrade,
   image writes return `410 Gone`, and tool instance variables are visible to every group that can
   read the tool.
@@ -318,6 +321,30 @@ Workflows](../agentic/upgrading.md) covers them in full.
    still runs, and don't restart API pods meanwhile. When the wait doesn't end although nothing
    seems to run, see [A drain that doesn't end](#a-drain-that-doesnt-end).
 
+4. Or, instead of waiting, cancel what is in flight: add a `drain-reactions` approval with
+   `cancelInFlight: true` and the confirmation code the waiting step's message shows as `confirm`,
+   and run the same `helm upgrade` again. The code exists only once the drain waits, so this
+   approval can't be part of the first `helm upgrade`, and it serves one attempt:
+
+   ```yaml
+   # add to the approvals in upgrade.yaml
+           - step: drain-reactions
+             backup: thoradm backup <date> on <where>
+             cancelInFlight: true
+             confirm: <the code the step shows>
+   ```
+
+   A `ThoriumCluster` without Helm spells the fields `cancel_in_flight` and `grace_seconds`. The
+   operator stops the scalers, waits a 60-second grace (`graceSeconds` changes it), pauses the
+   API, event handler, and search streamer, and cancels and records the reactions still in flight.
+   After the conversion, and before the components come back, it resubmits them as their creators;
+   the `ReactionsResubmitted` condition reports the counts (see [Cancelling instead of
+   waiting](../agentic/upgrading.md#cancelling-instead-of-waiting)). Previous-release workers it
+   didn't stop keep running their tool and may upload results, tags, and child samples, and stage
+   logs to the failed reaction: as soon as the step is `Done`, run the clean-up commands the
+   operator logged and stop old agents on bare-metal, Windows, or KVM hosts by hand (see [Workers
+   the operator didn't stop](../agentic/upgrading.md#workers-the-operator-didnt-stop)).
+
 **Check.** Phase `Ready` at `2026-10-v05` and every component back at its replica count;
 `thoradm --cluster-conf thorium.yml schema diff` exits 0, or 7 with only the drift
 [expected after stage 3](#expected-drift) (keep its output as this stage's snapshot);
@@ -326,8 +353,9 @@ conversions) shows what changed and what was skipped; tell group owners about sk
 `SchemaDrift` shows the operator's last drift read, which may predate this stage (see stage 2);
 `thoradm schema diff` shows the live state.
 Migrated tools show in `thorctl tools get` and the UI, pipelines name a tool for every stage, and a
-reaction runs to completion. Remove the approvals `status.upgrade.stale_approvals` lists from your
-values.
+reaction runs to completion. After an approved cancel, `thoradm --cluster-conf thorium.yml migrate
+report --id resubmit-reactions` names each request's outcome; tell the creators of refused and
+stale ones. Remove the approvals `status.upgrade.stale_approvals` lists from your values.
 
 **Roll back.** A target below `2026-10-v04` is refused once a conversion step finished or was
 skipped. Restore the pre-upgrade backup into a fresh stage-2 install (see [Rolling back a
@@ -613,7 +641,7 @@ has each step in full.
 | `2026-10-v01` | — | The baseline: a pre-Helm deployment once `convert-to-helm.sh` has recorded it | none | none | — |
 | `2026-10-v02` | `2026-10-v01` | Thorium deployed by the Helm charts with the chart-managed operator. Thorium's Scylla role and Elasticsearch user are checked (and created when the bootstrap is set); Elasticsearch indexes that are missing or mapped differently (megathor-made indexes whose `group` field is `text`) are rebuilt by the search streamer | `scylla-role` (Infra), `elastic-identity` (Infra), `elastic-reindex-keyword-mappings` (Data), `finalize` (Config) | The reindex needs an approval only when an index is wrong; it pauses only the search streamer, and search is incomplete until the reingest finishes (`SearchIncomplete`) | One-way |
 | `2026-10-v03` | `2026-10-v02` | The declared schema is applied in a Job before any step that changes data, and the record of it is kept in Scylla's `schema_migrations`; each user's theme moves into the user's settings | `schema-apply` (Infra), `users-settings-theme` (Data) | The theme move needs an approval only when a user still holds the theme in its own field; it pauses the API | To `2026-10-v02` with `users-settings-theme-reverse`, which loses nothing |
-| `2026-10-v04` | `2026-10-v03` | Images become tools with a first tool instance, pipeline stages are pinned to those tools, and legacy tool names in provenance move to their own field; image writes return `410 Gone` afterwards | `drain-reactions` (Data, waits only), `images-to-tools`, `pipelines-to-tool-stages`, `provenance-to-legacy-tools` (Data), `finalize-tool-only` (Config) | Each conversion needs an approval when it has work; they pause the API, scalers, event handler, and search streamer until the new Deployments are applied | Refused once a conversion step finished or was skipped: restore a backup |
+| `2026-10-v04` | `2026-10-v03` | Images become tools with a first tool instance, pipeline stages are pinned to those tools, and legacy tool names in provenance move to their own field; image writes return `410 Gone` afterwards | `drain-reactions` (Data; waits, or cancels with an approval), `images-to-tools`, `pipelines-to-tool-stages`, `provenance-to-legacy-tools` (Data), `finalize-tool-only` (Config) | Each conversion needs an approval when it has work; they pause the API, scalers, event handler, and search streamer until the new Deployments are applied. The drain waits with Thorium running and needs no approval; an approval with `cancelInFlight` and the code the waiting step shows cancels the reactions in flight instead, pausing from the cancel on, and resubmits them before the components come back (`ReactionsResubmitted`) | Refused once a conversion step finished or was skipped: restore a backup |
 | `2026-10-v05` | `2026-10-v04` | The YARA scanning schema: the `scan_stats` table, the `entities_by_name` view, and the `yara_rulesets` bucket, created by the schema apply and the reconcile | `finalize-yara-scanning` (Config) | none | To `2026-10-v04` with `finalize-yara-scanning-reverse`, which drops nothing |
 
 Revisions from `2026-10-v04` on hold no schema step of their own: the operator applies the schema of
@@ -707,7 +735,7 @@ thoradm --cluster-conf thorium.yml schema diff --json | jq '[.backends[].objects
 | `SchemaDrift` still lists objects that `thoradm schema diff` no longer shows (or shows none for new drift), and setting an annotation changes nothing | The operator reads drift only during a reconcile, once its last read is an hour old. A `Ready` cluster reconciles on a spec change, a component Deployment's change, an operator restart, or once a day; annotations other than `thorium.sandia.gov/retry-schema-apply` and `thorium.sandia.gov/allow-inline-config` start no reconcile | Restarting the operator (`kubectl -n thorium rollout restart deployment operator`) triggers a reconcile, which reads the drift only when a read is due: the last read (kept in the `thorium-upgrade-state` ConfigMap) is over an hour old, the acknowledgements changed, or a schema apply finished since it; until then `thoradm schema diff` shows the live state. Steps block on the drift the operator last read |
 | `images-to-tools` (stage 3, from `2026-10-v03`) fails or retries with `the Scylla statements didn't prepare: ... unconfigured table scan_stats` (or `entities_by_name`) | On a plan from `2026-10-v03`, the conversions run before the image's schema is applied. The tool writer of an older image prepares every statement of its build, so it needs the objects `2026-10-v05` adds; a newer image's writer prepares only the objects the keyspace holds | Update the image to one whose writer starts without them; the Job's next attempt starts. With the older image, create the missing objects with their declared definitions in `cqlsh`, replacing `<namespace>` with `thorium.namespace` (below); the Job's next attempt starts, and the later schema apply finds them in place. Create `entities_by_name` only when `DESCRIBE MATERIALIZED VIEW <namespace>.entities_by_name` finds none |
 | The event handler logs `Failed to start event controller; retrying` again and again after an upgrade, or the API logs `Skipped unreadable entity row` and a read of one entity answers `500` | An entity row whose stored data this build can't parse, such as a row a feature or development build wrote. Listings skip such a row and the API logs `Skipped unreadable entity row` with its `id`, `kind`, and `group`; a read of that entity by id or name answers `500` (`Entity <id> is unreadable: its stored data could not be parsed`). The event handler reads its rules from the API at startup and retries with a backoff that doubles from 1 to 60 seconds until it starts | Find the rows from the API's `Skipped unreadable entity row` lines, then delete those entities or rewrite their data in a form the build reads. Nothing else needs doing: the event handler starts once its startup reads succeed |
-| Many finished `migration-check-*` Jobs in the namespace after a long drain | The operator runs a new check Job each time it checks a waiting step. It deletes a check Job once it has read its report, and Kubernetes deletes an unread one an hour after it ends, but a check Job an older operator made keeps that operator's retention of seven days; schema-apply, migration, and record Jobs are kept for seven days so their logs can be read, and `schema-status` Jobs are deleted once read | Nothing needs doing: Kubernetes deletes them when their retention ends. To delete finished check Jobs sooner: `kubectl -n thorium delete jobs -l thorium.sandia.gov/job-kind=migration-check --field-selector status.successful=1` |
+| Many finished `migration-check-*` Jobs in the namespace after a long drain | The operator runs a new check Job each time it checks a waiting step. It deletes a check Job once it has read its report or once the step's run starts, and Kubernetes deletes any other unread one an hour after it ends, but a check Job an older operator made keeps that operator's retention of seven days; schema-apply, migration, and record Jobs are kept for seven days so their logs can be read, and `schema-status` Jobs are deleted once read | Nothing needs doing: Kubernetes deletes them when their retention ends. To delete finished check Jobs sooner: `kubectl -n thorium delete jobs -l thorium.sandia.gov/job-kind=migration-check --field-selector status.successful=1` |
 
 The declared definitions of the objects `2026-10-v05` adds (`thoradm schema print --backend
 scylla` prints every declared object):

@@ -110,6 +110,16 @@ pub struct UpgradeApproval {
     /// loss report shows
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub accept_backup_gaps: bool,
+    /// Let a step that cancels in-flight work on approval cancel it: with the step's current
+    /// confirmation code in `confirm`, the step stops the components it quiesces, waits
+    /// `grace_seconds`, and runs instead of waiting for the work to finish
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancel_in_flight: bool,
+    /// How many seconds the quiesced components stay stopped before the run starts, so work about
+    /// to finish can end (0 to 3600, 60 when unset)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(max = 3600))]
+    pub grace_seconds: Option<u64>,
 }
 
 /// The upgrade progress reported in a `ThoriumCluster`'s status
@@ -178,6 +188,10 @@ pub enum UpgradeConditionType {
     /// The cluster runs a mutable image tag (such as `latest`), so a new image pushed under the
     /// same tag doesn't change the schema-apply trigger key or run the Job
     MutableImageTag,
+    /// The requests a drain cancelled were resubmitted (`True`, with thoradm's counts), or are still
+    /// to be: running, or left to retry by the last resubmit Job (`False`, naming that Job and its
+    /// counts); counts only
+    ReactionsResubmitted,
     /// A value this build doesn't know, written by a newer operator
     #[serde(other)]
     Unknown,
@@ -284,7 +298,13 @@ pub enum BlockReason {
         /// The confirmation code the approval must repeat as `confirm`
         confirm: String,
     },
-    /// A lossy approval was given, but its code doesn't confirm this occurrence
+    /// A step that waits for in-flight work runs instead of waiting only with an approval with a
+    /// backup, `cancel_in_flight`, and this attempt's confirmation code
+    CancelApproval {
+        /// The confirmation code the approval must repeat as `confirm`
+        confirm: String,
+    },
+    /// A lossy or cancel approval was given, but its code doesn't confirm this occurrence
     ConfirmationRefused {
         /// The current confirmation code, which a new approval must repeat
         confirm: String,
@@ -311,7 +331,13 @@ enum KnownBlockReason {
         /// The confirmation code the approval must repeat as `confirm`
         confirm: String,
     },
-    /// A lossy approval was given, but its code doesn't confirm this occurrence
+    /// A step that waits for in-flight work runs instead of waiting only with an approval with a
+    /// backup, `cancel_in_flight`, and this attempt's confirmation code
+    CancelApproval {
+        /// The confirmation code the approval must repeat as `confirm`
+        confirm: String,
+    },
+    /// A lossy or cancel approval was given, but its code doesn't confirm this occurrence
     ConfirmationRefused {
         /// The current confirmation code, which a new approval must repeat
         confirm: String,
@@ -328,9 +354,10 @@ enum KnownBlockReason {
 }
 
 /// The names of the [`BlockReason`] variants this build knows
-const KNOWN_BLOCK_REASONS: [&str; 5] = [
+const KNOWN_BLOCK_REASONS: [&str; 6] = [
     "Approval",
     "LossAcceptance",
+    "CancelApproval",
     "ConfirmationRefused",
     "Drift",
     "Unknown",
@@ -363,6 +390,7 @@ impl<'de> Deserialize<'de> for BlockReason {
         Ok(match known {
             KnownBlockReason::Approval => BlockReason::Approval,
             KnownBlockReason::LossAcceptance { confirm } => BlockReason::LossAcceptance { confirm },
+            KnownBlockReason::CancelApproval { confirm } => BlockReason::CancelApproval { confirm },
             KnownBlockReason::ConfirmationRefused { confirm, refusal } => {
                 BlockReason::ConfirmationRefused { confirm, refusal }
             }
@@ -391,7 +419,7 @@ impl JsonSchema for BlockReason {
         // accept both forms and leave the shape to the custom deserializer
         json_schema!({
             "description": "What a blocked step is waiting for: Approval, LossAcceptance, \
-                ConfirmationRefused, or Drift",
+                CancelApproval, ConfirmationRefused, or Drift",
             "x-kubernetes-preserve-unknown-fields": true
         })
     }
@@ -458,6 +486,9 @@ mod tests {
         for reason in [
             BlockReason::Approval,
             BlockReason::LossAcceptance {
+                confirm: "ABCD1234".to_owned(),
+            },
+            BlockReason::CancelApproval {
                 confirm: "ABCD1234".to_owned(),
             },
             BlockReason::ConfirmationRefused {

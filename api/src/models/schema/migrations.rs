@@ -603,6 +603,10 @@ pub struct StatusReport {
     /// check Job's result is a [`CheckReport`], not a record status
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<CheckReport>,
+    /// The applied report a migration run Job left in its result row, asked for with `--result`,
+    /// kept as the JSON the run wrote so a reader takes only the parts it knows
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied: Option<serde_json::Value>,
 }
 
 /// Which catalog a build knows

@@ -5,7 +5,7 @@ use crate::models::upgrades::{
     CatalogEntry, MigrationPhase, Reversibility, StepDef, StepKind, UpgradeComponent,
 };
 
-/// The id of the step that waits for in-flight reactions to finish
+/// The id of the step that waits for in-flight reactions to finish, or cancels them on approval
 pub const DRAIN_REACTIONS_STEP: &str = "drain-reactions";
 
 /// The id of the step that converts each image into a tool
@@ -37,6 +37,11 @@ const DRAIN_NEEDS: &[UpgradeComponent] = &[
     UpgradeComponent::BaremetalScaler,
 ];
 
+/// The components the drain stops first when an approval cancels the work in flight, so no new job
+/// is scheduled during the grace while the API keeps serving the jobs already running
+const DRAIN_QUIESCE: &[UpgradeComponent] =
+    &[UpgradeComponent::Scaler, UpgradeComponent::BaremetalScaler];
+
 /// The steps of revision `2026-10-v04`, in the order they run
 ///
 /// This list is append only: each change that needs work on existing deployments in this revision
@@ -45,7 +50,9 @@ const DRAIN_NEEDS: &[UpgradeComponent] = &[
 /// step that pauses the API: the operator keeps paused components at zero for the rest of the
 /// plan, so a step that waits for in-flight work must run before one that pauses. The drain lists
 /// the components it needs running, so the planner also puts it ahead of the steps of an earlier
-/// revision that pause them when an upgrade crosses both revisions.
+/// revision that pause them when an upgrade crosses both revisions. The drain's own pause takes
+/// effect only when an approved run that cancels the work in flight starts, so its unapproved wait
+/// runs with every component up.
 /// The revision has no schema-apply step of its own: the schema it declares differs from the
 /// previous revision's only in how pipelines are stored in Redis. The operator applies the schema
 /// for the image it deploys when it rolls that image out, after the upgrade's steps have run (see
@@ -55,15 +62,29 @@ pub(super) const STEPS: &[StepDef] = &[
         id: DRAIN_REACTIONS_STEP,
         kind: StepKind::Data,
         description: "Wait until no reaction is Created or Started and no stage-path worker is \
-                  registered, with Thorium running normally; the step only checks and deletes \
-                  nothing, and is skipped when nothing is in flight",
+                  registered, with Thorium running normally, and skip once nothing is in flight; \
+                  an approval with cancelInFlight (cancel_in_flight in the ThoriumCluster) and \
+                  the step's confirmation code stops the scalers, waits a grace period, pauses \
+                  Thorium, and cancels what is still in flight, recording each request so it is \
+                  resubmitted after the conversions",
+        pause: CONVERSION_PAUSE,
+        quiesce: DRAIN_QUIESCE,
+        cancels_on_approval: true,
         thoradm_migration: Some(DRAIN_REACTIONS_STEP),
         manual_procedure: Some(
-            "Stop submitting reactions, list the reactions and stage-path workers that hold the \
-         drain with `thoradm migrate check --id drain-reactions`, and let them finish, or delete a \
-         stuck reaction with `thorctl reactions delete --group <group> <id>` while the previous API \
-         is still running; do not restart or delete API pods meanwhile. The step is done once no \
-         reaction is Created or Started and no stage-path worker is registered.",
+            "List the reactions and stage-path workers that hold the drain with `thoradm migrate \
+         check --id drain-reactions`. Either stop submitting reactions and let them finish, or \
+         delete a stuck reaction with `thorctl reactions delete --group <group> <id>` while the \
+         previous API is still running, and do not restart or delete API pods meanwhile; the step \
+         is done once no reaction is Created or Started and no stage-path worker is registered. Or \
+         cancel them: take a backup and add the approval {step: drain-reactions, backup: <where \
+         your backup is>, cancelInFlight: true, confirm: <the code the step shows>} (Helm value \
+         operator.cluster.upgrade.approvals[], with graceSeconds to change the 60 second grace; \
+         in the ThoriumCluster's spec.upgrade.approvals they are cancel_in_flight and \
+         grace_seconds). \
+         The scalers stop first, and after the grace the step pauses Thorium and fails each \
+         reaction still in flight, recording its request, which is resubmitted as its creator \
+         after the conversions.",
         ),
         phase: Some(MigrationPhase::Migrate),
         needs_running: DRAIN_NEEDS,
