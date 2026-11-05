@@ -24,12 +24,12 @@ use thorium::models::backends::db;
 use thorium::models::backends::oauth::OAuthRegistrationSession;
 use thorium::models::{
     AssociationKind, AssociationRequest, AssociationTarget, Buffer, CommentRequest, EntityKinds,
-    EntityRequest, GroupAllowedUpdate, GroupUpdate, HostPathWhitelistUpdate, ImageBan,
-    ImageBanKind, ImageBanUpdate, ImageNetworkPolicyUpdate, ImageUpdate, NotificationLevel,
-    NotificationParams, NotificationRequest, OnDiskFile, OriginRequest, OutputDisplayType,
-    OutputRequest, PipelineBan, PipelineBanKind, PipelineBanUpdate, PipelineUpdate, ReactionCache,
-    Resources, SampleRequest, ScopedTokenRequest, SystemSettingsUpdate, SystemSettingsUpdateParams,
-    ToolVersion, User, UserCreate, UserRole,
+    EntityListOpts, EntityRequest, GroupAllowedUpdate, GroupUpdate, HostPathWhitelistUpdate,
+    ImageBan, ImageBanKind, ImageBanUpdate, ImageNetworkPolicyUpdate, ImageUpdate,
+    NotificationLevel, NotificationParams, NotificationRequest, OnDiskFile, OriginRequest,
+    OutputDisplayType, OutputRequest, PipelineBan, PipelineBanKind, PipelineBanUpdate,
+    PipelineUpdate, ReactionCache, Resources, SampleRequest, ScopedTokenRequest,
+    SystemSettingsUpdate, SystemSettingsUpdateParams, ToolVersion, User, UserCreate, UserRole,
 };
 use thorium::test_utilities::generators;
 
@@ -79,6 +79,7 @@ pub async fn broad(harness: &Harness) -> Broad {
     jobs(&client, &names, &group).await;
     let sample = files(harness, &client, &names, &group, &second_group).await;
     entities(&client, &names, &group, &sample).await;
+    saved_cursor(&client, &group).await;
     graphics(harness, &names, &group).await;
     runtime(&client, &names, &group).await;
     // the data Agentic Workflows adds, with a run that holds a run token
@@ -480,6 +481,29 @@ async fn entities(client: &Thorium, names: &Names, group: &str, sample: &str) {
         .target(AssociationTarget::File(sample.to_owned()))
         .groups(groups);
     client.associations.create(&association).await.unwrap();
+}
+
+/// Lists the group's entities one at a time, so the API saves the listing's cursor in Redis
+///
+/// The API saves a new cursor only while it has more to return, so the list's page size is smaller
+/// than the entities the seed created.
+///
+/// # Arguments
+///
+/// * `client` - An admin client
+/// * `group` - The group whose entities are listed
+async fn saved_cursor(client: &Thorium, group: &str) {
+    // a page of one entity out of the several the seed holds leaves the cursor unexhausted, with no
+    // limit to count the page against
+    let cursor = client
+        .entities
+        .list(&EntityListOpts::default().groups(vec![group]).page_size(1))
+        .await
+        .unwrap();
+    assert!(
+        !cursor.exhausted(),
+        "the seed's entities fit in one page, so no cursor was saved"
+    );
 }
 
 /// What the value-class fixture holds: every required cell and every case the stores hold
