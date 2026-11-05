@@ -62,3 +62,86 @@ thorctl pipelines bans delete <group> <pipeline> <BAN-ID>
 
 > Note that removing automatically generated bans is not generally advised, as Thorium will
 > eventually re-ban the entity automatically unless the underlying issue is resolved.
+
+## Tool Instance Bans
+
+Thorium refuses new work for a tool instance with a ban before it queues a job:
+
+- a direct tool run of the instance, and of the Image tool instance a container-backed Agentic tool
+  pins (so a workflow run's container tool is refused when its tool run starts)
+- each stage of a new reaction, single or bulk, whatever the stage is named, including a stage bound
+  to the tool, which runs its latest instance
+- the harness of a new workflow run
+
+Pipelines that name a banned instance can still be created and edited, so you can point them at
+another instance; their reactions are refused.
+
+Bans don't stop work that was already started. Reactions created before the ban keep their queued
+jobs, and their later stages are still created. A scaler that hasn't cached the instance
+starts no workers for it once it is banned. A scaler that already cached the instance keeps
+starting workers for its queued jobs until the scaler restarts: it reads a cached instance again
+only when the instance is needed in a group it wasn't cached for, or after nothing has needed it
+for a cache lifetime (`cache_lifetime`, 10 minutes by default), which its queued jobs prevent.
+Workers that were already running keep claiming its jobs until they exit, and the bare-metal and
+Windows reactors launch whatever workers the scaler created. Restart the scaler or cancel the
+reactions if those jobs must not run. After a lift, a running scaler starts workers for the
+instance again within a cache lifetime. Agentic tool instances bound to a workflow with a `ThoriumMcp` or
+`HarnessNative` backing aren't checked: the API's MCP server or the harness serves them inside a
+workflow run without a tool run, so a banned one stays callable from the workflows that bind it.
+To stop one, ban the workflow's harness too, or remove the binding.
+
+A ban follows the tool's new versions: a new instance inherits every ban of the instance it
+supersedes (the tool's newest instance), so publishing a changed version never escapes a ban.
+Only an admin's lift ends one, and a version published after the lift starts without it. A ban
+on an older instance stays on that instance and doesn't reach versions already published after
+it. Anyone who can edit the tool in all of its groups can also deprecate the newest version,
+which makes an older version the tool's latest, and un-deprecate older versions. So to stop a
+tool, ban every version of it. Only an admin can delete a tool instance with a ban. An instance
+stays linked to its tool: nobody can delete its `PublishedFrom` association, and the association
+moves with the tool when the tool's groups change.
+
+A tool instance's bans are in the `bans` field of its metadata, keyed by ban id like an image's
+(read them with `GET /api/entities/<INSTANCE-ID>`). They are kept in the instance's stored metadata,
+so backups carry them.
+
+### Bans Carried from Images
+
+When the [image conversion](./agentic/upgrading.md) turns an image into a tool, the image's
+first tool instance is written with the image's bans, under the same ban ids, so it is never
+runnable while the image was banned. The conversion report warns about each banned image it
+converted.
+
+A deployment that ran the conversion before conversions carried bans has unbanned instances for
+banned images, and versions published since then have none either. The
+[consistency scan](./thoradm/thoradm.md#consistency-scan), which the API runs every time it starts,
+adds each legacy image's bans to every instance of the tool it converted into that lacks them, so
+upgrading the API is enough to fix such a deployment. The scan matches bans by id, so running it
+again changes nothing. An instance it can't read or write is logged as an error and skipped (an
+instance the API can't read can't run either), and the scan goes on with the rest. Check the
+result with [`thoradm bans audit`](./thoradm/thoradm.md#bans).
+
+### Banning and Lifting
+
+Only admins ban a tool instance or lift its bans; other users get a `401`. Send the entity update
+form fields with `PATCH /api/entities/<INSTANCE-ID>`:
+
+- `metadata[tool_instance_ban]`: adds a `Generic` ban with this text as its reason
+- `metadata[tool_instance_unban][]`: lifts the ban with this id (repeat it to lift several); an id
+  the instance doesn't have is refused and nothing is lifted
+
+```Bash
+# ban a tool instance
+curl -X PATCH "$THORIUM_URL/api/entities/<INSTANCE-ID>" \
+  -H "Authorization: Token $(echo -n "$TOKEN" | base64)" \
+  -F 'metadata[tool_instance_ban]=Pulls an untrusted model'
+# lift one of its bans
+curl -X PATCH "$THORIUM_URL/api/entities/<INSTANCE-ID>" \
+  -H "Authorization: Token $(echo -n "$TOKEN" | base64)" \
+  -F 'metadata[tool_instance_unban][]=<BAN-ID>'
+```
+
+The Rust client takes the same changes as `EntityMetadataUpdate::ToolInstance { ban, unban, .. }`.
+
+Lifting a ban an instance carried from its image (from any instance of the converted tool) also
+lifts that ban from the legacy image, so the consistency scan doesn't carry it back. The tool's
+other instances keep their copies until you lift those too.

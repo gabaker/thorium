@@ -2133,6 +2133,7 @@ mod tests {
                 previous: None,
                 spec_hash: "sha256:spec".to_owned(),
                 deprecated: false,
+                bans: std::collections::BTreeMap::new(),
                 spec,
                 portability: None,
                 provides: Vec::new(),

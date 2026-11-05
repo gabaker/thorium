@@ -73,6 +73,7 @@ fn publish(graph: &mut MemoryGraph, root: Uuid, version: &str) -> Uuid {
         previous: None,
         spec_hash: spec_hash.clone(),
         deprecated: false,
+        bans: BTreeMap::new(),
         spec,
         portability: None,
         provides: Vec::new(),

@@ -50,6 +50,7 @@ impl FakeWorkloadSource {
                 previous: None,
                 spec_hash: String::new(),
                 deprecated: false,
+                bans: std::collections::BTreeMap::new(),
                 spec: ToolSpec::Image(spec),
                 portability: None,
                 provides: Vec::new(),

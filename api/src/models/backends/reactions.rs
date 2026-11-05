@@ -15,6 +15,7 @@ use uuid::Uuid;
 use super::db;
 use crate::models::ApiCursor;
 use crate::models::ReactionCursorParams;
+use crate::models::backends::entities::tools;
 use crate::models::backends::run_files::{self, RunFileParts, ToolAccess};
 use crate::models::backends::stage_tools::{self, ToolInstanceMemo};
 use crate::models::{
@@ -2100,6 +2101,8 @@ impl WorkflowRunSources {
             ));
         };
         let harness = harness.clone();
+        // a banned harness never runs
+        tools::check_unbanned(&harness_entity)?;
         // every bound tool must still be an agentic tool instance
         let mut specs = HashMap::with_capacity(ids.len());
         let mut pinned = Vec::new();
@@ -2379,6 +2382,8 @@ impl Reaction {
         let Some(meta) = instance_meta(&entity) else {
             return not_found!(format!("tool instance {id} not found"));
         };
+        // a banned tool instance never runs
+        tools::check_unbanned(&entity)?;
         // find the Image tool instance this run's job runs, and the provenance of a pinned one
         let mut memo = ToolInstanceMemo::default();
         let (stage, image, scaler, pinned_provenance) = match &meta.spec {
@@ -2412,6 +2417,8 @@ impl Reaction {
                         entity.name, pinned.name
                     ));
                 };
+                // nor does the banned Image tool instance a container tool pins
+                tools::check_unbanned(&pinned)?;
                 // the job runs the pinned image as its stage, recording its provenance
                 let found = (
                     tool_name(&pinned, pinned_meta),

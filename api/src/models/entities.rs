@@ -475,6 +475,10 @@ cfg_if::cfg_if! {
             pub tool_spec: Option<String>,
             /// Whether a tool instance is deprecated
             pub tool_instance_deprecated: Option<bool>,
+            /// The reason for a ban an admin adds to a tool instance
+            pub tool_instance_ban: Option<String>,
+            /// The ids of the bans an admin lifts from a tool instance
+            pub tool_instance_unban: Vec<Uuid>,
             /// The native agentic tool instances a new harness instance provides
             pub tool_provides: Vec<Uuid>,
             /// The JSON encoded new env values of a harness tool
@@ -2582,6 +2586,10 @@ pub enum EntityMetadataUpdate {
     ToolInstance {
         /// Whether this tool instance is deprecated
         deprecated: Option<bool>,
+        /// The reason for a ban to add to this tool instance (admins only)
+        ban: Option<String>,
+        /// The ids of the bans to lift from this tool instance (admins only)
+        unban: Vec<Uuid>,
     },
     /// Updates for an agent entity
     Agent {
@@ -3106,10 +3114,15 @@ impl EntityMetadataUpdate {
                     .into_iter()
                     .fold(form, |form, (name, value)| form.text(name, value));
             }
-            EntityMetadataUpdate::ToolInstance { deprecated } => {
-                // set whether this instance is deprecated
+            EntityMetadataUpdate::ToolInstance {
+                deprecated,
+                ban,
+                unban,
+            } => {
+                // set whether this instance is deprecated and the bans to add or lift
                 form = tools::tool_instance_update_form_fields(deprecated)
                     .into_iter()
+                    .chain(tools::tool_instance_ban_form_fields(ban.as_ref(), &unban))
                     .fold(form, |form, (name, value)| form.text(name, value));
             }
             EntityMetadataUpdate::Agent {

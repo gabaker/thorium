@@ -313,6 +313,7 @@ impl Graph {
             previous,
             spec_hash,
             deprecated: false,
+            bans: std::collections::BTreeMap::new(),
             spec,
             portability: None,
             provides: Vec::new(),

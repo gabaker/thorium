@@ -1102,13 +1102,21 @@ impl AssociationDeleteRequest {
     ///
     /// Only the submitter of an association, a manager/owner of the group it is in, or an admin
     /// can delete it. If any matching association cannot be deleted by this user then nothing
-    /// is deleted.
+    /// is deleted. A tool instance's `PublishedFrom` edge to its tool is refused for everyone:
+    /// it is removed only when the instance is deleted.
     ///
     /// # Arguments
     ///
     /// * `user` - The user that is deleting associations
     /// * `shared` - Shared Thorium objects
     pub async fn apply(self, user: &User, shared: &Shared) -> Result<(), ApiError> {
+        // publishing, the tool delete guard, and ban inheritance find a tool's instances through
+        // these edges, so removing one would detach an instance (and its bans) from its tool
+        if self.kind == AssociationKind::PublishedFrom {
+            return bad!(
+                "`PublishedFrom` is managed by publishing and deleting a tool instance".to_owned()
+            );
+        }
         // make sure we have at least one target to delete associations with
         if self.targets.is_empty() {
             return bad!("At least one target must be set to delete associations".to_owned());

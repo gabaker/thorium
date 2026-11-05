@@ -294,6 +294,35 @@ pub async fn set_highest_revision(
     write_rows(&root, year, bucket, shared).await
 }
 
+/// Rewrite a tool instance with its bans, as it's stored
+///
+/// The instance must be read in every one of its groups, while its tool's lock is held.
+///
+/// # Arguments
+///
+/// * `instance` - The tool instance with its new bans, in every one of its groups
+/// * `shared` - Shared Thorium objects
+#[instrument(
+    name = "db::entities::set_tool_instance_bans",
+    skip_all,
+    fields(id = instance.id.to_string()),
+    err(Debug)
+)]
+pub async fn set_tool_instance_bans(mut instance: Entity, shared: &Shared) -> Result<(), ApiError> {
+    // only a tool instance carries bans
+    if !matches!(instance.metadata, EntityMetadata::ToolInstance(_)) {
+        return internal_err!(format!("{} is not a tool instance", instance.id));
+    }
+    // drop the fields filled in when it's read
+    instance.drop_associated_data();
+    // find the partition the instance's rows are in
+    let year = instance.created.year();
+    let chunk_size = shared.config.thorium.entities.partition_size;
+    let bucket = helpers::partition(instance.created, year, chunk_size);
+    // rewrite every row of the instance with its new metadata
+    write_rows(&instance, year, bucket, shared).await
+}
+
 /// Mark an agent, toolset, or workflow modified now, as it's stored
 ///
 /// The root must be read in every one of its groups, while its lock is held.

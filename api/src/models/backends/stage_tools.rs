@@ -11,6 +11,7 @@ use tracing::instrument;
 use uuid::Uuid;
 
 use crate::models::backends::db;
+use crate::models::backends::entities::tools;
 use crate::models::{
     Entity, EntityKinds, EntityMetadata, Group, ImageJobInfo, ImageScaler, Pipeline, PlannedStage,
     ReactionPlan, RunProvenance, ToolSpec, User,
@@ -284,7 +285,8 @@ impl ToolInstanceMemo {
 
 /// Resolve every stage of a pipeline to the tool instance a new reaction runs
 ///
-/// A pipeline with a stage that no tool backs is refused, naming those stages.
+/// A pipeline with a stage that no tool backs is refused, naming those stages, and so is one
+/// with a stage whose tool instance has a ban.
 ///
 /// # Arguments
 ///
@@ -321,6 +323,9 @@ pub async fn resolve_plan(
             // every stage has a tool since none are unconverted
             let id = pipeline.stage_tools[stage];
             let tool_instance = memo.resolve(&pipeline.group, stage, id, shared).await?;
+            // a stage never runs a banned tool instance, whatever the stage is named
+            let entity = memo.entity(&pipeline.group, tool_instance, shared).await?;
+            tools::check_unbanned(entity)?;
             planned.push(PlannedStage {
                 name: stage.clone(),
                 tool_instance,

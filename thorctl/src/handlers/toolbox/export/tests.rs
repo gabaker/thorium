@@ -683,6 +683,7 @@ fn entities_are_exported_with_named_edges() {
             previous: None,
             spec_hash: "h".to_owned(),
             deprecated: false,
+            bans: std::collections::BTreeMap::new(),
             spec: thorium::models::ToolSpec::default(),
             portability: None,
             provides: Vec::new(),

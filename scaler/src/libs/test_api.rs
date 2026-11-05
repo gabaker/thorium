@@ -548,6 +548,7 @@ pub fn tool_instance(
             previous: None,
             spec_hash: String::new(),
             deprecated: false,
+            bans: BTreeMap::new(),
             spec: ToolSpec::Image(spec),
             portability: None,
             provides: Vec::new(),

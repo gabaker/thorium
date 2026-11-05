@@ -772,6 +772,8 @@ async fn deprecate(thorium: &Thorium, cmd: &DeprecateTool) -> Result<(), Error> 
     // mark the instance deprecated, or restore it
     let update = EntityUpdate::default().metadata(EntityMetadataUpdate::ToolInstance {
         deprecated: Some(!cmd.undo),
+        ban: None,
+        unban: Vec::new(),
     });
     thorium.entities.update(cmd.tool_instance, update).await?;
     if cmd.undo {
@@ -1432,6 +1434,7 @@ mod tests {
                 previous: None,
                 spec_hash: "hash".to_owned(),
                 deprecated: false,
+                bans: std::collections::BTreeMap::new(),
                 spec,
                 portability: None,
                 provides: Vec::new(),
@@ -1605,6 +1608,7 @@ mod tests {
                 previous: None,
                 spec_hash: "hash".to_owned(),
                 deprecated: false,
+                bans: std::collections::BTreeMap::new(),
                 spec,
                 portability: None,
                 provides: Vec::new(),

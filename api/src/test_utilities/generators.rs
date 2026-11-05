@@ -2851,6 +2851,8 @@ pub fn gen_tool_deprecate(deprecated: bool) -> EntityUpdate {
     // set the instance's deprecated flag
     EntityUpdate::default().metadata(EntityMetadataUpdate::ToolInstance {
         deprecated: Some(deprecated),
+        ban: None,
+        unban: Vec::new(),
     })
 }
 

@@ -11,11 +11,11 @@ use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 use thorium::models::{
-    AgentEntity, AgentEntityRequest, AssociationKind, AssociationRequest, AssociationTarget,
-    Directionality, Entity, EntityKinds, EntityListOpts, EntityMetadata, EntityMetadataUpdate,
-    EntityResponse, EntityUpdate, SelectorMatches, ToolSetEntity, ToolSetEntityRequest,
-    ToolSetExclusion, ToolSetExclusionReason, ToolSetInclusion, ToolSetInstanceEntity,
-    ToolSetInstanceStatus, ToolSetSelector, UserRole, WorkflowGraphChange,
+    AgentEntity, AgentEntityRequest, AssociationKind, AssociationListOpts, AssociationRequest,
+    AssociationTarget, Directionality, Entity, EntityKinds, EntityListOpts, EntityMetadata,
+    EntityMetadataUpdate, EntityResponse, EntityUpdate, SelectorMatches, ToolSetEntity,
+    ToolSetEntityRequest, ToolSetExclusion, ToolSetExclusionReason, ToolSetInclusion,
+    ToolSetInstanceEntity, ToolSetInstanceStatus, ToolSetSelector, UserRole, WorkflowGraphChange,
 };
 use thorium::test_utilities::generators::{GroupRoles, TestUser, god_group, moon_user};
 use thorium::test_utilities::{self, generators};
@@ -272,6 +272,8 @@ async fn deprecate(client: &Thorium, id: Uuid, deprecated: bool) -> Result<(), E
     // set the instance's deprecated flag
     let meta = EntityMetadataUpdate::ToolInstance {
         deprecated: Some(deprecated),
+        ban: None,
+        unban: Vec::new(),
     };
     client
         .entities
@@ -923,6 +925,8 @@ async fn submitted_instances() -> Result<(), Error> {
     assert!(msg.contains("metadata can't change"), "{msg}");
     let deprecated = EntityMetadataUpdate::ToolInstance {
         deprecated: Some(true),
+        ban: None,
+        unban: Vec::new(),
     };
     let (status, _) = refusal(update_metadata(&admin, resp.id, deprecated).await);
     assert_eq!(status, 400);
@@ -1983,6 +1987,72 @@ async fn group_changes() -> Result<(), Error> {
     );
     let narrowed = admin.entities.get(instance.id).await?;
     assert_eq!(narrowed.groups.clone(), vec![a.clone()]);
+    Ok(())
+}
+
+/// Moving a toolset to another group in one update moves its instances' `BuiltFrom` edges with
+/// it, so the toolset still lists its instance and no edge is left in the old group
+#[tokio::test]
+async fn group_swap_keeps_instances() -> Result<(), Error> {
+    // a toolset in minerva with one instance, over a tool in minerva and mars
+    let admin = test_utilities::admin_client().await?;
+    let suffix = generators::name_suffix();
+    let roles = GroupRoles::default();
+    let a = god_group(&admin, "minerva", &suffix, &roles).await?;
+    let b = god_group(&admin, "mars", &suffix, &roles).await?;
+    let (tool_root, tool) = agentic_tool(&[&a, &b], &admin).await?;
+    let req = ToolSetEntityRequest::default().tool(tool_root.id);
+    let created = toolset(&admin, "swapping", &[&a], req).await?;
+    let instance = submit(
+        &admin,
+        &generators::gen_toolset_instance(&created, 1, None, &[&tool]),
+    )
+    .await?;
+    // the toolset moves from minerva to mars in one update
+    admin
+        .entities
+        .update(
+            created.id,
+            EntityUpdate::default().group(&b).remove_group(&a),
+        )
+        .await?;
+    let moved = admin.entities.get(instance.id).await?;
+    assert_eq!(moved.groups, vec![b.clone()]);
+    // the instance is still linked to its toolset from both ends
+    assert_eq!(
+        edges(
+            &admin,
+            created.id,
+            AssociationKind::BuiltFrom,
+            Directionality::From
+        )
+        .await?,
+        vec![instance.id]
+    );
+    assert_eq!(
+        edges(
+            &admin,
+            instance.id,
+            AssociationKind::BuiltFrom,
+            Directionality::To
+        )
+        .await?,
+        vec![created.id]
+    );
+    // and neither end keeps an edge in minerva
+    let opts = AssociationListOpts::default()
+        .groups(vec![a.clone()])
+        .limit(500);
+    for id in [created.id, instance.id] {
+        let left = admin.associations.list_entity(id, &opts).await?;
+        assert!(
+            left.data
+                .iter()
+                .all(|assoc| assoc.kind != AssociationKind::BuiltFrom),
+            "{id}: {:?}",
+            left.data
+        );
+    }
     Ok(())
 }
 

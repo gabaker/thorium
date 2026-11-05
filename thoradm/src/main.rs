@@ -3,7 +3,7 @@
 use clap::Parser;
 use std::process::ExitCode;
 use thoradm::outcome::RunOutcome;
-use thoradm::{args, backup, census, migrate, provision, schema, settings, users};
+use thoradm::{args, backup, bans, census, migrate, provision, schema, settings, users};
 use tracing::error;
 
 /// Runs one thoradm command and exits with its outcome's code
@@ -25,8 +25,8 @@ async fn main() -> ExitCode {
     };
     // send every error and summary to stderr
     thoradm::shared::progress::init_logging();
-    // execute the right handler; backup, census, migrate, and schema commands return their own
-    // outcome so they can exit with a nonzero code
+    // execute the right handler; backup, census, migrate, schema, and bans commands return their
+    // own outcome so they can exit with a nonzero code
     let outcome = match &args.cmd {
         args::SubCommands::Backup(backup_cmd) => backup::handle(backup_cmd, &args).await,
         args::SubCommands::Settings(settings_cmd) => settings::handle(settings_cmd, &args)
@@ -43,6 +43,7 @@ async fn main() -> ExitCode {
             Box::pin(migrate::handle(migrate_cmd, &args)).await
         }
         args::SubCommands::Schema(schema_cmd) => schema::handle(schema_cmd, &args).await,
+        args::SubCommands::Bans(bans_cmd) => Box::pin(bans::handle(bans_cmd, &args)).await,
     };
     // an error that ended the command early is an abort
     match outcome {
