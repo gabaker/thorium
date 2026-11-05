@@ -12,7 +12,7 @@ What it supports:
 | Model | `AnthropicMessages` on an `Anthropic` or `LiteLlm` endpoint, with an `ApiKey` credential |
 | Tools | `ThoriumMcp` and `Container` tools, bound to the `ThoriumApi` mechanism |
 | Agents | The entry agent only: a run whose entry agent delegates to sub-agents fails at start |
-| Inputs | The run's first sample; a run without a sample fails at start |
+| Inputs | The run's first sample that isn't a run prompt; a run without one fails at start. A `prompt.txt` input the run's creator uploaded is read as the run's question (see [Asking a question per run](#asking-a-question-per-run)) |
 
 It also refuses, before its first model call, a run with a tool that requires approval and a tool
 bound to any other mechanism. A refused run exits with `2` and writes the reason to `status.json`
@@ -370,6 +370,7 @@ tool call is a sub run of the workflow run, and the harness's output is in the r
 | `model_calls`, `tool_calls` | How many model and tool calls were made |
 | `input_tokens`, `output_tokens` | The tokens of every model call |
 | `tools` | The tools mapped into the run, in `tools.json` order: each one's `function_name`, `tool_instance`, and `backing` (`ThoriumMcp <MCP tool>` or `Container <Image tool instance>`). Empty for a run refused before its tools were checked |
+| `run_prompt` | The run prompt that became the run's question: its `sample` (SHA256) and its size in `bytes`, never its text. Left out when the run has none |
 
 Once its start checks pass, the harness also logs one line per tool, so the workflow's mapping
 shows in `thorctl runs logs` after the pod is gone:
@@ -378,3 +379,42 @@ shows in `thorctl runs logs` after the pod is gone:
 thorpal-harness: tool sample_info (instance 5b0d...): ThoriumMcp get_sample
 thorpal-harness: tool scan (instance 9e41...): Container 0c7a...
 ```
+
+### Asking a question per run
+---
+
+Until Thorium has its own way to pass a prompt to a run, the harness reads a per-run question from
+the run's inputs: a sample the run's creator uploaded under the file name `prompt.txt` is the run
+prompt. The agent's
+`prompt` stays as the standing instructions, and the run prompt is appended after them and the
+input file as a `Run question:` section; the `system_prompt` is unchanged. The run prompt isn't a
+file ThorPal analyzes: the first other sample is, whatever the order of the inputs. A run without a
+`prompt.txt` input runs exactly as it would otherwise.
+
+`run.json` names samples only by SHA256, so the harness asks Thorium, with the run's token, who
+created the run (`GET /api/users/whoami`, which names the token's owner) and for each sample's
+submissions. It treats a sample as the run prompt when a submission the run's creator uploaded has
+a file name, without its directories, of exactly `prompt.txt`. Only the creator's own `prompt.txt`
+counts: one another user uploaded, even of the same file, leaves the sample an ordinary file, so
+nobody else can set the question of your run. A sample it can't look up, or every sample when it
+can't learn who created the run, is analyzed as a file, with a warning in the stage logs.
+
+- In the UI, type the question in the run form's **Prompt** box: the UI uploads it as `prompt.txt`
+  and adds it to the run's inputs.
+- With `thorctl`, add a file named `prompt.txt` as a `--file` input next to the file to analyze.
+  `thorctl` uploads a `--file` under the path it was given, so give it as `--file prompt.txt` from
+  its directory or as an absolute path such as `--file /home/me/prompt.txt` (Thorium refuses a path
+  that starts with `./` or has a `..` component, so `--file ./prompt.txt` fails with a 400). A
+  `prompt.txt` you uploaded earlier can be given with `--sample <SHA256>` instead.
+
+```bash
+printf 'Which C2 domains does it contact, and how is the traffic encoded?\n' > prompt.txt
+thorctl workflows run 'analyze#r1' -g <GROUP> --sample <SHA256> --file prompt.txt --wait
+```
+
+The harness refuses the run before its first model call, naming the problem, when the run prompt is
+over 16384 bytes (16 KiB; it is refused rather than cut so the model never answers part of a
+question), isn't valid UTF-8, holds only whitespace, or is the run's only input, and when a run has
+more than one `prompt.txt` input. It never logs or records the question's text: the stage logs say
+only that a run prompt was used, with its sample and size, and `status.json` records the same in
+`run_prompt`. The question is part of the conversation, so it appears in `conversation.jsonl`.

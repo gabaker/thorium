@@ -175,8 +175,25 @@ revision, or by instance id (a workflow id also means its latest instance); only
 and older Ready instances keep running after newer ones are built. A workflow with no Ready instance
 fails naming `thorctl instances request workflow NAME`, which builds one now (see [AI Agents,
 Toolsets, and Workflows](../developers/agents_workflows.md)). When a name is resolved the line
-`Running X at instance ID` goes to stderr, so stdout still holds only the reaction id. There is no
-per-run question: the agents work from their prompts and the inputs.
+`Running X at instance ID` goes to stderr, so stdout still holds only the reaction id. The agents
+work from their prompts and the inputs.
+
+Thorium has no per-run prompt of its own yet. In the meantime, a workflow run on the [ThorPal
+harness](../developers/thorpal_harness.md#asking-a-question-per-run) reads an input file you
+uploaded as `prompt.txt` as the run's question, appended to the entry agent's prompt, and analyzes
+the other file. Only your own upload counts: a `prompt.txt` another user uploaded is an ordinary
+input file. In the UI, type the question in the run form's **Prompt** box. With `thorctl`, add it
+as `--file prompt.txt` from its directory or as an absolute path such as
+`--file /home/me/prompt.txt` (Thorium refuses a path that starts with `./` or has a `..`
+component, so `--file ./prompt.txt` fails with a 400):
+
+```bash
+printf 'Does it persist across reboots, and how?\n' > prompt.txt
+thorctl workflows run "malware-triage#r3" --sample <SHA256> --file prompt.txt --wait
+```
+
+The question can be at most 16 KiB of UTF-8 text, and a run whose only input is `prompt.txt` is
+refused. Other harnesses get `prompt.txt` as an ordinary input file.
 
 When a workflow run is created, Thorium picks one model for every agent: each of the agent's models
 in priority order (or the workflow's default models), from the run group's endpoints and then your

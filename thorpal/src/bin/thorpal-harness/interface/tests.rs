@@ -713,3 +713,272 @@ fn status_includes_the_tools() {
         }])
     );
 }
+
+/// Plan the fixture run on some samples, each written to the samples directory, then apply the
+/// run prompts among them
+///
+/// # Arguments
+///
+/// * `dir` - The scratch directory for the run's files and samples
+/// * `samples` - The run's samples in input order, each with its downloaded bytes
+/// * `prompts` - The samples that are run prompts
+fn plan_with_prompts(
+    dir: &Path,
+    samples: &[(&str, &[u8])],
+    prompts: &[&str],
+) -> Result<super::RunPlan, String> {
+    // the fixture run on the given samples
+    let mut fixture = RunFixture::new(BASE_URL, "http://127.0.0.1:9");
+    fixture.run.samples = samples.iter().map(|(sha, _)| (*sha).to_owned()).collect();
+    let files = load(&fixture, dir);
+    // the thorium-agent downloads each sample under its SHA256
+    let samples_dir = dir.join("samples");
+    std::fs::create_dir_all(&samples_dir).unwrap();
+    for (sha, bytes) in samples {
+        std::fs::write(samples_dir.join(sha), bytes).unwrap();
+    }
+    // plan, then apply the run prompts
+    let mut planned = plan(&files, &samples_dir)?;
+    let prompts = prompts.iter().map(|sha| (*sha).to_owned()).collect();
+    planned.use_run_prompt(&prompts, &samples_dir)?;
+    Ok(planned)
+}
+
+/// A run prompt in either input order is excluded from the analyzed samples and appended to the
+/// agent's prompt as the run's question, and the plan records its sample and size
+#[test]
+fn run_prompts_become_the_question() {
+    // a binary and a question padded with whitespace, in both input orders
+    let binary = "b".repeat(64);
+    let prompt = "c".repeat(64);
+    let question = "  Does it persist? europa-run-q  \n";
+    for order in [
+        [
+            (prompt.as_str(), question.as_bytes()),
+            (binary.as_str(), b"MZ".as_slice()),
+        ],
+        [
+            (binary.as_str(), b"MZ".as_slice()),
+            (prompt.as_str(), question.as_bytes()),
+        ],
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let planned = plan_with_prompts(dir.path(), &order, &[&prompt]).unwrap();
+        // the binary is analyzed and nothing is skipped
+        let samples = dir.path().join("samples");
+        assert_eq!(planned.binary, samples.join(&binary));
+        assert!(planned.skipped.is_empty(), "{:?}", planned.skipped);
+        // the question follows the agent's prompt and the input file, trimmed
+        let expected = format!(
+            "Describe the input file.\n\nThe input file has SHA256 {binary} and is at {}.\n\nRun question:\nDoes it persist? europa-run-q",
+            samples.join(&binary).display()
+        );
+        assert_eq!(planned.prompt, expected);
+        // the plan records the sample and the size as uploaded
+        let used = planned.run_prompt.clone().unwrap();
+        assert_eq!(used.sample, prompt);
+        assert_eq!(used.bytes, question.len() as u64);
+    }
+}
+
+/// A run with no run prompt keeps the plain prompt and samples exactly
+#[test]
+fn runs_without_run_prompts_are_unchanged() {
+    // two plain samples: the first is analyzed and the second skipped
+    let dir = tempfile::tempdir().unwrap();
+    let first = "e".repeat(64);
+    let second = "f".repeat(64);
+    let samples = [
+        (first.as_str(), b"MZ".as_slice()),
+        (second.as_str(), b"PK".as_slice()),
+    ];
+    let planned = plan_with_prompts(dir.path(), &samples, &[]).unwrap();
+    let dir_samples = dir.path().join("samples");
+    assert_eq!(planned.binary, dir_samples.join(&first));
+    assert_eq!(planned.skipped, vec![second]);
+    assert_eq!(
+        planned.prompt,
+        format!(
+            "Describe the input file.\n\nThe input file has SHA256 {first} and is at {}.",
+            dir_samples.join(&first).display()
+        )
+    );
+    assert!(planned.run_prompt.is_none());
+}
+
+/// A run prompt whose download is a device rather than a regular file is refused before it is
+/// read, since a device reports no size and may never end
+#[cfg(unix)]
+#[test]
+fn a_device_run_prompt_is_refused() {
+    // the run's binary, and its run prompt as a link to an endless device
+    let binary = "b".repeat(64);
+    let prompt = "c".repeat(64);
+    let dir = tempfile::tempdir().unwrap();
+    let mut fixture = RunFixture::new(BASE_URL, "http://127.0.0.1:9");
+    fixture.run.samples = vec![binary.clone(), prompt.clone()];
+    let files = load(&fixture, dir.path());
+    let samples_dir = dir.path().join("samples");
+    std::fs::create_dir_all(&samples_dir).unwrap();
+    std::fs::write(samples_dir.join(&binary), b"MZ").unwrap();
+    std::os::unix::fs::symlink("/dev/zero", samples_dir.join(&prompt)).unwrap();
+    // planning the run prompt refuses it
+    let mut planned = plan(&files, &samples_dir).unwrap();
+    let prompts = std::iter::once(prompt.clone()).collect();
+    let error = planned.use_run_prompt(&prompts, &samples_dir).unwrap_err();
+    assert!(error.contains("isn't a regular file"), "{error}");
+}
+
+/// Run prompts that are too big, not UTF-8, empty, the only sample, or more than one are refused
+/// with a reason naming the problem and never the prompt's text
+#[test]
+fn bad_run_prompts_name_the_reason() {
+    // each case plans a run and checks its refusal names the words and not the text
+    let binary = "b".repeat(64);
+    let prompt = "c".repeat(64);
+    let check = |samples: &[(&str, &[u8])], prompts: &[&str], words: &[&str]| {
+        let dir = tempfile::tempdir().unwrap();
+        let error = plan_with_prompts(dir.path(), samples, prompts).unwrap_err();
+        for word in words {
+            assert!(error.contains(word), "{word}: {error}");
+        }
+        assert!(!error.contains("europa-run-q"), "{error}");
+    };
+    // one byte over the cap
+    let mut big = b"europa-run-q ".to_vec();
+    big.resize(
+        usize::try_from(super::MAX_RUN_PROMPT_BYTES).unwrap() + 1,
+        b'x',
+    );
+    check(
+        &[(&binary, b"MZ"), (&prompt, &big)],
+        &[&prompt],
+        &["prompt.txt", "16384 bytes", "16385"],
+    );
+    // exactly at the cap is fine
+    let dir = tempfile::tempdir().unwrap();
+    let mut full = b"europa-run-q ".to_vec();
+    full.resize(usize::try_from(super::MAX_RUN_PROMPT_BYTES).unwrap(), b'x');
+    assert!(
+        plan_with_prompts(
+            dir.path(),
+            &[(&binary, b"MZ"), (&prompt, &full)],
+            &[&prompt]
+        )
+        .is_ok()
+    );
+    // not UTF-8
+    check(
+        &[(&binary, b"MZ"), (&prompt, b"europa-run-q \xff\xfe")],
+        &[&prompt],
+        &["prompt.txt", "UTF-8"],
+    );
+    // only whitespace
+    check(
+        &[(&binary, b"MZ"), (&prompt, b" \n\t ")],
+        &[&prompt],
+        &["prompt.txt", "empty"],
+    );
+    // the only sample
+    check(
+        &[(&prompt, b"europa-run-q")],
+        &[&prompt],
+        &["prompt.txt", "no file to analyze"],
+    );
+    // two run prompts
+    let second = "d".repeat(64);
+    check(
+        &[
+            (&prompt, b"europa-run-q"),
+            (&second, b"europa-run-q"),
+            (&binary, b"MZ"),
+        ],
+        &[&prompt, &second],
+        &["prompt.txt", "2"],
+    );
+    // a run prompt that wasn't downloaded
+    let dir = tempfile::tempdir().unwrap();
+    let mut fixture = RunFixture::new(BASE_URL, "http://127.0.0.1:9");
+    fixture.run.samples = vec![prompt.clone(), binary.clone()];
+    let mut planned = plan(&load(&fixture, dir.path()), &dir.path().join("samples")).unwrap();
+    let prompts = std::iter::once(prompt.clone()).collect();
+    let error = planned
+        .use_run_prompt(&prompts, &dir.path().join("samples"))
+        .unwrap_err();
+    assert!(error.contains("unable to read"), "{error}");
+}
+
+/// A sample is a run prompt when any submission the run's creator uploaded has a file name,
+/// without its directories, of exactly `prompt.txt`; another user's `prompt.txt` doesn't count
+#[test]
+fn run_prompts_are_named_prompt_txt() {
+    // names as the UI and thorctl upload them
+    for name in [
+        "prompt.txt",
+        "/tmp/questions/prompt.txt",
+        "questions/prompt.txt",
+        "C:\\q\\prompt.txt",
+    ] {
+        assert!(super::is_run_prompt_name(name), "{name}");
+    }
+    for name in [
+        "Prompt.txt",
+        "prompt.txt.exe",
+        "my-prompt.txt",
+        "prompt.md",
+        "",
+    ] {
+        assert!(!super::is_run_prompt_name(name), "{name}");
+    }
+    // any one of the creator's submissions of a sample may carry the name
+    let submission = |name: Option<&str>, submitter: &str| thorium::models::SubmissionChunk {
+        id: Uuid::new_v4(),
+        name: name.map(ToOwned::to_owned),
+        description: None,
+        groups: vec!["jupiter-k3f9".to_owned()],
+        submitter: submitter.to_owned(),
+        uploaded: chrono::Utc::now(),
+        origin: thorium::models::Origin::None,
+    };
+    let mut sample = thorium::models::Sample {
+        sha256: "c".repeat(64),
+        sha1: "1".repeat(40),
+        md5: "5".repeat(32),
+        tags: std::collections::HashMap::new(),
+        submissions: vec![submission(None, "io"), submission(Some("notes.bin"), "io")],
+        comments: Vec::new(),
+    };
+    assert!(!super::is_run_prompt(&sample, "io"));
+    // another user's prompt.txt doesn't make it the creator's run prompt
+    sample
+        .submissions
+        .push(submission(Some("prompt.txt"), "callisto"));
+    assert!(!super::is_run_prompt(&sample, "io"));
+    assert!(super::is_run_prompt(&sample, "callisto"));
+    // the creator's own prompt.txt does
+    sample
+        .submissions
+        .push(submission(Some("prompt.txt"), "io"));
+    assert!(super::is_run_prompt(&sample, "io"));
+}
+
+/// The status records a run prompt by sample and size, and leaves the key out without one
+#[test]
+fn status_records_the_run_prompt_without_text() {
+    // no run prompt: no key
+    let value = serde_json::to_value(HarnessStatus::default()).unwrap();
+    assert!(value.get("run_prompt").is_none(), "{value}");
+    // a run prompt: its sample and size
+    let status = HarnessStatus {
+        run_prompt: Some(super::RunPromptUse {
+            sample: "c".repeat(64),
+            bytes: 12,
+        }),
+        ..HarnessStatus::default()
+    };
+    let value = serde_json::to_value(&status).unwrap();
+    assert_eq!(
+        value["run_prompt"],
+        serde_json::json!({"sample": "c".repeat(64), "bytes": 12})
+    );
+}

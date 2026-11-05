@@ -18,7 +18,7 @@ mod traces;
 use dispatch::Dispatcher;
 use interface::{
     DEFAULT_TIMEOUT_SECS, HarnessPaths, HarnessStatus, NetworkSettings, RunFiles, RunPlan,
-    StatusTool, TIMEOUT_ENV, write_file,
+    RunPromptUse, StatusTool, TIMEOUT_ENV, write_file,
 };
 use traces::Recorder;
 
@@ -183,10 +183,22 @@ async fn run(args: &[String]) -> i32 {
         Err(error) => return refuse(&paths, &error),
     };
     // check everything ThorPal needs before the first model call
-    let plan = match interface::plan(&files, &paths.samples) {
+    let mut plan = match interface::plan(&files, &paths.samples) {
         Ok(plan) => plan,
         Err(error) => return refuse(&paths, &error),
     };
+    // a sample the run's creator uploaded as prompt.txt is the run's question, not a file to analyze
+    let (prompts, warnings) = interface::find_run_prompts(&files.keys, &files.run.samples).await;
+    for warning in &warnings {
+        eprintln!("thorpal-harness: {warning}");
+    }
+    if let Err(error) = plan.use_run_prompt(&prompts, &paths.samples) {
+        return refuse(&paths, &error);
+    }
+    // log that a run prompt is used and its size, never its text
+    if let Some(used) = &plan.run_prompt {
+        eprintln!("thorpal-harness: {used}");
+    }
     // log the tools mapped into the run so the workflow's mapping shows in the stage logs
     let tools = plan.status_tools();
     for tool in &tools {
@@ -219,7 +231,7 @@ async fn run(args: &[String]) -> i32 {
             code: EXIT_TIMED_OUT,
         },
     };
-    finish(&paths, &recorder, tools, ending)
+    finish(&paths, &recorder, tools, plan.run_prompt.clone(), ending)
 }
 
 /// Write a run's outputs and pick its exit code
@@ -229,11 +241,13 @@ async fn run(args: &[String]) -> i32 {
 /// * `paths` - Where the outputs go
 /// * `recorder` - The run's recorded events
 /// * `tools` - The tools mapped into the run
+/// * `run_prompt` - The run prompt that became the run's question, if the run has one
 /// * `ending` - How the run ended
 fn finish(
     paths: &HarnessPaths,
     recorder: &Arc<Mutex<Recorder>>,
     tools: Vec<StatusTool>,
+    run_prompt: Option<RunPromptUse>,
     ending: Ending,
 ) -> i32 {
     // take what was recorded, even from a run that timed out
@@ -272,6 +286,7 @@ fn finish(
     status.success = code == EXIT_OK;
     status.reason = reason;
     status.tools = tools;
+    status.run_prompt = run_prompt;
     write_status(paths, &status);
     code
 }

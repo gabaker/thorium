@@ -4,11 +4,12 @@
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use thorium::Thorium;
 use thorium::client::Keys;
 use thorium::models::{
     AgenticToolBacking, CredentialType, HarnessAgentFile, HarnessCapabilities, HarnessInputs,
     HarnessModelEntry, HarnessModels, HarnessOutputs, HarnessRunFile, HarnessToolEntry, ModelApi,
-    ModelProvider, ModelProviderKind, ToolInvocation, ToolMechanism,
+    ModelProvider, ModelProviderKind, Sample, ToolInvocation, ToolMechanism,
 };
 use thorium::utils::helpers::redact_url;
 use thorpal::AiProviderConfig;
@@ -28,6 +29,15 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = 600;
 
 /// The prompt the entry agent gets when its snapshot has none
 const DEFAULT_PROMPT: &str = "Analyze the input file.";
+
+/// The file name that marks a run's sample as its run prompt, on a submission the run's creator
+/// uploaded: the UI uploads its Prompt box text under this name, and `thorctl` uploads a `--file`
+/// under its path
+pub const RUN_PROMPT_NAME: &str = "prompt.txt";
+
+/// The most bytes a run prompt may hold; a bigger one is refused rather than cut, so the model
+/// never answers a truncated question
+pub const MAX_RUN_PROMPT_BYTES: u64 = 16 * 1024;
 
 /// Where the harness reads its inputs and writes its outputs
 #[derive(Debug, Clone, PartialEq)]
@@ -591,6 +601,253 @@ pub struct RunPlan {
     pub preamble: Option<String>,
     /// The entry agent's task prompt with the run's input added
     pub prompt: String,
+    /// The entry agent's task prompt as its snapshot sets it
+    pub task: String,
+    /// The SHA256s of every sample of the run, in input order
+    pub samples: Vec<String>,
+    /// The run prompt that became the run's question, if the run has one
+    pub run_prompt: Option<RunPromptUse>,
+}
+
+/// The run prompt a run used, as `status.json` and the logs record it: never its text
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunPromptUse {
+    /// The SHA256 of the run prompt's sample
+    pub sample: String,
+    /// The size of the run prompt in bytes, as uploaded
+    pub bytes: u64,
+}
+
+impl std::fmt::Display for RunPromptUse {
+    /// Write the line the harness logs for a run prompt, naming its sample and size
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write to
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // the sample and the size, never the text
+        write!(
+            f,
+            "the run's question comes from its run prompt (sample {}, {} bytes)",
+            self.sample, self.bytes
+        )
+    }
+}
+
+/// Check whether a submission's file name marks a run prompt: its last path component, with
+/// either separator, is exactly `prompt.txt`
+///
+/// # Arguments
+///
+/// * `name` - The submission's file name
+#[must_use]
+pub fn is_run_prompt_name(name: &str) -> bool {
+    // thorctl uploads a file under the path it was given, so only the last component counts
+    name.rsplit(['/', '\\']).next() == Some(RUN_PROMPT_NAME)
+}
+
+/// Check whether a sample is a run prompt: any of its submissions that the run's creator
+/// uploaded is named `prompt.txt`
+///
+/// Only the creator's own submissions count, so another user who can see a sample can't make it
+/// the question of someone else's run by uploading it as `prompt.txt`.
+///
+/// # Arguments
+///
+/// * `sample` - The sample as Thorium describes it
+/// * `creator` - The username of the run's creator, who owns the run's token
+#[must_use]
+pub fn is_run_prompt(sample: &Sample, creator: &str) -> bool {
+    // the name lives on each submission, so any of the creator's can mark it
+    sample
+        .submissions
+        .iter()
+        .filter(|submission| submission.submitter == creator)
+        .filter_map(|submission| submission.name.as_deref())
+        .any(is_run_prompt_name)
+}
+
+/// Find the run's samples that are run prompts by asking Thorium who created the run (the owner
+/// of the run's token) and for each sample's submissions, since `run.json` names samples only by
+/// SHA256
+///
+/// A sample Thorium can't describe is treated as an ordinary sample, and so is every sample when
+/// Thorium can't say who created the run, so a failed lookup leaves the run as it would be
+/// without run prompts; the returned warnings say which lookups failed.
+///
+/// # Arguments
+///
+/// * `keys` - The Thorium API url and the run's token
+/// * `samples` - The SHA256s of the run's samples
+pub async fn find_run_prompts(keys: &Keys, samples: &[String]) -> (BTreeSet<String>, Vec<String>) {
+    // start with no run prompts and nothing to warn about
+    let mut prompts = BTreeSet::new();
+    let mut warnings = Vec::new();
+    // a run without samples has nothing to look up
+    if samples.is_empty() {
+        return (prompts, warnings);
+    }
+    // build a client from the run's keys
+    let thorium = match Thorium::from_keys(keys.clone()).await {
+        Ok(thorium) => thorium,
+        Err(error) => {
+            warnings.push(format!(
+                "unable to connect to Thorium to look for a run prompt, so every sample is analyzed as a file: {error}"
+            ));
+            return (prompts, warnings);
+        }
+    };
+    // the run's token belongs to the run's creator, whose own uploads alone can be its prompt
+    let creator = match thorium.users.info().await {
+        Ok(user) => user.username,
+        Err(error) => {
+            warnings.push(format!(
+                "unable to learn who created the run to look for a run prompt, so every sample is analyzed as a file: {error}"
+            ));
+            return (prompts, warnings);
+        }
+    };
+    // describe each sample once and keep the ones the creator uploaded as prompt.txt
+    let unique: BTreeSet<&String> = samples.iter().collect();
+    for sha256 in unique {
+        match thorium.files.get(sha256).await {
+            Ok(sample) if is_run_prompt(&sample, &creator) => {
+                prompts.insert(sha256.clone());
+            }
+            Ok(_) => (),
+            Err(error) => warnings.push(format!(
+                "unable to read sample {sha256}'s submissions, so it isn't checked for a run prompt: {error}"
+            )),
+        }
+    }
+    (prompts, warnings)
+}
+
+/// Read a run prompt's text from its downloaded sample, refusing one that isn't a regular file, is
+/// too big, isn't UTF-8, or holds only whitespace; no error carries the prompt's text
+///
+/// # Arguments
+///
+/// * `path` - Where the run prompt's sample was downloaded
+/// * `sha256` - The run prompt's SHA256, for errors
+fn read_run_prompt(path: &Path, sha256: &str) -> Result<(String, u64), String> {
+    // a read error names the run prompt
+    let unreadable = |error: std::io::Error| {
+        format!("unable to read the run prompt {RUN_PROMPT_NAME} (sample {sha256}): {error}")
+    };
+    // open it once and check what was opened, so a pipe or device can't stand in for the file
+    let file = std::fs::File::open(path).map_err(unreadable)?;
+    let metadata = file.metadata().map_err(unreadable)?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "the run prompt {RUN_PROMPT_NAME} (sample {sha256}) isn't a regular file"
+        ));
+    }
+    // read at most one byte past the limit, so a file that grows or lies about its size is never
+    // loaded whole
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(file, MAX_RUN_PROMPT_BYTES + 1),
+        &mut bytes,
+    )
+    .map_err(unreadable)?;
+    let size = bytes.len() as u64;
+    if size > MAX_RUN_PROMPT_BYTES {
+        return Err(format!(
+            "the run prompt {RUN_PROMPT_NAME} (sample {sha256}) is {} bytes, over the {MAX_RUN_PROMPT_BYTES} bytes a run prompt may hold; shorten it",
+            metadata.len().max(size)
+        ));
+    }
+    // check it is text
+    let Ok(text) = String::from_utf8(bytes) else {
+        return Err(format!(
+            "the run prompt {RUN_PROMPT_NAME} (sample {sha256}) isn't valid UTF-8 text"
+        ));
+    };
+    // a prompt of only whitespace asks nothing
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(format!(
+            "the run prompt {RUN_PROMPT_NAME} (sample {sha256}) is empty"
+        ));
+    }
+    Ok((text.to_owned(), size))
+}
+
+/// Build the entry agent's prompt: its task, the file it analyzes, then the run's question when
+/// the run has one
+///
+/// # Arguments
+///
+/// * `task` - The entry agent's task prompt
+/// * `sha256` - The SHA256 of the file `ThorPal` analyzes
+/// * `binary` - Where that file was downloaded
+/// * `question` - The run prompt's text, if the run has one
+fn compose_prompt(task: &str, sha256: &str, binary: &Path, question: Option<&str>) -> String {
+    // the task and the file, as every run gets them
+    let mut prompt = format!(
+        "{task}\n\nThe input file has SHA256 {sha256} and is at {}.",
+        binary.display()
+    );
+    // the agent's prompt stays standing instructions and the run prompt is the question
+    if let Some(question) = question {
+        prompt.push_str("\n\nRun question:\n");
+        prompt.push_str(question);
+    }
+    prompt
+}
+
+impl RunPlan {
+    /// Take the run's question from its run prompt, if it has one: the run prompt isn't a sample
+    /// `ThorPal` analyzes, the first other sample is, and the run prompt's text is appended
+    /// to the entry agent's prompt
+    ///
+    /// # Arguments
+    ///
+    /// * `prompts` - The SHA256s of the run's samples that are run prompts
+    /// * `samples` - The directory the run's samples were downloaded to
+    pub fn use_run_prompt(
+        &mut self,
+        prompts: &BTreeSet<String>,
+        samples: &Path,
+    ) -> Result<(), String> {
+        // the run's samples in input order, split into run prompts and files
+        let (found, files): (Vec<&String>, Vec<&String>) =
+            self.samples.iter().partition(|sha| prompts.contains(*sha));
+        // a run without a run prompt is planned as it was
+        let Some(prompt) = found.first() else {
+            return Ok(());
+        };
+        // only one question can be asked
+        if found.len() > 1 {
+            return Err(format!(
+                "the run has {} run prompts named {RUN_PROMPT_NAME} (samples {}); give it at most one",
+                found.len(),
+                found
+                    .iter()
+                    .map(|sha| sha.as_str())
+                    .collect::<Vec<&str>>()
+                    .join(", ")
+            ));
+        }
+        // ThorPal still needs a file to analyze besides the question
+        let Some((first, rest)) = files.split_first() else {
+            return Err(format!(
+                "the run's only input is its run prompt {RUN_PROMPT_NAME} (sample {prompt}), so ThorPal has no file to analyze; add the file to the run's inputs"
+            ));
+        };
+        // read the question, then rebuild the prompt around the first file
+        let (question, bytes) = read_run_prompt(&samples.join(prompt), prompt)?;
+        let binary = samples.join(first);
+        self.prompt = compose_prompt(&self.task, first, &binary, Some(&question));
+        self.binary = binary;
+        self.skipped = rest.iter().map(|sha| (*sha).clone()).collect();
+        self.run_prompt = Some(RunPromptUse {
+            sample: (*prompt).clone(),
+            bytes,
+        });
+        Ok(())
+    }
 }
 
 /// Check that `ThorPal` can run this run and build what it needs, before any model call
@@ -684,10 +941,7 @@ pub fn plan(files: &RunFiles, samples: &Path) -> Result<RunPlan, String> {
     // the entry agent's prompt names the sample ThorPal analyzes
     let binary = samples.join(first);
     let task = entry.config.prompt.as_deref().unwrap_or(DEFAULT_PROMPT);
-    let prompt = format!(
-        "{task}\n\nThe input file has SHA256 {first} and is at {}.",
-        binary.display()
-    );
+    let prompt = compose_prompt(task, first, &binary, None);
     Ok(RunPlan {
         provider,
         model: model.clone(),
@@ -696,6 +950,9 @@ pub fn plan(files: &RunFiles, samples: &Path) -> Result<RunPlan, String> {
         skipped: rest.to_vec(),
         preamble: entry.config.system_prompt.clone(),
         prompt,
+        task: task.to_owned(),
+        samples: files.run.samples.clone(),
+        run_prompt: None,
     })
 }
 
@@ -787,6 +1044,9 @@ pub struct HarnessStatus {
     /// The tools mapped into the run, in tools.json order; empty for a run refused before its
     /// tools were checked
     pub tools: Vec<StatusTool>,
+    /// The run prompt that became the run's question, left out when the run has none
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_prompt: Option<RunPromptUse>,
 }
 
 impl HarnessStatus {
