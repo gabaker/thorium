@@ -9,7 +9,8 @@
 //! created at derive from the image, so a run that crashes partway and repeats an image writes
 //! the same rows again. An image counts as migrated only when its tool, its first instance, and
 //! the edge between them all exist. A banned image's first instance is written with the image's
-//! bans, so it never runs until an admin lifts them. Notes and warnings the conversion produces
+//! bans, so it never runs until an admin lifts them; a host path ban isn't carried, since the
+//! instance mounts the same host paths and every run checks them against the whitelist. Notes and warnings the conversion produces
 //! (who publishes each tool, dropped dependency names, env variable names that look like
 //! secrets, carried bans) are collected while the pass runs and added to the applied report when
 //! it is finished. The
@@ -28,7 +29,7 @@ use thorium::client::migrations::{
     ToolIdMap, convert_image, migrated_at,
 };
 use thorium::models::AssociationTargetColumn;
-use thorium::models::backends::entities::{PublishStamp, create_migrated_tool};
+use thorium::models::backends::entities::{PublishStamp, create_migrated_tool, tool_bans};
 use thorium::models::schema::{
     AppliedReport, Batch, IssueReport, MAX_REPORT_NOTES, MigrateError, MigrationRunner,
     ObjectClass, Outcome, ReportNote, RunContext, RunMode, Slice, backend_error, scan_table,
@@ -812,13 +813,13 @@ impl MigrationRunner for ImagesToTools {
             Ok(migration) => {
                 // a banned image's instance is written banned, which the admin should know
                 let mut warnings = migration.warnings;
-                if !image.bans.is_empty() {
+                let carried = tool_bans::carried_bans(image).len();
+                if carried > 0 {
                     warnings.push(MigrationNote::new(
                         group,
                         name,
                         format!(
-                            "carries the image's {} ban(s) to its tool instance, which won't run until an admin lifts them",
-                            image.bans.len()
+                            "carries the image's {carried} ban(s) to its tool instance, which won't run until an admin lifts them"
                         ),
                     ));
                 }
@@ -865,15 +866,11 @@ impl MigrationRunner for ImagesToTools {
             MigrateError::Rejected(format!("the image no longer converts: {}", skipped.reason))
         })?;
         // create the tool with ids and a time that derive from the image, so repeating it is safe,
-        // and with the image's bans, so a banned image never becomes a runnable instance
+        // and with the image's carried bans, so a banned image never becomes a runnable instance
         let stamp = PublishStamp {
             instance_id: ToolIdMap::first_instance_id(group, name),
             at: migrated_at(),
-            bans: image
-                .bans
-                .iter()
-                .map(|(id, ban)| (*id, ban.clone()))
-                .collect(),
+            bans: tool_bans::carried_bans(image),
         };
         let shared = Box::pin(writer(ctx)).await?;
         // create the tool as the user the conversion chose

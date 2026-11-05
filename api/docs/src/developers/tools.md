@@ -47,7 +47,9 @@ Each instance carries tags that users can't remove: `ToolId`, `ToolVersion`, `To
   [Tool Entries](../admins/network_policies/network_policies.md#tool-entries)).
 - A non-default `security_context` in a workload can only be published by an admin, and host path
   volumes must be on the deployment's host path whitelist (see
-  [Admin Command Line Tool](../admins/thoradm/thoradm.md)).
+  [Admin Command Line Tool](../admins/thoradm/thoradm.md)). Every run checks them again, so an
+  instance mounting a path an admin removes from the whitelist won't run until the path is allowed
+  again (see [Host Paths](../admins/bans_admins.md#host-paths)).
 - **A spec's `env` values are hashed, immutable, and readable by every member of the tool's
   groups.** Never put secrets in them; use a K8s Secret volume instead.
 

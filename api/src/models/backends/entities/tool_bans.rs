@@ -94,11 +94,12 @@ fn kind_name(kind: &ImageBanKind) -> &'static str {
 /// * `ban` - The image's ban
 #[must_use]
 pub fn carried(ban: &ImageBan) -> bool {
-    // every kind of ban keeps the instance from running as it kept the image from running
+    // a host path ban isn't carried: the instance mounts the same host paths, and every run
+    // checks them against the current whitelist, so a carried copy would only go stale once the
+    // path is allowed again
     match ban.ban_kind {
-        ImageBanKind::Generic(_)
-        | ImageBanKind::InvalidImageUrl(_)
-        | ImageBanKind::InvalidHostPath(_) => true,
+        ImageBanKind::Generic(_) | ImageBanKind::InvalidImageUrl(_) => true,
+        ImageBanKind::InvalidHostPath(_) => false,
     }
 }
 
@@ -481,4 +482,28 @@ pub(crate) async fn lift_from_legacy_image(
             .await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::carried;
+    use crate::models::{ImageBan, ImageBanKind};
+
+    /// Generic and image URL bans carry to a converted instance, and host path bans, which every
+    /// run rechecks against the whitelist, don't
+    #[test]
+    fn host_path_bans_are_not_carried() {
+        // the kinds that only an admin's lift ends are carried
+        assert!(carried(&ImageBan::new(ImageBanKind::generic(
+            "exfiltrates"
+        ))));
+        assert!(carried(&ImageBan::new(ImageBanKind::image_url(
+            "bad/url:latest"
+        ))));
+        // a host path ban follows the whitelist instead
+        assert!(!carried(&ImageBan::new(ImageBanKind::host_path(
+            "data",
+            "/srv/data"
+        ))));
+    }
 }

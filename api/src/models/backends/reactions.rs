@@ -2035,8 +2035,9 @@ struct WorkflowRunSources {
 impl WorkflowRunSources {
     /// Read a workflow instance and what a run of it needs
     ///
-    /// The instance must be `Ready`, its entry agent must have a harness, and every bound tool
-    /// and every Image tool instance a container tool pins must still exist.
+    /// The instance must be `Ready`, its entry agent must have a harness that has no ban and
+    /// mounts no host path the whitelist doesn't allow, and every bound tool and every Image tool
+    /// instance a container tool pins must still exist.
     ///
     /// # Arguments
     ///
@@ -2101,8 +2102,9 @@ impl WorkflowRunSources {
             ));
         };
         let harness = harness.clone();
-        // a banned harness never runs
-        tools::check_unbanned(&harness_entity)?;
+        // a banned harness, or one mounting a host path the whitelist no longer allows, never
+        // runs
+        tools::check_runnable(&harness_entity, shared).await?;
         // every bound tool must still be an agentic tool instance
         let mut specs = HashMap::with_capacity(ids.len());
         let mut pinned = Vec::new();
@@ -2335,7 +2337,8 @@ impl Reaction {
     /// Run a single tool instance on some files or repos
     ///
     /// An Image tool instance runs itself and an Agentic tool instance with a `Container`
-    /// backing runs the Image tool instance it pins; every other kind is refused. A run with a
+    /// backing runs the Image tool instance it pins; every other kind is refused, as is either
+    /// instance when it has a ban or mounts a host path the whitelist doesn't allow. A run with a
     /// parent runs in its parent's group.
     ///
     /// A direct tool run mints its own run token. A tool run made with a run token (a harness's
@@ -2382,8 +2385,9 @@ impl Reaction {
         let Some(meta) = instance_meta(&entity) else {
             return not_found!(format!("tool instance {id} not found"));
         };
-        // a banned tool instance never runs
-        tools::check_unbanned(&entity)?;
+        // a banned tool instance, or one mounting a host path the whitelist no longer allows,
+        // never runs
+        tools::check_runnable(&entity, shared).await?;
         // find the Image tool instance this run's job runs, and the provenance of a pinned one
         let mut memo = ToolInstanceMemo::default();
         let (stage, image, scaler, pinned_provenance) = match &meta.spec {
@@ -2417,8 +2421,8 @@ impl Reaction {
                         entity.name, pinned.name
                     ));
                 };
-                // nor does the banned Image tool instance a container tool pins
-                tools::check_unbanned(&pinned)?;
+                // nor does such an Image tool instance a container tool pins
+                tools::check_runnable(&pinned, shared).await?;
                 // the job runs the pinned image as its stage, recording its provenance
                 let found = (
                     tool_name(&pinned, pinned_meta),
@@ -2610,8 +2614,8 @@ impl Reaction {
         req: WorkflowRunRequest,
         shared: &Shared,
     ) -> Result<Reaction, ApiError> {
-        // read the instance and what a run of it needs
-        let sources = WorkflowRunSources::load(user, id, shared).await?;
+        // read the instance and what a run of it needs, boxing its large future
+        let sources = Box::pin(WorkflowRunSources::load(user, id, shared)).await?;
         // a run needs something to run on
         if let Err(err) = req.inputs.validate() {
             return bad!(err);
@@ -2647,8 +2651,8 @@ impl Reaction {
         reaction: Uuid,
         shared: &Shared,
     ) -> Result<Reaction, ApiError> {
-        // read the instance and what a run of it needs
-        let sources = WorkflowRunSources::load(user, id, shared).await?;
+        // read the instance and what a run of it needs, boxing its large future
+        let sources = Box::pin(WorkflowRunSources::load(user, id, shared)).await?;
         // find the failed run in one of the instance's groups
         let failed = find_reaction(user, &sources.entity.groups, &reaction, shared).await?;
         // it must be a run of this instance
