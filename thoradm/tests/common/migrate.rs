@@ -62,7 +62,7 @@ impl World {
         World::build(suffix, true, Some(revision)).await
     }
 
-    /// Build a world
+    /// Build a world, starting both its keyspace and its namespace's Redis keys from nothing
     ///
     /// # Arguments
     ///
@@ -136,16 +136,12 @@ impl World {
         let store = PassStore::prepare(session, &ns)
             .await
             .expect("statements prepare");
-        // a marker left by an earlier run must not satisfy this one
-        {
-            let mut redis_conn = backends.redis.get().await.expect("a Redis connection");
-            let _: () = redis::cmd("DEL")
-                .arg(fixture::marker_key(&ns))
-                .arg(thorium::models::schema::lease_key(&ns))
-                .query_async(&mut *redis_conn)
-                .await
-                .expect("the marker and lease clear");
-        }
+        // start Redis from nothing too: the Redis outlives the keyspace drop, so an earlier run's
+        // marker, lease, or event queues would satisfy or skew this run; only this namespace's
+        // keys go, by prefix, since other runs share the Redis
+        super::harness::delete_redis_namespace(&conf)
+            .await
+            .expect("the namespace's Redis keys clear");
         World {
             ns,
             conf,
