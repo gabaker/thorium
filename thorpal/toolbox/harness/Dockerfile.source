@@ -1,20 +1,23 @@
 # The ThorPal harness for Thorium workflow runs, built from source
 #
-# The build context is a directory holding this repository's committed tree at the commit being
-# built, in thorium/. `../build-harness-image.sh --from-source` (or `--stage <DIR>`) stages it from
-# git, so the context holds only committed files and no credentials or .git directory. Cargo fetches the workspace's git dependencies (rig and
-# ghidra-cli among them) from their public repositories at the commits Cargo.lock pins. Build it
-# with `docker build -f <context>/thorium/thorpal/toolbox/harness/Dockerfile.source <context>`.
+# For hosts without a Rust toolchain or on another release than the runtime's; CI publishes the
+# image ./Dockerfile builds from a binary it compiles on Ubuntu 22.04, with the same runtime as this
+# one. The build context is a directory holding this repository's committed tree at the commit
+# being built, in thorium/. `../build-harness-image.sh --from-source` (or `--stage <DIR>`) stages it
+# from git, so the context holds only committed files and no credentials or .git directory. Cargo
+# fetches the workspace's git dependencies (rig and ghidra-cli among them) from their public
+# repositories at the commits Cargo.lock pins. Build it with
+# `docker build -f <context>/thorium/thorpal/toolbox/harness/Dockerfile.source <context>`.
 #
 # The builder stage compiles thorpal-harness with a pinned nightly toolchain; the runtime stage
 # holds only the binary, the CA bundle, and the OpenSSL 3 libraries it links, and runs as an
 # unprivileged user. The harness's agents use no Ghidra tools, so the image carries neither Ghidra
-# nor a JDK. ./Dockerfile packages a prebuilt binary into the same runtime, for quick local builds.
+# nor a JDK. ./Dockerfile packages a prebuilt binary into the same runtime.
 #
 # The base of both stages, pinned by digest so a moved tag can't change the build; to bump it,
 # resolve the tag's multi-arch index digest and update both. The builder and the runtime must share
 # it: the binary needs a glibc at least as new as the one it was built against.
-ARG IMAGE="docker.io/library/ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852"
+ARG IMAGE="docker.io/library/ubuntu:22.04@sha256:076e7bf82319619f28dd0aa9c02ab34b055ad37100395b4f49a2ffba04fb5e11"
 
 FROM ${IMAGE} AS builder
 
@@ -81,7 +84,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # install the CA bundle and the OpenSSL 3 shared libraries the harness links
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates libssl3t64 && \
+    apt-get install -y --no-install-recommends ca-certificates libssl3 && \
     rm -rf /var/lib/apt/lists/*
 
 # run as an unprivileged user with a fixed uid/gid when the pod names no other (Thorium runs a

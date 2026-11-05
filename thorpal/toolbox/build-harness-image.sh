@@ -22,11 +22,13 @@ Usage: build-harness-image.sh [OPTIONS]
 
 By default, builds thorpal-harness on this host (cargo build --release -p thorpal --bin
 thorpal-harness), stages it with harness/Dockerfile in a temporary build context, builds
-<REGISTRY>/thorpal-harness:<TAG>, and prints the image reference.
+<REGISTRY>/thorpal-harness:<TAG>, and prints the image reference. This is how CI builds the image
+it publishes, on Ubuntu 22.04 (the runtime's release; check-harness-binary.sh checks a binary).
 
 With --from-source the binary is compiled inside the image build instead (harness/Dockerfile.source,
-for a host without a Rust toolchain): the build context is staged from git, this repo's committed HEAD with no
-.git directory, and cargo fetches the git dependencies at the commits Cargo.lock pins.
+for a host without a Rust toolchain or on another release): the build context is staged from git,
+this repo's committed HEAD with no .git directory, and cargo fetches the git dependencies at the
+commits Cargo.lock pins.
 --stage <DIR> stages that context into DIR and stops, to build it elsewhere.
 
 Options:
@@ -38,7 +40,7 @@ Options:
                               REGISTRY (env PUSH_REGISTRY)
   --toolbox                   Also write toolbox.local.json here with REGISTRY as its registry, so the
                               harness tool's spec names the image just built (needs thorctl; env THORCTL)
-  --base-image <IMAGE>        Base image (build arg IMAGE; default: the Dockerfile's ubuntu:24.04)
+  --base-image <IMAGE>        Base image (build arg IMAGE; default: the Dockerfile's ubuntu:22.04)
   --ca-cert <FILE>            A CA certificate (PEM) the build trusts while it downloads, such as a
                               TLS-intercepting proxy's (build arg BUILD_CA_CERT; env BUILD_CA_CERT_FILE)
   --binary <PATH>             Use this thorpal-harness binary instead of building it

@@ -2,16 +2,19 @@
 #
 # The build context holds a thorpal-harness binary built from this repo with
 # `cargo build --release -p thorpal --bin thorpal-harness`; ../build-harness-image.sh
-# builds it, stages it here, and builds this image. ./Dockerfile.source compiles
-# the binary in the image build instead and has the same runtime as this one. The harness's agents use no Ghidra tools, so
-# the image carries neither Ghidra nor a JDK.
+# builds it, stages it here, and builds this image. This is the image CI publishes:
+# CI builds the binary on Ubuntu 22.04 and checks it with ../check-harness-binary.sh
+# first. ./Dockerfile.source compiles the binary in the image build instead and has
+# the same runtime as this one. The harness's agents use no Ghidra tools, so the
+# image carries neither Ghidra nor a JDK.
 #
 # Override the base with `--build-arg IMAGE=<image>`. The binary links glibc,
 # libssl.so.3, and libcrypto.so.3 dynamically, so the base needs a glibc at
-# least as new as the build host's (2.39 for an Ubuntu 24.04 build), OpenSSL 3,
-# and apt (Ubuntu 24.04, Debian 13, or newer). The default is Ubuntu 24.04
-# pinned by digest, as in ./Dockerfile.source; keep the two in step.
-ARG IMAGE="docker.io/library/ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852"
+# least as new as the build host's (2.35 for an Ubuntu 22.04 build), OpenSSL 3,
+# and apt (Ubuntu 22.04 or newer, or Debian 12). The default is Ubuntu 22.04
+# pinned by digest, as in ./Dockerfile.source; keep the two in step, and on the
+# Ubuntu release of the CI base image (base/Dockerfile) that builds the binary.
+ARG IMAGE="docker.io/library/ubuntu:22.04@sha256:076e7bf82319619f28dd0aa9c02ab34b055ad37100395b4f49a2ffba04fb5e11"
 FROM ${IMAGE}
 
 # the PEM text of a CA that apt should trust while this image builds, such as a
@@ -31,7 +34,7 @@ RUN apt_opts=() && \
       apt_opts=(-o Acquire::https::CAInfo=/tmp/build-ca.crt); \
     fi && \
     apt-get "${apt_opts[@]}" update && \
-    apt-get "${apt_opts[@]}" install -y --no-install-recommends ca-certificates libssl3t64 && \
+    apt-get "${apt_opts[@]}" install -y --no-install-recommends ca-certificates libssl3 && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/build-ca.crt
 

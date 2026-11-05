@@ -1,4 +1,7 @@
-FROM thorium-registry.sandia.gov/base/ubuntu:latest
+# the same Ubuntu release as the ThorPal harness image's runtime (thorpal/toolbox/harness/Dockerfile,
+# ubuntu:22.04): CI builds thorpal-harness here and copies the binary into that image, so the glibc
+# and OpenSSL it links against must be no newer than the runtime's
+FROM thorium-registry.sandia.gov/base/ubuntu-22:latest
 
 # fail a RUN step if any command in a pipeline fails
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -17,10 +20,12 @@ RUN curl --proto '=https' --tlsv1.2 -sSf -o rustup-init "https://static.rust-lan
       chmod +x rustup-init && \
       ./rustup-init --default-toolchain nightly -y && \
       rm rustup-init
-# install build dependencies
+# install build dependencies; cargo fetches git dependencies (such as the ThorPal harness's) with
+# the git CLI
 RUN apt-get update && \
       apt-get install -y \
             build-essential \
+            git \
             libssl-dev \
             pkg-config \
             libclang-dev \

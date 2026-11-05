@@ -44,16 +44,19 @@ docker build -t <REGISTRY>/thorpal-harness:<TAG> thorpal-image
 docker push <REGISTRY>/thorpal-harness:<TAG>
 ```
 
-`--from-source` builds without a Rust toolchain on the host instead:
-`thorpal/toolbox/harness/Dockerfile.source` compiles the binary in the image build from this repo's
-committed `HEAD`, with the git dependencies at the commits `Cargo.lock` pins.
+CI publishes this prebuilt image as `<REGISTRY>/thorpal-harness:<version>`: it builds the binary
+on Ubuntu 22.04, the runtime's release, checks it with `thorpal/toolbox/check-harness-binary.sh` (no
+glibc symbol version newer than 2.35, OpenSSL 3 only), and packages it with
+`thorpal/toolbox/harness/Dockerfile`. `--from-source` builds without a Rust toolchain on the host
+instead: `thorpal/toolbox/harness/Dockerfile.source` compiles the binary in the image build from
+this repo's committed `HEAD`, with the git dependencies at the commits `Cargo.lock` pins.
 
-The image builds from Ubuntu 24.04 (pinned by digest) by default, installs `ca-certificates` and
+The image builds from Ubuntu 22.04 (pinned by digest) by default, installs `ca-certificates` and
 the OpenSSL 3 libraries, and runs as an unprivileged user; pass `--base-image <image>` to the script
 (`--build-arg IMAGE=<image>` to `docker build`) to use another base. The binary links glibc and OpenSSL 3 (`libssl.so.3`, `libcrypto.so.3`)
 dynamically and checks TLS against the system CA bundle, so the base needs apt and a glibc at least
-as new as the one it was built against (2.39 for a build on Ubuntu 24.04, so `ubuntu:24.04` or
-Debian 13 work and Debian 12 does not).
+as new as the one it was built against (2.35 for a build on Ubuntu 22.04, so Ubuntu 22.04 or
+newer and Debian 12 work, and Debian 11 does not).
 
 The binary prints the capabilities its Harness tool declares:
 

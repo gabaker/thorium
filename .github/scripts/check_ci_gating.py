@@ -181,7 +181,6 @@ CATEGORIES = {
     },
     # only in checkouts that have ThorPal
     "thorpal-harness.yml": {
-        "stage-harness-sources": "build",
         "build-harness-image": "build",
         "publish-harness-image": "build",
     },
