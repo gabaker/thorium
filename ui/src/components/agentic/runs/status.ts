@@ -24,7 +24,7 @@ export enum DerivedStageState {
   Waiting = 'Waiting',
   /** The run finished before it reached this stage */
   Skipped = 'Skipped',
-  /** The run finished (failed or was cancelled) while this stage's jobs were still queued or running */
+  /** The run finished (failed or was cancelled) while this stage's jobs were unfinished, and they can no longer run */
   Stopped = 'Stopped',
 }
 
@@ -75,7 +75,7 @@ export const STATUS_INDICATORS: Record<IndicatorStatus, StatusIndicatorStyle> = 
   Sleeping: indicator('Sleeping', FaMoon, 'A generator waiting to be respawned'),
   Waiting: indicator('Waiting', FaRegCircle, 'The run has not reached this stage yet'),
   Skipped: indicator('Skipped', FaMinusCircle, 'The run ended before this stage'),
-  Stopped: indicator('Stopped', FaStopCircle, 'The run ended while this stage was queued or running'),
+  Stopped: indicator('Stopped', FaStopCircle, 'The run ended before this stage finished, and its jobs can no longer run'),
 };
 
 /** The style drawn for a status the page does not know, so a new API status still shows its own text. */

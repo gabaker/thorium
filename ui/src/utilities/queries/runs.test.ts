@@ -9,12 +9,14 @@ import {
   fetchStageLogs,
   fetchSubRuns,
   isGone,
+  LOG_REFRESH_MS,
   MAX_POLL_FAILURES,
   reactionKey,
   REREAD_CONCURRENCY,
   rereadRuns,
   RunReadError,
   runRefetchInterval,
+  stageLogsRefetchInterval,
   UPDATES_PAGE_SIZE,
 } from './runs';
 import { getPipeline } from '@thorpi/pipelines';
@@ -100,6 +102,17 @@ describe('runRefetchInterval', () => {
     expect(runRefetchInterval({ error: new RunReadError('gone', 403) }, 1, 2000)).toBe(false);
     expect(runRefetchInterval({ error: new RunReadError('down', 503) }, 1, 2000)).toBe(2000);
     expect(runRefetchInterval({ error: new RunReadError('down', 503) }, MAX_POLL_FAILURES, 2000)).toBe(false);
+  });
+});
+
+describe('stageLogsRefetchInterval', () => {
+  it('reloads the logs while the run works', () => {
+    expect(stageLogsRefetchInterval(true, undefined, 0)).toBe(LOG_REFRESH_MS);
+    expect(stageLogsRefetchInterval(false, undefined, 0)).toBe(false);
+  });
+  it('reloads the logs of a stage that can still run only until its deadline', () => {
+    expect(stageLogsRefetchInterval(true, 1000, 999)).toBe(LOG_REFRESH_MS);
+    expect(stageLogsRefetchInterval(true, 1000, 1000)).toBe(false);
   });
 });
 

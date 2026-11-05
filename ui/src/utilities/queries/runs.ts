@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef } from 'react';
 import { Query, QueryClient, useQuery, useQueryClient } from '@tanstack/react-query';
 
 // project imports
+import { jobsLiveAfterFailure } from '@components/agentic/runs/stages';
 import { getPipeline } from '@thorpi/pipelines';
 import { getReaction, getReactionLogs } from '@thorpi/reactions';
 import { getRunStageLogs, listSubRuns } from '@thorpi/runs';
@@ -290,14 +291,15 @@ export interface ListQueryResult<T> {
 }
 
 /**
- * Read a reaction's status updates, polling while it works and reloading when its state changes.
+ * Read a reaction's status updates, polling while it works and reloading when its state changes. A failed
+ * reaction is still polled while one of its jobs can still run, so the job's final state shows.
  *
  * @param run - The reaction.
  * @param pollMs - The polling period while it works; job claims change no reaction field, so they are polled for.
  * @returns The updates and the last error.
  */
 export function useReactionUpdates(
-  run: Pick<Reaction, 'group' | 'id' | 'status' | 'current_stage' | 'current_stage_progress'>,
+  run: Pick<Reaction, 'group' | 'id' | 'status' | 'current_stage' | 'current_stage_progress' | 'run' | 'generators'>,
   pollMs: number,
 ): ListQueryResult<StatusUpdate> {
   const client = useQueryClient();
@@ -309,7 +311,8 @@ export function useReactionUpdates(
     queryFn: () => fetchAllStatusUpdates(run.group, run.id),
     retry: false,
     refetchOnWindowFocus: false,
-    refetchInterval: running ? pollMs : false,
+    refetchInterval: (state: Query<StatusUpdate[], Error>) =>
+      running || jobsLiveAfterFailure(run, state.state.data, Date.now()) ? pollMs : false,
   });
   return { data: query.data ?? null, error: query.error ? query.error.message : '' };
 }
@@ -318,21 +321,34 @@ export function useReactionUpdates(
 export const LOG_REFRESH_MS = 2000;
 
 /**
+ * Choose how often an open stage's logs reload.
+ *
+ * @param running - Whether the run still works, or the stage's jobs can still run after the run failed.
+ * @param liveUntil - When set, the time in milliseconds after which the stage's jobs are no longer expected to finish.
+ * @param now - The current time in milliseconds.
+ * @returns The reload period, or `false` to stop reloading.
+ */
+export function stageLogsRefetchInterval(running: boolean, liveUntil: number | undefined, now: number): number | false {
+  return running && (liveUntil === undefined || now < liveUntil) ? LOG_REFRESH_MS : false;
+}
+
+/**
  * Read one stage's log lines, reloading them while the run works.
  *
  * @param group - The reaction's group.
  * @param id - The reaction's id.
  * @param stage - The stage's name.
- * @param running - Whether the run still works.
+ * @param running - Whether the run still works, or the stage's jobs can still run after the run failed.
+ * @param liveUntil - When set, the time in milliseconds after which the logs stop reloading.
  * @returns The lines and the last error.
  */
-export function useStageLogs(group: string, id: string, stage: string, running: boolean): ListQueryResult<string> {
+export function useStageLogs(group: string, id: string, stage: string, running: boolean, liveUntil?: number): ListQueryResult<string> {
   const query = useQuery({
     queryKey: reactionLogsKey(group, id, stage),
     queryFn: () => fetchStageLogs(group, id, stage),
     retry: false,
     refetchOnWindowFocus: false,
-    refetchInterval: running ? LOG_REFRESH_MS : false,
+    refetchInterval: () => stageLogsRefetchInterval(running, liveUntil, Date.now()),
   });
   return { data: query.data ?? null, error: query.error ? query.error.message : '' };
 }

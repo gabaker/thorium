@@ -213,14 +213,16 @@ test.describe('run stages (mocked)', () => {
     }
   });
 
-  test('a failed run opens the failed stage logs and marks what stopped and what was skipped', async ({ page }) => {
+  test('a failed run opens the failed stage logs, keeps a still running stage running, and marks what was skipped', async ({ page }) => {
     await mockAuth(page);
     const updates = [...MIXED, failed('j2', 5), update('ReactionFailed', { status: 'Failed' }, 5)];
     await serve(page, makeRun({ status: 'Failed' }), updates);
     for (const [name, url] of PAGES) {
       await page.goto(url);
       await expect(node(page, 'strings')).toHaveAttribute('aria-label', 'strings: Failed');
-      await expect(node(page, 'yara')).toHaveAttribute('aria-label', 'yara: Stopped');
+      // the parallel stage's job keeps running after the run failed, and says so
+      await expect(node(page, 'yara')).toHaveAttribute('aria-label', 'yara: Running');
+      await expect(page.getByTestId('stage-note-yara')).toBeVisible();
       await expect(node(page, 'report')).toHaveAttribute('aria-label', 'report: Skipped');
       await expect(page.getByTestId('stage-logs-strings')).toBeVisible();
       await expect(page.getByTestId('run-stage-text')).toHaveText('failed at stage 2 of 3');

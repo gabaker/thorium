@@ -9,6 +9,8 @@ import {
   INITIAL_STAGE_UI,
   InputRow,
   inputRows,
+  jobsLiveAfterFailure,
+  liveAfterFailure,
   logsOpenByDefault,
   logsShown,
   RunStagesView,
@@ -230,7 +232,7 @@ describe('buildStageViews', () => {
       report: 'Completed',
     });
   });
-  it('shows a failed run: the failed stage, its stopped neighbour, and the skipped stages after it', () => {
+  it('shows a failed run: the failed stage, its still running neighbour, and the skipped stages after it', () => {
     const views = buildStageViews(run(ReactionStatus.Failed, 1), ORDER, [
       created('j1', 'scan'),
       completed('j1', 1),
@@ -239,18 +241,26 @@ describe('buildStageViews', () => {
       claimed('yara-x', 3),
       failed('j2', 4),
     ]);
-    expect(states(views)).toEqual({ scan: 'Completed', strings: 'Failed', yara: 'Stopped', report: 'Skipped' });
-    // the job left running when the run failed shows as stopped too
-    expect(views[1][1].jobs[0]).toMatchObject({ status: JobStatus.Running, state: 'Stopped' });
+    expect(states(views)).toEqual({ scan: 'Completed', strings: 'Failed', yara: 'Running', report: 'Skipped' });
+    // the job left running when the run failed keeps running, with a note saying the run failed
+    expect(views[1][1].jobs[0]).toMatchObject({ status: JobStatus.Running, state: 'Running' });
+    expect(views[1][1].jobs[0].note).toMatch(/run failed.*still running/);
+    expect(views[1][1].note).toMatch(/run failed.*still running/);
+    expect(views[1][0].note).toBeUndefined();
     expect(views.flat().some((stage) => stage.active)).toBe(false);
   });
-  it('shows a cancelled run, which fails with no job failure, as stopped at its stage', () => {
-    expect(
-      states(buildStageViews(run(ReactionStatus.Failed, 0), [['scan'], ['report']], [created('j1', 'scan'), claimed('scan-x', 1)])),
-    ).toEqual({
-      scan: 'Stopped',
+  it('shows a cancelled run, which fails with no job failure, as running its claimed job and stopped with a run token', () => {
+    const updates = [created('j1', 'scan'), claimed('scan-x', 1)];
+    expect(states(buildStageViews(run(ReactionStatus.Failed, 0), [['scan'], ['report']], updates))).toEqual({
+      scan: 'Running',
       report: 'Skipped',
     });
+    // a run token is revoked with its run, so its worker can never report back
+    const tokenRun = run(ReactionStatus.Failed, 0, { id: 'r', run: 'r', run_token: 'run-r' });
+    const views = buildStageViews(tokenRun, [['scan'], ['report']], updates);
+    expect(states(views)).toEqual({ scan: 'Stopped', report: 'Skipped' });
+    expect(views[0][0].jobs[0]).toMatchObject({ status: JobStatus.Running, state: 'Stopped' });
+    expect(views[0][0].jobs[0].note).toBeUndefined();
   });
   it('follows the polls of a running run: queued, running, then the next step', () => {
     const order = [['scan'], ['report']];
@@ -286,6 +296,115 @@ describe('buildStageViews', () => {
     );
     expect(views[0]).toHaveLength(40);
     expect(new Set(views[0].map((stage) => stage.state))).toEqual(new Set(['Created']));
+  });
+});
+
+/**
+ * Status updates recorded by the API for a pipeline run of two parallel stages, `alpha` and `beta`, then
+ * `gamma`, where `alpha`'s job errors (ids and names shortened, fields as the API wrote them).
+ */
+const PARALLEL_ORDER = [['alpha', 'beta'], ['gamma']];
+/** The deadline the API wrote on both jobs. */
+const DEADLINE = '2026-11-11 23:43:00.709803282 UTC';
+/** A job creation update as the API writes it. */
+const apiCreated = (job: string, stage: string, timestamp: string) => ({
+  ...update('JobCreated', { deadline: DEADLINE, stage, job, id: job, reaction: 'r', status: '"Created"' }),
+  timestamp,
+});
+/** A job update as the API writes it. */
+const apiJob = (action: string, values: Record<string, string>, timestamp: string) => ({ ...update(action, values), timestamp });
+/** Both jobs claimed, then `alpha`'s job errors, which fails the run. */
+const BOTH_CLAIMED: StatusUpdate[] = [
+  apiJob('ReactionCreated', { status: '"Created"', current_stage: '0' }, '2026-11-05T00:03:00.709874843Z'),
+  apiCreated('ja', 'alpha', '2026-11-05T00:03:00.710752917Z'),
+  apiCreated('jb', 'beta', '2026-11-05T00:03:00.710870698Z'),
+  apiJob('JobRunning', { status: 'running', worker: 'wa', stage: 'alpha', job: 'ja' }, '2026-11-05T00:03:00.744291876Z'),
+  apiJob('JobRunning', { status: 'running', worker: 'wb', stage: 'beta', job: 'jb' }, '2026-11-05T00:03:00.751352770Z'),
+  apiJob('JobFailed', { job: 'ja', status: 'Failed' }, '2026-11-05T00:03:00.798318056Z'),
+  apiJob('ReactionFailed', { status: 'Failed' }, '2026-11-05T00:03:00.800749032Z'),
+];
+/** `beta`'s job completing after the run failed, which the API accepts and records. */
+const BETA_COMPLETED = apiJob('JobCompleted', { job: 'jb', status: 'Completed' }, '2026-11-05T00:03:00.837769860Z');
+/** Only `alpha`'s job claimed, then it errors while `beta`'s job is still queued. */
+const ONE_CLAIMED: StatusUpdate[] = [
+  apiJob('ReactionCreated', { status: '"Created"', current_stage: '0' }, '2026-11-05T00:03:00.881445338Z'),
+  apiCreated('ja', 'alpha', '2026-11-05T00:03:00.882376308Z'),
+  apiCreated('jb', 'beta', '2026-11-05T00:03:00.882495626Z'),
+  apiJob('JobRunning', { job: 'ja', status: 'running', worker: 'wa', stage: 'alpha' }, '2026-11-05T00:03:00.889058467Z'),
+  apiJob('JobFailed', { job: 'ja', status: 'Failed' }, '2026-11-05T00:03:00.927389746Z'),
+  apiJob('ReactionFailed', { status: 'Failed' }, '2026-11-05T00:03:00.929737144Z'),
+];
+/** A worker claiming and completing the queued `beta` job after the run failed, which the API still allows. */
+const BETA_CLAIMED_LATE = [
+  apiJob('JobRunning', { status: 'running', worker: 'wb', job: 'jb', stage: 'beta' }, '2026-11-05T00:03:00.962266139Z'),
+  apiJob('JobCompleted', { job: 'jb', status: 'Completed' }, '2026-11-05T00:03:01.000313352Z'),
+];
+
+describe('a parallel stage failing in a pipeline run', () => {
+  /** The failed pipeline run, at its first step. */
+  const failedRun = run(ReactionStatus.Failed, 0, { current_stage_length: 2 });
+  /** The state and note of each job by id. */
+  const jobStates = (views: ReturnType<typeof buildStageViews>) =>
+    Object.fromEntries(views.flat().flatMap((stage) => stage.jobs.map((job) => [job.id, { state: job.state, note: job.note }])));
+  it('keeps the running sibling running with a note, then shows its final state', () => {
+    const running = buildStageViews(failedRun, PARALLEL_ORDER, BOTH_CLAIMED);
+    expect(states(running)).toEqual({ alpha: 'Failed', beta: 'Running', gamma: 'Skipped' });
+    expect(jobStates(running).ja).toEqual({ state: 'Failed', note: undefined });
+    expect(jobStates(running).jb.state).toBe('Running');
+    expect(jobStates(running).jb.note).toMatch(/still running/);
+    const done = buildStageViews(failedRun, PARALLEL_ORDER, [...BOTH_CLAIMED, BETA_COMPLETED]);
+    expect(states(done)).toEqual({ alpha: 'Failed', beta: 'Completed', gamma: 'Skipped' });
+    expect(jobStates(done).jb).toEqual({ state: 'Completed', note: undefined });
+    expect(done[0][1].note).toBeUndefined();
+  });
+  it('keeps the queued sibling queued with a note, since a worker can still claim it, then follows it', () => {
+    const queued = buildStageViews(failedRun, PARALLEL_ORDER, ONE_CLAIMED);
+    expect(states(queued)).toEqual({ alpha: 'Failed', beta: 'Created', gamma: 'Skipped' });
+    expect(jobStates(queued).jb.note).toMatch(/still queued/);
+    expect(queued[0][1].note).toMatch(/still queued/);
+    const claimedLate = buildStageViews(failedRun, PARALLEL_ORDER, [...ONE_CLAIMED, BETA_CLAIMED_LATE[0]]);
+    expect(states(claimedLate)).toEqual({ alpha: 'Failed', beta: 'Running', gamma: 'Skipped' });
+    const done = buildStageViews(failedRun, PARALLEL_ORDER, [...ONE_CLAIMED, ...BETA_CLAIMED_LATE]);
+    expect(states(done)).toEqual({ alpha: 'Failed', beta: 'Completed', gamma: 'Skipped' });
+  });
+  it('stops the unfinished siblings of a run with a run token, whose queued jobs are removed and token revoked', () => {
+    const tokenRun = { ...failedRun, run: 'r', run_token: 'run-r' };
+    expect(states(buildStageViews(tokenRun, PARALLEL_ORDER, BOTH_CLAIMED))).toEqual({ alpha: 'Failed', beta: 'Stopped', gamma: 'Skipped' });
+    expect(states(buildStageViews(tokenRun, PARALLEL_ORDER, ONE_CLAIMED))).toEqual({ alpha: 'Failed', beta: 'Stopped', gamma: 'Skipped' });
+  });
+  it('stops a sleeping generator of a failed run, whose last update is still its claim', () => {
+    // the API records nothing when a generator sleeps, so only the run's generators list tells it apart
+    const sleeping = { ...failedRun, generators: ['jb'] };
+    const views = buildStageViews(sleeping, PARALLEL_ORDER, BOTH_CLAIMED);
+    expect(states(views)).toEqual({ alpha: 'Failed', beta: 'Stopped', gamma: 'Skipped' });
+    expect(jobStates(views).jb).toEqual({ state: 'Stopped', note: undefined });
+    expect(views[0][1].note).toBeUndefined();
+    expect(jobsLiveAfterFailure(sleeping, BOTH_CLAIMED, Date.parse('2026-11-05T00:05:00Z'))).toBe(false);
+  });
+  it('gives a stage whose jobs can still run the deadline its logs are read until', () => {
+    const running = buildStageViews(failedRun, PARALLEL_ORDER, BOTH_CLAIMED);
+    expect(running[0][1].liveUntil).toBe(Date.parse('2026-11-11T23:43:00.709Z'));
+    expect(running[0][0].liveUntil).toBeUndefined();
+    const done = buildStageViews(failedRun, PARALLEL_ORDER, [...BOTH_CLAIMED, BETA_COMPLETED]);
+    expect(done[0][1].liveUntil).toBeUndefined();
+  });
+  it('tells which jobs can still run after their run failed', () => {
+    expect(liveAfterFailure(failedRun, JobStatus.Running)).toBe(true);
+    expect(liveAfterFailure(failedRun, JobStatus.Created)).toBe(true);
+    // a sleeping generator is not respawned for a failed run
+    expect(liveAfterFailure(failedRun, JobStatus.Sleeping)).toBe(false);
+    expect(liveAfterFailure(failedRun, JobStatus.Completed)).toBe(false);
+    expect(liveAfterFailure({ ...failedRun, run: 'r' }, JobStatus.Running)).toBe(false);
+    expect(liveAfterFailure(run(ReactionStatus.Started, 0), JobStatus.Running)).toBe(false);
+  });
+  it('keeps reading the updates of a failed run while a job can still run before its deadline', () => {
+    const now = Date.parse('2026-11-05T00:05:00Z');
+    expect(jobsLiveAfterFailure(failedRun, BOTH_CLAIMED, now)).toBe(true);
+    expect(jobsLiveAfterFailure(failedRun, ONE_CLAIMED, now)).toBe(true);
+    expect(jobsLiveAfterFailure(failedRun, [...BOTH_CLAIMED, BETA_COMPLETED], now)).toBe(false);
+    expect(jobsLiveAfterFailure(failedRun, BOTH_CLAIMED, Date.parse('2026-11-12T00:00:00Z'))).toBe(false);
+    expect(jobsLiveAfterFailure({ ...failedRun, run: 'r' }, BOTH_CLAIMED, now)).toBe(false);
+    expect(jobsLiveAfterFailure(failedRun, undefined, now)).toBe(false);
   });
 });
 

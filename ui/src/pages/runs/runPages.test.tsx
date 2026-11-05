@@ -141,7 +141,9 @@ describe('the run details and single reaction status pages', () => {
         'report',
       ]);
       expect(markup).toMatch(/data-testid="stage-status-strings"[^>]*data-status="Failed"/);
-      expect(markup).toMatch(/data-testid="stage-status-yara"[^>]*data-status="Stopped"/);
+      expect(markup).toMatch(/data-testid="stage-status-yara"[^>]*data-status="Running"/);
+      // the job still running after the run failed says so
+      expect(markup).toContain('data-testid="stage-note-yara"');
       expect(markup).toMatch(/data-testid="stage-status-report"[^>]*data-status="Skipped"/);
       // a failed run opens the logs of its failed and stopped stages
       expect(markup).toContain('data-testid="stage-logs-strings"');
