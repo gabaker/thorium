@@ -539,3 +539,56 @@ fn broken_statements_are_rejected_with_their_rule() {
         );
     }
 }
+
+/// Only the listed drain request writes may be conditional, and only with `NOT EXISTS` or one
+/// regular column equal to a bind marker
+#[test]
+fn only_the_listed_writes_may_be_conditional() {
+    use super::queries::migrations::{insert_if_absent, update_status_if};
+    // the listed writes validate against the declared schema
+    let objects = <ThoriumKeyspace as Keyspace>::OBJECTS;
+    for (name, cql) in [
+        (
+            "schema_migrations.insert_if_absent",
+            insert_if_absent("{ns}"),
+        ),
+        (
+            "schema_migrations.update_status_if",
+            update_status_if("{ns}"),
+        ),
+    ] {
+        assert_eq!(
+            validate_statement(&fixture(name, "schema_migrations", &cql), objects),
+            Ok(())
+        );
+    }
+    // the same text under another name is refused as conditional
+    let other = fixture(
+        "schema_migrations.other_if",
+        "schema_migrations",
+        &update_status_if("{ns}"),
+    );
+    assert_eq!(
+        validate_statement(&other, objects).map_err(|error| error.rule),
+        Err(Rule::Conditional)
+    );
+    // a listed name whose condition compares a key column or an unknown column is refused
+    let key = fixture(
+        "schema_migrations.update_status_if",
+        "schema_migrations",
+        "UPDATE {ns}.schema_migrations SET status = ? WHERE kind = ? AND id = ? IF id = ?",
+    );
+    assert_eq!(
+        validate_statement(&key, objects).map_err(|error| error.rule),
+        Err(Rule::Conditional)
+    );
+    let unknown = fixture(
+        "schema_migrations.update_status_if",
+        "schema_migrations",
+        "UPDATE {ns}.schema_migrations SET status = ? WHERE kind = ? AND id = ? IF state = ?",
+    );
+    assert_eq!(
+        validate_statement(&unknown, objects).map_err(|error| error.rule),
+        Err(Rule::UnknownColumn)
+    );
+}

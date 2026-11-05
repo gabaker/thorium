@@ -27,9 +27,16 @@ mod record;
 pub mod registry;
 mod report;
 mod reset_state;
+mod resubmit;
 mod revert;
 mod run;
 mod verify;
+
+#[cfg(feature = "test-support")]
+pub use drain::{CancelFault, arm_cancel_fault, set_result_uid};
+pub use resubmit::reserved_id;
+#[cfg(feature = "test-support")]
+pub use resubmit::{ResubmitFault, arm_resubmit_fault};
 
 use registry::{MIGRATIONS, MigrationDef, Support};
 
@@ -385,10 +392,12 @@ mod tests {
         }
         // a registered migration no catalog step uses could never be run by an upgrade
         for migration in MIGRATIONS.iter().filter(|migration| {
-            // a fixture or rebucket migration has no catalog step, and a check-only migration may be
-            // registered ahead of the step that runs it
+            // a fixture or rebucket migration has no catalog step, the resubmission is run by the
+            // operator inside the conversion pause rather than as a step, and a check-only
+            // migration may be registered ahead of the step that runs it
             !migration.id.starts_with("fixture-")
                 && !migration.id.starts_with("rebucket-")
+                && migration.id != super::resubmit::ID
                 && migration.support != Support::CheckOnly
         }) {
             assert!(
@@ -421,15 +430,9 @@ mod tests {
                 "{}",
                 migration.id
             );
-            // a check-only migration has no catalog step to run it, except the drain, whose check
-            // is its whole work and whose step only waits for it
+            // a check-only migration has no catalog step to run it
             if migration.support == Support::CheckOnly {
-                assert_eq!(
-                    step_for(migration.id).is_some(),
-                    migration.id == "drain-reactions",
-                    "{}",
-                    migration.id
-                );
+                assert!(step_for(migration.id).is_none(), "{}", migration.id);
             }
         }
     }
@@ -465,19 +468,25 @@ mod tests {
         assert_eq!(migration.families, ["entities"]);
     }
 
-    /// The drain is registered as a check that waits, and its step has no pause list, no
-    /// approval work, and a procedure that names the command that clears reactions
+    /// The drain is registered as a check that waits and a run that cancels, and its step has no
+    /// pause list, no approval work, and a procedure that names the check that lists what holds
+    /// it and the command that clears reactions
     #[test]
     fn the_drain_is_a_check_with_a_waiting_step() {
-        // the registration is a check only
+        // the registration checks and runs
         let migration = find("drain-reactions").expect("the migration is registered");
-        assert_eq!(migration.support, Support::CheckOnly);
+        assert_eq!(migration.support, Support::Yes);
         // its step pauses nothing, reads nothing after another step, and says how to clear reactions
         let step = step_for("drain-reactions").expect("a catalog step");
         assert!(step.pause.is_empty() && step.reads_after.is_empty());
+        let procedure = step.manual_procedure.expect("a procedure");
         assert!(
-            step.manual_procedure
-                .is_some_and(|text| text.contains("thorctl reactions delete"))
+            procedure.contains("thorctl reactions delete"),
+            "{procedure}"
+        );
+        assert!(
+            procedure.contains("thoradm migrate check --id drain-reactions"),
+            "{procedure}"
         );
     }
 

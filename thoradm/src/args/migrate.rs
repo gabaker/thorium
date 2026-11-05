@@ -4,7 +4,11 @@ use clap::Parser;
 use std::path::PathBuf;
 
 /// The data migration subcommands
+///
+/// A command is parsed once per process, so the size of its largest variant (`run`'s flags) costs
+/// nothing worth boxing it for.
 #[derive(Parser, Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum MigrateSubCommands {
     /// List every revision and its upgrade steps, with the migrations thoradm runs
     #[clap(version, author)]
@@ -124,6 +128,21 @@ pub struct RunMigration {
     /// The first pause before a retry, in milliseconds
     #[clap(long, default_value_t = 250, hide = true)]
     pub backoff_ms: u64,
+    /// The drain attempt a resubmission runs inside the conversion pause for (the `at` of the
+    /// drain's `Running` entry); passed only by the operator on a Job it creates while it holds
+    /// the pause, never by hand
+    #[clap(long, value_name = "ATTEMPT")]
+    pub in_pause: Option<String>,
+    /// Also resubmit requests marked stale (runs by hand only), still through every check
+    #[clap(long)]
+    pub include_stale: bool,
+    /// The most requests a drain cancel records, in place of the default cap
+    #[clap(long, value_name = "N")]
+    pub max_requests: Option<usize>,
+    /// The `at` of the drain step's `Running` entry, recorded as each cancelled request's attempt
+    /// (passed by the operator on the cancel's Job)
+    #[clap(long, value_name = "AT")]
+    pub step_attempt: Option<String>,
 }
 
 /// The migration whose last pass report to print
@@ -132,6 +151,10 @@ pub struct ReportMigration {
     /// The id of the migration (see `thoradm migrate list`)
     #[clap(long)]
     pub id: String,
+    /// Print the drain-reactions or resubmit-reactions report as JSON instead of tables (every
+    /// other migration's report is always JSON)
+    #[clap(long)]
+    pub json: bool,
 }
 
 /// The data migration to check

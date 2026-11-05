@@ -169,15 +169,18 @@ impl ReactionRequest {
     ///
     /// * `user` - The user casting this reaction request
     /// * `pipeline` - The pipeline this reaction is for
+    /// * `id` - The id the reaction gets
     /// * `plan` - The stages resolved for this reaction
     /// * `provenance` - The exact versions of the tool instances the plan runs
     /// * `parent_ephemeral` - Any ephemeral files from any parent reactions
     /// * `shared` - Shared Thorium objects
+    #[allow(clippy::too_many_arguments)]
     #[instrument(name = "ReactionRequest::cast", skip_all, err(Debug))]
     pub async fn cast<'a>(
         self,
         user: &User,
         pipeline: &'a Pipeline,
+        id: Uuid,
         plan: ReactionPlan,
         provenance: RunProvenance,
         parent_ephemeral: HashMap<String, Uuid>,
@@ -198,7 +201,7 @@ impl ReactionRequest {
         let (cast, cache) = self
             .cast_source(
                 user,
-                Uuid::new_v4(),
+                id,
                 source,
                 pipeline.sla,
                 plan,
@@ -349,6 +352,46 @@ impl ReactionDetailsList {
 }
 
 impl Reaction {
+    /// Makes the checks the create route makes before it creates a reaction, returning the group
+    /// and the pipeline the user may create it with
+    ///
+    /// In order, it refuses a disabled user, a user whose email isn't verified, a group or
+    /// pipeline the user can't see, and a pipeline with bans, each with the route's status and
+    /// message. [`Reaction::create`] then makes its own checks.
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user creating the reaction
+    /// * `group` - The group the reaction is in
+    /// * `pipeline` - The pipeline the reaction runs
+    /// * `shared` - Shared objects in Thorium
+    #[instrument(name = "Reactions::authorize_create", skip(user, shared), err(Debug))]
+    pub async fn authorize_create(
+        user: &User,
+        group: &str,
+        pipeline: &str,
+        shared: &Shared,
+    ) -> Result<(Group, Pipeline), ApiError> {
+        // a disabled user is refused, as authentication refuses them
+        if user.role == UserRole::Disabled {
+            return unauthorized!("This user has been disabled".to_owned());
+        }
+        // a user whose email isn't verified is refused, as authentication refuses them here
+        if !user.verified {
+            return unauthorized!("Email has not been verified".to_owned());
+        }
+        // get the pipeline as this user, which checks they can see its group
+        let (group_obj, pipeline_obj) = Pipeline::get(user, group, pipeline, shared).await?;
+        // refrain from running the reaction if the pipeline has a ban
+        if !pipeline_obj.bans.is_empty() {
+            return bad!(format!(
+                "The reaction cannot be created because pipeline '{pipeline}' in group '{group}' \
+                 has one or more bans! See the pipeline's notifications for more details.",
+            ));
+        }
+        Ok((group_obj, pipeline_obj))
+    }
+
     /// Creates a new reaction
     ///
     /// # Arguments
@@ -364,6 +407,55 @@ impl Reaction {
         group: &Group,
         pipeline: &Pipeline,
         request: ReactionRequest,
+        shared: &Shared,
+    ) -> Result<Reaction, ApiError> {
+        // create the reaction under a new id
+        Self::create_inner(user, group, pipeline, request, None, shared).await
+    }
+
+    /// Creates a new reaction under an id the caller reserved
+    ///
+    /// It makes the same checks as [`Reaction::create`], and refuses with a conflict, "reserved
+    /// reaction already exists", when a reaction with the id exists in the group or is created
+    /// before this one is written. The create route never uses it.
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user that is creating this reaction
+    /// * `group` - The group this reaction is in
+    /// * `pipeline` - The pipeline this reaction is apart of
+    /// * `request` - The `ReactionRequest` to build a reaction on
+    /// * `id` - The id the reaction gets
+    /// * `shared` - Shared objects in Thorium
+    #[instrument(name = "Reactions::create_with_id", skip_all, fields(group = &group.name, pipeline = &pipeline.name, id = %id), err(Debug))]
+    pub async fn create_with_id(
+        user: &User,
+        group: &Group,
+        pipeline: &Pipeline,
+        request: ReactionRequest,
+        id: Uuid,
+        shared: &Shared,
+    ) -> Result<Reaction, ApiError> {
+        // create the reaction under the reserved id
+        Self::create_inner(user, group, pipeline, request, Some(id), shared).await
+    }
+
+    /// Checks a reaction request and creates its reaction under a reserved id or a new one
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user that is creating this reaction
+    /// * `group` - The group this reaction is in
+    /// * `pipeline` - The pipeline this reaction is apart of
+    /// * `request` - The `ReactionRequest` to build a reaction on
+    /// * `reserved` - The id the caller reserved, or `None` to mint a new one
+    /// * `shared` - Shared objects in Thorium
+    async fn create_inner(
+        user: &User,
+        group: &Group,
+        pipeline: &Pipeline,
+        request: ReactionRequest,
+        reserved: Option<Uuid>,
         shared: &Shared,
     ) -> Result<Reaction, ApiError> {
         // ensure that all args defined are contained in the pipeline
@@ -392,7 +484,7 @@ impl Reaction {
         let provenance = memo.provenance(&plan);
         // add reaction to backend, boxing its large future
         Box::pin(db::reactions::create(
-            user, request, pipeline, plan, provenance, &mut memo, shared,
+            user, request, pipeline, plan, provenance, &mut memo, reserved, shared,
         ))
         .await
     }

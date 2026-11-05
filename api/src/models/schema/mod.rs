@@ -15,6 +15,7 @@ mod config_record;
 mod cql_type;
 mod cursors;
 mod definition;
+pub mod drain_requests;
 mod elastic;
 #[cfg(feature = "upgrades-runtime")]
 mod engine;
@@ -67,6 +68,8 @@ mod config_record_tests;
 mod cursor_tests;
 #[cfg(test)]
 mod ddl_tests;
+#[cfg(test)]
+mod drain_requests_tests;
 #[cfg(test)]
 mod elastic_tests;
 #[cfg(test)]
@@ -142,10 +145,11 @@ pub use legacy::{
 };
 pub use markers::{AppliedSchema, ConfigRecord, DeploymentRecord, RecordStatus};
 pub use migrations::{
-    AppliedReport, CatalogIdentity, CheckReport, CheckWait, FinishedStep, GroupTally, IssueReport,
-    MAX_REPORT_BYTES, MAX_REPORT_NOTES, MAX_REPORT_SKIPPED, MAX_REPORT_STRING, MigrationRecordKind,
-    MigrationRunStatus, ObjectClass, PassCheckpoint, PassCounts, ReasonSummary, ReportCounts,
-    ReportNote, ReportSummary, SkippedItem, StatusReport,
+    AppliedReport, CatalogIdentity, CheckReport, CheckWait, DrainCancelReport, DrainWorker,
+    FinishedStep, GroupTally, IssueReport, MAX_DRAIN_WORKERS, MAX_REPORT_BYTES, MAX_REPORT_NOTES,
+    MAX_REPORT_SKIPPED, MAX_REPORT_STRING, MigrationRecordKind, MigrationRunStatus, ObjectClass,
+    PassCheckpoint, PassCounts, ReasonSummary, ReportCounts, ReportNote, ReportSummary,
+    SkippedItem, StatusReport,
 };
 #[cfg(feature = "upgrades-runtime")]
 pub use pass_store::{
@@ -186,8 +190,8 @@ pub use released::LATER_REVISION_OBJECTS;
 pub(crate) use released::introduced_by_later_revision;
 #[cfg(feature = "upgrades-runtime")]
 pub use runner::{
-    Batch, MigrateError, MigrationRunner, Outcome, RunBackends, RunContext, RunLimits, RunMode,
-    Slice,
+    Batch, MigrateError, MigrationRunner, Outcome, RunBackends, RunContext, RunFlags, RunLimits,
+    RunMode, Slice,
 };
 #[cfg(feature = "upgrades-runtime")]
 pub use scan::{ScyllaScan, range_count, ring_slices, token_ranges};

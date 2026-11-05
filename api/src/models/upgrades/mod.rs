@@ -86,7 +86,7 @@ pub use revisions::{REVISION_PATTERN, RevisionId, UpgradeError};
 pub use state::{
     APPLY_KEY_MARKER, AppliedStep, DEPLOYMENT_MARKER, HELD_FAILURE_MARKER, IssueSummary,
     RECORD_MARKER, RESET_STATE_STEP, RESTORED_STEP, RETRY_VALUE_MARKER, UPGRADE_STOPPED_STEP,
-    UpgradeState, label_value,
+    UpgradeState, attempt_start, label_value,
 };
 pub use status::{
     BackendSchemaStatus, BlockReason, ConfirmRefusal, DriftEntry, DriftKind, DriftSummary,
@@ -157,6 +157,39 @@ mod tests {
     fn rev(raw: &str) -> RevisionId {
         // parse the id, failing the test when it is malformed
         raw.parse().expect("valid revision")
+    }
+
+    /// A step's attempt starts at its first run since it last finished or the newest stop,
+    /// restore, or reset, so a retry after a failed run stays in the failed run's attempt
+    #[test]
+    fn a_retry_after_a_failed_run_stays_in_its_attempt() {
+        // an entry of a step with an outcome
+        let entry = |step: &str, outcome: StepState| AppliedStep {
+            step: step.to_owned(),
+            outcome,
+            ..AppliedStep::default()
+        };
+        // an earlier finished run, then a run that failed and its retry
+        let mut history = vec![
+            entry("drain", StepState::Running),
+            entry("drain", StepState::Done),
+            entry("drain", StepState::Running),
+            entry("drain", StepState::Failed),
+            entry("other", StepState::Done),
+            entry("drain", StepState::Running),
+        ];
+        assert_eq!(attempt_start(&history, "drain", 5), 2);
+        assert_eq!(attempt_start(&history, "drain", 2), 2);
+        assert_eq!(attempt_start(&history, "drain", 0), 0);
+        // a stop, restore, or reset between them starts a new attempt with the retry
+        for ends in [UPGRADE_STOPPED_STEP, RESTORED_STEP, RESET_STATE_STEP] {
+            history[4] = entry(ends, StepState::Done);
+            assert_eq!(attempt_start(&history, "drain", 5), 5, "{ends}");
+        }
+        // references to entries work alike
+        history[4] = entry("other", StepState::Done);
+        let refs = history.iter().collect::<Vec<_>>();
+        assert_eq!(attempt_start(&refs, "drain", 5), 2);
     }
 
     /// Revision ids must be zero padded `YYYY-MM-vNN` and sort in upgrade order

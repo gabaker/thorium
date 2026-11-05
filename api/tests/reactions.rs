@@ -985,6 +985,119 @@ async fn create_bulk_checks_overrides_on_every_request() -> Result<(), Error> {
     Ok(())
 }
 
+/// The status code and message of a refused request, read from the client's error
+///
+/// # Arguments
+///
+/// * `error` - The error the client returned
+fn route_refusal(error: &Error) -> (u16, String) {
+    // the status code the route answered with
+    let code = error.status().map_or(0, |status| status.as_u16());
+    // the route's body is JSON whose `error` field holds the message
+    let body = error.msg().unwrap_or_default();
+    let msg = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("error")
+                .and_then(|msg| msg.as_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or(body);
+    (code, msg)
+}
+
+/// The create route and `Reaction::authorize_create` refuse a disabled user, an unverified user,
+/// a user outside the group, and a banned pipeline with the same status and message
+#[tokio::test]
+async fn the_create_route_and_authorize_create_refuse_the_same_requests() -> Result<(), Error> {
+    // a group with a clean pipeline and a banned one
+    let admin = test_utilities::admin_client().await?;
+    let group = generators::groups(1, &admin).await?.remove(0).name;
+    let mut pipes = generators::pipelines(&group, 2, false, &admin).await?;
+    let clean = pipes.remove(0).name;
+    let banned = pipes.remove(0).name;
+    let ban = PipelineUpdate::default().bans(PipelineBanUpdate::default().add_ban(
+        PipelineBan::new(PipelineBanKind::generic("Shared check ban!")),
+    ));
+    admin.pipelines.update(&group, &banned, &ban).await?;
+    // a member who stays enabled, a member who gets disabled, a member whose email is unverified,
+    // and a user outside the group
+    let member = group_member(&admin, &group, UserRole::User).await?;
+    let disabled = group_member(&admin, &group, UserRole::User).await?;
+    let unverified = group_member(&admin, &group, UserRole::User).await?;
+    let outsider = generators::client(&admin).await?;
+    let disabled_name = disabled.users.info().await?.username;
+    let unverified_name = unverified.users.info().await?.username;
+    admin
+        .users
+        .update(&disabled_name, role_update(UserRole::Disabled))
+        .await?;
+    let _: () = redis::cmd("hset")
+        .arg(format!(
+            "{}:user_data:{unverified_name}",
+            CONF.thorium.namespace
+        ))
+        .arg("verified")
+        .arg("false")
+        .query_async(&mut redis_conn().await)
+        .await
+        .map_err(|err| Error::new(err.to_string()))?;
+    // the shared objects the backend checks run with
+    let shared = Box::pin(thorium::utils::Shared::new(CONF.clone())).await;
+    // each refused request: the client that sends it, its pipeline, and the expected status
+    let cases = [
+        ("disabled", &disabled, &clean, 401),
+        ("unverified", &unverified, &clean, 401),
+        ("outside the group", &outsider, &clean, 401),
+        ("banned", &member, &banned, 400),
+    ];
+    for (case, client, pipeline, code) in cases {
+        // the route's refusal
+        let pipe = admin.pipelines.get(&group, pipeline).await?;
+        let request = generators::gen_reaction(&group, &pipe, None);
+        let route = client.reactions.create(&request).await;
+        let Err(route) = route else {
+            return Err(Error::new(format!("the route accepted the {case} request")));
+        };
+        let (route_code, route_msg) = route_refusal(&route);
+        is!(route_code, code);
+        // the shared check's refusal for the same user, group, and pipeline
+        let username = if case == "disabled" {
+            disabled_name.clone()
+        } else if case == "unverified" {
+            unverified_name.clone()
+        } else {
+            client.users.info().await?.username
+        };
+        let user = thorium::models::User::force_get(&username, &shared)
+            .await
+            .map_err(|err| Error::new(format!("{err:?}")))?;
+        let checked =
+            thorium::models::Reaction::authorize_create(&user, &group, pipeline, &shared).await;
+        let Err(checked) = checked else {
+            return Err(Error::new(format!(
+                "authorize_create accepted the {case} request"
+            )));
+        };
+        // both refuse with the same status and message
+        is!(checked.status().as_u16(), route_code);
+        is!(checked.msg().unwrap_or_default(), route_msg);
+    }
+    // the enabled member's request on the clean pipeline passes the shared check
+    let username = member.users.info().await?.username;
+    let user = thorium::models::User::force_get(&username, &shared)
+        .await
+        .map_err(|err| Error::new(format!("{err:?}")))?;
+    let (checked_group, checked_pipe) =
+        thorium::models::Reaction::authorize_create(&user, &group, &clean, &shared)
+            .await
+            .map_err(|err| Error::new(format!("{err:?}")))?;
+    is!(checked_group.name, group);
+    is!(checked_pipe.name, clean);
+    Ok(())
+}
+
 #[tokio::test]
 async fn create_sub_reaction() -> Result<(), Error> {
     // get admin client

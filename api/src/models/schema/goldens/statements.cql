@@ -378,6 +378,10 @@ SELECT kind, id, fingerprint, apply_key, layouts, revision, version, entry, resu
 DELETE FROM {ns}.schema_migrations WHERE kind = ? AND id = ?
 -- schema_migrations.delete_kind
 DELETE FROM {ns}.schema_migrations WHERE kind = ?
+-- schema_migrations.insert_if_absent
+INSERT INTO {ns}.schema_migrations (kind, id, value, attempt, status, entry, result, revision, started, finished, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS
+-- schema_migrations.update_status_if
+UPDATE {ns}.schema_migrations SET status = ?, entry = ?, result = ?, value = ?, finished = ?, updated = ? WHERE kind = ? AND id = ? IF status = ?
 -- schema_migration_issues.insert
 INSERT INTO {ns}.schema_migration_issues (migration, transform, reason, worker, attempt, checkpoint, lease, class, count, first_seen, last_seen, samples, resolved_count, accepted, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 -- schema_migration_issues.list

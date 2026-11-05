@@ -6,6 +6,9 @@
 // thoradm's `Error` wraps the large error types of its Scylla, S3, and API clients by value, so
 // every fallible function would trip this lint
 #![allow(clippy::result_large_err)]
+// the resubmission awaits the API's reaction create, whose future is nested as deeply as the API
+// crate's own limit allows
+#![recursion_limit = "256"]
 
 pub mod args;
 pub mod backup;

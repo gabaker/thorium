@@ -1,5 +1,6 @@
 //! Tests of `thoradm migrate run`, `check`, `issues`, and `report` as a Job runs them: exit codes,
-//! signals, the writer lease, logs without a terminal, and what a check leaves behind
+//! signals, the writer lease, logs without a terminal, what a check leaves behind, the drain and
+//! resubmission reports, and the drain run flags
 
 mod common;
 
@@ -8,7 +9,14 @@ use common::migrate::{World, run_signal};
 use serde_json::Value;
 use std::fmt::Write as _;
 use std::process::Output;
-use thorium::models::schema::{MigrationRunStatus, WriterLease};
+use thorium::models::ReactionStatus;
+use thorium::models::schema::drain_requests::{
+    CreatorMembership, DrainRequest, DrainRequestRow, DrainRequestStore, DrainStatus,
+    PipelineIdentity, args_sha256,
+};
+use thorium::models::schema::{
+    AppliedReport, DrainCancelReport, DrainWorker, MigrationRunStatus, PassCounts, WriterLease,
+};
 
 /// The arguments of a run of the fixture migration with one worker and a checkpoint per batch
 ///
@@ -867,4 +875,355 @@ async fn a_paused_scylla_is_retried_through() {
     assert_eq!(summary["counts"]["read"], 8000);
     assert!(world.rows().await.iter().all(|row| row.2 == 2));
     world.drop_keyspace().await;
+}
+
+/// The arguments every seeded drain request holds, which no report may print
+const ARGS_CANARY: &str = "{\"positionals\":[\"DRAIN-ARGS-CANARY\"]}";
+
+/// A drain request as a cancel records it
+///
+/// # Arguments
+///
+/// * `pipeline` - The pipeline the reaction ran
+/// * `creator` - The user who created the reaction
+/// * `parent` - The reaction's parent, if it was a sub reaction
+fn drain_request(pipeline: &str, creator: &str, parent: Option<&str>) -> DrainRequest {
+    // a request in group corn whose arguments are only hashed and counted
+    DrainRequest {
+        group: "corn".to_owned(),
+        pipeline: pipeline.to_owned(),
+        samples: vec!["sample-sha".to_owned()],
+        repos: Vec::new(),
+        tags: Vec::new(),
+        parent: parent.map(|id| id.parse().expect("a uuid")),
+        trigger_depth: None,
+        creator: creator.to_owned(),
+        old_status: ReactionStatus::Started,
+        last_activity: None,
+        orphan: false,
+        args_sha256: Some(args_sha256(ARGS_CANARY)),
+        args_bytes: ARGS_CANARY.len() as u64,
+        buffers: false,
+        cache: false,
+        identity: PipelineIdentity {
+            group: "corn".to_owned(),
+            name: pipeline.to_owned(),
+            creator: creator.to_owned(),
+            order_sha256: "0".repeat(64),
+        },
+        membership: CreatorMembership {
+            held_role: true,
+            role: "user".to_owned(),
+        },
+        binding: None,
+    }
+}
+
+/// The ids the report tests seed, with their status, reserved id, and result
+const DRAIN_ROWS: [(&str, DrainStatus, Option<&str>, Option<&str>); 6] = [
+    (
+        "0b6d1c3e-6f2a-4c55-9a51-2f4c3e8d1a77",
+        DrainStatus::Resubmitted,
+        Some("9a4f2e11-0000-4000-8000-000000000001"),
+        Some("9a4f2e11-0000-4000-8000-000000000001"),
+    ),
+    (
+        "1e93b4c2-6f2a-4c55-9a51-2f4c3e8d1a77",
+        DrainStatus::Refused,
+        None,
+        Some("the creator's account is disabled"),
+    ),
+    (
+        "5e0f8a90-1d3b-4f0e-8c6a-7b2d9e4f3c10",
+        DrainStatus::Stale,
+        None,
+        Some("idle since 2025-03-02, over 30 days"),
+    ),
+    (
+        "7c21d0aa-1d3b-4f0e-8c6a-7b2d9e4f3c10",
+        DrainStatus::Recorded,
+        None,
+        None,
+    ),
+    (
+        "a1000000-1d3b-4f0e-8c6a-7b2d9e4f3c10",
+        DrainStatus::Resubmitting,
+        Some("9a4f2e11-0000-4000-8000-000000000002"),
+        None,
+    ),
+    (
+        "c4d07f61-1d3b-4f0e-8c6a-7b2d9e4f3c10",
+        DrainStatus::Resubmitted,
+        Some("9a4f2e11-0000-4000-8000-000000000003"),
+        Some("9a4f2e11-0000-4000-8000-000000000003"),
+    ),
+];
+
+/// Seed every row of [`DRAIN_ROWS`] with its arguments row, the last as a sub reaction
+///
+/// # Arguments
+///
+/// * `world` - The world to seed
+async fn seed_drain_rows(world: &World) {
+    // each request and its arguments, as a cancel and a resubmission leave them
+    let store = DrainRequestStore::prepare(world.backends.scylla.clone(), &world.ns)
+        .await
+        .expect("the drain statements prepare");
+    // a plain insert, since a test keyspace may use tablets, which refuse the store's conditional one
+    let insert = format!(
+        "INSERT INTO {}.schema_migrations (kind, id, value, attempt, status, entry, result, \
+         revision, started) VALUES ('drain_request', ?, ?, ?, ?, ?, ?, ?, ?)",
+        world.ns
+    );
+    for (n, (id, status, entry, result)) in DRAIN_ROWS.iter().enumerate() {
+        let parent = (n == DRAIN_ROWS.len() - 1).then_some(DRAIN_ROWS[0].0);
+        let request = drain_request("unpack", &format!("creator{n}"), parent);
+        let row = DrainRequestRow {
+            id: (*id).to_owned(),
+            value: request.to_json().expect("the request serializes"),
+            attempt: Some("2026-11-04T10:05:00Z".to_owned()),
+            status: *status,
+            entry: entry.map(str::to_owned),
+            result: result.map(str::to_owned),
+            revision: Some("2026-10-v04".to_owned()),
+            started: Some(chrono::Utc::now()),
+            finished: None,
+            updated: None,
+        };
+        world
+            .session()
+            .query_unpaged(insert.clone(), seed_values(&row))
+            .await
+            .expect("a row inserts");
+        store.put_args(id, ARGS_CANARY).await.expect("args insert");
+    }
+}
+
+/// The values of a plain insert of a drain request row, in the seed statement's order
+///
+/// # Arguments
+///
+/// * `row` - The row to insert
+#[allow(clippy::type_complexity)]
+fn seed_values(
+    row: &DrainRequestRow,
+) -> (
+    String,
+    String,
+    Option<String>,
+    &'static str,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<chrono::DateTime<chrono::Utc>>,
+) {
+    // the columns as the store writes them, the status as its stored text
+    (
+        row.id.clone(),
+        row.value.clone(),
+        row.attempt.clone(),
+        row.status.as_str(),
+        row.entry.clone(),
+        row.result.clone(),
+        row.revision.clone(),
+        row.started,
+    )
+}
+
+/// Seed the drain cancel's finished pass with an applied report naming one removed worker
+///
+/// # Arguments
+///
+/// * `world` - The world to seed
+async fn seed_drain_pass(world: &World) {
+    // a pass that began and finished with the cancel's report
+    let report = AppliedReport {
+        drain: Some(DrainCancelReport {
+            cancelled: 6,
+            recorded: 4,
+            refused: 1,
+            stale: 1,
+            workers_removed: 1,
+            workers: vec![DrainWorker {
+                group: "corn".to_owned(),
+                name: "corn-unpack-7f9c2".to_owned(),
+                scaler: "K8s".to_owned(),
+                cluster: "prod".to_owned(),
+                node: "node-3".to_owned(),
+            }],
+            ..DrainCancelReport::default()
+        }),
+        ..AppliedReport::default()
+    };
+    world
+        .store
+        .begin_attempt("drain-reactions", "attempt-1", "test", None, None, None)
+        .await
+        .expect("the pass begins");
+    world
+        .store
+        .finish(
+            "drain-reactions",
+            MigrationRunStatus::Done,
+            "test",
+            &PassCounts::default(),
+            &report,
+        )
+        .await
+        .expect("the pass finishes");
+}
+
+/// Run `migrate report` for a drain id and return its stdout, asserting it succeeded
+///
+/// # Arguments
+///
+/// * `world` - The world to report on
+/// * `id` - The migration whose report to print
+/// * `json` - Whether to ask for JSON
+fn drain_report(world: &World, id: &str, json: bool) -> String {
+    // the report, with or without --json
+    let mut command = world.thoradm();
+    command.args(["migrate", "report", "--id", id]);
+    if json {
+        command.arg("--json");
+    }
+    let output = World::run(&mut command);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    // nothing the report writes to either stream holds the arguments or their hash
+    for text in [
+        &stderr,
+        &String::from_utf8_lossy(&output.stdout).into_owned(),
+    ] {
+        assert!(!text.contains("DRAIN-ARGS-CANARY"), "{text}");
+        assert!(!text.contains(&args_sha256(ARGS_CANARY)), "{text}");
+    }
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// Both drain reports name every request, its outcome, and its new id or reason, as tables and as
+/// JSON, and never print its arguments or their hash
+#[tokio::test]
+async fn the_report_prints_no_args() {
+    // six requests in every status, each with an arguments row
+    let world = World::new("clirpa").await;
+    seed_drain_rows(&world).await;
+    seed_drain_pass(&world).await;
+    // the resubmission's table names each request, its outcome, and its new id or reason
+    let table = drain_report(&world, "resubmit-reactions", false);
+    assert!(table.starts_with("OLD ID"), "{table}");
+    for header in ["GROUP", "PIPELINE", "CREATOR", "OUTCOME", "NEW ID / REASON"] {
+        assert!(table.contains(header), "{table}");
+    }
+    for (id, status, _, result) in DRAIN_ROWS {
+        let line = table
+            .lines()
+            .find(|line| line.starts_with(id))
+            .unwrap_or_else(|| panic!("{id} is listed: {table}"));
+        assert!(line.contains(status.as_str()), "{line}");
+        assert!(line.contains("corn") && line.contains("unpack"), "{line}");
+        if let Some(result) = result {
+            assert!(line.contains(result), "{line}");
+        }
+    }
+    let reserved = table
+        .lines()
+        .find(|line| line.starts_with(DRAIN_ROWS[4].0))
+        .unwrap();
+    assert!(reserved.contains(DRAIN_ROWS[4].2.unwrap()), "{reserved}");
+    let sub = table
+        .lines()
+        .find(|line| line.starts_with(DRAIN_ROWS[5].0))
+        .unwrap();
+    assert!(sub.contains("as a root"), "{sub}");
+    // its JSON holds the same requests
+    let json: Value = serde_json::from_str(&drain_report(&world, "resubmit-reactions", true))
+        .expect("the report is JSON");
+    assert_eq!(json["migration"], "resubmit-reactions");
+    let requests = json["requests"].as_array().expect("a request list");
+    assert_eq!(requests.len(), DRAIN_ROWS.len());
+    assert_eq!(requests[0]["id"], DRAIN_ROWS[0].0);
+    assert_eq!(requests[0]["status"], "resubmitted");
+    assert_eq!(requests[0]["creator"], "creator0");
+    assert_eq!(requests[1]["result"], DRAIN_ROWS[1].3.unwrap());
+    assert_eq!(requests[4]["entry"], DRAIN_ROWS[4].2.unwrap());
+    assert_eq!(json["counts"]["resubmitted"], 2);
+    for request in requests {
+        assert!(request.get("args").is_none() && request.get("args_sha256").is_none());
+    }
+    // the drain's report names the requests recorded and the worker registrations removed
+    let table = drain_report(&world, "drain-reactions", false);
+    for (id, _, _, _) in DRAIN_ROWS {
+        assert!(table.contains(id), "{table}");
+    }
+    assert!(
+        table.contains("corn-unpack-7f9c2") && table.contains("node-3"),
+        "{table}"
+    );
+    let json: Value = serde_json::from_str(&drain_report(&world, "drain-reactions", true))
+        .expect("the report is JSON");
+    assert_eq!(json["migration"], "drain-reactions");
+    assert_eq!(json["requests"].as_array().unwrap().len(), DRAIN_ROWS.len());
+    assert_eq!(json["cancel"]["workers"][0]["name"], "corn-unpack-7f9c2");
+    assert_eq!(json["cancel"]["cancelled"], 6);
+    world.drop_keyspace().await;
+}
+
+/// With nothing recorded, both drain reports say so and succeed, and the drain's report says no
+/// cancel has finished
+#[tokio::test]
+async fn an_empty_drain_report_says_nothing_is_recorded() {
+    // a world with no drain rows and no cancel pass
+    let world = World::new("clirpe").await;
+    let table = drain_report(&world, "resubmit-reactions", false);
+    assert!(table.contains("No drain requests are recorded"), "{table}");
+    let table = drain_report(&world, "drain-reactions", false);
+    assert!(table.contains("No drain requests are recorded"), "{table}");
+    assert!(table.contains("no finished cancel"), "{table}");
+    let json: Value = serde_json::from_str(&drain_report(&world, "drain-reactions", true))
+        .expect("the report is JSON");
+    assert_eq!(json["requests"].as_array().unwrap().len(), 0);
+    assert!(json["cancel"].is_null());
+    world.drop_keyspace().await;
+}
+
+/// `migrate run` lists the drain and resubmission flags in its help, and a malformed or valueless
+/// one is a usage error (an abort) before anything connects
+#[test]
+fn the_drain_run_flags_parse() {
+    // the help names every flag
+    let help = std::process::Command::new(env!("CARGO_BIN_EXE_thoradm"))
+        .args(["migrate", "run", "--help"])
+        .output()
+        .expect("thoradm runs");
+    assert_eq!(help.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&help.stdout);
+    for flag in [
+        "--in-pause <ATTEMPT>",
+        "--include-stale",
+        "--max-requests <N>",
+        "--step-attempt <AT>",
+    ] {
+        assert!(text.contains(flag), "{flag}: {text}");
+    }
+    // a count that isn't a number and a flag missing its value are usage errors
+    for bad in [
+        &["--max-requests", "many"][..],
+        &["--max-requests", "-1"][..],
+        &["--in-pause"][..],
+        &["--step-attempt"][..],
+        &["--include-stale=yes"][..],
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_thoradm"))
+            .args(["--cluster-conf", "/nonexistent/thorium.yml"])
+            .args(["migrate", "run", "--id", "resubmit-reactions"])
+            .args(bad)
+            .output()
+            .expect("thoradm runs");
+        assert_eq!(output.status.code(), Some(1), "{bad:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("error:"),
+            "{bad:?}"
+        );
+    }
 }

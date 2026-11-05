@@ -42,6 +42,7 @@ fn report(skipped: usize, notes: usize, width: usize) -> AppliedReport {
             })
             .collect(),
         mappings_total: 42,
+        drain: None,
     }
 }
 

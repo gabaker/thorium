@@ -565,6 +565,32 @@ pub async fn drop_keyspace(conf: &Conf) -> Result<(), String> {
         .map_err(|err| err.to_string())
 }
 
+/// Creates a namespace's keyspace without tablets, as the API would create it otherwise
+///
+/// A Scylla that doesn't know tablets refuses the option, and its keyspaces never use them, so
+/// that refusal leaves the keyspace for the API to create.
+///
+/// # Arguments
+///
+/// * `conf` - The config naming the keyspace and its replication
+pub async fn create_keyspace_without_tablets(conf: &Conf) -> Result<(), String> {
+    // refuse anything but a test keyspace
+    guard(conf)?;
+    // connect to the cluster
+    let session = thoradm::shared::scylla::get_client(conf)
+        .await
+        .map_err(|err| err.to_string())?;
+    // the API's keyspace statement with tablets turned off; an older Scylla's refusal is fine
+    let cql = format!(
+        "{} AND tablets = {{'enabled': false}}",
+        thorium::models::schema::keyspace_cql(conf)
+    );
+    if let Err(err) = session.query_unpaged(cql, &[]).await {
+        eprintln!("the keyspace keeps Scylla's default layout: {err}");
+    }
+    Ok(())
+}
+
 /// Lists every key in a bucket
 ///
 /// # Arguments
@@ -748,7 +774,19 @@ impl Harness {
     pub async fn get_with(adjust: fn(&mut Conf)) -> &'static Harness {
         // start the harness once per binary; every later test reuses it or its start error
         HARNESS
-            .get_or_init(|| Harness::start(adjust))
+            .get_or_init(|| Harness::start(adjust, true))
+            .await
+            .as_ref()
+            .unwrap_or_else(|err| panic!("failed to start the test harness: {err}"))
+    }
+
+    /// Returns this binary's harness, starting it on first use in a keyspace made without
+    /// tablets, as a deployment's keyspace is, so lightweight transactions run in it even on a
+    /// Scylla that puts new keyspaces on tablets; every test of a binary must start it this way
+    pub async fn get_without_tablets() -> &'static Harness {
+        // start the harness once per binary; every later test reuses it or its start error
+        HARNESS
+            .get_or_init(|| Harness::start(|_| (), false))
             .await
             .as_ref()
             .unwrap_or_else(|err| panic!("failed to start the test harness: {err}"))
@@ -759,7 +797,9 @@ impl Harness {
     /// # Arguments
     ///
     /// * `adjust` - Changes the namespace's config before anything starts
-    async fn start(adjust: fn(&mut Conf)) -> Result<Harness, String> {
+    /// * `tablets` - Whether the keyspace may use tablets, as Scylla's default for new keyspaces
+    ///   decides, or is made without them before the API starts
+    async fn start(adjust: fn(&mut Conf), tablets: bool) -> Result<Harness, String> {
         // name everything for this run and binary
         let id = format!("{}_{}", run_id(), binary_name());
         let mut conf = namespace_conf(&id, free_port());
@@ -772,6 +812,10 @@ impl Harness {
         wait_ready(&conf, READY_DEADLINE).await?;
         // start from an empty namespace
         drop_keyspace(&conf).await?;
+        // make the keyspace without tablets first when asked, which the API's create then keeps
+        if !tablets {
+            create_keyspace_without_tablets(&conf).await?;
+        }
         delete_redis_namespace(&conf).await?;
         create_buckets(&conf).await?;
         let s3 = s3_client(&conf);

@@ -1133,7 +1133,7 @@ pub struct RepoListLine {
 }
 
 /// A request for a specic repo/commit to be downloaded executing a job
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "python", pyclass(from_py_object))]
 pub struct RepoDependencyRequest {

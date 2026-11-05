@@ -715,6 +715,7 @@ async fn a_failed_record_write_leaves_the_old_record_intact() {
             report: None,
             updated: None,
         }],
+        drain_requests: Vec::new(),
     };
     backup
         .migrations
@@ -756,6 +757,7 @@ async fn a_second_run_archives_under_the_same_keys() {
         migrations: source.migrations.clone(),
         issues: source.issues.clone(),
         other: Vec::new(),
+        drain_requests: Vec::new(),
     };
     let scylla = harness.scylla().await;
     let ns = &harness.conf.thorium.namespace;

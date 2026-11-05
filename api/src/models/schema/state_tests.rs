@@ -89,6 +89,8 @@ fn state_statements_are_registered() {
             "schema_migrations.list",
             "schema_migrations.delete",
             "schema_migrations.delete_kind",
+            "schema_migrations.insert_if_absent",
+            "schema_migrations.update_status_if",
             "schema_migration_issues.insert",
             "schema_migration_issues.list",
             "schema_migration_issues.get_group",
@@ -102,7 +104,8 @@ fn state_statements_are_registered() {
 }
 
 /// Every record kind has its own stored text, which parses back to it; the legacy-drop kind is
-/// stored as `legacy_drop`, and text no kind owns is an error rather than a catch-all kind
+/// stored as `legacy_drop`, the drain kinds as `drain_request` and `drain_request_args`, and text
+/// no kind owns is an error rather than a catch-all kind
 #[test]
 fn every_record_kind_has_its_stored_text() {
     use super::MigrationRecordKind;
@@ -123,7 +126,9 @@ fn every_record_kind_has_its_stored_text() {
             "consumed_code",
             "archived_history",
             "job_result",
-            "legacy_drop"
+            "legacy_drop",
+            "drain_request",
+            "drain_request_args"
         ]
     );
     assert_eq!(texts.iter().collect::<BTreeSet<_>>().len(), texts.len());

@@ -885,9 +885,10 @@ deployment gets there.
 
 `drain-reactions` never deletes a reaction. While it waits, stop submitting reactions and let the
 unfinished ones finish, or delete a stuck one with `thorctl reactions delete` while the previous
-API is still running, and do not restart or delete API pods meanwhile. The three conversion steps
-pause the API, the scalers, the event handler, and the search streamer while they run, and those
-components stay at zero until the new release's Deployments are applied.
+API is still running, and do not restart or delete API pods meanwhile.
+`thoradm migrate check --id drain-reactions` names the reactions and workers that hold it. The
+three conversion steps pause the API, the scalers, the event handler, and the search streamer while
+they run, and those components stay at zero until the new release's Deployments are applied.
 
 An image the conversion can't convert (one missing a field it needs, whose name another tool
 already uses, or whose dependency lists name no migrated image) is left unconverted, and a pipeline

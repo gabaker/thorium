@@ -5,6 +5,8 @@
 use chrono::{DateTime, Duration, Utc};
 use scylla::client::session::Session;
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use thorium::models::schema::drain_requests::{DrainRequestRow, DrainRequestStore, DrainStatus};
 use thorium::models::schema::{
     ApplyError, ApplyOptions, ApplyTarget, ConfigAccept, ObjectDef, RecordError, RecordStatus,
     SchemaDefinition, SchemaObject, SeedRequest, append_history, apply, apply_objects,
@@ -1269,5 +1271,157 @@ async fn a_consumed_code_is_claimed_once_and_stays_out_of_the_history() -> Resul
     // it is no history entry
     let record = record_of(&session, &conf, &FUSED).await?;
     assert_eq!(record.history_len, 1);
+    exec(&session, &format!("DROP KEYSPACE IF EXISTS {keyspace}")).await
+}
+
+/// Whether a keyspace is on tablets, read from its `initial_tablets` in
+/// `system_schema.scylla_keyspaces`
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to use
+/// * `keyspace` - The keyspace to check
+async fn on_tablets(session: &Session, keyspace: &str) -> Result<bool, Error> {
+    // a row with an initial tablet count means the keyspace is on tablets
+    let rows = session
+        .query_unpaged(
+            "SELECT initial_tablets FROM system_schema.scylla_keyspaces WHERE keyspace_name = ?",
+            (keyspace,),
+        )
+        .await
+        .map_err(|err| Error::new(err.to_string()))?
+        .into_rows_result()
+        .map_err(|err| Error::new(err.to_string()))?;
+    let row = rows
+        .maybe_first_row::<(Option<i32>,)>()
+        .map_err(|err| Error::new(err.to_string()))?;
+    Ok(matches!(row, Some((Some(_),))))
+}
+
+/// Record a drain request, record it again, and move its status with the right and a wrong
+/// expected status, checking each guarded write's answer and the stored row
+///
+/// # Arguments
+///
+/// * `store` - The store to write with
+async fn guarded_writes_hold(store: &DrainRequestStore) -> Result<(), Error> {
+    // a first insert writes the row
+    let first = DrainRequestRow {
+        id: "11111111-1111-1111-1111-111111111111".to_owned(),
+        value: "{\"first\":true}".to_owned(),
+        attempt: Some("attempt-1".to_owned()),
+        status: DrainStatus::Recorded,
+        entry: None,
+        result: None,
+        revision: Some("2026-11-v04".to_owned()),
+        started: Some(start()),
+        finished: None,
+        updated: None,
+    };
+    let fail = |err: thorium::models::schema::MigrateError| Error::new(format!("{err:?}"));
+    assert!(store.insert_if_absent(&first).await.map_err(fail)?);
+    // a second insert with the same id is not applied and leaves the first row
+    let again = DrainRequestRow {
+        value: "{\"first\":false}".to_owned(),
+        attempt: Some("attempt-2".to_owned()),
+        ..first.clone()
+    };
+    assert!(!store.insert_if_absent(&again).await.map_err(fail)?);
+    let stored = store
+        .get(&first.id)
+        .await
+        .map_err(fail)?
+        .expect("the row was recorded");
+    assert_eq!(stored.value, first.value);
+    assert_eq!(stored.attempt, first.attempt);
+    assert_eq!(stored.status, DrainStatus::Recorded);
+    // an update expecting the stored status is applied
+    let reserved = DrainRequestRow {
+        status: DrainStatus::Resubmitting,
+        entry: Some("22222222-2222-2222-2222-222222222222".to_owned()),
+        ..stored.clone()
+    };
+    assert!(
+        store
+            .update_status_if(&reserved, DrainStatus::Recorded)
+            .await
+            .map_err(fail)?
+    );
+    // an update expecting a status the row no longer holds is not applied
+    let refused = DrainRequestRow {
+        status: DrainStatus::Refused,
+        result: Some("refused".to_owned()),
+        ..stored.clone()
+    };
+    assert!(
+        !store
+            .update_status_if(&refused, DrainStatus::Recorded)
+            .await
+            .map_err(fail)?
+    );
+    let stored = store
+        .get(&first.id)
+        .await
+        .map_err(fail)?
+        .expect("the row still exists");
+    assert_eq!(stored.status, DrainStatus::Resubmitting);
+    assert_eq!(stored.entry, reserved.entry);
+    assert_eq!(stored.result, None);
+    // an update of a row that was never recorded is not applied and writes nothing
+    let missing = DrainRequestRow {
+        id: "33333333-3333-3333-3333-333333333333".to_owned(),
+        ..first.clone()
+    };
+    assert!(
+        !store
+            .update_status_if(&missing, DrainStatus::Recorded)
+            .await
+            .map_err(fail)?
+    );
+    assert_eq!(store.get(&missing.id).await.map_err(fail)?, None);
+    Ok(())
+}
+
+/// The drain request store's guarded writes insert only absent rows and update only rows still
+/// holding the expected status, as plain writes after a read on a keyspace on tablets and as
+/// lightweight transactions on a keyspace created without tablets
+#[tokio::test]
+async fn drain_request_writes_are_guarded_with_and_without_tablets() -> Result<(), Error> {
+    // a keyspace created the cluster's default way, on tablets when the cluster enables them
+    let session = Arc::new(test_utilities::scylla_session().await?);
+    let conf = fresh(&session, "dreq_def").await?;
+    let keyspace = conf.thorium.namespace.clone();
+    apply_declared(&session, &conf).await?;
+    let tablets = on_tablets(&session, &keyspace).await?;
+    let store = DrainRequestStore::prepare(session.clone(), &keyspace)
+        .await
+        .map_err(|err| Error::new(format!("{err:?}")))?;
+    // the store uses lightweight transactions exactly when the keyspace has no tablets
+    assert_eq!(
+        store.conditional(),
+        !tablets,
+        "{keyspace} on tablets: {tablets}"
+    );
+    guarded_writes_hold(&store).await?;
+    exec(&session, &format!("DROP KEYSPACE IF EXISTS {keyspace}")).await?;
+    // a keyspace created without tablets uses lightweight transactions
+    let conf = fresh(&session, "dreq_vn").await?;
+    let keyspace = conf.thorium.namespace.clone();
+    exec(
+        &session,
+        &format!(
+            "CREATE KEYSPACE {keyspace} WITH replication = \
+             {{'class': 'NetworkTopologyStrategy', 'replication_factor': 1}} \
+             AND tablets = {{'enabled': false}}"
+        ),
+    )
+    .await?;
+    apply_declared(&session, &conf).await?;
+    assert!(!on_tablets(&session, &keyspace).await?);
+    let store = DrainRequestStore::prepare(session.clone(), &keyspace)
+        .await
+        .map_err(|err| Error::new(format!("{err:?}")))?;
+    assert!(store.conditional());
+    guarded_writes_hold(&store).await?;
     exec(&session, &format!("DROP KEYSPACE IF EXISTS {keyspace}")).await
 }

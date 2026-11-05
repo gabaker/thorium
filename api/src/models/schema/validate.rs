@@ -3,12 +3,14 @@
 //! A small CQL tokenizer reads each statement's target, the columns it selects, writes, sets, and
 //! restricts, and its trailing clauses, then checks them against the declared objects: the
 //! columns exist, the `WHERE` clause restricts the whole partition key, one-sided range
-//! comparisons on clustering columns point the way the read order implies, and no statement is
-//! conditional or updates a counter.
+//! comparisons on clustering columns point the way the read order implies, and no statement
+//! updates a counter or is conditional, except the drain request writes on `schema_migrations`
+//! listed in [`CONDITIONAL_STATEMENTS`].
 
 use std::fmt;
 
 use super::definition::{ClusterOrder, ColumnDef, ColumnRole, ObjectDef};
+use super::queries::migrations::CONDITIONAL_STATEMENTS;
 use super::statements::RegisteredStatement;
 
 /// A rule of statement validation
@@ -844,17 +846,24 @@ pub fn validate_statement(
         detail,
     };
     let tokens = tokenize(&statement.cql).map_err(|detail| fail(Rule::Syntax, detail))?;
-    // a conditional statement is rejected before anything else is read from it
-    if tokens
+    // a conditional statement is rejected before anything else is read from it, unless it is one
+    // of the listed writes, whose condition is split off and checked against the object below
+    let condition_at = tokens
         .iter()
-        .any(|token| matches!(token, Token::Word(word) if word.eq_ignore_ascii_case("IF")))
-    {
-        return Err(fail(
-            Rule::Conditional,
-            "a tablet keyspace runs no IF, IF EXISTS, or IF NOT EXISTS".to_owned(),
-        ));
-    }
-    let parsed = parse(&tokens).map_err(|detail| fail(Rule::Syntax, detail))?;
+        .position(|token| matches!(token, Token::Word(word) if word.eq_ignore_ascii_case("IF")));
+    let (tokens, condition) = match condition_at {
+        Some(at) if CONDITIONAL_STATEMENTS.contains(&statement.name.as_str()) => {
+            (&tokens[..at], &tokens[at + 1..])
+        }
+        Some(_) => {
+            return Err(fail(
+                Rule::Conditional,
+                "a tablet keyspace runs no IF, IF EXISTS, or IF NOT EXISTS".to_owned(),
+            ));
+        }
+        None => (&tokens[..], &[][..]),
+    };
+    let parsed = parse(tokens).map_err(|detail| fail(Rule::Syntax, detail))?;
     // the statement targets the declared object it's registered with
     let object = objects
         .iter()
@@ -874,11 +883,46 @@ pub fn validate_statement(
             ),
         ));
     }
-    // then its columns, assignments, and restrictions follow the object's declaration
+    // then its columns, assignments, restrictions, and condition follow the object's declaration
     check_columns(object, &parsed)
         .and_then(|()| check_assignments(object, &parsed))
         .and_then(|()| check_restrictions(object, &parsed))
+        .and_then(|()| check_condition(object, condition))
         .map_err(|(rule, detail)| fail(rule, detail))
+}
+
+/// Check the condition of a listed conditional write: `NOT EXISTS`, or one declared non-key
+/// column compared for equality with a bind marker; a statement with no condition passes
+///
+/// # Arguments
+///
+/// * `object` - The object the statement targets
+/// * `condition` - The tokens after the statement's `IF`
+fn check_condition(object: &ObjectDef, condition: &[Token]) -> Result<(), (Rule, String)> {
+    // the two shapes a listed write's condition takes
+    match condition {
+        [] => Ok(()),
+        [Token::Word(not), Token::Word(exists)]
+            if not.eq_ignore_ascii_case("NOT") && exists.eq_ignore_ascii_case("EXISTS") =>
+        {
+            Ok(())
+        }
+        [Token::Word(name), Token::Symbol("="), Token::Marker] => match column(object, name) {
+            Some(found) if found.role == ColumnRole::Regular => Ok(()),
+            Some(_) => Err((
+                Rule::Conditional,
+                format!("the condition compares key column `{name}`"),
+            )),
+            None => Err((
+                Rule::UnknownColumn,
+                format!("the condition names `{name}`, which isn't declared"),
+            )),
+        },
+        _ => Err((
+            Rule::Conditional,
+            "a condition is NOT EXISTS or one column equal to a bind marker".to_owned(),
+        )),
+    }
 }
 
 /// Validate every statement in a registry, returning each one that breaks a rule

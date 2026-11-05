@@ -2024,6 +2024,7 @@ mod tests {
             issues: 0,
             baseline,
             planned: vec!["2026-10-v03 drain-reactions".to_owned()],
+            ..RecordRestored::default()
         }
     }
 
