@@ -126,6 +126,10 @@ The ban (and associated notification) will contain the name of the offending vol
 quickly reconfigure their images. Removing or reconfiguring the problematic volume will automatically lift the ban.
 Images with multiple invalid host path volumes will have multiple bans, one for each invalid host path.
 
+Tool instances get no invalid host path bans: every run checks an instance's host path volumes against the whitelist,
+so an instance mounting a removed path is refused until the path is allowed again (see
+[Host Paths](../admins/bans_admins.md#host-paths)).
+
 #### Invalid Image URL
 
 > ⚠️ This ban type is not yet implemented! It will be applied in a future release of Thorium.

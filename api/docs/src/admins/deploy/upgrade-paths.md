@@ -654,6 +654,7 @@ kubectl -n thorium patch $TC --type json \
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | A tool instance converted from a banned image (or a later version of its tool) runs, or `thoradm bans audit` lists an image with `"covered": false` | The deployment ran `2026-10-v04` before conversions carried image bans, so the converted instances and the versions published from them have none | Upgrade the API to a release with the fix: the consistency scan it runs at startup adds each legacy image's bans to every instance of its converted tool. Run `thoradm bans audit` to confirm every converted image shows `"covered": true` (see [Tool Instance Bans](../bans_admins.md#tool-instance-bans)) |
+| A tool instance (converted or published) that mounts a host path removed from the whitelist still runs | Releases before the fix checked an instance's host paths only when it was published, and the consistency scan bans only images | Upgrade the API to a release with the fix: every run checks the instance's host paths against the current whitelist, with no scan or ban needed. Jobs queued before the upgrade still run, so check for them after removing a path (see [Host Paths](../bans_admins.md#host-paths)) |
 
 ### Buckets
 

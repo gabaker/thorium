@@ -812,7 +812,9 @@ banned.
 
 The API also runs the scan every time it starts. Besides host path bans on images, the scan adds
 the bans of each legacy image to every instance of the tool the image converted into that lacks
-them, logging and skipping any instance it can't read (see [Tool Instance Bans](../bans_admins.md#tool-instance-bans)).
+them, logging and skipping any instance it can't read (see [Tool Instance Bans](../bans_admins.md#tool-instance-bans)). Tool instances
+that mount a host path the whitelist no longer allows aren't banned by the scan: every run checks
+their host paths against the current whitelist (see [Host Paths](../bans_admins.md#host-paths)).
 
 You can manually run a consistency scan with the following command:
 

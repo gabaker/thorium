@@ -1,9 +1,9 @@
-//! Tests that a tool instance with a ban never runs: an image's bans carry to the instance its
-//! conversion makes, the consistency scan backfills them onto every instance of a tool converted
-//! without them and survives records it can't read, an admin bans an instance and lifts its bans,
-//! a ban follows the tool's new versions and the instance can't be detached from its tool, by
-//! deleting its edge or by moving the tool to another group, and every run path refuses a banned
-//! instance
+//! Tests that a tool instance with a ban, or one mounting a host path the whitelist no longer
+//! allows, never runs: an image's bans carry to the instance its conversion makes, the consistency
+//! scan backfills them onto every instance of a tool converted without them and survives records
+//! it can't read, an admin bans an instance and lifts its bans, a ban follows the tool's new
+//! versions and the instance can't be detached from its tool, by deleting its edge or by moving
+//! the tool to another group, and every run path refuses such an instance
 
 mod common;
 
@@ -23,10 +23,10 @@ use thorium::models::backends::entities::tool_bans::LegacyImageBans;
 use thorium::models::schema::{PassOutcome, PassStore, RunBackends, RunMode, RunOptions, run_pass};
 use thorium::models::{
     AssociationDeleteRequest, AssociationKind, AssociationListOpts, AssociationTarget,
-    EntityMetadata, EntityMetadataUpdate, EntityUpdate, GroupAllowed, Image, ImageBan,
-    ImageBanKind, ImageScaler, PipelineBan, PipelineBanKind, PipelineRequest, PipelineUpdate,
-    ReactionRequest, RunInputs, ToolRunRequest, ToolSpec, UserRole, WorkloadEnvironment,
-    WorkloadSpec,
+    EntityMetadata, EntityMetadataUpdate, EntityUpdate, GroupAllowed, HostPathWhitelistUpdate,
+    Image, ImageBan, ImageBanKind, ImageScaler, PipelineBan, PipelineBanKind, PipelineRequest,
+    PipelineUpdate, ReactionRequest, RunInputs, SystemSettingsUpdate, SystemSettingsUpdateParams,
+    ToolRunRequest, ToolSpec, UserRole, Volume, VolumeTypes, WorkloadEnvironment, WorkloadSpec,
 };
 use thorium::test_utilities::generators;
 use uuid::Uuid;
@@ -650,6 +650,96 @@ async fn the_scan_backfills_bans_onto_converted_instances() {
     assert_eq!(instance_ban_ids(&client, instance).await, vec![url_id]);
     let left = image_bans(&world, &group, "late").await;
     assert_eq!(left.keys().copied().collect::<Vec<Uuid>>(), vec![url_id]);
+}
+
+/// Withdrawing a host path from the whitelist stops every existing tool instance mounting it, by
+/// a direct run and through a pipeline, and allowing it again lets them run
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn withdrawing_a_host_path_stops_existing_instances() {
+    let _serial = SERIAL.lock().await;
+    let harness = Harness::get().await;
+    let client = Cluster::of_harness(harness).client().await;
+    let group = Names::new().group("hostpath");
+    seed::group(&client, &group).await;
+    let allowed = format!("/srv/{}", Names::new().group("allowed"));
+    let whitelist = |update: HostPathWhitelistUpdate| {
+        SystemSettingsUpdate::default().host_path_whitelist(update)
+    };
+    let params = SystemSettingsUpdateParams { scan: true };
+    // the admin allows the path and a tool mounting under it is published
+    client
+        .system
+        .update_settings(
+            &whitelist(HostPathWhitelistUpdate::default().add_path(&allowed)),
+            &params,
+        )
+        .await
+        .expect("the whitelist takes the path");
+    let vol = Volume::new("data", "/data", VolumeTypes::HostPath)
+        .host_path(format!("{allowed}/secrets"), None);
+    let ToolSpec::Image(mut workload) = generators::gen_image_spec() else {
+        unreachable!("an image spec")
+    };
+    let WorkloadEnvironment::K8s(env) = &mut workload.environment else {
+        unreachable!("a K8s spec")
+    };
+    env.volumes.push(vol);
+    let (_tool, instance) = generators::tool(
+        &[group.as_str()],
+        "1.0.0",
+        &ToolSpec::Image(workload),
+        &client,
+    )
+    .await
+    .expect("the tool publishes while its path is allowed");
+    let req = PipelineRequest::new(group.as_str(), "mount-pipe", serde_json::json!([["mount"]]))
+        .stage_tool("mount", instance.id);
+    client
+        .pipelines
+        .create(&req)
+        .await
+        .expect("the pipeline creates");
+    let sha = seed::sample(&client, &group, "c.bin", b"withdrawn host path").await;
+    run_tool(&client, instance.id, &sha)
+        .await
+        .expect("the instance runs while its path is allowed");
+    // the admin withdraws the path
+    client
+        .system
+        .update_settings(
+            &whitelist(HostPathWhitelistUpdate::default().remove_path(&allowed)),
+            &params,
+        )
+        .await
+        .expect("the whitelist drops the path");
+    // the existing instance no longer runs, directly or through its pipeline
+    let err = run_tool(&client, instance.id, &sha)
+        .await
+        .expect_err("an instance mounting a withdrawn path is refused");
+    assert!(err.contains("host path"), "{err}");
+    let err = react(&client, &group, "mount-pipe", &sha)
+        .await
+        .expect_err("a pipeline running an instance mounting a withdrawn path is refused");
+    assert!(err.contains("host path"), "{err}");
+    react_bulk(&client, &group, "mount-pipe", &sha)
+        .await
+        .expect_err("a bulk reaction running it is refused");
+    // allowing the path again lets it run
+    client
+        .system
+        .update_settings(
+            &whitelist(HostPathWhitelistUpdate::default().add_path(&allowed)),
+            &params,
+        )
+        .await
+        .expect("the whitelist takes the path again");
+    run_tool(&client, instance.id, &sha)
+        .await
+        .expect("the instance runs once its path is allowed again");
+    react(&client, &group, "mount-pipe", &sha)
+        .await
+        .expect("its pipeline runs once its path is allowed again");
 }
 
 /// A K8s image spec with one more CPU, so it publishes as a new version

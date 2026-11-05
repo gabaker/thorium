@@ -31,8 +31,8 @@ use crate::models::{
     HarnessEnv, HarnessSpec, HarnessToolAccess, ImageBan, ImageBanKind, NetworkPolicy,
     NetworkPolicyUpdate, SystemSettings, ToolEntity, ToolEntityRequest, ToolInstanceEntity,
     ToolInstanceEntityRequest, ToolInstanceSummary, ToolKind, ToolPortabilityReport, ToolSpec,
-    ToolVersion, User, UserRole, UserSettings, WorkflowGraphChange, WorkloadEnvironment,
-    WorkloadSpec,
+    ToolVersion, User, UserRole, UserSettings, VolumeTypes, WorkflowGraphChange,
+    WorkloadEnvironment, WorkloadSpec,
 };
 use crate::utils::{ApiError, Shared, helpers};
 use crate::{bad, bad_internal, conflict, internal_err, not_found, unauthorized};
@@ -388,6 +388,96 @@ pub(crate) fn check_delete_banned(user: &User, entity: &Entity) -> Result<(), Ap
         }
         _ => Ok(()),
     }
+}
+
+/// Get the host path mounts of a tool instance's workload as `(volume, host path)` pairs
+///
+/// An Image tool instance mounts its workload's volumes and a Harness tool instance its
+/// harness workload's; only K8s workloads mount volumes.
+///
+/// # Arguments
+///
+/// * `entity` - The tool instance
+pub(crate) fn host_path_mounts(entity: &Entity) -> Vec<(String, String)> {
+    // only Image and Harness tool instances run a workload of their own
+    let workload = match &entity.metadata {
+        EntityMetadata::ToolInstance(instance) => match &instance.spec {
+            ToolSpec::Image(workload) => workload,
+            ToolSpec::Harness(harness) => &harness.workload,
+            ToolSpec::Agentic(_) => return Vec::new(),
+        },
+        _ => return Vec::new(),
+    };
+    let WorkloadEnvironment::K8s(env) = &workload.environment else {
+        return Vec::new();
+    };
+    // keep each host path volume with the path it mounts
+    env.volumes
+        .iter()
+        .filter(|volume| volume.archetype == VolumeTypes::HostPath)
+        .filter_map(|volume| {
+            volume
+                .host_path
+                .as_ref()
+                .map(|host_path| (volume.name.clone(), host_path.path.clone()))
+        })
+        .collect()
+}
+
+/// Refuse to run a tool instance that mounts a host path the current settings don't allow
+///
+/// A host path is checked against the whitelist when an instance is published, and checked
+/// again on every run, so withdrawing a path from the whitelist stops every existing instance
+/// that mounts it and allowing it again lets them run.
+///
+/// # Arguments
+///
+/// * `name` - The tool instance's name
+/// * `mounts` - The instance's host path mounts as `(volume, host path)` pairs
+/// * `settings` - The current Thorium system settings
+pub(crate) fn check_host_paths(
+    name: &str,
+    mounts: &[(String, String)],
+    settings: &SystemSettings,
+) -> Result<(), ApiError> {
+    // any host path may be mounted while unrestricted host paths are allowed
+    if settings.allow_unrestricted_host_paths {
+        return Ok(());
+    }
+    // name every mount the whitelist no longer allows
+    let refused = mounts
+        .iter()
+        .filter(|(_, path)| !settings.is_whitelisted_host_path(path))
+        .map(|(volume, path)| format!("'{path}' in volume '{volume}'"))
+        .collect::<Vec<String>>();
+    if refused.is_empty() {
+        return Ok(());
+    }
+    bad!(format!(
+        "tool instance `{name}` mounts a host path that is not in the list of allowed host paths and can't run: {}; ask an admin to allow it",
+        refused.join(", ")
+    ))
+}
+
+/// Refuse to run a tool instance that has any ban or mounts a host path the current settings
+/// don't allow
+///
+/// The settings are read only when the instance mounts a host path.
+///
+/// # Arguments
+///
+/// * `entity` - The tool instance about to run
+/// * `shared` - Shared Thorium objects
+pub(crate) async fn check_runnable(entity: &Entity, shared: &Shared) -> Result<(), ApiError> {
+    // a banned instance never runs
+    check_unbanned(entity)?;
+    // an instance mounting host paths runs only while the settings allow them
+    let mounts = host_path_mounts(entity);
+    if mounts.is_empty() {
+        return Ok(());
+    }
+    let settings = db::system::get_settings(shared).await?;
+    check_host_paths(&entity.name, &mounts, &settings)
 }
 
 /// Get the stored spec hash of a tool instance entity
@@ -2272,9 +2362,12 @@ pub(crate) async fn list_summaries(
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use super::{is_noop, removal_message};
+    use super::{check_host_paths, host_path_mounts, is_noop, removal_message};
     use crate::models::entities::digests::ThorDigest;
-    use crate::models::{AgenticTool, AgenticToolBacking, ToolSpec};
+    use crate::models::{
+        AgenticTool, AgenticToolBacking, HarnessSpec, K8sEnvironment, SystemSettings, ToolSpec,
+        Volume, VolumeTypes, WorkloadEnvironment, WorkloadSpec,
+    };
 
     /// A small agentic spec
     fn spec() -> ToolSpec {
@@ -2341,5 +2434,105 @@ mod tests {
         assert!(!is_noop("v2:", Some((&stored, &latest, None)), &other_hash).unwrap());
         // a tool with no latest instance never gets a no-op
         assert!(!is_noop("v2:", None, &candidate).unwrap());
+    }
+
+    /// Build a tool instance entity with a spec
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - The tool instance's spec
+    fn instance(spec: ToolSpec) -> crate::models::Entity {
+        // an instance named after its tool and version
+        crate::models::Entity {
+            id: uuid::Uuid::new_v4(),
+            name: "mounter@1.0.0".to_owned(),
+            kind: crate::models::EntityKinds::ToolInstance,
+            metadata: crate::models::EntityMetadata::ToolInstance(
+                crate::models::ToolInstanceEntity {
+                    tool: uuid::Uuid::new_v4(),
+                    version: crate::models::ToolVersion::from("1.0.0"),
+                    previous: None,
+                    spec_hash: "sha256:spec".to_owned(),
+                    deprecated: false,
+                    bans: BTreeMap::new(),
+                    spec,
+                    portability: None,
+                    provides: Vec::new(),
+                },
+            ),
+            description: None,
+            submitter: "europa".to_owned(),
+            groups: vec!["jupiter".to_owned()],
+            tags: std::collections::HashMap::default(),
+            image: None,
+            created: chrono::Utc::now(),
+        }
+    }
+
+    /// Build a K8s workload mounting a host path and a config map
+    ///
+    /// # Arguments
+    ///
+    /// * `host_path` - The host path the workload mounts
+    fn mounting(host_path: &str) -> WorkloadSpec {
+        // one host path volume and one volume of another kind
+        let volumes = vec![
+            Volume::new("data", "/data", VolumeTypes::HostPath).host_path(host_path, None),
+            Volume::new("conf", "/conf", VolumeTypes::ConfigMap),
+        ];
+        WorkloadSpec {
+            environment: WorkloadEnvironment::K8s(K8sEnvironment {
+                volumes,
+                ..K8sEnvironment::default()
+            }),
+            ..WorkloadSpec::default()
+        }
+    }
+
+    /// Image and Harness tool instances report the host paths their workloads mount, and other
+    /// kinds and environments report none
+    #[test]
+    fn host_path_mounts_cover_image_and_harness_workloads() {
+        // an Image tool instance mounts its workload's host paths
+        let expected = vec![("data".to_owned(), "/srv/tools/data".to_owned())];
+        let image = instance(ToolSpec::Image(mounting("/srv/tools/data")));
+        assert_eq!(host_path_mounts(&image), expected);
+        // a Harness tool instance mounts its harness workload's
+        let harness = instance(ToolSpec::Harness(HarnessSpec {
+            workload: mounting("/srv/tools/data"),
+            ..HarnessSpec::default()
+        }));
+        assert_eq!(host_path_mounts(&harness), expected);
+        // an agentic tool and a workload outside K8s mount none
+        let none: Vec<(String, String)> = Vec::new();
+        assert_eq!(host_path_mounts(&instance(spec())), none);
+        let external = instance(ToolSpec::Image(WorkloadSpec::default()));
+        assert_eq!(host_path_mounts(&external), none);
+    }
+
+    /// A host path mount runs only while the whitelist allows it or its parent, or while host
+    /// paths are unrestricted
+    #[test]
+    fn host_paths_are_checked_against_the_current_settings() {
+        // nothing is allowed by default
+        let mounts = vec![("data".to_owned(), "/srv/tools/data".to_owned())];
+        let mut settings = SystemSettings::default();
+        let err = check_host_paths("mounter@1.0.0", &mounts, &settings).unwrap_err();
+        assert!(err.to_string().contains("host path"), "{err}");
+        assert!(err.to_string().contains("/srv/tools/data"), "{err}");
+        // a whitelisted parent allows it
+        settings
+            .host_path_whitelist
+            .insert(std::path::PathBuf::from("/srv/tools"));
+        check_host_paths("mounter@1.0.0", &mounts, &settings).unwrap();
+        // withdrawing it refuses the mount again
+        settings.host_path_whitelist.clear();
+        assert!(check_host_paths("mounter@1.0.0", &mounts, &settings).is_err());
+        // unrestricted host paths allow any mount
+        settings.allow_unrestricted_host_paths = true;
+        check_host_paths("mounter@1.0.0", &mounts, &settings).unwrap();
+        // an instance without host path mounts always passes
+        settings.allow_unrestricted_host_paths = false;
+        check_host_paths("mounter@1.0.0", &[], &settings).unwrap();
     }
 }

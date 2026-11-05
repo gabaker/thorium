@@ -109,7 +109,9 @@ so backups carry them.
 When the [image conversion](./agentic/upgrading.md) turns an image into a tool, the image's
 first tool instance is written with the image's bans, under the same ban ids, so it is never
 runnable while the image was banned. The conversion report warns about each banned image it
-converted.
+converted. `InvalidHostPath` bans are the exception: the instance mounts the same host paths, and
+every run checks them against the whitelist (see [Host Paths](#host-paths)), so a copy of the ban
+would only go stale once the path is allowed again.
 
 A deployment that ran the conversion before conversions carried bans has unbanned instances for
 banned images, and versions published since then have none either. The
@@ -119,6 +121,20 @@ upgrading the API is enough to fix such a deployment. The scan matches bans by i
 again changes nothing. An instance it can't read or write is logged as an error and skipped (an
 instance the API can't read can't run either), and the scan goes on with the rest. Check the
 result with [`thoradm bans audit`](./thoradm/thoradm.md#bans).
+
+### Host Paths
+
+Tool instances get no `InvalidHostPath` bans. Instead, every path that runs a tool instance checks
+the host path volumes of its workload (an Image tool instance's workload, or a Harness tool
+instance's harness workload) against the current host path whitelist, the same way publishing does.
+Removing a path from the whitelist (`thoradm settings update`) stops every existing instance that
+mounts it, or a path under it, from its next run on: a direct tool run, a new reaction, or a workflow
+run refuses it with an error that names the volume and the host path. Adding the path back, or
+allowing unrestricted host paths, lets those instances run again with no ban to lift. As with bans,
+jobs queued before the change are not cancelled.
+
+`thoradm bans audit` lists a legacy image's host path bans with `"carried": false`, and they never
+make an image's instance uncovered.
 
 ### Banning and Lifting
 

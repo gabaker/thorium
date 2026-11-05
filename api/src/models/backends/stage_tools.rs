@@ -14,7 +14,7 @@ use crate::models::backends::db;
 use crate::models::backends::entities::tools;
 use crate::models::{
     Entity, EntityKinds, EntityMetadata, Group, ImageJobInfo, ImageScaler, Pipeline, PlannedStage,
-    ReactionPlan, RunProvenance, ToolSpec, User,
+    ReactionPlan, RunProvenance, SystemSettings, ToolSpec, User,
 };
 use crate::utils::{ApiError, Shared};
 use crate::{bad, not_found};
@@ -24,6 +24,8 @@ use crate::{bad, not_found};
 pub struct ToolInstanceMemo {
     /// The tool and tool instance entities read so far, by id
     entities: HashMap<Uuid, Entity>,
+    /// The system settings, once a tool instance mounting a host path needed them
+    settings: Option<SystemSettings>,
 }
 
 impl ToolInstanceMemo {
@@ -159,6 +161,42 @@ impl ToolInstanceMemo {
             }
         };
         Ok(entity)
+    }
+
+    /// Refuse a tool instance that has any ban or mounts a host path the current settings don't
+    /// allow
+    ///
+    /// The settings are read at most once per request, and only when an instance mounts a host
+    /// path.
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group the tool instance must be in
+    /// * `id` - The id of the tool instance
+    /// * `shared` - Shared Thorium objects
+    async fn check_runnable(
+        &mut self,
+        group: &str,
+        id: Uuid,
+        shared: &Shared,
+    ) -> Result<(), ApiError> {
+        // a banned instance never runs
+        let entity = self.entity(group, id, shared).await?;
+        tools::check_unbanned(entity)?;
+        // an instance mounting host paths runs only while the settings allow them
+        let mounts = tools::host_path_mounts(entity);
+        if mounts.is_empty() {
+            return Ok(());
+        }
+        let name = entity.name.clone();
+        let settings = match self.settings.take() {
+            Some(settings) => settings,
+            None => db::system::get_settings(shared).await?,
+        };
+        // keep the settings for the rest of this request
+        let checked = tools::check_host_paths(&name, &mounts, &settings);
+        self.settings = Some(settings);
+        checked
     }
 
     /// Resolve the tool backing a stage to the tool instance it runs
@@ -323,9 +361,10 @@ pub async fn resolve_plan(
             // every stage has a tool since none are unconverted
             let id = pipeline.stage_tools[stage];
             let tool_instance = memo.resolve(&pipeline.group, stage, id, shared).await?;
-            // a stage never runs a banned tool instance, whatever the stage is named
-            let entity = memo.entity(&pipeline.group, tool_instance, shared).await?;
-            tools::check_unbanned(entity)?;
+            // a stage never runs a banned tool instance, or one mounting a host path the
+            // whitelist no longer allows, whatever the stage is named
+            memo.check_runnable(&pipeline.group, tool_instance, shared)
+                .await?;
             planned.push(PlannedStage {
                 name: stage.clone(),
                 tool_instance,
