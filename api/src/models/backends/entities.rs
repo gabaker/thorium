@@ -63,7 +63,8 @@ enum PublishedFromEdges {
     /// Copy them into every added group the other end is in, whatever the group allows, since
     /// they link an instance to its root and are written by Thorium rather than a user
     Follow,
-    /// Leave them alone, because the root's own group change copies them
+    /// Neither copy nor delete them, because they all end at the root, whose own group change
+    /// copies them into the added groups and only then deletes them from the removed ones
     Skip,
 }
 
@@ -2060,9 +2061,13 @@ impl Entity {
             }
             EntityMetadata::Tool(tool) => {
                 // a tool only changes its definition by publishing a new instance
-                if form.tool_instance_deprecated.is_some() {
+                if form.tool_instance_deprecated.is_some()
+                    || form.tool_instance_ban.is_some()
+                    || !form.tool_instance_unban.is_empty()
+                {
                     return bad!(
-                        "tool_instance_deprecated is only valid for a tool instance".to_owned()
+                        "tool_instance_deprecated, tool_instance_ban, and tool_instance_unban are only valid for a tool instance"
+                            .to_owned()
                     );
                 }
                 // a harness's env and disabled models are edited on the root without publishing
@@ -2090,8 +2095,9 @@ impl Entity {
                             .to_owned()
                     );
                 }
-                // deprecation is the only change a tool instance takes
+                // deprecation and bans are the only changes a tool instance takes
                 update!(instance.deprecated, form.tool_instance_deprecated);
+                tools::update_instance_bans(user, instance, &mut form)?;
             }
             graph @ (EntityMetadata::Agent(_)
             | EntityMetadata::ToolSet(_)
@@ -2834,6 +2840,8 @@ impl Entity {
     ) -> Result<(), ApiError> {
         // check the user's rights the way this kind's groups are kept
         self.authorize_delete(user, scoped, shared).await?;
+        // only an admin deletes a banned tool instance, so a ban can't be shed by deleting it
+        tools::check_delete_banned(user, &self)?;
         // a shared definition in use can't be deleted
         if self.kind.group_policy() == GroupPolicy::Contained {
             // a tool's instances are deleted before it
@@ -3332,6 +3340,8 @@ impl Entity {
     /// other end is also in it, created at the change and submitted by the user adding the
     /// group, and the entity's associations in each removed group are deleted. An added group
     /// that disallows associations gets no copies, since nobody may write associations there.
+    /// With `PublishedFromEdges::Skip`, an instance's `PublishedFrom` and `BuiltFrom` edges are
+    /// neither copied nor deleted, leaving both to its root's change.
     ///
     /// # Arguments
     ///
@@ -3435,6 +3445,16 @@ impl Entity {
             let mut cursor = db::associations::list(user, opts, source, shared).await?;
             // step over every page of associations
             loop {
+                // keep an instance's edges to its root for the root's own change, since deleting
+                // them here would leave the root nothing to copy into its new groups
+                if published_from == PublishedFromEdges::Skip {
+                    cursor.data.retain(|assoc| {
+                        !matches!(
+                            assoc.kind,
+                            AssociationKind::PublishedFrom | AssociationKind::BuiltFrom
+                        )
+                    });
+                }
                 // delete this page of associations from the removed groups
                 db::associations::delete_many(source, &cursor.data, shared).await?;
                 // stop once this cursor has been exhausted
@@ -4736,6 +4756,7 @@ impl EntityMetadataUpdateForm {
             "tool_instance_deprecated" => {
                 self.tool_instance_deprecated = Some(field.text().await?.parse()?);
             }
+            "tool_instance_ban" => self.tool_instance_ban = Some(field.text().await?),
             "tool_harness_env" => self.tool_harness_env = Some(field.text().await?),
             "clear_tool_harness_env" => {
                 self.clear_tool_harness_env = Some(field.text().await?.parse()?);
@@ -4966,6 +4987,10 @@ impl EntityMetadataUpdateForm {
                     "enable_tool_models" => {
                         self.enable_tool_models.insert(field.text().await?);
                     }
+                    // the bans an admin lifts from a tool instance
+                    "tool_instance_unban" => self
+                        .tool_instance_unban
+                        .push(field.text().await?.parse::<Uuid>()?),
                     "enable_model_endpoint_models" => {
                         self.enable_model_endpoint_models
                             .insert(field.text().await?);

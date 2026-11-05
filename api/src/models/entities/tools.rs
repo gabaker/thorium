@@ -14,7 +14,8 @@ use strum::{AsRefStr, EnumDiscriminants, EnumString};
 use uuid::Uuid;
 
 use crate::models::{
-    ArgStrategy, CredentialType, GenericJobArgs, ModelApi, WorkloadEnvironment, WorkloadSpec,
+    ArgStrategy, CredentialType, GenericJobArgs, ImageBan, ModelApi, WorkloadEnvironment,
+    WorkloadSpec,
 };
 
 mod descriptors;
@@ -205,6 +206,10 @@ pub struct ToolInstanceEntity {
     pub deprecated: bool,
     /// The kind-specific definition of this tool version
     pub spec: ToolSpec,
+    /// The bans that keep this instance from running, by ban id: an admin's bans and the bans of
+    /// the legacy image it was converted from; every run path refuses an instance with any ban
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bans: BTreeMap<Uuid, ImageBan>,
     /// How portable an agentic spec is across model APIs (computed on get, never stored)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub portability: Option<ToolPortabilityReport>,
@@ -2133,6 +2138,28 @@ pub fn tool_instance_update_form_fields(deprecated: Option<bool>) -> Vec<(&'stat
     deprecated
         .map(|deprecated| ("metadata[tool_instance_deprecated]", deprecated.to_string()))
         .into_iter()
+        .collect()
+}
+
+/// Get the form fields that add a ban to a tool instance and lift its bans, by name
+///
+/// # Arguments
+///
+/// * `ban` - The reason for a ban to add
+/// * `unban` - The ids of the bans to lift
+#[must_use]
+pub fn tool_instance_ban_form_fields(
+    ban: Option<&String>,
+    unban: &[Uuid],
+) -> Vec<(&'static str, String)> {
+    // the ban to add, then each ban to lift
+    ban.map(|reason| ("metadata[tool_instance_ban]", reason.clone()))
+        .into_iter()
+        .chain(
+            unban
+                .iter()
+                .map(|id| ("metadata[tool_instance_unban][]", id.to_string())),
+        )
         .collect()
 }
 

@@ -287,6 +287,8 @@ async fn harness_provides_native_tools() -> Result<(), Error> {
     publish_new_native(&europa.client, deprecated_root.id).await?;
     let update = EntityUpdate::default().metadata(EntityMetadataUpdate::ToolInstance {
         deprecated: Some(true),
+        ban: None,
+        unban: Vec::new(),
     });
     europa.client.entities.update(deprecated.id, update).await?;
     for (target, fragment) in [

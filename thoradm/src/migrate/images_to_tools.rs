@@ -8,9 +8,11 @@
 //! ones the API writes. The tool's id, its first instance's id, and the time everything is
 //! created at derive from the image, so a run that crashes partway and repeats an image writes
 //! the same rows again. An image counts as migrated only when its tool, its first instance, and
-//! the edge between them all exist. Notes and warnings the conversion produces (who publishes
-//! each tool, dropped dependency names, env variable names that look like secrets, bans) are
-//! collected while the pass runs and added to the applied report when it is finished. The
+//! the edge between them all exist. A banned image's first instance is written with the image's
+//! bans, so it never runs until an admin lifts them. Notes and warnings the conversion produces
+//! (who publishes each tool, dropped dependency names, env variable names that look like
+//! secrets, carried bans) are collected while the pass runs and added to the applied report when
+//! it is finished. The
 //! `entities` table is read once per pass for the names of its tools, so an image whose name
 //! another tool holds is refused instead of colliding with it. The groups and each group's image
 //! names are listed once per pass and every batch resumes from its position in those listings.
@@ -808,11 +810,23 @@ impl MigrationRunner for ImagesToTools {
         };
         match convert_image(image, &image_ctx) {
             Ok(migration) => {
+                // a banned image's instance is written banned, which the admin should know
+                let mut warnings = migration.warnings;
+                if !image.bans.is_empty() {
+                    warnings.push(MigrationNote::new(
+                        group,
+                        name,
+                        format!(
+                            "carries the image's {} ban(s) to its tool instance, which won't run until an admin lifts them",
+                            image.bans.len()
+                        ),
+                    ));
+                }
                 Self::collect(
                     ns,
                     (group.to_owned(), name.to_owned()),
                     &migration.notes,
-                    &migration.warnings,
+                    &warnings,
                 );
                 Ok(Outcome::Write(record.clone()))
             }
@@ -850,10 +864,16 @@ impl MigrationRunner for ImagesToTools {
         let migration = convert_image(image, &image_ctx).map_err(|skipped| {
             MigrateError::Rejected(format!("the image no longer converts: {}", skipped.reason))
         })?;
-        // create the tool with ids and a time that derive from the image, so repeating it is safe
+        // create the tool with ids and a time that derive from the image, so repeating it is safe,
+        // and with the image's bans, so a banned image never becomes a runnable instance
         let stamp = PublishStamp {
             instance_id: ToolIdMap::first_instance_id(group, name),
             at: migrated_at(),
+            bans: image
+                .bans
+                .iter()
+                .map(|(id, ban)| (*id, ban.clone()))
+                .collect(),
         };
         let shared = Box::pin(writer(ctx)).await?;
         // create the tool as the user the conversion chose

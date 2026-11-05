@@ -63,7 +63,8 @@ pub struct CachedWorkload {
 impl CachedWorkload {
     /// Build the cached workload of a tool instance entity
     ///
-    /// Returns `None` if the entity isn't a tool instance that runs a workload.
+    /// Returns `None` if the entity isn't a tool instance that runs a workload or if it has any
+    /// ban, so the scaler spawns no workers for a banned tool instance's queued jobs.
     ///
     /// # Arguments
     ///
@@ -75,6 +76,10 @@ impl CachedWorkload {
         let EntityMetadata::ToolInstance(meta) = &entity.metadata else {
             return None;
         };
+        // a banned tool instance runs nothing
+        if !meta.bans.is_empty() {
+            return None;
+        }
         let (kind, spec) = match &meta.spec {
             ToolSpec::Image(spec) => (ToolKind::Image, spec.clone()),
             ToolSpec::Harness(harness) => (ToolKind::Harness, harness.workload.clone()),
@@ -1024,6 +1029,12 @@ impl Cache {
                 }
             }
             None => {
+                // drop any workload cached before this read, since a tool instance that was
+                // banned since then must not be scheduled
+                self.workloads
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&id);
                 // remember this tool instance has no workload until the next reload
                 self.missing
                     .write()
@@ -1826,5 +1837,97 @@ mod tests {
                 .is_some_and(|line| line.contains("/api/users/logout")),
             "{lines:?}"
         );
+    }
+
+    /// Ban a tool instance in a mock API's world
+    ///
+    /// # Arguments
+    ///
+    /// * `api` - The mock API whose tool instance is banned
+    /// * `id` - The tool instance to ban
+    fn ban(api: &MockApi, id: Uuid) {
+        // add an admin's ban to the tool instance's metadata
+        let mut world = api.world.lock().unwrap();
+        let EntityMetadata::ToolInstance(meta) = &mut world.entities.get_mut(&id).unwrap().metadata
+        else {
+            panic!("fixtures are tool instances");
+        };
+        let ban = thorium::models::ImageBan::new(thorium::models::ImageBanKind::generic("unsafe"));
+        meta.bans.insert(ban.id, ban);
+    }
+
+    /// A banned tool instance has no workload, so nothing is scheduled for its queued jobs, while
+    /// an unbanned one in the same demand is cached
+    #[tokio::test]
+    async fn banned_tool_instance_has_no_workload() {
+        // two K8s tool instances, the first of them banned
+        let (world, ids) = k8s_world(2, |i| format!("registry.example/tool-{i}:1"));
+        let api = MockApi::start(world).await;
+        ban(&api, ids[0]);
+        let crane = MockCrane::new();
+        let cache = test_api::cache(&api, test_api::conf(&crane), ImageScaler::K8s, &["io"]).await;
+        let thorium = api.client().await;
+        // demand for both reads both once
+        for _ in 0..2 {
+            cache
+                .prefetch(&thorium, ids.iter().copied().collect())
+                .await;
+        }
+        assert_eq!(api.count("GET", "/api/entities/"), 2);
+        // the banned tool instance has no workload and is never ready
+        assert!(cache.get_workload(&ids[0]).is_none());
+        assert!(!cache.workload_ready(&ids[0], GROUP));
+        // the unbanned tool instance is cached
+        assert!(cache.get_workload(&ids[1]).is_some());
+    }
+
+    /// A cached workload whose tool instance is banned is dropped when demand in a new group reads
+    /// it again, and a lifted ban lets it be cached after the next reload
+    #[tokio::test]
+    async fn a_ban_drops_a_cached_workload_when_it_is_read_again() {
+        // one K8s tool instance cached in our group
+        let (world, ids) = k8s_world(1, |_| "registry.example/banned:1".to_owned());
+        let api = MockApi::start(world).await;
+        let crane = MockCrane::new();
+        let cache = Arc::new(
+            test_api::cache(&api, test_api::conf(&crane), ImageScaler::K8s, &["io"]).await,
+        );
+        let thorium = Arc::new(api.client().await);
+        cache
+            .prefetch_groups(&thorium, [(ids[0], [GROUP.to_owned()].into())].into())
+            .await;
+        assert!(cache.get_workload(&ids[0]).is_some());
+        // an admin bans the tool instance
+        ban(&api, ids[0]);
+        // demand in a group it has no projection for reads it again and drops its workload
+        cache
+            .prefetch_groups(&thorium, [(ids[0], ["vesta".to_owned()].into())].into())
+            .await;
+        assert_eq!(api.count("GET", "/api/entities/"), 2);
+        assert!(cache.get_workload(&ids[0]).is_none());
+        assert!(!cache.workload_ready(&ids[0], GROUP));
+        // the ban is lifted
+        {
+            let mut world = api.world.lock().unwrap();
+            let EntityMetadata::ToolInstance(meta) =
+                &mut world.entities.get_mut(&ids[0]).unwrap().metadata
+            else {
+                panic!("fixtures are tool instances");
+            };
+            meta.bans.clear();
+        }
+        // after the next reload demand caches its workload again
+        let TaskResult::Cache(reloaded) =
+            Cache::refresh(cache.clone(), thorium.clone(), ImageScaler::K8s)
+                .await
+                .unwrap()
+        else {
+            panic!("a refresh returns a cache");
+        };
+        reloaded
+            .prefetch_groups(&thorium, [(ids[0], [GROUP.to_owned()].into())].into())
+            .await;
+        assert_eq!(api.count("GET", "/api/entities/"), 3);
+        assert!(reloaded.get_workload(&ids[0]).is_some());
     }
 }

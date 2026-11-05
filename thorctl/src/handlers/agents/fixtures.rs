@@ -56,6 +56,7 @@ pub fn tool_instance(tool: &Entity, version: &str) -> Entity {
         previous: None,
         spec_hash: "hash".to_owned(),
         deprecated: false,
+        bans: std::collections::BTreeMap::new(),
         spec: ToolSpec::default(),
         portability: None,
         provides: Vec::new(),

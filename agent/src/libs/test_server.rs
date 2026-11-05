@@ -169,6 +169,7 @@ pub fn tool_instance_entity(
                 previous: None,
                 spec_hash: "hash".to_owned(),
                 deprecated: false,
+                bans: std::collections::BTreeMap::new(),
                 spec,
                 portability: None,
                 provides: Vec::new(),

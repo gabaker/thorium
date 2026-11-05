@@ -1058,7 +1058,7 @@ impl PartialEq<EntityUpdate> for Entity {
                     }
                 }
                 (
-                    EntityMetadataUpdate::ToolInstance { deprecated },
+                    EntityMetadataUpdate::ToolInstance { deprecated, .. },
                     EntityMetadata::ToolInstance(instance),
                 ) => {
                     // the deprecated flag is set as requested

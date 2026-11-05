@@ -28,10 +28,11 @@ use crate::models::{
     AgenticToolBacking, AssociationKind, AssociationListOpts, AssociationTarget,
     AssociationTargetColumn, CrawlLimits, Directionality, Entity, EntityKinds, EntityMetadata,
     EntityMetadataForm, EntityMetadataUpdateForm, EntityResponse, Event, Group, GroupAllowAction,
-    HarnessEnv, HarnessSpec, HarnessToolAccess, NetworkPolicy, NetworkPolicyUpdate, SystemSettings,
-    ToolEntity, ToolEntityRequest, ToolInstanceEntity, ToolInstanceEntityRequest,
-    ToolInstanceSummary, ToolKind, ToolPortabilityReport, ToolSpec, ToolVersion, User, UserRole,
-    UserSettings, WorkflowGraphChange, WorkloadEnvironment, WorkloadSpec,
+    HarnessEnv, HarnessSpec, HarnessToolAccess, ImageBan, ImageBanKind, NetworkPolicy,
+    NetworkPolicyUpdate, SystemSettings, ToolEntity, ToolEntityRequest, ToolInstanceEntity,
+    ToolInstanceEntityRequest, ToolInstanceSummary, ToolKind, ToolPortabilityReport, ToolSpec,
+    ToolVersion, User, UserRole, UserSettings, WorkflowGraphChange, WorkloadEnvironment,
+    WorkloadSpec,
 };
 use crate::utils::{ApiError, Shared, helpers};
 use crate::{bad, bad_internal, conflict, internal_err, not_found, unauthorized};
@@ -60,13 +61,16 @@ pub(crate) struct PreparedInstance {
 /// migration derives both from what it migrates, so a crashed run that repeats a publish
 /// overwrites the rows it already wrote instead of duplicating them. A stamped create also
 /// skips the check that the tools a spec's dependency settings name already exist, because a
-/// migration creates those tools in the same pass, in any order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// migration creates those tools in the same pass, in any order. A migration also passes the bans
+/// of what it migrates, so the instance is written already banned and never runs without them.
+#[derive(Debug, Clone, PartialEq)]
 pub struct PublishStamp {
     /// The id of the first instance the publish creates
     pub instance_id: Uuid,
     /// When the tool, its instance, and the edge between them are created
     pub at: DateTime<Utc>,
+    /// The bans the first instance is written with
+    pub bans: BTreeMap<Uuid, ImageBan>,
 }
 
 /// Map a model validation message to a `400`
@@ -329,6 +333,61 @@ async fn check_provides(
         found.push(entity);
     }
     Ok(found)
+}
+
+/// Refuse to run a tool instance that has any ban
+///
+/// Every path that runs a tool instance checks this before it queues a job: a direct tool run
+/// (and the Image tool instance a container tool pins), each stage of a new reaction, and a
+/// workflow run's harness. The bans of a legacy image are carried to the instance it converted
+/// into, so they keep it from running as they kept the image from running, and a new version
+/// inherits the bans of the instance it supersedes.
+///
+/// # Arguments
+///
+/// * `entity` - The tool instance about to run
+pub(crate) fn check_unbanned(entity: &Entity) -> Result<(), ApiError> {
+    // only a tool instance carries bans, and one without any runs
+    let EntityMetadata::ToolInstance(instance) = &entity.metadata else {
+        return Ok(());
+    };
+    if instance.bans.is_empty() {
+        return Ok(());
+    }
+    // name every ban's reason, so the caller knows what an admin has to lift
+    let reasons = instance
+        .bans
+        .values()
+        .map(crate::models::bans::Ban::msg)
+        .collect::<Vec<String>>()
+        .join("; ");
+    bad!(format!(
+        "tool instance `{}` has one or more bans and can't run: {reasons}",
+        entity.name
+    ))
+}
+
+/// Refuse a non-admin's delete of a tool instance that has any ban
+///
+/// A new instance inherits the bans of the newest one, so deleting a banned instance would let
+/// its tool's next version publish unbanned; only an admin, who could lift the ban anyway,
+/// deletes one.
+///
+/// # Arguments
+///
+/// * `user` - The user deleting the entity
+/// * `entity` - The entity being deleted
+pub(crate) fn check_delete_banned(user: &User, entity: &Entity) -> Result<(), ApiError> {
+    // only a tool instance carries bans, and an admin may delete a banned one
+    match &entity.metadata {
+        EntityMetadata::ToolInstance(instance) if !instance.bans.is_empty() && !user.is_admin() => {
+            unauthorized!(format!(
+                "only an admin can delete tool instance `{}`, which has one or more bans",
+                entity.name
+            ))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Get the stored spec hash of a tool instance entity
@@ -901,13 +960,17 @@ pub(crate) struct PublishPlan {
 
 /// Run every check of a publish and build what it would write, writing nothing
 ///
+/// The new instance inherits the bans of the instance it supersedes (the tool's newest
+/// instance), so a ban follows every version published after the banned one.
+///
 /// # Arguments
 ///
 /// * `user` - The user publishing the instance
 /// * `tool` - The tool to publish an instance of, in all of its groups
 /// * `prepared` - The checked version and spec
 /// * `existing` - The tool's existing instances, newest first
-/// * `stamp` - The id and time to publish with, or `None` for a random id and the current time
+/// * `stamp` - The id, time, and bans to publish with, or `None` for a random id, the current
+///   time, and no bans of its own
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "tools::validate_publish", skip_all, fields(tool = tool.id.to_string()), err(Debug))]
 pub(crate) async fn validate_publish(
@@ -923,7 +986,7 @@ pub(crate) async fn validate_publish(
     // the new instance supersedes the most recently created one
     let previous = existing.first().map(|entity| entity.id);
     // build the new instance in every group of its tool
-    let now = stamp.map_or_else(Utc::now, |stamp| stamp.at);
+    let now = stamp.as_ref().map_or_else(Utc::now, |stamp| stamp.at);
     let name = format!("{}@{}", tool.name, prepared.version);
     // a stamp chooses the id; otherwise tests may choose it
     #[cfg(feature = "test-utilities")]
@@ -931,7 +994,20 @@ pub(crate) async fn validate_publish(
         || crate::test_utilities::faults::take_create_id(&name).unwrap_or_else(Uuid::new_v4);
     #[cfg(not(feature = "test-utilities"))]
     let fallback = Uuid::new_v4;
-    let id = stamp.map_or_else(fallback, |stamp| stamp.instance_id);
+    let id = stamp
+        .as_ref()
+        .map_or_else(fallback, |stamp| stamp.instance_id);
+    // the new instance inherits the bans of the instance it supersedes, so publishing a new
+    // version never escapes a ban; only an admin's lift ends one
+    let edge_at = stamp.as_ref().map(|stamp| stamp.at);
+    let mut bans = stamp.map_or_else(BTreeMap::new, |stamp| stamp.bans);
+    if let Some(EntityMetadata::ToolInstance(superseded)) =
+        existing.first().map(|entity| &entity.metadata)
+    {
+        for (id, ban) in &superseded.bans {
+            bans.entry(*id).or_insert_with(|| ban.clone());
+        }
+    }
     let instance = Entity {
         id,
         name,
@@ -942,6 +1018,7 @@ pub(crate) async fn validate_publish(
             previous,
             spec_hash: prepared.spec_hash.clone(),
             deprecated: false,
+            bans,
             spec: prepared.spec,
             portability: None,
             provides: Vec::new(),
@@ -960,7 +1037,7 @@ pub(crate) async fn validate_publish(
         version: prepared.version,
         spec_hash: prepared.spec_hash,
         now,
-        edge_at: stamp.map(|stamp| stamp.at),
+        edge_at,
     })
 }
 
@@ -977,7 +1054,8 @@ pub(crate) async fn validate_publish(
 /// * `existing` - The tool's existing instances, newest first
 /// * `tags` - The user tags to give the new instance
 /// * `new_tool_tags` - The user tags of the tool when the tool itself still needs to be created
-/// * `stamp` - The id and time to publish with, or `None` for a random id and the current time
+/// * `stamp` - The id, time, and bans to publish with, or `None` for a random id, the current
+///   time, and no bans of its own
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "tools::publish", skip_all, fields(tool = tool.id.to_string()), err(Debug))]
 #[expect(clippy::too_many_arguments)]
@@ -1262,8 +1340,8 @@ pub(crate) async fn create_tool(
 /// * `groups` - The checked groups
 /// * `req` - The tool's request
 /// * `tags` - The requested user tags
-/// * `stamp` - The first instance's id and the time to create with, or `None` for a random id
-///   and the current time
+/// * `stamp` - The first instance's id, bans, and the time to create with, or `None` for a random
+///   id, no bans, and the current time
 /// * `shared` - Shared Thorium objects
 #[expect(clippy::too_many_arguments)]
 async fn create_tool_from_request(
@@ -1279,7 +1357,7 @@ async fn create_tool_from_request(
     shared: &Shared,
 ) -> Result<EntityResponse, ApiError> {
     // build the tool, which has no latest instance until its first is published
-    let now = stamp.map_or_else(Utc::now, |stamp| stamp.at);
+    let now = stamp.as_ref().map_or_else(Utc::now, |stamp| stamp.at);
     let mut meta = ToolEntity::new(req.kind, now);
     // a harness gets its env and disabled models on the root
     if req.harness_env.is_some() || !req.disabled_models.is_empty() {
@@ -1348,7 +1426,7 @@ async fn create_tool_from_request(
 ///
 /// * `tool` - The tool an image converts into
 /// * `submitter` - The username to create the tool as
-/// * `stamp` - The first instance's id and the time to create everything at
+/// * `stamp` - The first instance's id and bans, and the time to create everything at
 /// * `shared` - Shared Thorium objects
 pub fn create_migrated_tool<'a>(
     tool: &'a MigratedTool,
@@ -1366,7 +1444,7 @@ pub fn create_migrated_tool<'a>(
 ///
 /// * `tool` - The tool an image converts into
 /// * `submitter` - The username to create the tool as
-/// * `stamp` - The first instance's id and the time to create everything at
+/// * `stamp` - The first instance's id and bans, and the time to create everything at
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "tools::create_migrated_tool", skip_all, err(Debug))]
 async fn create_migrated_tool_inner(
@@ -1655,6 +1733,49 @@ fn checked_model_ids(ids: BTreeSet<String>) -> Result<BTreeSet<String>, ApiError
         return bad!("a disabled model id can't be empty".to_owned());
     }
     Ok(ids)
+}
+
+/// Apply the bans an update adds to a tool instance and lifts from it
+///
+/// Only an admin bans a tool instance or lifts its bans. A ban added here is a generic ban with
+/// the given reason. Lifting a ban the instance doesn't have is refused, so a mistyped id is
+/// never mistaken for a lifted ban. The caller holds the tool's lock and writes the instance.
+///
+/// # Arguments
+///
+/// * `user` - The user updating the tool instance
+/// * `instance` - The tool instance
+/// * `form` - The metadata update form
+pub(crate) fn update_instance_bans(
+    user: &User,
+    instance: &mut ToolInstanceEntity,
+    form: &mut EntityMetadataUpdateForm,
+) -> Result<(), ApiError> {
+    // nothing changes without a ban to add or lift
+    if form.tool_instance_ban.is_none() && form.tool_instance_unban.is_empty() {
+        return Ok(());
+    }
+    // only an admin bans a tool instance or lifts its bans
+    if !user.is_admin() {
+        return unauthorized!("only an admin can ban a tool instance or lift its bans".to_owned());
+    }
+    // every ban lifted must be one the instance has
+    if let Some(missing) = form
+        .tool_instance_unban
+        .iter()
+        .find(|id| !instance.bans.contains_key(*id))
+    {
+        return bad!(format!("the tool instance has no ban `{missing}`"));
+    }
+    // lift the bans, then add the new one
+    for id in std::mem::take(&mut form.tool_instance_unban) {
+        instance.bans.remove(&id);
+    }
+    if let Some(reason) = form.tool_instance_ban.take() {
+        let ban = ImageBan::new(ImageBanKind::generic(reason));
+        instance.bans.insert(ban.id, ban);
+    }
+    Ok(())
 }
 
 /// Apply the harness settings of a tool update to the tool's root
