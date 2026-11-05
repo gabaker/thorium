@@ -650,7 +650,7 @@ pub(crate) fn is_noop(
 /// * `tool` - The id of the tool
 /// * `groups` - The groups to read the edges in
 /// * `shared` - Shared Thorium objects
-async fn instance_ids(
+pub(crate) async fn instance_ids(
     user: &User,
     tool: Uuid,
     groups: &[String],
@@ -1740,6 +1740,7 @@ fn checked_model_ids(ids: BTreeSet<String>) -> Result<BTreeSet<String>, ApiError
 /// Only an admin bans a tool instance or lifts its bans. A ban added here is a generic ban with
 /// the given reason. Lifting a ban the instance doesn't have is refused, so a mistyped id is
 /// never mistaken for a lifted ban. The caller holds the tool's lock and writes the instance.
+/// Returns the ids of the lifted bans.
 ///
 /// # Arguments
 ///
@@ -1750,10 +1751,10 @@ pub(crate) fn update_instance_bans(
     user: &User,
     instance: &mut ToolInstanceEntity,
     form: &mut EntityMetadataUpdateForm,
-) -> Result<(), ApiError> {
+) -> Result<Vec<Uuid>, ApiError> {
     // nothing changes without a ban to add or lift
     if form.tool_instance_ban.is_none() && form.tool_instance_unban.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     // only an admin bans a tool instance or lifts its bans
     if !user.is_admin() {
@@ -1768,14 +1769,15 @@ pub(crate) fn update_instance_bans(
         return bad!(format!("the tool instance has no ban `{missing}`"));
     }
     // lift the bans, then add the new one
-    for id in std::mem::take(&mut form.tool_instance_unban) {
-        instance.bans.remove(&id);
+    let lifted = std::mem::take(&mut form.tool_instance_unban);
+    for id in &lifted {
+        instance.bans.remove(id);
     }
     if let Some(reason) = form.tool_instance_ban.take() {
         let ban = ImageBan::new(ImageBanKind::generic(reason));
         instance.bans.insert(ban.id, ban);
     }
-    Ok(())
+    Ok(lifted)
 }
 
 /// Apply the harness settings of a tool update to the tool's root

@@ -477,8 +477,9 @@ impl SystemSettings {
     /// and cleaning/marking/modifying data that isn't
     ///
     /// This applies to images with host path mounts that may not be on the configured whitelist
-    /// after a settings update, to pipelines those images may be a part of, and to group and user
-    /// model endpoints that may not be on the allowed model endpoint list
+    /// after a settings update, to pipelines those images may be a part of, to tool instances
+    /// converted from banned images without their bans, and to group and user model endpoints
+    /// that may not be on the allowed model endpoint list
     ///
     /// # Arguments
     ///
@@ -489,10 +490,21 @@ impl SystemSettings {
         // only admins can perform a scan
         is_admin!(user);
         // update all images that parse; records that don't parse are skipped
-        stream::iter(db::images::backup(shared).await?.0)
+        let images = db::images::backup(shared).await?.0;
+        // keep the banned ones, whose bans carry to the tool instances they converted into
+        let banned = images
+            .iter()
+            .filter(|image| !image.bans.is_empty())
+            .cloned()
+            .collect::<Vec<Image>>();
+        stream::iter(images)
             .map(Ok)
             .try_for_each_concurrent(1000, |image| self.scan_helper_images(image, user, shared))
             .await?;
+        // carry legacy image bans to converted tool instances that lack them, for clusters that
+        // converted their images before conversions carried bans; a record it can't read or
+        // write is logged and skipped, so it never fails the scan
+        Box::pin(entities::tool_bans::backfill(&banned, shared)).await;
         // update all pipelines that parse
         stream::iter(db::pipelines::backup(shared).await?.0)
             .map(Ok)

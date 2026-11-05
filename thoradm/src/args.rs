@@ -86,6 +86,18 @@ pub enum SubCommands {
     /// Print, hash, apply, and diff Thorium's declared schema
     #[clap(subcommand)]
     Schema(SchemaSubCommands),
+    /// Audit the bans of legacy images and the tool instances they converted into
+    #[clap(subcommand)]
+    Bans(BansSubCommands),
+}
+
+/// The ban subcommands
+#[derive(Parser, Debug, Clone)]
+pub enum BansSubCommands {
+    /// List legacy images with bans, the tool instance each converted into, and whether that
+    /// instance carries each ban (reads only)
+    #[clap(version, author)]
+    Audit,
 }
 
 /// The user account specific subcommands

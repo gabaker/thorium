@@ -810,11 +810,58 @@ are no longer consistent. For example, an admin adds a host path volume mount wi
 on the host path whitelist, resulting in an image with an invalid configuration that is not properly
 banned.
 
+The API also runs the scan every time it starts. Besides host path bans on images, the scan adds
+the bans of each legacy image to every instance of the tool the image converted into that lacks
+them, logging and skipping any instance it can't read (see [Tool Instance Bans](../bans_admins.md#tool-instance-bans)).
+
 You can manually run a consistency scan with the following command:
 
 ```Bash
 thoradm settings scan
 ```
+
+## Bans
+
+`thoradm bans audit` lists every legacy image that has bans, every instance of the tool it
+converted into, and which of the image's bans each instance lacks. It reads the cluster config like
+`thoradm migrate` (`--cluster-conf`, default `thorium.yml`), changes nothing, and prints no
+credentials. Each image is one JSON line on stdout, and a summary goes to stderr:
+
+```Bash
+thoradm bans audit | jq .
+```
+
+```JSON
+{
+  "group": "corn",
+  "image": "harvester",
+  "tool": "0b6d0a4e-55d1-5f7e-8a43-2f4e3c9d1b7a",
+  "first_instance": "6f1c0c55-1d3e-5b0e-9a49-0b8f1b6a7c2d",
+  "instances": [
+    { "id": "6f1c0c55-1d3e-5b0e-9a49-0b8f1b6a7c2d", "missing": [] },
+    { "id": "c3a1e2f0-7d4b-4c55-9e8a-1f2b3c4d5e6f", "missing": [] }
+  ],
+  "bans": [
+    {
+      "id": "bfe49500-dfcb-4790-a6b3-379114222426",
+      "kind": "Generic",
+      "reason": "This image leaks credentials",
+      "carried": true,
+      "on_every_instance": true
+    }
+  ],
+  "covered": true
+}
+```
+
+`instances` lists each existing instance of the converted tool (the first one and every version
+published since) with the ids of the carried bans it lacks in `missing`; an instance that can't be
+read has an `error` instead. `carried` says whether this kind of ban is carried to the instances,
+and `on_every_instance` whether every readable instance has it. `covered` is `false` when an
+instance lacks a ban it should carry or can't be read (or the tool's instances can't be listed, in
+which case the entry has an `error`). Restarting the API (or running `thoradm settings scan`)
+backfills a missing ban; an unreadable instance has to be repaired or deleted. An image not
+converted yet has no instances; its conversion writes the bans with the instance.
 
 ## Provision Thorium Resources
 

@@ -50,6 +50,7 @@ mod hunts;
 pub(crate) mod models;
 pub(crate) mod references;
 mod rules;
+pub mod tool_bans;
 pub(crate) mod tools;
 pub(crate) mod toolsets;
 pub mod workflows;
@@ -2097,7 +2098,10 @@ impl Entity {
                 }
                 // deprecation and bans are the only changes a tool instance takes
                 update!(instance.deprecated, form.tool_instance_deprecated);
-                tools::update_instance_bans(user, instance, &mut form)?;
+                let lifted = tools::update_instance_bans(user, instance, &mut form)?;
+                // a lifted ban leaves the legacy image this instance's tool converted from too,
+                // so the consistency scan doesn't carry it back
+                tool_bans::lift_from_legacy_image(user, self, &lifted, shared).await?;
             }
             graph @ (EntityMetadata::Agent(_)
             | EntityMetadata::ToolSet(_)

@@ -1,7 +1,9 @@
 //! Tests that a tool instance with a ban never runs: an image's bans carry to the instance its
-//! conversion makes, an admin bans an instance and lifts its bans, a ban follows the tool's new
-//! versions and the instance can't be detached from its tool, by deleting its edge or by moving
-//! the tool to another group, and every run path refuses a banned instance
+//! conversion makes, the consistency scan backfills them onto every instance of a tool converted
+//! without them and survives records it can't read, an admin bans an instance and lifts its bans,
+//! a ban follows the tool's new versions and the instance can't be detached from its tool, by
+//! deleting its edge or by moving the tool to another group, and every run path refuses a banned
+//! instance
 
 mod common;
 
@@ -10,12 +12,14 @@ use common::harness::{ADMIN, Harness};
 use common::migrate::World;
 use common::names::Names;
 use common::seed;
+use scylla::value::CqlTimestamp;
 use std::collections::HashMap;
 use std::sync::Arc;
 use thoradm::migrate::pipelines_to_tool_stages::PIPELINES_TO_TOOL_STAGES;
 use thoradm::migrate::registry::{MIGRATIONS, MigrationDef};
 use thorium::Thorium;
 use thorium::client::migrations::ToolIdMap;
+use thorium::models::backends::entities::tool_bans::LegacyImageBans;
 use thorium::models::schema::{PassOutcome, PassStore, RunBackends, RunMode, RunOptions, run_pass};
 use thorium::models::{
     AssociationDeleteRequest, AssociationKind, AssociationListOpts, AssociationTarget,
@@ -213,6 +217,49 @@ async fn seed_image(world: &World, image: &Image) {
             .to_owned(),
     )
     .await;
+}
+
+/// Replace the bans of a stored legacy image
+///
+/// # Arguments
+///
+/// * `world` - The test world
+/// * `group` - The image's group
+/// * `name` - The image's name
+/// * `bans` - The bans to store
+async fn set_image_bans(world: &World, group: &str, name: &str, bans: &HashMap<Uuid, ImageBan>) {
+    // overwrite only the bans field of the image's hash
+    redis_cmd::<()>(
+        world,
+        redis::cmd("HSET")
+            .arg(format!("{}:image_data:{group}:{name}", world.ns))
+            .arg("bans")
+            .arg(serde_json::to_string(bans).unwrap())
+            .to_owned(),
+    )
+    .await;
+}
+
+/// Read the bans of a stored legacy image
+///
+/// # Arguments
+///
+/// * `world` - The test world
+/// * `group` - The image's group
+/// * `name` - The image's name
+async fn image_bans(world: &World, group: &str, name: &str) -> HashMap<Uuid, ImageBan> {
+    // the bans field is a JSON map
+    let raw: Option<String> = redis_cmd(
+        world,
+        redis::cmd("HGET")
+            .arg(format!("{}:image_data:{group}:{name}", world.ns))
+            .arg("bans")
+            .to_owned(),
+    )
+    .await;
+    raw.map_or_else(HashMap::new, |raw| {
+        serde_json::from_str(&raw).expect("the bans parse")
+    })
 }
 
 /// Write a pipeline the way the API before tools stored one: stage names only, with its bans
@@ -528,6 +575,83 @@ async fn an_admin_bans_and_lifts_a_tool_instance() {
         .await
         .expect("a lifted instance runs");
 }
+
+/// An instance converted before conversions carried bans gets its image's bans from the
+/// consistency scan, which leaves it unchanged when it runs again; the audit lists them, and a
+/// carried ban an admin lifts stays lifted across a rescan
+#[tokio::test]
+async fn the_scan_backfills_bans_onto_converted_instances() {
+    let _serial = SERIAL.lock().await;
+    let harness = Harness::get().await;
+    let world = harness_world(harness).await;
+    let client = Cluster::of_harness(harness).client().await;
+    let group = Names::new().group("backfill");
+    seed::group(&client, &group).await;
+    // an image converted while it had no bans, which an admin banned before the upgrade: the
+    // shape a cluster that converted before bans were carried is left in
+    seed_image(&world, &image(&group, "late")).await;
+    let out = run(&world, migration("images-to-tools")).await;
+    assert_eq!(out.counts.written, 1, "{out:?}");
+    let generic = ImageBan::new(ImageBanKind::generic("leaks credentials"));
+    let url = ImageBan::new(ImageBanKind::image_url("repo/late:1.0"));
+    let (generic_id, url_id) = (generic.id, url.id);
+    let mut expected = vec![generic.id, url.id];
+    expected.sort();
+    let bans = HashMap::from([(generic.id, generic), (url.id, url)]);
+    set_image_bans(&world, &group, "late", &bans).await;
+    let instance = ToolIdMap::first_instance_id(&group, "late");
+    assert_eq!(
+        instance_ban_ids(&client, instance).await,
+        Vec::<Uuid>::new()
+    );
+    // the scan the API runs at startup carries the bans over
+    scan(&client).await;
+    assert_eq!(instance_ban_ids(&client, instance).await, expected);
+    let sha = seed::sample(&client, &group, "b.bin", b"backfilled bans").await;
+    run_tool(&client, instance, &sha)
+        .await
+        .expect_err("a backfilled instance's direct run is refused");
+    // running it again changes nothing
+    scan(&client).await;
+    scan(&client).await;
+    assert_eq!(instance_ban_ids(&client, instance).await, expected);
+    // the legacy image keeps its bans
+    assert_eq!(image_bans(&world, &group, "late").await.len(), 2);
+    // the audit lists the image, its instance, and both bans as carried
+    let audits = Box::pin(thoradm::bans::audit(
+        world.conf.clone(),
+        world.backends.redis.clone(),
+    ))
+    .await
+    .expect("the audit runs");
+    let entry = audits
+        .iter()
+        .find(|entry| entry.group == group && entry.image == "late")
+        .expect("the audit lists the banned image");
+    assert_eq!(entry.first_instance, instance);
+    assert!(entry.covered, "{entry:?}");
+    assert_eq!(
+        audited_instances(entry),
+        vec![(instance, Vec::new(), false)],
+        "{entry:?}"
+    );
+    let listed = entry.bans.iter().map(|ban| ban.id).collect::<Vec<Uuid>>();
+    assert_eq!(listed, expected);
+    assert!(
+        entry.bans.iter().all(|ban| ban.on_every_instance),
+        "{entry:?}"
+    );
+    // lifting a carried ban from the instance also lifts it from the legacy image, so a rescan
+    // doesn't carry it back
+    set_bans(&client, instance, None, vec![generic_id])
+        .await
+        .expect("the admin lifts a carried ban");
+    scan(&client).await;
+    assert_eq!(instance_ban_ids(&client, instance).await, vec![url_id]);
+    let left = image_bans(&world, &group, "late").await;
+    assert_eq!(left.keys().copied().collect::<Vec<Uuid>>(), vec![url_id]);
+}
+
 /// A K8s image spec with one more CPU, so it publishes as a new version
 ///
 /// # Arguments
@@ -567,6 +691,21 @@ async fn publish(client: &Thorium, tool: Uuid, version: &str, spec: &ToolSpec) -
         panic!("not a tool: {:?}", entity.metadata);
     };
     meta.latest.expect("the tool has a latest instance")
+}
+
+/// Read a tool instance's spec
+///
+/// # Arguments
+///
+/// * `client` - An admin client
+/// * `id` - The tool instance's id
+async fn instance_spec(client: &Thorium, id: Uuid) -> ToolSpec {
+    // the spec is in the instance's metadata
+    let entity = client.entities.get(id).await.expect("the instance reads");
+    let EntityMetadata::ToolInstance(meta) = entity.metadata else {
+        panic!("not a tool instance");
+    };
+    meta.spec
 }
 
 /// An admin's ban follows a tool's new versions: a group manager who publishes a changed version
@@ -817,4 +956,272 @@ async fn a_group_swap_keeps_a_banned_instance_linked() {
         .await
         .expect_err("the new version of a banned instance is refused");
     assert!(err.contains("SECURITY: group swap"), "{err}");
+}
+
+/// Rewrite the stored metadata of every row of an entity, returning what it held before
+///
+/// Stands in for data the API can't write any more: an instance published before new versions
+/// carried bans, or one an older or newer release stored in a shape this one can't parse.
+///
+/// # Arguments
+///
+/// * `world` - The test world
+/// * `id` - The entity's id
+/// * `edit` - Builds the new metadata from the stored metadata
+async fn rewrite_kind_data<F: Fn(&str) -> String>(world: &World, id: Uuid, edit: F) -> String {
+    /// A row's key in the entities table and its stored metadata
+    type Key = (String, String, i32, i32, CqlTimestamp, String);
+    let ns = &world.ns;
+    let session = &world.backends.scylla;
+    // find every row of the entity and its key in the base table
+    let result = session
+        .query_unpaged(
+            format!(
+                "SELECT kind, group, year, bucket, created, kind_data FROM {ns}.entities_by_id \
+                 WHERE id = ?"
+            ),
+            (id,),
+        )
+        .await
+        .expect("the entity's rows read")
+        .into_rows_result()
+        .expect("rows");
+    let rows = result
+        .rows::<Key>()
+        .expect("typed rows")
+        .map(|row| row.expect("a row"))
+        .collect::<Vec<Key>>();
+    assert!(!rows.is_empty(), "entity {id} has rows");
+    // rewrite each row's metadata
+    for (kind, group, year, bucket, created, kind_data) in &rows {
+        session
+            .query_unpaged(
+                format!(
+                    "UPDATE {ns}.entities SET kind_data = ? WHERE kind = ? AND group = ? \
+                     AND year = ? AND bucket = ? AND created = ? AND id = ?"
+                ),
+                (edit(kind_data), kind, group, year, bucket, created, id),
+            )
+            .await
+            .expect("the entity's row rewrites");
+    }
+    rows[0].5.clone()
+}
+
+/// Read the bans of a stored legacy pipeline
+///
+/// # Arguments
+///
+/// * `world` - The test world
+/// * `group` - The pipeline's group
+/// * `name` - The pipeline's name
+async fn pipeline_bans(world: &World, group: &str, name: &str) -> HashMap<Uuid, PipelineBan> {
+    // the bans are one JSON field of the pipeline's hash
+    let raw: Option<String> = redis_cmd(
+        world,
+        redis::cmd("HGET")
+            .arg(format!("{}:pipeline_data:{group}:{name}", world.ns))
+            .arg("bans")
+            .to_owned(),
+    )
+    .await;
+    raw.map_or_else(HashMap::new, |raw| {
+        serde_json::from_str(&raw).expect("pipeline bans parse")
+    })
+}
+
+/// Find a legacy image's entry in the ban audit
+///
+/// # Arguments
+///
+/// * `world` - The test world
+/// * `group` - The image's group
+/// * `image` - The image's name
+async fn audit_entry(world: &World, group: &str, image: &str) -> LegacyImageBans {
+    // the audit reads the cluster the world points at
+    let audits = Box::pin(thoradm::bans::audit(
+        world.conf.clone(),
+        world.backends.redis.clone(),
+    ))
+    .await
+    .expect("the audit runs");
+    audits
+        .into_iter()
+        .find(|entry| entry.group == group && entry.image == image)
+        .expect("the audit lists the banned image")
+}
+
+/// The instances an audit entry reports: each one's id, the ids of the bans it lacks, and
+/// whether it couldn't be read
+///
+/// # Arguments
+///
+/// * `entry` - The audit entry
+fn audited_instances(entry: &LegacyImageBans) -> Vec<(Uuid, Vec<Uuid>, bool)> {
+    // read the entry as the JSON line the audit prints
+    let json = serde_json::to_value(entry).expect("the entry serializes");
+    let ids = |value: &serde_json::Value| {
+        value.as_array().map_or_else(Vec::new, |ids| {
+            ids.iter()
+                .map(|id| id.as_str().expect("an id").parse::<Uuid>().expect("a uuid"))
+                .collect::<Vec<Uuid>>()
+        })
+    };
+    json.get("instances")
+        .and_then(|instances| instances.as_array())
+        .map_or_else(Vec::new, |instances| {
+            instances
+                .iter()
+                .map(|inst| {
+                    let id = inst["id"].as_str().expect("an id").parse().expect("a uuid");
+                    let error = inst.get("error").is_some_and(|error| !error.is_null());
+                    (id, ids(&inst["missing"]), error)
+                })
+                .collect()
+        })
+}
+
+/// The scan carries a legacy image's bans to every instance of the tool it converted into, not
+/// just the first, and the audit reports each instance, so a later version missing a ban leaves
+/// the image uncovered until a scan adds it; lifting a carried ban from a later version also
+/// keeps it lifted across a rescan
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn the_scan_backfills_every_instance_of_a_converted_tool() {
+    let _serial = SERIAL.lock().await;
+    let harness = Harness::get().await;
+    let world = harness_world(harness).await;
+    let client = Cluster::of_harness(harness).client().await;
+    let group = Names::new().group("everyversion");
+    seed::group(&client, &group).await;
+    // an image converted while unbanned, whose tool got a second version before an admin banned
+    // the image
+    seed_image(&world, &image(&group, "multi")).await;
+    let out = run(&world, migration("images-to-tools")).await;
+    assert_eq!(out.counts.written, 1, "{out:?}");
+    let tool = ToolIdMap::tool_id(&group, "multi");
+    let v1 = ToolIdMap::first_instance_id(&group, "multi");
+    let spec = instance_spec(&client, v1).await;
+    let v2 = publish(&client, tool, "2.0.0", &more_cpu(&spec)).await;
+    let generic = ImageBan::new(ImageBanKind::generic("phones home"));
+    let generic_id = generic.id;
+    set_image_bans(
+        &world,
+        &group,
+        "multi",
+        &HashMap::from([(generic.id, generic)]),
+    )
+    .await;
+    // the audit sees both instances lack the ban
+    let entry = audit_entry(&world, &group, "multi").await;
+    assert!(!entry.covered, "{entry:?}");
+    let mut listed = audited_instances(&entry)
+        .into_iter()
+        .map(|(id, _, _)| id)
+        .collect::<Vec<Uuid>>();
+    listed.sort();
+    let mut both = vec![v1, v2];
+    both.sort();
+    assert_eq!(listed, both, "{entry:?}");
+    // the scan bans every version
+    scan(&client).await;
+    assert_eq!(instance_ban_ids(&client, v1).await, vec![generic_id]);
+    assert_eq!(instance_ban_ids(&client, v2).await, vec![generic_id]);
+    let sha = seed::sample(&client, &group, "f.bin", b"every version banned").await;
+    run_tool(&client, v2, &sha)
+        .await
+        .expect_err("the converted tool's later version is refused");
+    let entry = audit_entry(&world, &group, "multi").await;
+    assert!(entry.covered, "{entry:?}");
+    // a later version stored without the ban leaves the image uncovered until the next scan
+    rewrite_kind_data(&world, v2, |stored| {
+        // the stored metadata is tagged with its kind
+        let mut meta: serde_json::Value = serde_json::from_str(stored).expect("metadata parses");
+        meta["ToolInstance"]
+            .as_object_mut()
+            .expect("tool instance metadata")
+            .remove("bans");
+        meta.to_string()
+    })
+    .await;
+    assert_eq!(instance_ban_ids(&client, v2).await, Vec::<Uuid>::new());
+    let entry = audit_entry(&world, &group, "multi").await;
+    assert!(!entry.covered, "{entry:?}");
+    let (_, missing, _) = audited_instances(&entry)
+        .into_iter()
+        .find(|(id, _, _)| *id == v2)
+        .expect("the audit lists v2");
+    assert_eq!(missing, vec![generic_id], "{entry:?}");
+    scan(&client).await;
+    assert_eq!(instance_ban_ids(&client, v2).await, vec![generic_id]);
+    // lifting the carried ban from the later version keeps it lifted across a rescan
+    set_bans(&client, v2, None, vec![generic_id])
+        .await
+        .expect("the admin lifts v2's carried ban");
+    scan(&client).await;
+    assert_eq!(instance_ban_ids(&client, v2).await, Vec::<Uuid>::new());
+    assert_eq!(instance_ban_ids(&client, v1).await, vec![generic_id]);
+}
+
+/// An unreadable converted instance doesn't stop the consistency scan the API runs at startup:
+/// the scan succeeds, still backfills the other images' instances and bans the pipelines after
+/// them, and the audit reports the unreadable instance instead of failing
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn an_unreadable_instance_does_not_stop_the_scan() {
+    let _serial = SERIAL.lock().await;
+    let harness = Harness::get().await;
+    let world = harness_world(harness).await;
+    let client = Cluster::of_harness(harness).client().await;
+    let group = Names::new().group("unreadable");
+    seed::group(&client, &group).await;
+    // two images converted while unbanned, banned afterwards
+    seed_image(&world, &image(&group, "broken")).await;
+    seed_image(&world, &image(&group, "fine")).await;
+    let out = run(&world, migration("images-to-tools")).await;
+    assert_eq!(out.counts.written, 2, "{out:?}");
+    for name in ["broken", "fine"] {
+        let ban = ImageBan::new(ImageBanKind::generic("tampered"));
+        set_image_bans(&world, &group, name, &HashMap::from([(ban.id, ban)])).await;
+    }
+    // a legacy pipeline running the other image, which the scan bans after the backfill
+    seed_pipeline(&world, &group, "fine-pipe", &[&["fine"]], &HashMap::new()).await;
+    // one converted instance's stored metadata can't be parsed
+    let broken = ToolIdMap::first_instance_id(&group, "broken");
+    let fine = ToolIdMap::first_instance_id(&group, "fine");
+    let original = rewrite_kind_data(&world, broken, |_| "{\"spec\": [unparsable".to_owned()).await;
+    // the scan, which a failure would stop the API starting, still succeeds
+    let scanned = client.system.consistency_scan().await;
+    // put the instance back before asserting, so later tests' scans read it
+    rewrite_kind_data(&world, broken, |_| original.clone()).await;
+    scanned.expect("the scan succeeds past an unreadable instance");
+    // the other image's instance got its ban, and the pipeline scan after the backfill ran
+    assert_eq!(instance_ban_ids(&client, fine).await.len(), 1);
+    let pbans = pipeline_bans(&world, &group, "fine-pipe").await;
+    assert_eq!(pbans.len(), 1, "{pbans:?}");
+    // the audit reports the unreadable instance and carries on
+    rewrite_kind_data(&world, broken, |_| "{\"spec\": [unparsable".to_owned()).await;
+    let audits = Box::pin(thoradm::bans::audit(
+        world.conf.clone(),
+        world.backends.redis.clone(),
+    ))
+    .await;
+    rewrite_kind_data(&world, broken, |_| original.clone()).await;
+    let audits = audits.expect("the audit runs past an unreadable instance");
+    let entry = audits
+        .iter()
+        .find(|entry| entry.group == group && entry.image == "broken")
+        .expect("the audit lists the image with the unreadable instance");
+    assert!(!entry.covered, "{entry:?}");
+    assert!(
+        audited_instances(entry)
+            .iter()
+            .any(|(id, _, error)| *id == broken && *error),
+        "{entry:?}"
+    );
+    let entry = audits
+        .iter()
+        .find(|entry| entry.group == group && entry.image == "fine")
+        .expect("the audit lists the other image");
+    assert!(entry.covered, "{entry:?}");
 }

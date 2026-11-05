@@ -26,7 +26,7 @@ use std::net::SocketAddr;
 use std::os::unix::process::ExitStatusExt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use thoradm::args::{Args, BackupComponents, BackupSubCommands, SubCommands};
+use thoradm::args::{Args, BackupComponents, BackupSubCommands, BansSubCommands, SubCommands};
 use thoradm::backup::failures::{
     ComponentCounts, FAILURES_FILE, FailureKind, FailureLog, FailurePolicy, FailureRecord,
     Operation, read_records,
@@ -1308,6 +1308,19 @@ fn abort_on_failure_parses_as_a_plain_switch() {
     );
     // a value is a usage error, since there is no count or threshold
     assert!(parse(&["thoradm", "backup", "new", "--abort-on-failure=1"]).is_err());
+}
+
+/// `thoradm bans audit` parses with the global cluster config and takes no arguments of its own
+#[test]
+fn bans_audit_parses() {
+    let parse = |argv: &[&str]| Args::try_parse_from(argv);
+    let audit = parse(&["thoradm", "-c", "conf.yml", "bans", "audit"]).unwrap();
+    assert!(matches!(
+        audit.cmd,
+        SubCommands::Bans(BansSubCommands::Audit)
+    ));
+    assert_eq!(audit.cluster_conf, std::path::PathBuf::from("conf.yml"));
+    assert!(parse(&["thoradm", "bans", "audit", "extra"]).is_err());
 }
 
 /// Usage errors exit 1, so exit 2 always means recorded failures; help still exits 0
