@@ -11,8 +11,10 @@ export interface StageJob {
   id: string;
   /** The job's last status the updates recorded */
   status: JobStatus;
-  /** What the page shows for the job: its status, or Stopped when the run ended while it was queued or running */
+  /** What the page shows for the job: its status, or Stopped when the run ended while it was unfinished and it can never run */
   state: IndicatorStatus;
+  /** A note beside the job's state, set when the job can still run after its run failed */
+  note?: string;
   /** When the job was created */
   created?: string;
   /** When a worker last claimed the job */
@@ -39,6 +41,10 @@ export interface StageView {
   toolInstance?: string;
   /** The stage's state */
   state: IndicatorStatus;
+  /** A note beside the stage's state, set when its jobs can still run after the run failed */
+  note?: string;
+  /** When the stage's jobs that can still run after the run failed reach their last deadline, in milliseconds */
+  liveUntil?: number;
   /** The stage's jobs in creation order */
   jobs: StageJob[];
   /** Whether the stage is in the step the run is working on now */
@@ -46,7 +52,7 @@ export interface StageView {
 }
 
 /** The parts of a run the stage views read. */
-export type StageRun = Pick<Reaction, 'status' | 'current_stage' | 'generators' | 'plan'>;
+export type StageRun = Pick<Reaction, 'status' | 'current_stage' | 'generators' | 'plan' | 'run'>;
 
 /**
  * Get the name of a status update's action.
@@ -74,6 +80,8 @@ export function statusAction(action: StatusUpdate['action']): StatusAction | nul
 const COMPLETED_STATE: IndicatorStatus = JobStatus.Completed;
 /** The failed state, typed as a stage state for comparisons. */
 const FAILED_STATE: IndicatorStatus = JobStatus.Failed;
+/** The running state, typed as a stage state for comparisons. */
+const RUNNING_STATE: IndicatorStatus = JobStatus.Running;
 /** The stopped state, typed as a stage state for comparisons. */
 const STOPPED_STATE: IndicatorStatus = DerivedStageState.Stopped;
 
@@ -193,6 +201,83 @@ export function stageJobs(updates: StatusUpdate[], generators: string[] = []): M
 /** The job statuses that mean work is still queued or running. */
 const UNFINISHED_JOBS: string[] = [JobStatus.Created, JobStatus.Running, JobStatus.Sleeping];
 
+/** The job statuses that can still move on after their run failed, unless the run has a run token. */
+const LIVE_AFTER_FAILURE: string[] = [JobStatus.Created, JobStatus.Running];
+
+/**
+ * Tell whether a job, or a stage by its combined job status, can still run and record a final state after its
+ * run failed.
+ *
+ * Failing a run fails only the job that errored: its other running jobs keep running and still record whether
+ * they completed or failed, and its queued jobs stay queued, so a worker can still claim and run them. A run
+ * with a run token is the exception: its queued jobs are removed and its token is revoked with the run, so its
+ * workers can no longer claim jobs or report back.
+ *
+ * @param run - The run.
+ * @param status - The job's status, or a stage's combined job status.
+ * @returns Whether the run failed and the job can still run.
+ */
+export function liveAfterFailure(run: Pick<Reaction, 'status' | 'run'>, status: string): boolean {
+  return run.status === ReactionStatus.Failed && !run.run && LIVE_AFTER_FAILURE.includes(status);
+}
+
+/**
+ * Tell whether one job can still run and record a final state after its run failed. A generator the run
+ * lists as sleeping is never respawned for a failed run, and the API records nothing when a generator sleeps,
+ * so its last update can still be its claim.
+ *
+ * @param run - The run.
+ * @param job - The job.
+ * @returns Whether the run failed and the job can still run.
+ */
+export function jobLiveAfterFailure(run: Pick<Reaction, 'status' | 'run'>, job: Pick<StageJob, 'status' | 'generator'>): boolean {
+  return liveAfterFailure(run, job.status) && !(job.generator && job.status === JobStatus.Running);
+}
+
+/**
+ * Get the time a job that can still run stops being expected to finish.
+ *
+ * @param job - The job.
+ * @returns The job's deadline in milliseconds, or infinity when it can't be read.
+ */
+function jobLiveUntil(job: Pick<StageJob, 'deadline'>): number {
+  const deadline = parseTimestamp(job.deadline ?? '');
+  return Number.isNaN(deadline) ? Infinity : deadline;
+}
+
+/**
+ * Get the note beside a job, or a stage, that can still run after its run failed.
+ *
+ * @param status - The job's status, or the stage's combined job status.
+ * @returns The note.
+ */
+export function liveAfterFailureNote(status: IndicatorStatus): string {
+  return status === RUNNING_STATE
+    ? 'The run failed, but this job is still running and records its result when it finishes'
+    : 'The run failed, but this job is still queued and a worker can still claim it';
+}
+
+/**
+ * Tell whether a failed run's status updates should still be read, because one of its jobs can still run
+ * before its deadline.
+ *
+ * @param run - The run.
+ * @param updates - The run's status updates, or `undefined` before they are read.
+ * @param now - The current time in milliseconds.
+ * @returns Whether a job of the failed run is still queued or running within its deadline.
+ */
+export function jobsLiveAfterFailure(
+  run: Pick<Reaction, 'status' | 'run' | 'generators'>,
+  updates: StatusUpdate[] | undefined,
+  now: number,
+): boolean {
+  if (!updates || !liveAfterFailure(run, JobStatus.Running)) return false;
+  // a job past its deadline is no longer expected to finish; a deadline that can't be read keeps reading
+  return [...stageJobs(updates, run.generators ?? []).values()]
+    .flat()
+    .some((job) => jobLiveAfterFailure(run, job) && now < jobLiveUntil(job));
+}
+
 /**
  * Combine the statuses of a stage's jobs into one: a failure wins, then running, sleeping, and queued
  * work; a stage is complete only when every job is.
@@ -212,21 +297,25 @@ export function combineJobStatuses(jobs: Pick<StageJob, 'status'>[]): JobStatus 
  *
  * @param run - The run.
  * @param step - The stage's step, counted from zero.
- * @param jobs - The stage's jobs.
+ * @param jobs - The stage's jobs, with whether each is one of the run's sleeping generators.
  * @returns The stage's state.
  */
 export function stageState(
-  run: Pick<Reaction, 'status' | 'current_stage'>,
+  run: Pick<Reaction, 'status' | 'current_stage' | 'run'>,
   step: number,
-  jobs: Pick<StageJob, 'status'>[],
+  jobs: (Pick<StageJob, 'status'> & Partial<Pick<StageJob, 'generator'>>)[],
 ): IndicatorStatus {
   const finished = isRunFinished(run.status);
   if (jobs.length > 0) {
     const combined = combineJobStatuses(jobs);
     // the run moves past a step only once all of its jobs completed
     if (step < run.current_stage && combined !== JobStatus.Failed) return JobStatus.Completed;
-    if (finished && UNFINISHED_JOBS.includes(combined))
-      return run.status === ReactionStatus.Completed ? JobStatus.Completed : DerivedStageState.Stopped;
+    if (finished && UNFINISHED_JOBS.includes(combined)) {
+      if (run.status === ReactionStatus.Completed) return JobStatus.Completed;
+      // only the jobs that can still run after the run failed keep the stage from being stopped
+      const live = jobs.filter((job) => jobLiveAfterFailure(run, { status: job.status, generator: job.generator ?? false }));
+      return live.length > 0 ? combineJobStatuses(live) : DerivedStageState.Stopped;
+    }
     return combined;
   }
   // without jobs in the updates, the run's own position tells the state
@@ -251,11 +340,18 @@ export function buildStageViews(run: StageRun, order: string[][], updates: Statu
     names.map((name) => {
       const stageJobList = jobs.get(name) ?? [];
       const state = stageState(run, step, stageJobList);
-      // a job left queued or running when the run ended shows as stopped, like its stage
+      // a job left unfinished when the run ended shows as stopped, like its stage, unless it can still run
       for (const job of stageJobList) {
-        if (finished && UNFINISHED_JOBS.includes(job.status) && state !== COMPLETED_STATE) job.state = DerivedStageState.Stopped;
+        if (!finished || !UNFINISHED_JOBS.includes(job.status) || state === COMPLETED_STATE) continue;
+        if (jobLiveAfterFailure(run, job)) job.note = liveAfterFailureNote(job.status);
+        else job.state = DerivedStageState.Stopped;
       }
-      return { name, step, toolInstance: tools.get(name), state, jobs: stageJobList, active: !finished && step === run.current_stage };
+      const note = finished && liveAfterFailure(run, state) ? liveAfterFailureNote(state) : undefined;
+      // the stage's logs are read until the last deadline of its jobs that can still run
+      const liveJobs = note === undefined ? [] : stageJobList.filter((job) => job.note !== undefined);
+      const liveUntil = liveJobs.length > 0 ? Math.max(...liveJobs.map(jobLiveUntil)) : undefined;
+      const active = !finished && step === run.current_stage;
+      return { name, step, toolInstance: tools.get(name), state, note, liveUntil, jobs: stageJobList, active };
     }),
   );
 }

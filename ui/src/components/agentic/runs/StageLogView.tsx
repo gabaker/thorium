@@ -13,13 +13,15 @@ interface StageLogViewProps {
   reaction: string;
   /** The stage's name */
   stage: string;
-  /** Whether the run is still working, so the logs keep reloading */
+  /** Whether the run is still working, or the stage's jobs can still run after it failed, so the logs keep reloading */
   running: boolean;
+  /** When set, the time in milliseconds after which the logs stop reloading */
+  liveUntil?: number;
 }
 
 /** The log lines of one stage, reloaded while the run works. */
-export const StageLogView: FC<StageLogViewProps> = ({ group, reaction, stage, running }) => {
-  const { data: lines, error } = useStageLogs(group, reaction, stage, running);
+export const StageLogView: FC<StageLogViewProps> = ({ group, reaction, stage, running, liveUntil }) => {
+  const { data: lines, error } = useStageLogs(group, reaction, stage, running, liveUntil);
   // each state is its own block so it never runs on from the stage's Hide logs button; a failed read
   // keeps its error shown until the next successful read replaces it with the lines
   if (error !== '') {

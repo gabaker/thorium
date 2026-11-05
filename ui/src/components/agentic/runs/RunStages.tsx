@@ -112,6 +112,11 @@ const StageJobs: FC<StageJobsProps> = ({ stage, running }) => {
               </td>
               <td>
                 <StatusPill status={job.state} testId={`job-status-${job.id}`} />
+                {job.note && (
+                  <Muted as="div" data-testid={`job-note-${job.id}`}>
+                    {job.note}
+                  </Muted>
+                )}
               </td>
               <td>{job.worker ? <Mono>{job.worker}</Mono> : <Muted>none</Muted>}</td>
               <td>{job.created ? <RunTime value={job.created} /> : <Muted>none</Muted>}</td>
@@ -146,11 +151,14 @@ interface StageDetailProps {
 /** One stage: its status, tool, step, jobs, a link to its log page, and its logs. */
 const StageDetail: FC<StageDetailProps> = ({ run, stage, parallel, tool, selected, shown, onToggle }) => {
   const running = !isRunFinished(run.status);
+  // a stage whose jobs can still run after the run failed still gets its logs when they finish
+  const live = running || stage.note !== undefined;
   return (
     <StageBlock id={stageBlockId(stage.name)} $selected={selected} data-testid="stage-detail" data-stage={stage.name}>
       <InlineRow>
         <StatusPill status={stage.state} testId={`stage-status-${stage.name}`} />
         <Mono>{stage.name}</Mono>
+        {stage.note && <Muted data-testid={`stage-note-${stage.name}`}>{stage.note}</Muted>}
         {tool && (
           <Muted>
             runs{' '}
@@ -172,7 +180,7 @@ const StageDetail: FC<StageDetailProps> = ({ run, stage, parallel, tool, selecte
       </InlineRow>
       <StageBody>
         <StageJobs stage={stage} running={running} />
-        {shown && <StageLogView group={run.group} reaction={run.id} stage={stage.name} running={running} />}
+        {shown && <StageLogView group={run.group} reaction={run.id} stage={stage.name} running={live} liveUntil={stage.liveUntil} />}
       </StageBody>
     </StageBlock>
   );
