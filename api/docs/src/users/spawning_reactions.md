@@ -103,6 +103,38 @@ preferable to `thorctl reactions create` for running a quick, one-off reaction.
 
 The status of a reaction and its lifetime are covered in [Reaction Status](../developers/reaction_status.md).
 
+### Reactions an upgrade cancelled
+---
+
+An upgrade to a release with tools can cancel the reactions that are still `Created` or `Started`
+when it converts pipelines, if your admin chooses that over waiting for them. A cancelled reaction
+shows as `Failed`, and its status log says why (as `thorctl reactions logs` prints it):
+
+```text
+[2026-11-04 10:06:02 UTC] ReactionFailed: cancelled by the upgrade to 2026-10-v04; recorded to be resubmitted once the upgrade finishes
+```
+
+After the conversion, Thorium creates the reaction again as you, with the same samples, repos, tags,
+and arguments, and appends a second entry to the old reaction's status log naming the new one:
+
+```text
+[2026-11-04 10:31:47 UTC] ReactionFailed: resubmitted by the upgrade to 2026-10-v04 as 9a4f2e11-...
+```
+
+Read the status log with `thorctl reactions logs <REACTION>` or in the UI's reaction page. The new
+reaction carries the tag `resubmitted-from:<old id>`, so you can find it by tag
+(`GET /api/reactions/tag/{group}/resubmitted-from:<old id>/`). It runs every stage of the pipeline
+again, the stages the cancelled reaction had finished included; the results those stages already
+wrote are kept. It has no parent reaction and gets the pipeline's default SLA.
+
+A cancelled reaction with no `resubmitted ... as` entry wasn't created again. When the cancel
+already knew it couldn't be (the reaction used uploaded files, its arguments were too large to keep,
+or you have no owner, manager, or user role in the group, among other reasons), the first entry
+says so: `cancelled by the upgrade to 2026-10-v04; not resubmitted: <reason>`. A reaction the
+resubmission refused later (for example because the pipeline changed or wasn't converted) gets no
+second entry. Ask your admin, whose report names the reason, or create the reaction again
+yourself.
+
 ### Who can do this, and limits
 ---
 

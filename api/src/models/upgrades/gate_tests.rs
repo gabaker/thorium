@@ -4,11 +4,12 @@
 use std::collections::BTreeSet;
 
 use super::gate::{
-    LossGate, LossVerdict, LossySetting, confirmation_code, consumed_codes, recorded_code,
+    CODE_LEN, LossGate, LossVerdict, LossySetting, confirmation_code, consumed_codes, drain_code,
+    grace_secs, recorded_code,
 };
 use super::{
-    AppliedStep, BlockReason, ConfirmRefusal, FieldLoss, RevisionId, StepLoss, StepState,
-    UpgradeApproval, UpgradeState,
+    AppliedStep, BlockReason, ConfirmRefusal, FieldLoss, QUIESCE_STEP, RevisionId, StepLoss,
+    StepState, UPGRADE_STOPPED_STEP, UpgradeApproval, UpgradeState,
 };
 
 /// The step every test judges
@@ -365,4 +366,126 @@ fn a_started_step_consumes_the_code_it_repeated() {
         consumed_codes(&history, STEP),
         BTreeSet::from(["USED0001".to_owned()])
     );
+}
+
+/// Build a timed history entry
+///
+/// # Arguments
+///
+/// * `step` - The step's id
+/// * `outcome` - How the step ended
+/// * `at` - When it was recorded
+fn timed(step: &str, outcome: StepState, at: &str) -> AppliedStep {
+    // an entry of the conversion revision at a time
+    AppliedStep {
+        revision: "2026-10-v04".to_owned(),
+        step: step.to_owned(),
+        outcome,
+        at: Some(at.to_owned()),
+        ..AppliedStep::default()
+    }
+}
+
+/// The drain's code is stable while the history is: the same inputs give the same 8 Crockford
+/// characters, which differ for another step or target
+#[test]
+fn the_drain_code_is_stable_while_the_history_is() {
+    // a history that stopped at the schema revision
+    let history = vec![timed(
+        "schema-apply",
+        StepState::Done,
+        "2026-11-01T00:00:00Z",
+    )];
+    let code = drain_code("drain-reactions", "2026-10-v03", "2026-10-v04", &history);
+    // the code is 8 Crockford base32 characters and repeats for the same history
+    assert_eq!(code.len(), CODE_LEN, "{code}");
+    assert!(
+        code.chars()
+            .all(|c| "0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(c)),
+        "{code}"
+    );
+    assert_eq!(
+        code,
+        drain_code("drain-reactions", "2026-10-v03", "2026-10-v04", &history)
+    );
+    // another step or target gives another code
+    assert_ne!(
+        code,
+        drain_code("other-step", "2026-10-v03", "2026-10-v04", &history)
+    );
+    assert_ne!(
+        code,
+        drain_code("drain-reactions", "2026-10-v03", "2026-10-v05", &history)
+    );
+}
+
+/// Any entry added to the history changes the drain's code: a quiesce, a restore of the paused
+/// components, a stopped upgrade, and an entry of the same length but a newer time
+#[test]
+fn the_drain_code_changes_with_any_history_entry() {
+    // the code shown while the drain waits
+    let mut history = vec![timed(
+        "schema-apply",
+        StepState::Done,
+        "2026-11-01T00:00:00Z",
+    )];
+    let shown = drain_code("drain-reactions", "2026-10-v03", "2026-10-v04", &history);
+    let mut seen = vec![shown];
+    // each added entry gives a code never seen before
+    for (step, outcome, at) in [
+        (QUIESCE_STEP, StepState::Running, "2026-11-01T00:01:00Z"),
+        ("restore-paused", StepState::Done, "2026-11-01T00:02:00Z"),
+        (
+            UPGRADE_STOPPED_STEP,
+            StepState::Done,
+            "2026-11-01T00:03:00Z",
+        ),
+    ] {
+        history.push(timed(step, outcome, at));
+        let code = drain_code("drain-reactions", "2026-10-v03", "2026-10-v04", &history);
+        assert!(!seen.contains(&code), "{code} repeats after {step}");
+        seen.push(code);
+    }
+    // a history of the same length whose newest entry is newer gives another code too
+    let last = history.len() - 1;
+    history[last].at = Some("2026-11-01T00:04:00Z".to_owned());
+    let code = drain_code("drain-reactions", "2026-10-v03", "2026-10-v04", &history);
+    assert!(!seen.contains(&code), "{code} repeats for a newer entry");
+}
+
+/// The code a quiesce entry recorded is consumed for the step it quiesced for, beside the codes
+/// the step's own started entries hold
+#[test]
+fn a_quiesce_entry_consumes_its_code() {
+    // a quiesce for the drain, then the drain's run
+    let mut quiesce = timed(QUIESCE_STEP, StepState::Running, "2026-11-01T00:01:00Z");
+    quiesce.confirm = Some("QUIESCE1".to_owned());
+    quiesce.chain = vec!["drain-reactions".to_owned()];
+    let history = state(vec![
+        quiesce,
+        timed(
+            "drain-reactions",
+            StepState::Running,
+            "2026-11-01T00:02:00Z",
+        ),
+    ]);
+    // the quiesce's code counts as consumed
+    assert_eq!(
+        consumed_codes(&history, "drain-reactions"),
+        BTreeSet::from(["QUIESCE1".to_owned()])
+    );
+}
+
+/// The grace is 60 seconds when unset, and an asked grace is kept up to an hour
+#[test]
+fn the_grace_defaults_to_a_minute_and_is_capped_at_an_hour() {
+    // unset, in range, zero, and too long
+    let with = |grace: Option<u64>| UpgradeApproval {
+        grace_seconds: grace,
+        ..UpgradeApproval::default()
+    };
+    assert_eq!(grace_secs(&with(None)), 60);
+    assert_eq!(grace_secs(&with(Some(30))), 30);
+    assert_eq!(grace_secs(&with(Some(0))), 0);
+    assert_eq!(grace_secs(&with(Some(7200))), 3600);
 }

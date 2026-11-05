@@ -19,6 +19,9 @@ tool in the pipeline cause the reaction to be marked as `Completed`.
 | Completed | This reaction has completed successfully. |
 | Failed | The reaction has failed due to an error. |
 
+An upgrade that cancels the reactions in flight also leaves them `Failed`, with the reason in their
+status log; see [Reactions an upgrade cancelled](../users/spawning_reactions.md#reactions-an-upgrade-cancelled).
+
 ### Checking status with Thorctl
 ---
 

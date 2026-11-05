@@ -66,7 +66,7 @@ the operator's upgrade code:
    an additive change runs by itself, an Elasticsearch rebuild and a data migration wait for an
    approval, a migration with corrupted objects fails on the first group over its limit and
    finishes after you fix the objects and run `thoradm migrate run --id <migration> --reason
-   <code>` or accept the code in `acceptIssues`, and a migration interrupted by killing its pod
+   <code>` or accept the code in `acceptIssues` (`accept_issues` in the `ThoriumCluster`), and a migration interrupted by killing its pod
    resumes.
 2. **Pre-release round trip.** (A feature branch's catalog only: the shipped catalog has no
    pre-release revision.) The base revision to a pre-release revision, back with the branch

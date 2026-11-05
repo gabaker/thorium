@@ -129,6 +129,22 @@ impl Catalog {
                     step.id, step.group_max
                 ));
             }
+            // a step that cancels on approval stops its quiesced components first, then pauses the
+            // rest and runs its migration, so it needs all three, with the quiesce inside the pause
+            if step.cancels_on_approval {
+                let quiesce_paused = step.quiesce.iter().all(|c| step.pause.contains(c));
+                if step.quiesce.is_empty()
+                    || step.pause.is_empty()
+                    || step.thoradm_migration.is_none()
+                    || !quiesce_paused
+                {
+                    problems.push(format!(
+                        "step {} cancels on approval, so it needs a quiesce list that is part of \
+                         its pause list, a pause list, and a thoradm migration",
+                        step.id
+                    ));
+                }
+            }
             // a step that reverses another must sit on a downward edge and name a step of the
             // edge it undoes
             if let Some(forward) = step.reverses {
@@ -560,4 +576,123 @@ fn overlaps(first: &[SchemaTarget], second: &[SchemaTarget]) -> bool {
 fn label(edge: &CatalogEntry) -> String {
     // show the start (or that it is a baseline) and the end
     format!("{} -> {}", edge.from.unwrap_or("(baseline)"), edge.id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{
+        Catalog, CatalogEntry, MigrationPhase, StepDef, StepKind, UpgradeComponent,
+    };
+
+    /// The components the fixture step pauses
+    const PAUSE: &[UpgradeComponent] = &[UpgradeComponent::Api, UpgradeComponent::Scaler];
+
+    /// The components the fixture step quiesces
+    const QUIESCE: &[UpgradeComponent] = &[UpgradeComponent::Scaler];
+
+    /// A step that cancels on approval with everything it needs
+    const CANCELLING: StepDef = StepDef {
+        id: "cancel-work",
+        kind: StepKind::Data,
+        description: "Cancel the work in flight",
+        pause: PAUSE,
+        quiesce: QUIESCE,
+        cancels_on_approval: true,
+        thoradm_migration: Some("cancel-work"),
+        manual_procedure: Some("Run `thoradm migrate run --id cancel-work`."),
+        phase: Some(MigrationPhase::Migrate),
+        check_only: true,
+        ..StepDef::BASE
+    };
+
+    /// Check a catalog of a baseline and one edge holding a step
+    ///
+    /// # Arguments
+    ///
+    /// * `step` - The step of the edge
+    fn check_with(step: &StepDef) -> Result<(), Vec<String>> {
+        // a baseline and a release edge with the one step
+        let steps: &'static [StepDef] = vec![*step].leak();
+        let edges: &'static [CatalogEntry] = vec![
+            CatalogEntry {
+                from: None,
+                id: "2026-10-v01",
+                released_with: "0.0.0",
+                description: "A fixture baseline",
+                schema: None,
+                prerelease: false,
+                sibling: false,
+                steps: &[],
+            },
+            CatalogEntry {
+                from: Some("2026-10-v01"),
+                id: "2026-10-v02",
+                released_with: "0.0.0",
+                description: "A fixture edge",
+                schema: None,
+                prerelease: false,
+                sibling: false,
+                steps,
+            },
+        ]
+        .leak();
+        Catalog { edges, floors: &[] }.check()
+    }
+
+    /// A step that cancels on approval needs a quiesce list, a pause, and a thoradm migration, and
+    /// its quiesce list must be part of its pause; one that has them all passes
+    #[test]
+    fn a_step_that_cancels_on_approval_needs_a_quiesce_within_its_pause_and_a_migration() {
+        // the complete step passes
+        assert_eq!(check_with(&CANCELLING), Ok(()));
+        // each missing part, and a quiesce outside the pause, is refused naming the step
+        for (broken, why) in [
+            (
+                StepDef {
+                    quiesce: &[],
+                    ..CANCELLING
+                },
+                "no quiesce",
+            ),
+            (
+                StepDef {
+                    pause: &[],
+                    quiesce: &[],
+                    ..CANCELLING
+                },
+                "no pause",
+            ),
+            (
+                StepDef {
+                    thoradm_migration: None,
+                    ..CANCELLING
+                },
+                "no migration",
+            ),
+            (
+                StepDef {
+                    quiesce: &[UpgradeComponent::EventHandler],
+                    ..CANCELLING
+                },
+                "quiesce outside the pause",
+            ),
+        ] {
+            let problems = check_with(&broken).expect_err(why);
+            assert!(
+                problems
+                    .iter()
+                    .any(|problem| problem.contains("cancel-work") && problem.contains("cancels")),
+                "{why}: {problems:?}"
+            );
+        }
+        // a step that doesn't cancel on approval needs none of them
+        assert_eq!(
+            check_with(&StepDef {
+                cancels_on_approval: false,
+                quiesce: &[],
+                ..CANCELLING
+            }),
+            Ok(())
+        );
+    }
 }

@@ -468,17 +468,28 @@ mod tests {
         assert_eq!(migration.families, ["entities"]);
     }
 
-    /// The drain is registered as a check that waits and a run that cancels, and its step has no
-    /// pause list, no approval work, and a procedure that names the check that lists what holds
-    /// it and the command that clears reactions
+    /// The drain is registered as a check that waits and a run that cancels, and its step pauses
+    /// the conversion's components only through an approved cancel, stopping the scalers first,
+    /// and has a procedure that names the check that lists what holds it and the command that
+    /// clears reactions
     #[test]
     fn the_drain_is_a_check_with_a_waiting_step() {
         // the registration checks and runs
         let migration = find("drain-reactions").expect("the migration is registered");
         assert_eq!(migration.support, Support::Yes);
-        // its step pauses nothing, reads nothing after another step, and says how to clear reactions
+        // its step pauses what the conversions pause, stops the scalers first, cancels only on
+        // approval, reads nothing after another step, and says how to clear reactions
         let step = step_for("drain-reactions").expect("a catalog step");
-        assert!(step.pause.is_empty() && step.reads_after.is_empty());
+        let images = step_for("images-to-tools").expect("a catalog step");
+        assert_eq!(step.pause, images.pause);
+        assert_eq!(
+            step.quiesce,
+            [
+                upgrades::UpgradeComponent::Scaler,
+                upgrades::UpgradeComponent::BaremetalScaler
+            ]
+        );
+        assert!(step.cancels_on_approval && step.reads_after.is_empty());
         let procedure = step.manual_procedure.expect("a procedure");
         assert!(
             procedure.contains("thorctl reactions delete"),

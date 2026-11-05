@@ -180,10 +180,11 @@ pub use rebucket::{
     prepared_statements, scan_table,
 };
 pub use record::{
-    FINALIZE_STEP, RECORD_REVISION_STEP, RESULT_PREFIX, RESULT_TTL_SECS, REVISION_ROW, RecordError,
-    SEED_REVISION_STEP, append_history, catalog_identity, claim_consumed_code,
-    copy_operator_entries, finished_steps, history_id, read_job_result, read_status,
-    record_family_layout, record_revision, seed_from_state, write_job_result,
+    FINALIZE_STEP, RECORD_REVISION_STEP, RESULT_CHUNK_BYTES, RESULT_PREFIX, RESULT_TTL_SECS,
+    REVISION_ROW, RecordError, SEED_REVISION_STEP, append_history, catalog_identity,
+    claim_consumed_code, copy_operator_entries, finished_steps, history_id, join_result,
+    read_job_result, read_status, record_family_layout, record_revision, result_lines,
+    seed_from_state, write_job_result,
 };
 pub use registry::{Keyspace, RegistryError, SchemaDefinition, SchemaObject, validate};
 pub use released::LATER_REVISION_OBJECTS;

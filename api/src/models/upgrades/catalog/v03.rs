@@ -41,7 +41,8 @@ pub(super) const STEPS: &[StepDef] = &[
         manual_procedure: Some(
             "Run `thoradm migrate run users-settings-theme` with the API scaled to zero. A user \
              whose theme can't be read is listed by `thoradm migrate issues`; fix the user or \
-             accept the code with `acceptIssues` in the approval.",
+             accept the code with `acceptIssues` (`accept_issues` in the ThoriumCluster) in the \
+             approval.",
         ),
         targets: &[SchemaTarget {
             backend: SchemaBackend::Redis,

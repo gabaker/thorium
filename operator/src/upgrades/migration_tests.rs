@@ -332,6 +332,14 @@ impl Scene {
     ///
     /// Returns when the reconcile asks to be run again: the upgrade's action, or the hold's.
     async fn reconcile(&self) -> Option<Action> {
+        // box the reconcile since its future is too large to keep on the stack of every test
+        Box::pin(self.reconcile_inner()).await
+    }
+
+    /// Run one reconcile of the upgrade, which [`Scene::reconcile`] boxes
+    ///
+    /// Returns when the reconcile asks to be run again: the upgrade's action, or the hold's.
+    async fn reconcile_inner(&self) -> Option<Action> {
         // gate the cluster with the status the last reconcile left
         let mut cluster = self.cluster.clone();
         cluster.status = Some(self.sim.status());
@@ -339,7 +347,7 @@ impl Scene {
         // a cluster that is held or reached its target has nothing left to run
         let tracker = tracked(&cluster);
         let pending = match gate(&client, &tracker).await {
-            Ok(Gate::Upgrade(pending)) => pending,
+            Ok(Gate::Upgrade(pending)) => Some(pending),
             Ok(Gate::Hold(action)) => return Some(action),
             // a hold with a run open stops its Job first, through the gate's status tracker
             Ok(Gate::Stop { action, stored }) => {
@@ -347,12 +355,22 @@ impl Scene {
                 meta.status = std::sync::Arc::new(tracker);
                 return Some(super::stop(&meta, action, stored).await.expect("stop"));
             }
+            Ok(Gate::Current) => None,
             _ => return None,
         };
         let meta = meta_for(cluster, &client);
-        Box::pin(run_with(&meta, pending, &Local))
-            .await
-            .expect("run")
+        if let Some(pending) = pending
+            && let Some(action) = Box::pin(run_with(&meta, pending, &Local))
+                .await
+                .expect("run")
+        {
+            return Some(action);
+        }
+        // a resubmission that holds the pause holds the rollout too, as the reconcile does
+        match super::resubmit::track(&meta).await.expect("resubmit") {
+            super::resubmit::Tracked::Hold(action) => Some(action),
+            _ => None,
+        }
     }
 
     /// Run several reconciles
@@ -2765,6 +2783,14 @@ mod reingest_tests;
 #[path = "rerun_tests.rs"]
 mod rerun_tests;
 
+/// Tests of the drain's cancel on approval: its code, quiesce, grace, run, and withdrawal
+#[path = "quiesce_tests.rs"]
+mod quiesce_tests;
+
+/// Tests of resubmitting the requests a drain recorded, inside the conversion pause
+#[path = "resubmit_tests.rs"]
+mod resubmit_tests;
+
 /// Build a catalog of the production drain and image conversion steps, from the first revision to
 /// the second
 fn agentic_catalog() -> Catalog {
@@ -2847,9 +2873,11 @@ async fn the_drain_waits_before_anything_is_paused_and_skips_when_nothing_is_in_
     // the step waits with the reason and asks for no approval
     let step = scene.step("drain-reactions");
     assert_eq!(step.state, StepState::Waiting, "{step:?}");
-    assert_eq!(
-        step.message.as_deref(),
-        Some("2 reaction(s) are still Created or Started")
+    assert!(
+        step.message.as_deref().is_some_and(
+            |message| message.starts_with("2 reaction(s) are still Created or Started")
+        ),
+        "{step:?}"
     );
     // no migration Job ran and every component keeps its replicas
     assert_eq!(migrations(&scene).len(), 0);

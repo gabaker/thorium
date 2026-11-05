@@ -473,6 +473,7 @@ pub fn render_reason(reason: &BlockReason) -> String {
     match reason {
         BlockReason::Approval => "approval".to_owned(),
         BlockReason::LossAcceptance { .. } => "loss acceptance".to_owned(),
+        BlockReason::CancelApproval { .. } => "cancel approval".to_owned(),
         BlockReason::ConfirmationRefused { refusal, .. } => format!("confirmation {refusal:?}"),
         BlockReason::Drift { objects } => format!("drift on {}", objects.join(", ")),
         BlockReason::Unknown => "unknown".to_owned(),
@@ -489,7 +490,8 @@ pub fn render_reason(reason: &BlockReason) -> String {
 pub fn reasons_match(expected: &BlockReason, found: &BlockReason) -> bool {
     // a code inside the reason isn't compared, only that one is shown
     match (expected, found) {
-        (BlockReason::LossAcceptance { .. }, BlockReason::LossAcceptance { confirm }) => {
+        (BlockReason::LossAcceptance { .. }, BlockReason::LossAcceptance { confirm })
+        | (BlockReason::CancelApproval { .. }, BlockReason::CancelApproval { confirm }) => {
             !confirm.is_empty()
         }
         (

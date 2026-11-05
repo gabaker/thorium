@@ -66,8 +66,8 @@ pub use catalog::{
 };
 pub use checks::MAX_GROUP_MAX;
 pub use gate::{
-    CODE_LEN, CONSUMED_REFUSAL, LossGate, LossVerdict, LossySetting, confirmation_code,
-    consumed_codes, recorded_code,
+    CODE_LEN, CONSUMED_REFUSAL, DEFAULT_GRACE_SECS, LossGate, LossVerdict, LossySetting,
+    MAX_GRACE_SECS, confirmation_code, consumed_codes, drain_code, grace_secs, recorded_code,
 };
 pub use plan::{
     ChainLink, PlanDirection, PlanItem, PlannedPass, UpgradePlan, plan, resolve_target,
@@ -85,8 +85,8 @@ pub use reversibility::{
 pub use revisions::{REVISION_PATTERN, RevisionId, UpgradeError};
 pub use state::{
     APPLY_KEY_MARKER, AppliedStep, DEPLOYMENT_MARKER, HELD_FAILURE_MARKER, IssueSummary,
-    RECORD_MARKER, RESET_STATE_STEP, RESTORED_STEP, RETRY_VALUE_MARKER, UPGRADE_STOPPED_STEP,
-    UpgradeState, attempt_start, label_value,
+    QUIESCE_STEP, RECORD_MARKER, RESET_STATE_STEP, RESTORED_STEP, RETRY_VALUE_MARKER,
+    UPGRADE_STOPPED_STEP, UpgradeState, attempt_start, label_value,
 };
 pub use status::{
     BackendSchemaStatus, BlockReason, ConfirmRefusal, DriftEntry, DriftKind, DriftSummary,

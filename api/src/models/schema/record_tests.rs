@@ -7,14 +7,14 @@ use std::collections::BTreeMap;
 use super::record::{copyable, ends_reingest, picked, seed_differences};
 use super::{
     BackendDrift, DriftReport, Fingerprint, FinishedStep, ObjectDrift, catalog_identity,
-    finished_steps, history_id,
+    finished_steps, history_id, join_result,
 };
 use crate::models::upgrades::fixtures::{
     BASE, DATA_BLANK_PROCEDURE, ONE_EDGE, PROCEDURE_STEP, RELEASE, SKIP,
 };
 use crate::models::upgrades::{
-    AppliedStep, BackendSchemaStatus, DriftKind, RESET_STATE_STEP, RevisionId, SchemaBackend,
-    StepState,
+    AppliedStep, BackendSchemaStatus, Catalog, CatalogEntry, DriftKind, RESET_STATE_STEP,
+    RevisionId, SchemaBackend, StepDef, StepState, UpgradeComponent,
 };
 
 /// Build a history entry
@@ -231,6 +231,59 @@ fn the_catalog_identity_names_its_latest_revision_and_hashes_its_steps() {
     assert_ne!(one.hash, skip.hash);
 }
 
+/// Copy the one-edge catalog with its first step changed
+///
+/// # Arguments
+///
+/// * `change` - What to change on the step
+fn with_first_step(change: impl Fn(StepDef) -> StepDef) -> Catalog {
+    // copy every edge, changing the first step that exists
+    let mut changed = false;
+    let edges = ONE_EDGE
+        .edges
+        .iter()
+        .map(|edge| {
+            if changed || edge.steps.is_empty() {
+                return *edge;
+            }
+            changed = true;
+            let mut steps = edge.steps.to_vec();
+            steps[0] = change(steps[0]);
+            CatalogEntry {
+                steps: steps.leak(),
+                ..*edge
+            }
+        })
+        .collect::<Vec<_>>();
+    assert!(changed, "the fixture has a step");
+    Catalog {
+        edges: edges.leak(),
+        floors: ONE_EDGE.floors,
+    }
+}
+
+/// The catalog identity moves when a step's quiesce list or whether it cancels on approval changes,
+/// so an operator and a thoradm that run such a step differently never agree
+#[test]
+fn the_catalog_identity_hashes_quiesce_and_cancels_on_approval() {
+    // the fixture as it is, with a quiesce list, and cancelling on approval
+    let base = catalog_identity(&ONE_EDGE);
+    let quiesced = catalog_identity(&with_first_step(|step| StepDef {
+        quiesce: &[UpgradeComponent::Scaler],
+        ..step
+    }));
+    let cancelling = catalog_identity(&with_first_step(|step| StepDef {
+        cancels_on_approval: true,
+        ..step
+    }));
+    // each change moves the hash, and the two changes differ from each other
+    assert_ne!(base.hash, quiesced.hash);
+    assert_ne!(base.hash, cancelling.hash);
+    assert_ne!(quiesced.hash, cancelling.hash);
+    // a step that sets neither keeps the hash it had
+    assert_eq!(base, catalog_identity(&with_first_step(|step| step)));
+}
+
 /// Build a drift entry for an object
 ///
 /// # Arguments
@@ -435,4 +488,21 @@ fn the_operators_done_of_a_rerun_is_copied_though_the_record_holds_an_older_done
     let copied = picked(&DATA_BLANK_PROCEDURE, &history, &recorded);
     assert!(copied.contains(&second_done), "{copied:?}");
     assert!(!copied.contains(&first_done), "{copied:?}");
+}
+
+/// A chunk line whose count doesn't match the lines printed is refused before anything is sized
+/// by it, however large the count
+#[test]
+fn a_result_count_that_does_not_match_the_lines_is_refused() {
+    // one line naming a count far beyond what could be allocated
+    let err = join_result(&["1/99999999999 x"]).expect_err("the huge count is refused");
+    assert_eq!(err, "result chunk 2 of 99999999999 is missing");
+    // two lines that agree on a count of three name the chunk that never came
+    let err = join_result(&["1/3 a", "3/3 c"]).expect_err("the short result is refused");
+    assert_eq!(err, "result chunk 2 of 3 is missing");
+    // more lines than the count names
+    let err = join_result(&["1/2 a", "2/2 b", "2/2 c"]).expect_err("the long result is refused");
+    assert!(err.contains("2 chunks but 3"), "{err}");
+    // a count matching the lines still joins
+    assert_eq!(join_result(&["2/2 b", "1/2 a"]), Ok("ab".to_owned()));
 }

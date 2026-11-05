@@ -93,6 +93,13 @@ pub struct StepDef {
     /// The components the operator pauses (scales to zero) before this step runs and restores
     /// after the new release's Deployments are applied
     pub pause: &'static [UpgradeComponent],
+    /// The components of `pause` scaled to zero first, for a grace period before the rest of
+    /// `pause`, when an approval starts a step that cancels in-flight work
+    pub quiesce: &'static [UpgradeComponent],
+    /// Whether an approval with `cancel_in_flight` and the step's current confirmation code starts
+    /// the step's run instead of holding it: the `quiesce` components stop first, the step never
+    /// skips on that path, and its run cancels the work still in flight
+    pub cancels_on_approval: bool,
     /// The thoradm migration that performs this step, if thoradm runs it
     pub thoradm_migration: Option<&'static str>,
     /// How to perform this step by hand when it can't run automatically
@@ -137,6 +144,8 @@ impl StepDef {
         kind: StepKind::Config,
         description: "",
         pause: &[],
+        quiesce: &[],
+        cancels_on_approval: false,
         thoradm_migration: None,
         manual_procedure: None,
         targets: &[],

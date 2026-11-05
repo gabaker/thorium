@@ -20,7 +20,8 @@ pub(super) const STEPS: &[StepDef] = &[StepDef {
     manual_procedure: Some(
         "Run `thoradm migrate run users-settings-theme-reverse` with the API scaled to zero. A \
          user whose theme or settings can't be read is listed by `thoradm migrate issues`; fix \
-         the user or accept the code with `acceptIssues` in the approval.",
+         the user or accept the code with `acceptIssues` (`accept_issues` in the ThoriumCluster) \
+         in the approval.",
     ),
     phase: Some(MigrationPhase::Migrate),
     reverses: Some(USERS_SETTINGS_THEME_STEP),

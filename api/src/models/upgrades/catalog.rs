@@ -574,18 +574,38 @@ mod tests {
         assert_eq!(Catalog::PRODUCTION.check(), Ok(()));
     }
 
-    /// The drain waits first and pauses nothing, every step that pauses comes after it, and every
-    /// data step after it reads after it, so no check precedes the wait
+    /// The drain leads the edge and is check-only; it pauses the conversion pause, quiesces the
+    /// scalers first, and cancels on approval, so its pause is reached only through an approved run;
+    /// the conversions come after it, and every data step after it reads after it
     #[test]
     fn v04_drains_before_any_pause_and_its_data_steps_read_after_the_drain() {
         let steps = v04().steps;
-        // the drain leads the edge, needs the API running, and pauses nothing
+        // the drain leads the edge, needs the API running, and only checks
         let drain = steps.first().expect("a step");
         assert_eq!(drain.id, "drain-reactions");
-        assert_eq!(drain.pause, []);
         assert!(drain.needs_running.contains(&UpgradeComponent::Api));
-        // the steps that pause are the three conversions, all after the drain
-        let pausing = steps
+        assert!(drain.check_only);
+        // its pause is the conversions' pause, with the scalers quiesced first, and only an
+        // approval that cancels starts it
+        let conversion = steps[1].pause;
+        assert_eq!(drain.pause, conversion);
+        assert_eq!(
+            drain.quiesce,
+            [UpgradeComponent::Scaler, UpgradeComponent::BaremetalScaler]
+        );
+        assert!(drain.quiesce.iter().all(|c| drain.pause.contains(c)));
+        assert!(drain.cancels_on_approval);
+        assert_eq!(drain.thoradm_migration, Some("drain-reactions"));
+        // no other step cancels on approval or quiesces
+        for step in &steps[1..] {
+            assert!(
+                !step.cancels_on_approval && step.quiesce.is_empty(),
+                "{}",
+                step.id
+            );
+        }
+        // the steps after it that pause are the three conversions
+        let pausing = steps[1..]
             .iter()
             .filter(|step| !step.pause.is_empty())
             .map(|step| step.id)
@@ -613,6 +633,8 @@ mod tests {
             ("finalize-tool-only", StepKind::Config)
         );
         assert_eq!(last.pause, []);
+        // the catalog's checks pass
+        assert_eq!(Catalog::PRODUCTION.check(), Ok(()));
     }
 
     /// Record an entry for a step in a state

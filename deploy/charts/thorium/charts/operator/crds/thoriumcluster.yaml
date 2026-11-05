@@ -2979,12 +2979,26 @@ spec:
                         backup:
                           description: Where the backup taken before this step is (a path, snapshot name, or ticket)
                           type: string
+                        cancel_in_flight:
+                          description: |-
+                            Let a step that cancels in-flight work on approval cancel it: with the step's current
+                            confirmation code in `confirm`, the step stops the components it quiesces, waits
+                            `grace_seconds`, and runs instead of waiting for the work to finish
+                          type: boolean
                         confirm:
                           description: |-
                             The confirmation code the blocked lossy step shows in the status, repeated to approve that
                             one occurrence of the step; a code already recorded in the history never matches again
                           nullable: true
                           type: string
+                        grace_seconds:
+                          description: |-
+                            How many seconds the quiesced components stay stopped before the run starts, so work about
+                            to finish can end (0 to 3600, 60 when unset)
+                          maximum: 3600.0
+                          minimum: 0.0
+                          nullable: true
+                          type: integer
                         step:
                           description: The id of the approved step
                           type: string
@@ -3110,6 +3124,7 @@ spec:
                           - LossySettingRefused
                           - SearchIncomplete
                           - MutableImageTag
+                          - ReactionsResubmitted
                           - Unknown
                           type: string
                       required:

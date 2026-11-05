@@ -10,6 +10,7 @@
 //! converted by `deploy/charts/scripts/convert-to-helm.sh` first, which records its starting
 //! revision. The operator refuses to touch an unconverted one.
 
+mod cancel;
 mod detect;
 #[cfg(test)]
 mod downgrade_tests;
@@ -26,11 +27,13 @@ mod migration_tests;
 #[cfg(test)]
 mod n1;
 mod pause;
+mod quiesce;
 mod rebucket;
 mod record;
 #[cfg(test)]
 mod record_tests;
 mod reingest;
+mod resubmit;
 mod schema_apply;
 #[cfg(test)]
 mod sim;
@@ -60,6 +63,7 @@ pub use pause::{held as paused_components, restore_applied as restore_paused};
 use record::Moved;
 pub use record::recover_with;
 pub use reingest::track as track_reingest;
+pub use resubmit::{Tracked as Resubmit, track as track_resubmit};
 #[cfg(test)]
 pub(crate) use schema_apply::tests as schema_apply_tests;
 pub use schema_apply::{RETRY_ANNOTATION as RETRY_SCHEMA_APPLY, ensure as apply_schema};
@@ -158,6 +162,12 @@ impl Pending {
             self.steps.clone(),
         );
         progress.stale_approvals = stale_approvals(&self.approvals, &self.steps);
+        progress.stale_approvals.extend(quiesce::stale(
+            &self.stored.state,
+            &self.target,
+            &self.approvals,
+            &self.steps,
+        ));
         // the loss across every lossy step on the path, estimated before anything is approved
         let losses = self
             .steps
@@ -430,6 +440,19 @@ pub async fn gate(client: &Client, tracker: &StatusTracker) -> Result<Gate, Erro
     if stops_attempt(&decision, &stored.state) {
         record_stop(client, &namespace, &mut stored).await?;
     }
+    // a quiesce whose step no longer leads the plan with a usable approval ends before its run
+    let planned = match &decision {
+        Decision::Upgrade { target, steps } => Some((target, steps.as_slice())),
+        _ => None,
+    };
+    quiesce::settle(
+        client,
+        &namespace,
+        &mut stored,
+        planned,
+        &cluster.spec.upgrade.approvals,
+    )
+    .await?;
     // act on the decision
     match decision {
         Decision::Current(progress) => {
@@ -1302,6 +1325,10 @@ async fn run_with(
     if let Some(action) = ops.refresh(meta, &mut pending).await? {
         return Ok(Some(action));
     }
+    // a resubmission of drained requests that holds the conversion pause starts no later step
+    if let resubmit::Tracked::Hold(action) = resubmit::follow(meta, &mut pending.stored).await? {
+        return Ok(Some(action));
+    }
     // remember where this upgrade started for its messages, and keep it in the state because the
     // recorded revision moves past it as each edge finishes; the next save of the state, which
     // the first step's entry makes, keeps it
@@ -1333,6 +1360,13 @@ async fn run_with(
     }
     // run each step in order, stopping at any that must be checked again later
     for index in 0..pending.steps.len() {
+        // a step that moved the revision past the drain's may have made the resubmission due
+        if index > 0
+            && let resubmit::Tracked::Hold(action) =
+                resubmit::follow(meta, &mut pending.stored).await?
+        {
+            return Ok(Some(action));
+        }
         if let Some(action) = run_step(meta, &mut pending, index, &start, ops).await? {
             return Ok(Some(action));
         }
@@ -2543,6 +2577,129 @@ pub(crate) mod tests {
                 "finalize-tool-only",
             ]
         );
+    }
+
+    /// A cluster this build finds waiting at the drain, with nothing paused and an approval naming
+    /// only a backup set earlier, keeps its state: the gate saves nothing, the drain is still the
+    /// next step, and the approval doesn't start the cancel
+    #[tokio::test]
+    async fn a_cluster_waiting_at_the_drain_keeps_its_state_across_this_build() {
+        // a cluster at v03 that reached the drain of v04 and waits there
+        let v03 = "2026-10-v03";
+        let v04 = "2026-10-v04";
+        let waiting = Catalog::PRODUCTION.reached(&rev(v03), OPERATOR_VERSION);
+        let cluster = chart_cluster(serde_json::json!({
+            "target_revision": v04,
+            "approvals": [{"step": "drain-reactions", "backup": "snap-1"}],
+        }));
+        let fake =
+            fake_with_status(&cluster).route("GET", STATE_PATH, 200, state_config_map(&waiting));
+        let Ok(Gate::Upgrade(pending)) = gate(&fake.client(), &tracked(&cluster)).await else {
+            panic!("a targeted cluster should be upgraded");
+        };
+        // nothing was written and the drain leads the plan
+        assert!(saved_state(&fake).is_none());
+        assert_eq!(pending.stored.state.applied, waiting.applied);
+        assert_eq!(pending.steps[0].step, "drain-reactions");
+        // the approval set earlier names no cancel and no code, so it doesn't count for the drain
+        let (_, drain) = Catalog::PRODUCTION
+            .step("drain-reactions")
+            .expect("the drain");
+        assert!(
+            migration::usable_now(
+                &pending.stored.state,
+                drain,
+                &pending.target,
+                &pending.approvals
+            )
+            .is_none()
+        );
+    }
+
+    /// A drain this attempt already finished, done or skipped, isn't run again by this build: the
+    /// plan starts at the first conversion
+    #[tokio::test]
+    async fn a_finished_drain_is_not_rerun_after_this_build() {
+        // an attempt from v03 that finished the drain and blocked at the first conversion
+        let v03 = "2026-10-v03";
+        let v04 = "2026-10-v04";
+        for finished in [StepState::Done, StepState::Skipped] {
+            let mut attempted = Catalog::PRODUCTION.reached(&rev(v03), OPERATOR_VERSION);
+            for (step, outcome) in [
+                ("drain-reactions", finished),
+                ("images-to-tools", StepState::Blocked),
+            ] {
+                attempted.record(AppliedStep {
+                    revision: v04.to_owned(),
+                    step: step.to_owned(),
+                    outcome,
+                    at: Some("2026-10-27T13:24:00Z".to_owned()),
+                    ..AppliedStep::default()
+                });
+            }
+            let cluster = chart_cluster(serde_json::json!({"target_revision": v04}));
+            let fake = fake_with_status(&cluster).route(
+                "GET",
+                STATE_PATH,
+                200,
+                state_config_map(&attempted),
+            );
+            let Ok(Gate::Upgrade(pending)) = gate(&fake.client(), &tracked(&cluster)).await else {
+                panic!("a targeted cluster should be upgraded");
+            };
+            let ids = pending
+                .steps
+                .iter()
+                .map(|step| step.step.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                ids,
+                [
+                    "images-to-tools",
+                    "pipelines-to-tool-stages",
+                    "provenance-to-legacy-tools",
+                    "finalize-tool-only",
+                ],
+                "{finished:?}"
+            );
+        }
+    }
+
+    /// A cluster at v05 whose history the earlier catalog recorded, with its old drain run, plans
+    /// nothing and shows no catalog skew once the image's thoradm reports this build's catalog
+    #[tokio::test]
+    async fn a_v05_history_from_the_old_catalog_plans_nothing_and_shows_no_skew() {
+        // the history the earlier catalog left: every step to v05 done, the drain without a Job
+        let v05 = "2026-10-v05";
+        let mut state = Catalog::PRODUCTION.reached(&rev(v05), OPERATOR_VERSION);
+        assert!(
+            state
+                .applied
+                .iter()
+                .any(|entry| entry.step == "drain-reactions" && entry.job.is_none())
+        );
+        // the image's thoradm reports the catalog this build plans with
+        state.schema.insert(
+            migration::CATALOG_MARKER.to_owned(),
+            serde_json::to_string(&thorium::models::schema::catalog_identity(
+                &Catalog::PRODUCTION,
+            ))
+            .expect("an identity"),
+        );
+        // nothing is planned and no skew is reported
+        let steps = Catalog::PRODUCTION
+            .plan(&state, &upgrades::latest())
+            .expect("plan");
+        assert!(steps.is_empty(), "{steps:?}");
+        assert_eq!(migration::skew(&state), None);
+        let cluster = chart_cluster(serde_json::json!({"target_revision": v05}));
+        let fake =
+            fake_with_status(&cluster).route("GET", STATE_PATH, 200, state_config_map(&state));
+        let gated = gate(&fake.client(), &tracked(&cluster))
+            .await
+            .expect("gate");
+        assert!(matches!(gated, Gate::Current));
+        assert!(saved_state(&fake).is_none());
     }
 
     /// A malformed recorded state is an error rather than a fresh start

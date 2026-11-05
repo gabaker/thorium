@@ -15,6 +15,7 @@ use std::time::Duration;
 use thorium::Error;
 use thorium::models::schema::{
     DeploymentRecord, FINALIZE_STEP, FinishedStep, RESULT_PREFIX, RecordStatus, StatusReport,
+    join_result,
 };
 use thorium::models::upgrades::{
     APPLY_KEY_MARKER, AppliedStep, DEPLOYMENT_MARKER, MAX_HISTORY, RECORD_MARKER, RESET_STATE_STEP,
@@ -271,22 +272,30 @@ pub fn seed_spec(meta: &ClusterMeta, revision: &RevisionId) -> Result<JobSpec, E
     Ok(spec)
 }
 
-/// Parse a status Job's report out of its pod's log
+/// Parse a status Job's report out of its pod's log, joining a report printed in chunks
 ///
 /// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
 /// * `job` - The finished Job
 async fn parse_report(meta: &ClusterMeta, job: &Job) -> Result<StatusReport, Error> {
-    // find the line the Job printed
+    // find the lines the Job printed
     let job_name = name(job);
-    let line = jobs::result_line(meta, &job_name, RESULT_PREFIX)
+    let lines = jobs::result_lines(meta, &job_name, RESULT_PREFIX)
         .await?
-        .ok_or_else(|| {
-            Error::new(format!(
-                "The status Job {job_name} finished without printing a result line"
-            ))
-        })?;
+        .unwrap_or_default();
+    if lines.is_empty() {
+        return Err(Error::new(format!(
+            "The status Job {job_name} finished without printing a result line"
+        )));
+    }
+    // join a report printed in chunks, trusting no line that isn't the Job's own output
+    let lines = lines.iter().map(String::as_str).collect::<Vec<_>>();
+    let line = join_result(&lines).map_err(|why| {
+        Error::new(format!(
+            "The status Job {job_name} printed a result that can't be read: {why}"
+        ))
+    })?;
     // and read the report it holds
     serde_json::from_str(&line).map_err(|error| {
         Error::new(format!(

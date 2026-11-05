@@ -616,7 +616,8 @@ mod tests {
                 "finalize-yara-scanning",
             ]
         );
-        // the conversions pause the five components and the drain pauses none
+        // the conversions pause the five components, and so does the drain, through its approved
+        // run only
         let pauses = [
             UpgradeComponent::Api,
             UpgradeComponent::Scaler,
@@ -625,7 +626,7 @@ mod tests {
             UpgradeComponent::SearchStreamer,
         ];
         let step = |id: &str| thorium::models::upgrades::step(id).expect("a step").1;
-        assert_eq!(step("drain-reactions").pause, []);
+        assert_eq!(step("drain-reactions").pause, pauses);
         for id in [
             "images-to-tools",
             "pipelines-to-tool-stages",

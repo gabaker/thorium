@@ -95,7 +95,7 @@ seven steps and `thoradm migrate plan --from 2026-10-v03` the five of `2026-10-v
 | Step | Kind | Pauses | Needs an approval | What it does |
 | ---- | ---- | ------ | ----------------- | ------------ |
 | `schema-apply` | Infra | Nothing | No | Revision `2026-10-v03`. Applies the schema this release declares and records what was applied. It runs first, so every later step finds the tables and columns it reads. |
-| `drain-reactions` | Data | Nothing | No | Deletes nothing. Its check waits, with Thorium running, while reactions are `Created` or `Started` or workers of the previous release are registered, and the step is `Skipped` when none are. It runs before any component is paused, and ahead of `users-settings-theme` when one upgrade runs both. |
+| `drain-reactions` | Data | Nothing while it waits; with a cancel approval, scaler and baremetal-scaler first, then the API, event handler, and search streamer too | No; an approval with `cancelInFlight` and the step's confirmation code cancels instead of waiting | Its check waits, with Thorium running, while reactions are `Created` or `Started` or workers of the previous release are registered, and the step is `Skipped` when none are. With a cancel approval it fails the reactions still in flight, records each request, and the requests are resubmitted once the conversion is recorded (see [The drain](#the-drain)). It runs before any component is paused, and ahead of `users-settings-theme` when one upgrade runs both. |
 | `users-settings-theme` | Data | API | When a user still holds its theme in its own field | Revision `2026-10-v03`. Moves each user's theme into the user's `settings`. Only users written by a development image have the old layout, so a deployment of a released version finds every user converted and records the step `Skipped`. |
 | `images-to-tools` | Data | API, scaler, baremetal-scaler, event handler, search streamer | When there is an image to migrate | Creates one tool and a first tool instance for each image. |
 | `pipelines-to-tool-stages` | Data | The same | When there is a stage to convert | Pins each stage of every pipeline whose stages all have a migrated tool to that tool's first instance. Its check runs again after `images-to-tools` finishes. |
@@ -103,16 +103,23 @@ seven steps and `thoradm migrate plan --from 2026-10-v03` the five of `2026-10-v
 | `finalize-tool-only` | Config | Nothing | No | Marks the conversion finished. The operator then records the revision. |
 
 A `Data` step with nothing to do is recorded `Skipped` and asks for no approval. `drain-reactions`
-has no migration to run and never asks for an approval (`thoradm migrate list` marks it like the other
-Data steps); an approval that names it is reported as stale. Once every step is done or skipped, the operator applies the new release's Deployments and
+never asks for an approval: it waits until nothing is in flight. An approval that names it opts in
+to cancelling what is in flight instead, and counts only with a backup, `cancelInFlight: true`, and
+the confirmation code the waiting step shows (see [Cancelling instead of
+waiting](#cancelling-instead-of-waiting)). While the step is planned, an approval naming it that
+doesn't count is listed in `status.upgrade.stale_approvals` with the reason and the current code;
+once the step is done, any approval naming it is listed there as not a step of the plan. Once every
+step is done or skipped, the operator applies the new release's Deployments and
 only then scales each paused component back to the replica count it had before the upgrade, one
 component at a time.
 
 ### The drain
 
-`drain-reactions` deletes nothing. An in-flight reaction has no plan, and its queued jobs and
-worker records have the previous shape, so the new release can't continue it, and the upgrade
-leaves the decision about unfinished work to you. The step runs **before any component is paused**
+Unless you approve a cancel, `drain-reactions` deletes nothing. An in-flight reaction has no plan,
+and its queued jobs and worker records have the previous shape, so the new release can't continue
+it, and the upgrade leaves the decision about unfinished work to you: wait for it, delete it, or
+approve the cancel described in [Cancelling instead of waiting](#cancelling-instead-of-waiting). The
+step runs **before any component is paused**
 (first on a deployment at `2026-10-v03`, right after `schema-apply` on one at `2026-10-v02`, where
 it also runs ahead of the `users-settings-theme` step that pauses the API), so Thorium keeps running
 normally while it waits. Its check
@@ -124,7 +131,12 @@ reads Redis and Scylla and writes nothing:
   Started and 1 stage-path worker(s) are still registered`, points to
   `thoradm migrate check --id drain-reactions`, and the check runs again every 15 seconds. The
   reason never contains a reaction id, name, or group. Workers exit on their own once they find no
-  job, so after the last reaction ends a worker may stay registered for a while.
+  job, so after the last reaction ends a worker may stay registered for a while. The reason ends
+  with the approval that would cancel instead, including the step's confirmation code, for example
+  `To cancel what is in flight instead, take a backup and add the approval {step: drain-reactions,
+  backup: <where your backup is>, cancelInFlight: true, confirm: 7KQ2M9XA} (Helm value
+  operator.cluster.upgrade.approvals[]; cancel_in_flight: true in the ThoriumCluster), repeating the
+  code the step shows as confirm`.
 
 To see what holds the drain, run its check with the cluster config:
 
@@ -200,7 +212,141 @@ operator records an `upgrade-stopped` entry, and the next attempt drains again b
 conversion step, since reactions may have been submitted in between. A conversion step that
 finished before the stop stays finished.
 
-Instead of waiting, `thoradm migrate run --id drain-reactions` cancels the reactions in flight:
+#### Cancelling instead of waiting
+
+When the reactions in flight can't be waited for (a long hunt, a reaction stuck on a missing image,
+or more than you want to delete one by one), approve the drain with `cancelInFlight`. The step then
+fails what is still in flight, records each reaction's request, and resubmits the requests as their
+creators once the conversion is recorded. Results the cancelled reactions already wrote are kept,
+and a resubmitted reaction runs every stage of its pipeline again, the stages that had finished
+included.
+
+1. Run `thoradm --cluster-conf thorium.yml migrate check --id drain-reactions` and read the named
+   tables, so you know what will be cancelled.
+2. Take a backup (see [Before you upgrade](#before-you-upgrade)). The approval names it, as every
+   approval does.
+3. Read the confirmation code the waiting step shows. It is in the step's message and in its
+   `blocked` field (`{"CancelApproval":{"confirm":"7KQ2M9XA"}}`), eight characters computed from
+   the upgrade history. The code changes when the history gains an entry, and the drain's run
+   records one, but nothing is recorded while the drain waits: an approval written before the step
+   waits, or left from an attempt stopped before the drain started, can still match. Add the
+   approval only when you mean to cancel, and remove it once the drain has run:
+
+   ```bash
+   kubectl -n thorium get thoriumcluster thorium -o jsonpath='{.status.upgrade.steps[0].message}'
+   ```
+
+4. Add the approval and run `helm upgrade` again. Approving the conversion steps in the same
+   `helm upgrade` keeps the outage short, since the components the cancel pauses stay down until
+   the new release's Deployments are applied:
+
+   ```yaml
+   operator:
+     cluster:
+       upgrade:
+         approvals:
+           - step: drain-reactions
+             backup: thoradm backup 2026-11-04 on /mnt/backups
+             cancelInFlight: true
+             # the code the waiting step shows
+             confirm: 7KQ2M9XA
+             # optional: 60 when unset, 0 to 3600
+             graceSeconds: 60
+           - step: images-to-tools
+             backup: thoradm backup 2026-11-04 on /mnt/backups
+           # and the other conversion steps
+   ```
+
+   A `ThoriumCluster` without Helm takes the same approval in snake case under
+   `spec.upgrade.approvals`: `cancel_in_flight: true`, `confirm`, and `grace_seconds`. megathor
+   passes `thorium_upgrade_approvals` through as written in the Helm form.
+
+An approval without `cancelInFlight: true` changes nothing: the step keeps waiting. An approval
+whose `confirm` is missing or isn't the current code changes nothing either; the step's message ends
+`the approval repeats no confirmation code; the current code is <code>` or `the approval's
+confirmation code doesn't match; the current code is <code>`, and `status.upgrade.stale_approvals`
+lists it. A code is used up when the step starts stopping the scalers and never matches again, so
+**one approval serves one attempt**: if the attempt stops, the cluster is restored or its recorded
+state reset, or the approval is withdrawn during the grace, the next attempt shows a new code and
+waits for a new approval.
+
+With a usable approval the operator runs these phases in order, whatever is left in flight:
+
+| Phase | What happens | Step message |
+| ----- | ------------ | ------------ |
+| Quiesce | Records the scaler's and baremetal-scaler's replica counts in the upgrade history, then scales both to 0, so no new job is scheduled and no Deployment apply brings them back. The API, event handler, and search streamer keep running, so jobs that are running can finish and report | `Stopped scaler, baremetal-scaler for a grace of 60 seconds before step drain-reactions cancels what is in flight; 42 seconds left` |
+| Grace | Waits `graceSeconds` (60 when unset, at most 3600) from the recorded quiesce, so jobs near their end can finish. An operator restart keeps the recorded start and counts | The same |
+| Pause | Scales the rest of the conversion pause (API, event handler, search streamer) to 0, so nothing new can be submitted, and records their counts | The step's `Running` message names the migration Job |
+| Cancel | The `drain-reactions` migration Job records each `Created` or `Started` reaction's request, deletes its queued jobs, fails it with the reason in its status log, and removes the previous release's worker registrations. With nothing left, it records nothing and finishes | The same |
+| Worker pods | The operator deletes the previous release's worker pods the Job names, but only those in the operator's own Kubernetes cluster, in a group's namespace, carrying Thorium's worker labels, and on the recorded node; any other is counted as not reachable | `Done`, with the counts, for example `...; worker pods: 1 deleted, 0 not reachable; 0 workers not listed for pod deletion` |
+
+The step is `Done` on this path, never `Skipped`, even when nothing was left after the grace. Its
+history entry's `work` holds the counts: `<n> reactions cancelled; requests: <n> recorded, <n> kept
+from an earlier run, <n> refused, <n> stale; <n> workers removed`. A cancel run retried after its
+Job failed counts the `recorded` requests the failed run left as kept, and the resubmission creates
+what either run cancelled. The cancel records a request `refused` when it can never be resubmitted
+(arguments over 64 KiB, uploaded files or a cache, a creator that is a system account or holds no
+owner, manager, or user role in the group, or a pipeline that is gone), and `stale` when it was idle
+for more than 30 days. Its reaction is failed all the same, and its status log says it was not
+resubmitted.
+
+**Thorium is down from the pause until the rollout.** From the moment the API, event handler, and
+search streamer are scaled to 0, Thorium is unavailable, as for any conversion step, and it stays
+down through the conversions until the new release's Deployments are applied. The resubmission runs
+inside that window, so users have no chance to change a pipeline or a group before their work is
+created again.
+
+**Withdrawing during the grace.** Removing the approval, removing its `cancelInFlight`, or clearing
+the target before the cancel Job is created scales the scalers back to their recorded counts and
+records that their pause ended; the step goes back to waiting, and a new approval needs the new
+code. Once the cancel Job exists, the run owns the pause: a withdrawn approval stops it like any
+started step, with every paused component left at 0 (see [Interruptions and
+reruns](#interruptions-and-reruns)).
+
+**The resubmission.** Once `finalize-tool-only` has recorded `2026-10-v04`, and before the paused
+components come back, the operator runs a `resubmit-reactions` Job (`thoradm migrate run --id
+resubmit-reactions`). It decides from the upgrade history in Scylla, so a lost state ConfigMap
+doesn't lose it: a cancel run that recorded requests, with no finished resubmission after it and no
+stop, restore, or state reset in between. A failed Job is run again, up to three Jobs inside the
+pause; after that the paused components come back anyway, and the operator runs another Job only
+when you set the `thorium.sandia.gov/refresh-check` annotation on the `ThoriumCluster` to a new
+value. The `ReactionsResubmitted` condition reports progress and the outcome, with counts only, for
+example `The requests the drain recorded were resubmitted: resubmitted 4, refused 1, stale 0`.
+
+Each request is created again as its creator, with its samples, repos, tags, and arguments, plus the
+tag `resubmitted-from:<old id>`, the pipeline's default SLA, and no parent. Before creating it, the
+Job checks it as the create route would and more: the creator must still exist and hold the owner,
+manager, or user role in the group, the pipeline must be converted and unchanged since the cancel,
+and the arguments must still be stored (they expire after 14 days); a sub reaction of a recorded
+parent is left for the parent's resubmission to create. [Cancelling and Resubmitting
+Reactions](../thoradm/thoradm.md#cancelling-and-resubmitting-reactions) lists every reason. A
+refused request keeps its reason and is never resubmitted, and a request recorded outside this
+attempt is marked `stale`. A hand run with `--include-stale` takes stale requests through every
+check, so it refuses one the conversion pause never bound to its stage tools (only the operator's
+run inside the pause binds them); submit refused and stale requests again with `thorctl`. A Redis,
+Scylla, or S3 error isn't a refusal: the request stays `recorded` and the next Job retries it. Each
+request's new reaction id is reserved before the create, so a rerun never creates it twice.
+
+The cancelled reaction stays `Failed` until its retention expires. Its status log holds `cancelled
+by the upgrade to 2026-10-v04; recorded to be resubmitted once the upgrade finishes`, and once it is
+resubmitted a second entry, `resubmitted by the upgrade to 2026-10-v04 as <new id>` (see [Reactions
+an upgrade cancelled](../../users/spawning_reactions.md#reactions-an-upgrade-cancelled)).
+
+The reports name what each side did; they never print arguments, only their hash and size:
+
+```bash
+# each reaction recorded and each worker registration removed
+thoradm --cluster-conf thorium.yml migrate report --id drain-reactions
+# each request with its outcome: the new reaction id, or why it was refused or is stale
+thoradm --cluster-conf thorium.yml migrate report --id resubmit-reactions
+```
+
+Tell the creators of refused and stale requests: the report names each request's group, pipeline,
+and creator.
+
+#### Cancelling by hand
+
+Outside the operator, `thoradm migrate run --id drain-reactions` cancels the reactions in flight:
 it records each one's request, deletes its jobs, fails it, and removes the stage-path workers'
 registrations. `thoradm migrate run --id resubmit-reactions` creates the recorded requests again as
 their creators, and `thoradm migrate report --id drain-reactions` and `--id resubmit-reactions`
@@ -209,7 +355,9 @@ Reactions](../thoradm/thoradm.md#cancelling-and-resubmitting-reactions) describe
 flags, and the reasons a request is refused. A cancel run by hand records its requests outside any
 drain attempt, so nothing resubmits them; the report lists what to submit again.
 
-**Backups and restores while requests are recorded.** The recorded requests are `drain_request`
+#### Backups and restores while requests are recorded
+
+The recorded requests are `drain_request`
 rows in the schema record, and their arguments are rows that expire after 14 days. While any
 `drain_request` row exists, take and restore backups with a thoradm of this release or newer. An
 older thoradm copies the arguments rows into the backup with the rest of the record and writes
@@ -236,13 +384,16 @@ search streamer, because the previous API would write data in the shape being re
 components stay down until the new release's Deployments are applied, **including while a later
 step waits for its approval, after a failed step, and after you clear the target mid-step**, until
 you retry it, set the target again, or restore the backup.
-Nothing is paused before the first conversion step starts running, so while that step waits for its
-approval Thorium keeps serving. Once it is down, Thorium is unavailable: users can't reach the API,
+Nothing is paused before the first conversion step starts running, unless you approved the drain's
+cancel, so while that step waits for its approval Thorium keeps serving. Once it is down, Thorium is unavailable: users can't reach the API,
 and nothing is scheduled.
 
 Approving every step up front limits the outage to the steps' run time. `drain-reactions` pauses
-nothing, so Thorium keeps running while it waits for reactions to finish; the outage starts only
-when the first conversion step begins. Each step's check reports an estimate of the time its
+nothing while it waits, so Thorium keeps running while reactions finish; the outage starts only
+when the first conversion step begins. An approved cancel starts it earlier: the scalers stop at
+the start of the grace, and the API, event handler, and search streamer when the cancel begins (see
+[Cancelling instead of waiting](#cancelling-instead-of-waiting)). The resubmission then runs before
+the components come back, so it adds to the outage. Each step's check reports an estimate of the time its
 components stay down. Each paused component's replica count is recorded on the step's `Running`
 history entry in `thorium-upgrade-state`, and `kubectl -n thorium get deploy -w` shows the
 components go down and come back.
@@ -251,7 +402,9 @@ components go down and come back.
 
 Every `Data` step except `drain-reactions` needs an approval naming your backup when it has work
 to do (`users-settings-theme` only when a user still holds its theme in its own field), like any other
-approval (see [Approvals](../deploy/upgrades.md#approvals)). Approvals may be set before the upgrade
+approval (see [Approvals](../deploy/upgrades.md#approvals)). `drain-reactions` takes an approval
+only to cancel instead of waiting, and that approval can't be set up front: it repeats a code the
+step shows once it waits (see [Cancelling instead of waiting](#cancelling-instead-of-waiting)). Approvals may be set before the upgrade
 starts. The recommended procedure is to run the checks, take the backup, and then set the target
 revision and every approval in one `helm upgrade`, so no step waits:
 
@@ -435,7 +588,7 @@ operator holds it, and it prints a JSON result with the pass's status (`done`, o
 counts, and issue groups. Stop the components the step lists (see `thoradm migrate list`) first,
 since the operator pauses them only for its own runs. When the operator next checks the step it
 finds nothing left to migrate and skips it. `thoradm migrate run --id drain-reactions` cancels the
-reactions in flight instead of waiting for them (see [The drain](#the-drain)). See
+reactions in flight instead of waiting for them (see [Cancelling by hand](#cancelling-by-hand)). See
 [Migrate](../thoradm/thoradm.md#migrate) for every flag and the exit codes.
 
 ## Interruptions and reruns

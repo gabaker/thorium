@@ -8,7 +8,8 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 use super::{
-    AppliedStep, BlockReason, ConfirmRefusal, StepLoss, StepState, UpgradeApproval, UpgradeState,
+    AppliedStep, BlockReason, ConfirmRefusal, QUIESCE_STEP, StepLoss, StepState, UpgradeApproval,
+    UpgradeState,
 };
 
 /// The alphabet confirmation codes are written in: Crockford base32, which leaves out the letters
@@ -62,6 +63,69 @@ pub fn confirmation_code(step: &str, revision: &str, loss: &StepLoss, history: u
         .rev()
         .map(|index| CROCKFORD[((bits >> (index * 5)) & 0x1f) as usize] as char)
         .collect()
+}
+
+/// How many seconds the quiesced components of a step that cancels on approval stay stopped
+/// before its run starts, when the approval sets no grace
+pub const DEFAULT_GRACE_SECS: u64 = 60;
+
+/// The longest grace an approval may ask for, in seconds; a longer one is cut to this
+pub const MAX_GRACE_SECS: u64 = 3600;
+
+/// Compute the confirmation code of a step that cancels in-flight work on approval
+///
+/// The code is 8 Crockford base32 characters of a sha256 over the step id, the recorded and target
+/// revisions, the length of the applied history, and the `at` of its newest entry. None of it can
+/// be known before the step is reached in an attempt, so an approval written in advance can't
+/// carry it; the history doesn't change while the step waits, so the code is stable while the
+/// admin reads the report; and any entry added since (a quiesce, a restore of paused components,
+/// a stopped upgrade, a restore) changes it.
+///
+/// # Arguments
+///
+/// * `step` - The step id
+/// * `revision` - The revision the deployment is recorded at
+/// * `target` - The revision the upgrade moves to
+/// * `history` - The applied history the operator holds
+#[must_use]
+pub fn drain_code(step: &str, revision: &str, target: &str, history: &[AppliedStep]) -> String {
+    // hash each part after its length so parts can't run into each other
+    let mut hasher = Sha256::new();
+    let mut add = |part: &str| {
+        hasher.update((part.len() as u64).to_le_bytes());
+        hasher.update(part.as_bytes());
+    };
+    add(step);
+    add(revision);
+    add(target);
+    add(&history.len().to_string());
+    add(history
+        .last()
+        .and_then(|entry| entry.at.as_deref())
+        .unwrap_or_default());
+    let digest = hasher.finalize();
+    // write the first 40 bits as 8 characters of 5 bits each
+    let bits = digest[..5]
+        .iter()
+        .fold(0_u64, |bits, byte| (bits << 8) | u64::from(*byte));
+    (0..CODE_LEN)
+        .rev()
+        .map(|index| CROCKFORD[((bits >> (index * 5)) & 0x1f) as usize] as char)
+        .collect()
+}
+
+/// Get the grace an approval asks for, in seconds, within the allowed range
+///
+/// # Arguments
+///
+/// * `approval` - The approval
+#[must_use]
+pub fn grace_secs(approval: &UpgradeApproval) -> u64 {
+    // the default when unset, and never more than the cap
+    approval
+        .grace_seconds
+        .unwrap_or(DEFAULT_GRACE_SECS)
+        .min(MAX_GRACE_SECS)
 }
 
 /// What `dangerous_downgrade_lossy` comes to on a cluster
@@ -151,8 +215,9 @@ impl LossGate<'_> {
         format!(
             "Step {} loses data: {}. It loses {fields}. To accept the loss, take a backup and add \
              the approval {{step: {}, backup: <where your backup is>, acceptLoss: true, confirm: \
-             {}}} (Helm value operator.cluster.upgrade.approvals[]); the code is for this block \
-             of this step only",
+             {}}} (Helm value operator.cluster.upgrade.approvals[]; accept_loss: true in the \
+             ThoriumCluster's spec.upgrade.approvals); the code is for this block of this step \
+             only",
             self.loss.step, self.loss.description, self.loss.step, self.code
         )
     }
@@ -239,7 +304,8 @@ impl LossGate<'_> {
                 ConfirmRefusal::BackupGap,
                 &format!(
                     "{} isn't covered by thoradm backup, so a backup can't restore it; add \
-                     acceptBackupGaps: true to accept that",
+                     acceptBackupGaps: true (accept_backup_gaps in the ThoriumCluster) to accept \
+                     that",
                     gaps.join(", ")
                 ),
             );
@@ -295,7 +361,8 @@ pub fn recorded_code(state: &UpgradeState, step: &str, preceding: &[&str]) -> Op
 /// Get the confirmation codes a step's runs consumed
 ///
 /// A run consumes the code its approval repeated when it starts, so every entry of the step other
-/// than a `Blocked` one that records a code counts.
+/// than a `Blocked` one that records a code counts, and so does the code every quiesce entry
+/// recorded, which the quiesce consumed when an approval started a step that cancels on approval.
 ///
 /// # Arguments
 ///
@@ -307,7 +374,7 @@ pub fn consumed_codes(state: &UpgradeState, step: &str) -> BTreeSet<String> {
     state
         .applied
         .iter()
-        .filter(|entry| entry.step == step && ends_block(entry))
+        .filter(|entry| (entry.step == step && ends_block(entry)) || entry.step == QUIESCE_STEP)
         .filter_map(|entry| entry.confirm.clone())
         .collect()
 }

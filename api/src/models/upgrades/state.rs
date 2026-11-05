@@ -27,6 +27,12 @@ pub const RESTORED_STEP: &str = "restored";
 /// and the next attempt runs it before its first conversion
 pub const UPGRADE_STOPPED_STEP: &str = "upgrade-stopped";
 
+/// The step of the history entry the operator records when an approval starts a step that cancels
+/// in-flight work: a `Running` entry holding the replica counts of the components it stops first
+/// and, as `confirm`, the confirmation code the approval repeated, which the entry consumes; its
+/// `chain` names the step it quiesced for
+pub const QUIESCE_STEP: &str = "drain-quiesce";
+
 /// A step recorded in a cluster's upgrade history
 ///
 /// Finished steps are recorded as `Done` or `Skipped`. A step that blocks on an admin is also

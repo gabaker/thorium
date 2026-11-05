@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
-use thorium::models::schema::{CatalogIdentity, RESULT_PREFIX};
+use thorium::models::schema::{CatalogIdentity, result_lines};
 use thorium::models::upgrades::UpgradeState;
 
 use crate::k8s::clusters::tests::{FakeKube, FakeRequest, kube_status};
@@ -95,6 +95,14 @@ struct World {
     scaled: Vec<(String, i32)>,
     /// The labels on the cluster's Namespace
     namespace_labels: BTreeMap<String, String>,
+    /// The worker pods in group namespaces, by `(namespace, name)`, as the API returns them
+    worker_pods: BTreeMap<(String, String), Value>,
+    /// The namespaces whose pods the operator may not read or delete, which answer 403
+    forbidden: BTreeSet<String>,
+    /// The worker pods recreated under the same name right before their next delete
+    recreate_before_delete: BTreeSet<(String, String)>,
+    /// The worker pods deleted, in order, as `(namespace, name)`
+    deleted_pods: Vec<(String, String)>,
 }
 
 /// A stateful fake of the Kubernetes API
@@ -223,11 +231,17 @@ impl World {
                         })
                         .and_then(Value::as_str)
                         .map(ToOwned::to_owned);
-                    let check = uid
+                    let left = uid
                         .as_ref()
                         .and_then(|uid| self.results.get(uid))
                         .cloned()
                         .unwrap_or(Value::Null);
+                    // a run's applied report counts what it skipped; anything else is a check's
+                    let (check, applied) = if left.get("skipped_total").is_some() {
+                        (Value::Null, left)
+                    } else {
+                        (left, Value::Null)
+                    };
                     let catalog = self
                         .catalog
                         .clone()
@@ -246,8 +260,16 @@ impl World {
                         "status": status,
                         "catalog": catalog,
                         "check": check,
+                        "applied": applied,
                     });
-                    log = format!("{RESULT_PREFIX}{report}\n");
+                    // printed as thoradm prints it, in chunks when it is large
+                    log = result_lines(&report.to_string()).into_iter().fold(
+                        String::new(),
+                        |mut log, line| {
+                            let _ = writeln!(log, "{line}");
+                            log
+                        },
+                    );
                 }
                 (
                     "Complete",
@@ -316,6 +338,53 @@ impl World {
         self.pods
             .retain(|pod| pod["metadata"]["labels"]["job-name"] != job_name);
         self.terminating.remove(job_name);
+    }
+
+    /// Answer a read or delete of a worker pod in a group namespace
+    ///
+    /// # Arguments
+    ///
+    /// * `method` - The request's method, `GET` or `DELETE`
+    /// * `key` - The pod's namespace and name
+    /// * `preconditions` - The delete's preconditions, or null
+    fn worker_pod(
+        &mut self,
+        method: &str,
+        key: (String, String),
+        preconditions: &Value,
+    ) -> (u16, Value) {
+        // a namespace the operator has no rights in refuses every request
+        if self.forbidden.contains(&key.0) {
+            return (403, kube_status(403, "Forbidden"));
+        }
+        // a pod recreated right before the delete has the same name and a new UID
+        if method == "DELETE"
+            && self.recreate_before_delete.remove(&key)
+            && let Some(pod) = self.worker_pods.get_mut(&key)
+        {
+            pod["metadata"]["uid"] = json!(format!("{}-recreated", key.1));
+        }
+        // a pod that doesn't exist is not found
+        let Some(pod) = self.worker_pods.get(&key).cloned() else {
+            return (404, kube_status(404, "NotFound"));
+        };
+        // a read returns the pod as it is now
+        if method == "GET" {
+            return (200, pod);
+        }
+        // a delete pinned to a UID the pod no longer has conflicts
+        if let Some(uid) = preconditions["uid"].as_str()
+            && pod["metadata"]["uid"].as_str() != Some(uid)
+        {
+            return (409, kube_status(409, "Conflict"));
+        }
+        // the delete removes the pod and logs it
+        self.worker_pods.remove(&key);
+        self.deleted_pods.push(key);
+        (
+            200,
+            json!({"kind": "Status", "apiVersion": "v1", "status": "Success"}),
+        )
     }
 
     /// Answer a request
@@ -507,9 +576,27 @@ impl World {
                 cluster["status"] = self.status.clone();
                 Some((200, cluster))
             }
+            (method @ ("GET" | "DELETE"), _) if worker_pod_path(path).is_some() => {
+                let key = worker_pod_path(path)?;
+                Some(self.worker_pod(method, key, &request.body["preconditions"]))
+            }
             _ => None,
         }
     }
+}
+
+/// Split the path of a pod outside the cluster's namespace into its namespace and name
+///
+/// # Arguments
+///
+/// * `path` - The request's path
+fn worker_pod_path(path: &str) -> Option<(String, String)> {
+    // `/api/v1/namespaces/<namespace>/pods/<name>`, with nothing after the name
+    let rest = path.strip_prefix("/api/v1/namespaces/")?;
+    let (namespace, rest) = rest.split_once('/')?;
+    let name = rest.strip_prefix("pods/")?;
+    (namespace != "thorium" && !name.is_empty() && !name.contains('/'))
+        .then(|| (namespace.to_owned(), name.to_owned()))
 }
 
 /// Move a Job to its next resource version, as every change of an object does
@@ -855,6 +942,20 @@ impl Sim {
             .insert(name.to_owned(), (replicas, replicas));
     }
 
+    /// Add a Deployment whose spec and status disagree, as right after a scale or while pods stop
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The Deployment's name
+    /// * `spec` - The replica count its spec asks for
+    /// * `live` - The replica count its status reports
+    pub(crate) fn set_replicas(&self, name: &str, spec: i32, live: i32) {
+        // the status no longer follows the spec, so the live count stays until it is unstuck
+        let mut world = self.world.lock().expect("world lock");
+        world.deployments.insert(name.to_owned(), (spec, live));
+        world.stuck.insert(name.to_owned());
+    }
+
     /// Make a Deployment's pods stay up whatever its spec asks for
     ///
     /// # Arguments
@@ -902,5 +1003,95 @@ impl Sim {
     pub(crate) fn scaled(&self) -> Vec<(String, i32)> {
         // the patches the fake saw
         self.world.lock().expect("world lock").scaled.clone()
+    }
+
+    /// Add a worker pod in a group namespace
+    ///
+    /// # Arguments
+    ///
+    /// * `namespace` - The pod's namespace
+    /// * `name` - The pod's name, whose UID is `<name>-uid`
+    /// * `labels` - The pod's labels
+    /// * `node` - The node the pod is pinned to
+    pub(crate) fn add_worker_pod(
+        &self,
+        namespace: &str,
+        name: &str,
+        labels: &[(&str, &str)],
+        node: &str,
+    ) {
+        // a pod as the API returns it, pinned to its node
+        let labels = labels
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), json!(value)))
+            .collect::<serde_json::Map<_, _>>();
+        let pod = json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"name": name, "namespace": namespace, "uid": format!("{name}-uid"),
+                         "labels": labels},
+            "spec": {"nodeName": node, "containers": []},
+        });
+        self.world
+            .lock()
+            .expect("world lock")
+            .worker_pods
+            .insert((namespace.to_owned(), name.to_owned()), pod);
+    }
+
+    /// Make every pod request in a namespace answer 403, as the own-namespace setup does
+    ///
+    /// # Arguments
+    ///
+    /// * `namespace` - The namespace
+    pub(crate) fn forbid_namespace(&self, namespace: &str) {
+        // kept until the test ends
+        self.world
+            .lock()
+            .expect("world lock")
+            .forbidden
+            .insert(namespace.to_owned());
+    }
+
+    /// Recreate a worker pod under the same name right before its next delete
+    ///
+    /// # Arguments
+    ///
+    /// * `namespace` - The pod's namespace
+    /// * `name` - The pod's name
+    pub(crate) fn recreate_before_delete(&self, namespace: &str, name: &str) {
+        // the next delete finds a new UID
+        self.world
+            .lock()
+            .expect("world lock")
+            .recreate_before_delete
+            .insert((namespace.to_owned(), name.to_owned()));
+    }
+
+    /// Get the worker pods deleted, in order, as `(namespace, name)`
+    pub(crate) fn deleted_pods(&self) -> Vec<(String, String)> {
+        // every delete that succeeded
+        self.world.lock().expect("world lock").deleted_pods.clone()
+    }
+
+    /// Get the worker pods that still exist, as `(namespace, name, uid)`
+    pub(crate) fn worker_pods(&self) -> Vec<(String, String, String)> {
+        // each pod with the UID it has now
+        self.world
+            .lock()
+            .expect("world lock")
+            .worker_pods
+            .iter()
+            .map(|((namespace, name), pod)| {
+                (
+                    namespace.clone(),
+                    name.clone(),
+                    pod["metadata"]["uid"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                )
+            })
+            .collect()
     }
 }

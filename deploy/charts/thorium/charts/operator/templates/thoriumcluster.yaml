@@ -97,6 +97,12 @@ spec:
         {{- if .acceptBackupGaps }}
         accept_backup_gaps: true
         {{- end }}
+        {{- if .cancelInFlight }}
+        cancel_in_flight: true
+        {{- end }}
+        {{- if not (kindIs "invalid" .graceSeconds) }}
+        grace_seconds: {{ .graceSeconds | int64 }}
+        {{- end }}
       {{- end }}
     {{- end }}
     {{- with .driftAcknowledged }}

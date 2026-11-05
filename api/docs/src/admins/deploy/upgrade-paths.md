@@ -248,7 +248,10 @@ Workflows](../agentic/upgrading.md) covers them in full.
   `UpgradeRequired` instead.
 - The outage is planned and users are told. What creates reactions (triggers, bulk submissions,
   users) is stopped, and running reactions are left to finish: the drain never ends while something
-  keeps submitting.
+  keeps submitting. Decide how the drain ends: wait for the reactions in flight to finish (or
+  delete stuck ones), with Thorium serving meanwhile, or approve the cancel once the drain waits,
+  which fails what is still in flight and resubmits it after the conversion; Thorium is then down
+  from the cancel until the new Deployments are applied.
 - Images whose `env` holds secrets are cleaned up while image writes still work: after the upgrade,
   image writes return `410 Gone`, and tool instance variables are visible to every group that can
   read the tool.
@@ -318,6 +321,26 @@ Workflows](../agentic/upgrading.md) covers them in full.
    still runs, and don't restart API pods meanwhile. When the wait doesn't end although nothing
    seems to run, see [A drain that doesn't end](#a-drain-that-doesnt-end).
 
+4. Or, instead of waiting, cancel what is in flight: add a `drain-reactions` approval with
+   `cancelInFlight: true` and the confirmation code the waiting step's message shows as `confirm`,
+   and run the same `helm upgrade` again. The code exists only once the drain waits, so this
+   approval can't be part of the first `helm upgrade`, and it serves one attempt:
+
+   ```yaml
+   # add to the approvals in upgrade.yaml
+           - step: drain-reactions
+             backup: thoradm backup <date> on <where>
+             cancelInFlight: true
+             confirm: <the code the step shows>
+   ```
+
+   A `ThoriumCluster` without Helm spells the fields `cancel_in_flight` and `grace_seconds`. The
+   operator stops the scalers, waits a 60-second grace (`graceSeconds` changes it), pauses the
+   API, event handler, and search streamer, and cancels and records the reactions still in flight.
+   After the conversion, and before the components come back, it resubmits them as their creators;
+   the `ReactionsResubmitted` condition reports the counts (see [Cancelling instead of
+   waiting](../agentic/upgrading.md#cancelling-instead-of-waiting)).
+
 **Check.** Phase `Ready` at `2026-10-v05` and every component back at its replica count;
 `thoradm --cluster-conf thorium.yml schema diff` exits 0, or 7 with only the drift
 [expected after stage 3](#expected-drift) (keep its output as this stage's snapshot);
@@ -326,8 +349,9 @@ conversions) shows what changed and what was skipped; tell group owners about sk
 `SchemaDrift` shows the operator's last drift read, which may predate this stage (see stage 2);
 `thoradm schema diff` shows the live state.
 Migrated tools show in `thorctl tools get` and the UI, pipelines name a tool for every stage, and a
-reaction runs to completion. Remove the approvals `status.upgrade.stale_approvals` lists from your
-values.
+reaction runs to completion. After an approved cancel, `thoradm --cluster-conf thorium.yml migrate
+report --id resubmit-reactions` names each request's outcome; tell the creators of refused and
+stale ones. Remove the approvals `status.upgrade.stale_approvals` lists from your values.
 
 **Roll back.** A target below `2026-10-v04` is refused once a conversion step finished or was
 skipped. Restore the pre-upgrade backup into a fresh stage-2 install (see [Rolling back a
@@ -613,7 +637,7 @@ has each step in full.
 | `2026-10-v01` | — | The baseline: a pre-Helm deployment once `convert-to-helm.sh` has recorded it | none | none | — |
 | `2026-10-v02` | `2026-10-v01` | Thorium deployed by the Helm charts with the chart-managed operator. Thorium's Scylla role and Elasticsearch user are checked (and created when the bootstrap is set); Elasticsearch indexes that are missing or mapped differently (megathor-made indexes whose `group` field is `text`) are rebuilt by the search streamer | `scylla-role` (Infra), `elastic-identity` (Infra), `elastic-reindex-keyword-mappings` (Data), `finalize` (Config) | The reindex needs an approval only when an index is wrong; it pauses only the search streamer, and search is incomplete until the reingest finishes (`SearchIncomplete`) | One-way |
 | `2026-10-v03` | `2026-10-v02` | The declared schema is applied in a Job before any step that changes data, and the record of it is kept in Scylla's `schema_migrations`; each user's theme moves into the user's settings | `schema-apply` (Infra), `users-settings-theme` (Data) | The theme move needs an approval only when a user still holds the theme in its own field; it pauses the API | To `2026-10-v02` with `users-settings-theme-reverse`, which loses nothing |
-| `2026-10-v04` | `2026-10-v03` | Images become tools with a first tool instance, pipeline stages are pinned to those tools, and legacy tool names in provenance move to their own field; image writes return `410 Gone` afterwards | `drain-reactions` (Data, waits only), `images-to-tools`, `pipelines-to-tool-stages`, `provenance-to-legacy-tools` (Data), `finalize-tool-only` (Config) | Each conversion needs an approval when it has work; they pause the API, scalers, event handler, and search streamer until the new Deployments are applied | Refused once a conversion step finished or was skipped: restore a backup |
+| `2026-10-v04` | `2026-10-v03` | Images become tools with a first tool instance, pipeline stages are pinned to those tools, and legacy tool names in provenance move to their own field; image writes return `410 Gone` afterwards | `drain-reactions` (Data; waits, or cancels with an approval), `images-to-tools`, `pipelines-to-tool-stages`, `provenance-to-legacy-tools` (Data), `finalize-tool-only` (Config) | Each conversion needs an approval when it has work; they pause the API, scalers, event handler, and search streamer until the new Deployments are applied. The drain waits with Thorium running and needs no approval; an approval with `cancelInFlight` and the code the waiting step shows cancels the reactions in flight instead, pausing from the cancel on, and resubmits them before the components come back (`ReactionsResubmitted`) | Refused once a conversion step finished or was skipped: restore a backup |
 | `2026-10-v05` | `2026-10-v04` | The YARA scanning schema: the `scan_stats` table, the `entities_by_name` view, and the `yara_rulesets` bucket, created by the schema apply and the reconcile | `finalize-yara-scanning` (Config) | none | To `2026-10-v04` with `finalize-yara-scanning-reverse`, which drops nothing |
 
 Revisions from `2026-10-v04` on hold no schema step of their own: the operator applies the schema of

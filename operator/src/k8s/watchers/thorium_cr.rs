@@ -541,6 +541,13 @@ async fn apply_cluster(
     {
         return Ok(action);
     }
+    // a resubmission of drained requests that holds the conversion pause holds the rollout, whose
+    // applies would restore the paused components
+    let resubmit = match upgrades::track_resubmit(meta).await? {
+        upgrades::Resubmit::Hold(action) => return Ok(action),
+        upgrades::Resubmit::Again(secs) => Some(secs),
+        upgrades::Resubmit::Idle => None,
+    };
     // box the apply since its future is too large to keep on the stack
     let action = Box::pin(operate::apply(meta, state.url.clone(), &state.shared)).await?;
     // read and report schema drift when it is due; it never holds the reconcile, but a read under
@@ -550,8 +557,10 @@ async fn apply_cluster(
     // sooner than the day a ready cluster waits
     let ready = Action::requeue(Duration::from_secs(operate::APPLY_REQUEUE_SECS));
     let reingest = upgrades::track_reingest(meta).await;
-    // only a cluster that would otherwise wait its usual day is asked back sooner
-    match (action == ready, drift, reingest) {
+    // only a cluster that would otherwise wait its usual day is asked back sooner, by whichever
+    // follow-up asks first
+    let soon = [reingest, resubmit].into_iter().flatten().min();
+    match (action == ready, drift, soon) {
         (true, Some(again), _) => Ok(again),
         (true, None, Some(secs)) => Ok(Action::requeue(Duration::from_secs(secs))),
         _ => Ok(action),
