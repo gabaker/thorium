@@ -1235,7 +1235,7 @@ pub async fn snapshot_stats(shared: &Shared) -> Result<Option<ScanStatsSnapshot>
     shared
         .scylla
         .queries
-        .scan_stats
+        .scan_stats()?
         .insert(&shared.scylla.session, &row)
         .await?;
     // take the gate only now that the row landed so a failure above never
@@ -1361,7 +1361,7 @@ async fn newest_in_window(
                 .scylla
                 .session
                 .execute_unpaged(
-                    &shared.scylla.queries.scan_stats.pull,
+                    &shared.scylla.queries.scan_stats()?.pull,
                     (year, bucket_chunk, window.1, window.0, 1_i32),
                 )
                 .await?;
@@ -1446,7 +1446,7 @@ pub async fn stats_history(
                     .scylla
                     .session
                     .execute_unpaged(
-                        &shared.scylla.queries.scan_stats.pull,
+                        &shared.scylla.queries.scan_stats()?.pull,
                         (
                             year,
                             bucket_chunk,

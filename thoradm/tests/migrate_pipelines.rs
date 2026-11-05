@@ -367,6 +367,28 @@ async fn pipelines_convert_whole_or_not_at_all() {
     );
 }
 
+/// Pipelines convert on the schema an upgrade from `2026-10-v03` holds while its conversions run,
+/// without the objects `2026-10-v05` adds
+#[tokio::test]
+async fn pipelines_convert_before_the_later_objects_exist() {
+    // build a keyspace at the schema of the revision the upgrade starts from
+    let world = World::new_at("pp_v03", "2026-10-v03").await;
+    // start from an empty Redis namespace
+    clear_redis(&world).await;
+    // p1's stages both have instances
+    seed_instance(&world, "corn", "a").await;
+    seed_instance(&world, "corn", "b").await;
+    seed_pipeline(&world, "corn", "p1", &[&["a"], &["b"]], None).await;
+    // convert the pipeline and expect it written
+    let out = run(&world, 1, 10).await;
+    assert_eq!(out.counts.written, 1, "{:?}", out.counts);
+    // the stored stage tools are those of the stages' instances
+    assert_eq!(
+        stage_tools(&world, "corn", "p1").await,
+        Some(expected("corn", &["a", "b"]))
+    );
+}
+
 /// An instance whose tool isn't the derived one doesn't resolve its stage
 #[tokio::test]
 async fn an_instance_of_another_tool_does_not_resolve_a_stage() {

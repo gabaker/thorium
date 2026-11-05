@@ -496,7 +496,7 @@ pub async fn get_by_name(
         let rows = shared
             .scylla
             .queries
-            .entities_by_name
+            .entities_by_name()?
             .get_chunk(&shared.scylla.session, name, groups_chunk, &kinds)
             .await?;
         // count this chunks rows so a truncated read can never pass silently

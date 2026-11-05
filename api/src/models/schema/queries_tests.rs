@@ -4,7 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::queries::migrations::SchemaStateQueries;
 use super::queries::{
-    CommentsByIdQueries, CommentsQueries, SamplesListQueries, SamplesQueries, ScyllaQueries,
+    ADDED_LATER, CommentsByIdQueries, CommentsQueries, SamplesListQueries, SamplesQueries,
+    ScyllaQueries,
 };
 use super::scylla::{
     AssociationsTable, CommentsTable, CommitishListTable, CommitishesTable, EntitiesTable,
@@ -12,7 +13,8 @@ use super::scylla::{
     ResultsStreamTable, ResultsTable, S3IdsTable, SamplesListTable, ScanStatsTable,
     SchemaMigrationIssuesTable, SchemaMigrationsTable, TagsTable,
 };
-use super::{InKind, InList, Projection, TableStatements, plan_in_chunks};
+use super::{ADDED_OBJECTS, InKind, InList, Projection, TableStatements, plan_in_chunks};
+use crate::models::upgrades::SchemaBackend;
 use crate::models::{
     AssociationListRow, BasicSubmissionRow, CommentIdRow, CommentRow, CommitishDataRow,
     CommitishListRow, CommitishRepoDataRow, EntityListRow, EntityListSupplementRow, EntityRow,
@@ -843,5 +845,26 @@ fn search_statements_match_todays_text() {
     );
     for (name, old) in &legacy {
         assert_eq!(normalize(old), normalize(&generated[name]), "{name}");
+    }
+}
+
+/// Every Scylla object a later revision added has statements an offline writer can leave out, so
+/// a writer inside an upgrade starts on the schema the upgrade began from
+#[test]
+fn later_objects_have_optional_statements() {
+    // the Scylla objects the baseline module lists as added after older revisions
+    let added = ADDED_OBJECTS
+        .iter()
+        .filter(|(_, backend, _)| *backend == SchemaBackend::Scylla)
+        .map(|(_, _, name)| *name)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(added, ADDED_LATER.into_iter().collect::<BTreeSet<_>>());
+    // each one has generated statements
+    let objects = ScyllaQueries::statements("ns")
+        .into_iter()
+        .filter_map(|(name, _)| name.split_once('.').map(|(object, _)| object.to_owned()))
+        .collect::<BTreeSet<_>>();
+    for name in ADDED_LATER {
+        assert!(objects.contains(name), "{name} has no statements");
     }
 }

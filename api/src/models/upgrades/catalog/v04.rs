@@ -47,8 +47,9 @@ const DRAIN_NEEDS: &[UpgradeComponent] = &[
 /// the components it needs running, so the planner also puts it ahead of the steps of an earlier
 /// revision that pause them when an upgrade crosses both revisions.
 /// The revision has no schema-apply step of its own: the schema it declares differs from the
-/// previous revision's only in how pipelines are stored in Redis, and the operator applies the
-/// schema for the image it deploys before it rolls anything out (see `2026-10-v03`).
+/// previous revision's only in how pipelines are stored in Redis. The operator applies the schema
+/// for the image it deploys when it rolls that image out, after the upgrade's steps have run (see
+/// `2026-10-v03`), so these steps can run on the schema the upgrade started from.
 pub(super) const STEPS: &[StepDef] = &[
     StepDef {
         id: DRAIN_REACTIONS_STEP,

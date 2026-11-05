@@ -16,8 +16,9 @@ pub const FINALIZE_YARA_SCANNING_STEP: &str = "finalize-yara-scanning";
 /// from the `entities` table, and the `yara_rulesets` S3 bucket role at layout 1). The upgrade
 /// runs before the reconcile that deploys the new image, so the record step runs first, and that
 /// reconcile then applies the image's schema before it rolls anything out (see `2026-10-v03`) and
-/// creates a missing bucket. No step changes data: the new objects start empty, so the record step
-/// is the whole edge.
+/// creates a missing bucket, so the steps of earlier revisions in the same upgrade run without
+/// these objects. No step changes data: the new objects start empty, so the record step is the
+/// whole edge.
 pub(super) const STEPS: &[StepDef] = &[StepDef {
     id: FINALIZE_YARA_SCANNING_STEP,
     kind: StepKind::Config,
