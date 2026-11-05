@@ -101,6 +101,55 @@ egress:
 thorctl network-policies create --name thorpal-model-egress --groups <GROUP> --rules-file model-egress.yaml
 ```
 
+### Proxies and custom CA certificates
+---
+
+The harness's model client and its Thorium client both take their proxy and CA settings from the
+standard env vars, which the Harness tool sets in `environment.K8s.env`:
+
+| Env var | Effect |
+| ------- | ------ |
+| `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` | The proxy for https urls, for http urls, and for either when its own is unset. The upper-case name wins when both cases are set, and an empty value means no proxy |
+| `NO_PROXY` | The hosts reached without the proxy. List the Thorium API host (the scaler adds it unless the admin turned off `agent_auto_bypass_proxy_for_api`), or tool calls go through the proxy too |
+| `SSL_CERT_FILE` | A PEM bundle that **replaces** the system CA certificates, so it must hold the public roots the model needs as well as your own |
+| `SSL_CERT_DIR` | Directories of CA certificates (`:` separated) that replace the system's |
+
+With a proxy, the network policy must allow the proxy's address instead of the model's. A custom
+CA bundle is usually mounted from a ConfigMap in the group's namespace:
+
+```bash
+cat /etc/ssl/certs/ca-certificates.crt corp-root.pem > bundle.pem
+kubectl -n <GROUP_NAMESPACE> create configmap thorpal-ca --from-file=ca.pem=bundle.pem
+```
+
+```yaml
+# added to thorpal.yaml under Harness.workload.environment.K8s
+env:
+  HTTPS_PROXY: http://proxy.example.com:3128
+  NO_PROXY: thorium-api.thorium.svc.cluster.local.,.svc,.cluster.local
+  SSL_CERT_FILE: /etc/thorpal-ca/ca.pem
+volumes:
+  - name: thorpal-ca
+    archetype: ConfigMap
+    mount_path: /etc/thorpal-ca
+    read_only: true
+    config_map: {optional: false}
+```
+
+At start the harness logs the settings in effect to the stage logs, with any user and password
+removed from the proxy urls:
+
+```text
+thorpal-harness: network: calls use proxy HTTPS_PROXY=http://proxy.example.com:3128 (NO_PROXY=thorium-api.thorium.svc.cluster.local.,.svc,.cluster.local); CA certificates from SSL_CERT_FILE=/etc/thorpal-ca/ca.pem
+```
+
+Without any of them it logs `no proxy is set, so calls go direct` and `CA certificates from the
+system store`. An `SSL_CERT_FILE` that is set but empty still replaces the system store, and is
+logged as `SSL_CERT_FILE=""`. A listed `SSL_CERT_DIR` directory that doesn't exist is logged as a
+warning. A run whose CA settings load no certificates (an `SSL_CERT_FILE` that can't be read or
+holds none, and no `SSL_CERT_DIR` directory that holds any) is refused with exit code `2` before its
+first model call, and the reason is written to `status.json`.
+
 ### The Harness tool
 ---
 

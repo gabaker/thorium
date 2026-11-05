@@ -3,7 +3,8 @@
 //! Reads the files the thorium-agent writes for a workflow run, gives `ThorPal`'s main agent the
 //! run's model and the entry agent's tools, and writes the answer, conversation, traces, and
 //! status back where the thorium-agent collects them. It reads no model settings from its
-//! environment: the model, its endpoint, and its key come only from the models file.
+//! environment: the model, its endpoint, and its key come only from the models file. Its HTTP
+//! clients take the proxy and CA settings from the standard env vars, which it logs at start.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -16,7 +17,8 @@ mod traces;
 
 use dispatch::Dispatcher;
 use interface::{
-    DEFAULT_TIMEOUT_SECS, HarnessPaths, HarnessStatus, RunFiles, RunPlan, TIMEOUT_ENV, write_file,
+    DEFAULT_TIMEOUT_SECS, HarnessPaths, HarnessStatus, NetworkSettings, RunFiles, RunPlan,
+    TIMEOUT_ENV, write_file,
 };
 use traces::Recorder;
 
@@ -166,6 +168,16 @@ async fn run(args: &[String]) -> i32 {
         Ok(paths) => paths,
         Err(error) => return refuse(&HarnessPaths::default(), &error),
     };
+    // log the proxies and CA certificates model and Thorium calls use, without proxy user info
+    let network = NetworkSettings::from_env();
+    eprintln!("thorpal-harness: {network}");
+    for warning in network.ca_dir_warnings() {
+        eprintln!("thorpal-harness: {warning}");
+    }
+    // CA settings that load no certificates would stop rig from building the model client
+    if let Err(error) = interface::probe_model_client() {
+        return refuse(&paths, &network.client_problem(&error));
+    }
     let files = match RunFiles::load(&paths.inputs) {
         Ok(files) => files,
         Err(error) => return refuse(&paths, &error),

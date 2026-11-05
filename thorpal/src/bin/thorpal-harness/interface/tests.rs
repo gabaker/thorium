@@ -4,6 +4,7 @@ use futures::StreamExt;
 use rig::agent::MultiTurnStreamItem;
 use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use thorium::models::{
@@ -13,7 +14,9 @@ use thorium::models::{
 use thorpal::AiProviderConfig;
 use uuid::Uuid;
 
-use super::{ConversionError, RunFiles, capabilities, plan, provider_config};
+use super::{
+    ConversionError, EnvSetting, NetworkSettings, RunFiles, capabilities, plan, provider_config,
+};
 
 #[path = "../../../../tests/common/fixtures.rs"]
 #[allow(dead_code)]
@@ -348,4 +351,184 @@ async fn converted_config_streams_to_the_endpoint() {
     );
     assert_eq!(requests[0].body["model"], Value::from(MODEL));
     assert_eq!(requests[0].body["stream"], Value::Bool(true));
+}
+
+/// Build a set of env vars from name and value pairs
+///
+/// # Arguments
+///
+/// * `pairs` - The env var names and values
+fn vars(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+    // own every name and value
+    pairs
+        .iter()
+        .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+        .collect()
+}
+
+/// Build the setting one env var gives
+///
+/// # Arguments
+///
+/// * `var` - The env var's name
+/// * `value` - The value it gives
+fn setting(var: &'static str, value: &str) -> EnvSetting {
+    // the setting the harness reports for this var
+    EnvSetting {
+        var,
+        value: value.to_owned(),
+    }
+}
+
+/// With no proxy or CA env var set, calls go direct and TLS uses the system store
+#[test]
+fn network_settings_say_direct_without_a_proxy() {
+    // nothing set, or only empty values, means no settings
+    assert_eq!(
+        NetworkSettings::from_vars(&vars(&[])),
+        NetworkSettings::default()
+    );
+    let empty = NetworkSettings::from_vars(&vars(&[
+        ("HTTPS_PROXY", ""),
+        ("NO_PROXY", " "),
+        ("SSL_CERT_DIR", ""),
+    ]));
+    assert_eq!(empty, NetworkSettings::default());
+    // the log line says calls go direct with the system's CA certificates
+    let line = NetworkSettings::default().to_string();
+    assert!(
+        line.contains("no proxy is set, so calls go direct"),
+        "{line}"
+    );
+    assert!(line.contains("no NO_PROXY"), "{line}");
+    assert!(line.contains("system store"), "{line}");
+    assert_eq!(NetworkSettings::default().ca_file_problem(), None);
+    assert_eq!(
+        NetworkSettings::default().ca_dir_warnings(),
+        Vec::<String>::new()
+    );
+}
+
+/// A present but empty `SSL_CERT_FILE` replaces the system store in the HTTP clients, so it is
+/// reported as set, quoted so the empty value shows
+#[test]
+fn network_settings_report_an_empty_ca_bundle() {
+    // an empty and a blank bundle path are both kept as given
+    for value in ["", " "] {
+        let settings = NetworkSettings::from_vars(&vars(&[("SSL_CERT_FILE", value)]));
+        assert_eq!(settings.ca_file, Some(setting("SSL_CERT_FILE", value)));
+        // the log line quotes the value instead of claiming the system store
+        let line = settings.to_string();
+        assert!(!line.contains("system store"), "{line}");
+        assert!(
+            line.contains(&format!("CA certificates from SSL_CERT_FILE=\"{value}\"")),
+            "{line}"
+        );
+        // the bundle can't be read
+        assert!(settings.ca_file_problem().is_some(), "{value:?}");
+    }
+}
+
+/// Proxy urls lose their user info, the upper-case name wins like it does in the HTTP clients,
+/// and the CA settings are reported
+#[test]
+fn network_settings_redact_and_prefer_upper_case() {
+    // every kind of setting, with user info in the proxies and both cases of each name
+    let settings = NetworkSettings::from_vars(&vars(&[
+        ("HTTPS_PROXY", "http://europa:hunter2@proxy.example:3128"),
+        ("https_proxy", "http://lower.example:1"),
+        ("http_proxy", "http://io:k3f9@plain.example:8080"),
+        ("all_proxy", "socks5://ganymede@socks.example:1080"),
+        ("NO_PROXY", "thorium-api.thorium.svc.cluster.local.,.svc"),
+        ("no_proxy", "ignored.example"),
+        ("SSL_CERT_FILE", "/etc/thorpal-ca/ca.pem"),
+        ("SSL_CERT_DIR", "/etc/thorpal-ca/dir"),
+        ("HOME", "/home/thorium"),
+    ]));
+    assert_eq!(
+        settings,
+        NetworkSettings {
+            https_proxy: Some(setting("HTTPS_PROXY", "http://proxy.example:3128")),
+            http_proxy: Some(setting("http_proxy", "http://plain.example:8080")),
+            all_proxy: Some(setting("all_proxy", "socks5://socks.example:1080")),
+            no_proxy: Some(setting(
+                "NO_PROXY",
+                "thorium-api.thorium.svc.cluster.local.,.svc"
+            )),
+            ca_file: Some(setting("SSL_CERT_FILE", "/etc/thorpal-ca/ca.pem")),
+            ca_dir: Some(setting("SSL_CERT_DIR", "/etc/thorpal-ca/dir")),
+        }
+    );
+    // the log line names every setting and none of the user info
+    let line = settings.to_string();
+    for expected in [
+        "HTTPS_PROXY=http://proxy.example:3128",
+        "http_proxy=http://plain.example:8080",
+        "all_proxy=socks5://socks.example:1080",
+        "NO_PROXY=thorium-api.thorium.svc.cluster.local.,.svc",
+        "SSL_CERT_FILE=/etc/thorpal-ca/ca.pem",
+        "SSL_CERT_DIR=/etc/thorpal-ca/dir",
+    ] {
+        assert!(line.contains(expected), "{expected} missing from {line}");
+    }
+    for secret in [
+        "europa",
+        "hunter2",
+        "io:",
+        "k3f9",
+        "ganymede",
+        "lower.example",
+    ] {
+        assert!(!line.contains(secret), "{secret} leaked into {line}");
+    }
+    // the lower-case names are used when the upper-case ones aren't set
+    let lower = NetworkSettings::from_vars(&vars(&[
+        ("https_proxy", "http://lower.example:1"),
+        ("no_proxy", "a.example"),
+    ]));
+    assert_eq!(
+        lower.https_proxy,
+        Some(setting("https_proxy", "http://lower.example:1"))
+    );
+    assert_eq!(lower.no_proxy, Some(setting("no_proxy", "a.example")));
+    // an empty upper-case name hides the lower-case one, as it does in the HTTP clients
+    let hidden = NetworkSettings::from_vars(&vars(&[
+        ("HTTPS_PROXY", ""),
+        ("https_proxy", "http://lower.example:1"),
+    ]));
+    assert_eq!(hidden.https_proxy, None);
+}
+
+/// A CA bundle that can't be read and a CA directory that doesn't exist are reported, and readable
+/// ones are not
+#[test]
+fn network_settings_check_the_ca_files() {
+    // a real bundle and directory raise no problem
+    let dir = tempfile::tempdir().unwrap();
+    let bundle = dir.path().join("ca.pem");
+    std::fs::write(&bundle, "-----BEGIN CERTIFICATE-----\n").unwrap();
+    let readable = NetworkSettings::from_vars(&vars(&[
+        ("SSL_CERT_FILE", bundle.to_str().unwrap()),
+        ("SSL_CERT_DIR", dir.path().to_str().unwrap()),
+    ]));
+    assert_eq!(readable.ca_file_problem(), None);
+    assert_eq!(readable.ca_dir_warnings(), Vec::<String>::new());
+    // a missing bundle and directory are both named
+    let missing = dir.path().join("missing.pem");
+    let gone = dir.path().join("gone");
+    let unreadable = NetworkSettings::from_vars(&vars(&[
+        ("SSL_CERT_FILE", missing.to_str().unwrap()),
+        (
+            "SSL_CERT_DIR",
+            &format!("{}:{}", dir.path().display(), gone.display()),
+        ),
+    ]));
+    let problem = unreadable.ca_file_problem().unwrap();
+    assert!(problem.contains("SSL_CERT_FILE"), "{problem}");
+    assert!(problem.contains("missing.pem"), "{problem}");
+    // only the missing directory is named
+    let warnings = unreadable.ca_dir_warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("SSL_CERT_DIR"), "{warnings:?}");
+    assert!(warnings[0].contains("gone"), "{warnings:?}");
 }

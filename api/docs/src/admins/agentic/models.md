@@ -45,6 +45,19 @@ curl -X PATCH "$THORIUM_URL/api/system/settings" \
 The update also takes `remove_endpoints` (a list of the same entries) and `clear_endpoints: true`.
 `thoradm settings get` and `GET /api/system/settings` print the current list.
 
+### Reaching models through a proxy
+---
+
+A harness calls its model from its own pod, so a model that is only reachable through a proxy or
+behind a private CA is configured on the Harness tool, not on the endpoint: the harness spec's
+`environment.K8s.env` sets `HTTPS_PROXY`, `NO_PROXY` (with the Thorium API host), and
+`SSL_CERT_FILE`, a ConfigMap or Secret volume carries the CA bundle, and the harness's network
+policy allows the proxy's address. The endpoint's `base_url` stays the model's own url, and it is
+that url the allowed endpoint list must name. The event handler refreshes catalogs from its own
+pod, so it needs the same proxy in its component `env`. The ThorPal harness honours these settings
+and logs the ones in effect at start; see
+[Registering the ThorPal Harness](../../developers/thorpal_harness.md#proxies-and-custom-ca-certificates).
+
 ### Bans
 ---
 

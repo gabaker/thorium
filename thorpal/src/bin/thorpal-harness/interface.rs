@@ -10,6 +10,7 @@ use thorium::models::{
     HarnessModelEntry, HarnessModels, HarnessOutputs, HarnessRunFile, HarnessToolEntry, ModelApi,
     ModelProvider, ModelProviderKind, ToolInvocation, ToolMechanism,
 };
+use thorium::utils::helpers::redact_url;
 use thorpal::AiProviderConfig;
 use uuid::Uuid;
 
@@ -184,6 +185,265 @@ impl RunFiles {
             models,
             keys,
         })
+    }
+}
+
+/// The proxy env vars the HTTP clients read, in the order they read them: the first one set wins
+const HTTPS_PROXY_VARS: [&str; 2] = ["HTTPS_PROXY", "https_proxy"];
+
+/// The env vars that set the proxy for plain HTTP urls, in the order the HTTP clients read them
+const HTTP_PROXY_VARS: [&str; 2] = ["HTTP_PROXY", "http_proxy"];
+
+/// The env vars that set the proxy for urls of any scheme without their own proxy
+const ALL_PROXY_VARS: [&str; 2] = ["ALL_PROXY", "all_proxy"];
+
+/// The env vars that list the hosts reached without a proxy
+const NO_PROXY_VARS: [&str; 2] = ["NO_PROXY", "no_proxy"];
+
+/// The env var naming a CA bundle that replaces the system's CA certificates
+const CA_FILE_VAR: &str = "SSL_CERT_FILE";
+
+/// The env var naming directories of CA certificates that replace the system's
+const CA_DIR_VAR: &str = "SSL_CERT_DIR";
+
+/// Every env var that changes how the harness's HTTP clients reach the model and Thorium
+pub const NETWORK_VARS: [&str; 10] = [
+    HTTPS_PROXY_VARS[0],
+    HTTPS_PROXY_VARS[1],
+    HTTP_PROXY_VARS[0],
+    HTTP_PROXY_VARS[1],
+    ALL_PROXY_VARS[0],
+    ALL_PROXY_VARS[1],
+    NO_PROXY_VARS[0],
+    NO_PROXY_VARS[1],
+    CA_FILE_VAR,
+    CA_DIR_VAR,
+];
+
+/// One network setting taken from the environment
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvSetting {
+    /// The env var the value came from
+    pub var: &'static str,
+    /// The value, with any url user info removed
+    pub value: String,
+}
+
+impl std::fmt::Display for EnvSetting {
+    /// Write this setting as `VAR=value`, quoting a value that is empty or has surrounding
+    /// whitespace so it shows in the logs
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write to
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // the name and the already redacted value, quoted when it would otherwise not show
+        if self.value.is_empty() || self.value.trim() != self.value {
+            write!(f, "{}={:?}", self.var, self.value)
+        } else {
+            write!(f, "{}={}", self.var, self.value)
+        }
+    }
+}
+
+/// The proxy and CA settings the harness's HTTP clients take from the environment
+///
+/// The model client (reqwest) and Thorium's client both read the proxy env vars, preferring the
+/// upper-case name, and verify TLS against `SSL_CERT_FILE` and `SSL_CERT_DIR` when they are set.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NetworkSettings {
+    /// The proxy for https urls, the one model calls to an https endpoint go through
+    pub https_proxy: Option<EnvSetting>,
+    /// The proxy for plain http urls
+    pub http_proxy: Option<EnvSetting>,
+    /// The proxy for urls whose scheme has no proxy of its own
+    pub all_proxy: Option<EnvSetting>,
+    /// The hosts reached without a proxy
+    pub no_proxy: Option<EnvSetting>,
+    /// The CA bundle that replaces the system's CA certificates
+    pub ca_file: Option<EnvSetting>,
+    /// The CA certificate directories that replace the system's
+    pub ca_dir: Option<EnvSetting>,
+}
+
+/// Find the first of some env vars that is set, the way the HTTP clients do, ignoring an empty
+/// value since the clients treat it as unset
+///
+/// # Arguments
+///
+/// * `vars` - The env vars
+/// * `names` - The names to check, in order
+/// * `redact` - Whether the value is a url whose user info must be removed
+fn first_set(
+    vars: &BTreeMap<String, String>,
+    names: &[&'static str],
+    redact: bool,
+) -> Option<EnvSetting> {
+    // the first name present wins even when it's empty, like the HTTP clients
+    let (var, value) = names
+        .iter()
+        .find_map(|name| vars.get(*name).map(|value| (*name, value.trim())))?;
+    if value.is_empty() {
+        return None;
+    }
+    // proxy urls may carry a user and password, which are never shown
+    let value = if redact {
+        redact_url(value)
+    } else {
+        value.to_owned()
+    };
+    Some(EnvSetting { var, value })
+}
+
+/// Find an env var that is set, keeping its value as given even when it's empty, since the TLS
+/// backend treats a present `SSL_CERT_FILE` as set whatever its value
+///
+/// # Arguments
+///
+/// * `vars` - The env vars
+/// * `name` - The name to check
+fn present(vars: &BTreeMap<String, String>, name: &'static str) -> Option<EnvSetting> {
+    // any value counts, even an empty one
+    vars.get(name).map(|value| EnvSetting {
+        var: name,
+        value: value.clone(),
+    })
+}
+
+/// Build an HTTP client the way rig builds the model client, so CA settings that load no
+/// certificates are caught before the first model call instead of panicking inside it
+pub fn probe_model_client() -> Result<(), String> {
+    // rig builds its client with reqwest's defaults, which load the CA certificates
+    let Err(error) = reqwest::Client::builder().build() else {
+        return Ok(());
+    };
+    // name every error in the chain, since the CA problem is usually the innermost
+    let mut reason = error.to_string();
+    let mut source = std::error::Error::source(&error);
+    while let Some(inner) = source {
+        reason.push_str(": ");
+        reason.push_str(&inner.to_string());
+        source = inner.source();
+    }
+    Err(reason)
+}
+
+impl NetworkSettings {
+    /// Read the proxy and CA settings from a set of env vars
+    ///
+    /// # Arguments
+    ///
+    /// * `vars` - The env vars, by name
+    #[must_use]
+    pub fn from_vars(vars: &BTreeMap<String, String>) -> Self {
+        // proxy urls are redacted, while host lists and paths hold no secrets
+        NetworkSettings {
+            https_proxy: first_set(vars, &HTTPS_PROXY_VARS, true),
+            http_proxy: first_set(vars, &HTTP_PROXY_VARS, true),
+            all_proxy: first_set(vars, &ALL_PROXY_VARS, true),
+            no_proxy: first_set(vars, &NO_PROXY_VARS, false),
+            ca_file: present(vars, CA_FILE_VAR),
+            ca_dir: first_set(vars, &[CA_DIR_VAR], false),
+        }
+    }
+
+    /// Read the proxy and CA settings from the harness's environment
+    #[must_use]
+    pub fn from_env() -> Self {
+        // collect only the network env vars, skipping any that aren't valid unicode
+        let vars = NETWORK_VARS
+            .iter()
+            .filter_map(|name| {
+                std::env::var(name)
+                    .ok()
+                    .map(|value| ((*name).to_owned(), value))
+            })
+            .collect();
+        Self::from_vars(&vars)
+    }
+
+    /// Check that the CA bundle these settings name can be read
+    #[must_use]
+    pub fn ca_file_problem(&self) -> Option<String> {
+        // the CA bundle must be a readable file
+        let file = self.ca_file.as_ref()?;
+        let error = std::fs::File::open(&file.value).err()?;
+        Some(format!("{file}, which can't be read ({error})"))
+    }
+
+    /// Explain why the model client can't be built, naming the CA settings that load no
+    /// certificates
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - The error from building the model client
+    #[must_use]
+    pub fn client_problem(&self, error: &str) -> String {
+        // the client error, then what is wrong with the CA settings where that's known
+        let mut reason =
+            format!("the model client can't be built, so no TLS connection can be made: {error}");
+        let problems = self
+            .ca_file_problem()
+            .into_iter()
+            .chain(self.ca_dir_warnings());
+        for problem in problems {
+            reason.push_str("; ");
+            reason.push_str(&problem);
+        }
+        reason
+    }
+
+    /// Check that the CA directories these settings name exist, since certificates are only
+    /// loaded from the ones that do
+    #[must_use]
+    pub fn ca_dir_warnings(&self) -> Vec<String> {
+        // a directory list that isn't set has nothing to check
+        let Some(dirs) = &self.ca_dir else {
+            return Vec::new();
+        };
+        // name every listed directory that doesn't exist
+        dirs.value
+            .split(':')
+            .filter(|dir| !dir.is_empty() && !Path::new(dir).is_dir())
+            .map(|dir| format!("{} names {dir}, which isn't a directory", dirs.var))
+            .collect()
+    }
+}
+
+impl std::fmt::Display for NetworkSettings {
+    /// Write the proxies and CA certificates model and Thorium calls use
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write to
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // name every proxy that is set, or say calls go direct
+        let proxies: Vec<String> = [&self.https_proxy, &self.http_proxy, &self.all_proxy]
+            .into_iter()
+            .flatten()
+            .map(ToString::to_string)
+            .collect();
+        if proxies.is_empty() {
+            write!(f, "network: no proxy is set, so calls go direct")?;
+        } else {
+            write!(f, "network: calls use proxy {}", proxies.join(", "))?;
+        }
+        // the hosts that skip the proxy
+        match &self.no_proxy {
+            Some(no_proxy) => write!(f, " ({no_proxy})")?,
+            None => write!(f, " (no NO_PROXY)")?,
+        }
+        // the CA certificates TLS is checked against
+        let cas: Vec<String> = [&self.ca_file, &self.ca_dir]
+            .into_iter()
+            .flatten()
+            .map(ToString::to_string)
+            .collect();
+        if cas.is_empty() {
+            write!(f, "; CA certificates from the system store")
+        } else {
+            write!(f, "; CA certificates from {}", cas.join(", "))
+        }
     }
 }
 
