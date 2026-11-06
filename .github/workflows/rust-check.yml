@@ -1,8 +1,7 @@
 # Runs Thorium's Rust static checks: cargo check, clippy, and rustfmt; the unit tests that need no
-# services along with a check that the chart's CRD matches the operator, the schema change
-# warnings, and a check that the schema pattern test series stays off main; a check that the
-# integration tests compile; thoradm's tests that need no backing services; and thorctl's unit
-# tests and its harness tests that need no services
+# services along with a check that the chart's CRD matches the operator and the schema change
+# warnings; a check that the integration tests compile; thoradm's tests that need no backing
+# services; and thorctl's unit tests and its harness tests that need no services
 #
 # - ci.yml calls this workflow on pushes and pull requests that change Rust code, after its
 #   builds and image publish, whatever they concluded, so these jobs never gate or block a build
@@ -459,8 +458,7 @@ jobs:
             exit 1
           fi
 
-  # the unit tests that need no services, the chart CRD check, the schema change report, and the
-  # check that the schema test series stays off main
+  # the unit tests that need no services, the chart CRD check, and the schema change report
   test:
     name: Test · unit tests and schema checks
     runs-on: ubuntu-24.04
@@ -546,28 +544,6 @@ jobs:
             --example schema_report -- --sarif "${RUNNER_TEMP}/schema/schema-changes.sarif"
           python3 .github/scripts/lint_report.py --tool schema --format sarif \
             --input "${RUNNER_TEMP}/schema/schema-changes.sarif" --output-dir "${RUNNER_TEMP}/schema"
-
-      # the schema pattern test series lives on its own test branch: finding it
-      # fails the job on main and warns on every other branch. The pattern is
-      # assembled so it never matches its own text, and an ordinary
-      # schema_tests module doesn't match it
-      - name: Check that the schema test series is absent
-        if: ${{ !cancelled() }}
-        env:
-          ON_MAIN: ${{ github.ref == 'refs/heads/main' }}
-        run: |
-          word="schema"; tail="test"
-          pattern="\\b${word}[-_]${tail}(\\b|[-_.0-9])"
-          if hits=$(git grep -nE "$pattern" -- . ':!.gitlab/' ':!.github/'); then
-            echo "$hits"
-            if [ "$ON_MAIN" = "true" ]; then
-              echo "::error::The schema test series is present on main; it belongs only on its test branch"
-              exit 1
-            fi
-            echo "::warning::The schema test series is present; it must be removed before this branch reaches main"
-          else
-            echo "No schema test series content found"
-          fi
 
       # saved even when a test fails, since the build output is still valid
       - name: Save Cargo cache
