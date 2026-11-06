@@ -234,6 +234,18 @@ pub(super) async fn run(cmd: &ApplySchema, args: &Args) -> Result<ApplyReport, F
             .await?,
         )
     };
+    // a record a newer build wrote is refused before anything changes, as the API refuses it
+    let checked = crate::shared::record_guard::read(&session, &conf)
+        .await
+        .and_then(|recorded| {
+            crate::shared::record_guard::check_apply(&Catalog::PRODUCTION, &recorded)
+        });
+    if let Err(err) = checked {
+        if let Some(lease) = lease {
+            lease.release().await;
+        }
+        return Err(err.into());
+    }
     // converge to the declared schema, recording the key the operator passed, if any
     let key = std::env::var(TRIGGER_KEY_ENV).unwrap_or_default();
     let options = ApplyOptions {

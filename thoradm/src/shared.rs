@@ -3,6 +3,7 @@
 pub mod ctl_conf;
 pub mod monitor;
 pub mod progress;
+pub mod record_guard;
 pub mod redis;
 pub mod retry;
 pub mod scylla;

@@ -1252,6 +1252,59 @@ pub(super) async fn recorded_revision(
         .and_then(|row| row.revision))
 }
 
+/// What a writer reads from the record before it changes anything
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecordedState {
+    /// The recorded revision with the whole history, oldest first, when a revision is recorded
+    pub state: Option<UpgradeState>,
+    /// The deployment fingerprint the last `schema apply` recorded, if one did
+    pub fingerprint: Option<Fingerprint>,
+}
+
+/// Read the recorded revision, the whole history, and the applied deployment fingerprint
+///
+/// A keyspace without `schema_migrations` reads as nothing recorded. A recorded revision that
+/// doesn't parse is an error, so a caller never takes it for no record.
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to read with
+/// * `conf` - The Thorium config, for the keyspace
+/// * `version` - The Thorium version the returned state names as its writer
+pub async fn read_recorded(
+    session: &Session,
+    conf: &Conf,
+    version: &str,
+) -> Result<RecordedState, RecordError> {
+    // a keyspace without the table records nothing
+    if !tables(session, conf)
+        .await?
+        .contains(<SchemaMigrationsTable as ScyllaObject>::NAME)
+    {
+        return Ok(RecordedState::default());
+    }
+    let queries = prepare(session, conf).await?;
+    // the revision and the whole history, which the planner's rules read
+    let state = match read_revision(session, &queries).await? {
+        Some(row) => {
+            let revision = row
+                .revision
+                .as_deref()
+                .unwrap_or_default()
+                .parse::<RevisionId>()
+                .map_err(|err| RecordError::invalid(format!("the recorded revision: {err}")))?;
+            let mut state = UpgradeState::new(revision, version);
+            state.applied = read_history(session, &queries).await?;
+            Some(state)
+        }
+        None => None,
+    };
+    // the deployment fingerprint, which reads as empty before the first apply
+    let deployment = read_schema(session, &queries).await?.deployment;
+    let fingerprint = (!deployment.as_str().is_empty()).then_some(deployment);
+    Ok(RecordedState { state, fingerprint })
+}
+
 /// Write a Job's full result under its UID, expiring after seven days
 ///
 /// # Arguments
