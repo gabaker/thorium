@@ -5,6 +5,9 @@ use bb8_redis::bb8::Pool;
 use indicatif::{ProgressBar, ProgressStyle};
 use kanal::AsyncSender;
 use scylla::client::session::Session;
+use scylla::deserialize::row::{ColumnIterator, DeserializeRow};
+use scylla::deserialize::{DeserializationError, TypeCheckError};
+use scylla::frame::response::result::ColumnSpec;
 use scylla::statement::prepared::PreparedStatement;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -24,6 +27,45 @@ use crate::shared::monitor::MonitorUpdate;
 use crate::shared::retry::RetryPolicy;
 use crate::shared::scylla::{RangeReader, ScyllaCrawlController, ScyllaCrawlSupport};
 use crate::shared::workers::Orders;
+
+/// One row of a census scan, or `None` for the row of nulls some Scylla versions return for a
+/// token range with no partitions
+///
+/// Scylla 5.2 answers a `GROUP BY` aggregate over a token range holding no partitions with one
+/// row whose grouped columns are null and whose count is 0, where Scylla 6 returns no rows. A
+/// census groups by the partition key, whose columns are never null in a real partition, so a
+/// null first column marks that row.
+struct CensusScanRow<R>(Option<R>);
+
+impl<'frame, 'metadata, R> DeserializeRow<'frame, 'metadata> for CensusScanRow<R>
+where
+    R: DeserializeRow<'frame, 'metadata>,
+{
+    /// Checks the scan's columns against the census row type
+    ///
+    /// # Arguments
+    ///
+    /// * `specs` - The columns the scan returns
+    fn type_check(specs: &[ColumnSpec]) -> Result<(), TypeCheckError> {
+        // the row of nulls has the same columns as any other row
+        R::type_check(specs)
+    }
+
+    /// Reads one row of a census scan, returning `None` for the row of nulls of an empty range
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The columns of the row
+    fn deserialize(row: ColumnIterator<'frame, 'metadata>) -> Result<Self, DeserializationError> {
+        // a null first partition key column only appears in the empty range's row of nulls
+        let empty_range = matches!(row.clone().next(), Some(Ok(column)) if column.slice.is_none());
+        if empty_range {
+            return Ok(CensusScanRow(None));
+        }
+        // any other row is a partition the census counts
+        R::deserialize(row).map(|row| CensusScanRow(Some(row)))
+    }
+}
 
 /// What every worker of one census shares
 #[derive(Clone)]
@@ -148,7 +190,7 @@ impl<T: CensusSupport> CensusWorker<T> {
             let mut reader =
                 RangeReader::new(&scylla, &prepared, (start, end), RetryPolicy::default());
             loop {
-                let page = match reader.next_page::<T::Row>().await {
+                let page = match reader.next_page::<CensusScanRow<T::Row>>().await {
                     Ok(Some(page)) => page,
                     Ok(None) => break,
                     Err(failed) => {
@@ -161,7 +203,9 @@ impl<T: CensusSupport> CensusWorker<T> {
                 for typed_row in page {
                     // log and count a row that can't be read, then go on with the rest
                     let typed_row = match typed_row {
-                        Ok(typed_row) => typed_row,
+                        Ok(CensusScanRow(Some(typed_row))) => typed_row,
+                        // an empty range's row of nulls counts no partition
+                        Ok(CensusScanRow(None)) => continue,
                         Err(error) => {
                             tracing::error!("Census failure: {error}");
                             self.errors.fetch_add(1, Ordering::Relaxed);
@@ -574,13 +618,17 @@ async fn members_of<T: CensusSupport>(
     let mut reader = RangeReader::new(scylla, &prepared, (i64::MIN, i64::MAX), retry);
     let mut members = Vec::new();
     loop {
-        let page = match reader.next_page::<T::Row>().await {
+        let page = match reader.next_page::<CensusScanRow<T::Row>>().await {
             Ok(Some(page)) => page,
             Ok(None) => return Ok(members),
             Err(failed) => return Err(Error::new(failed.to_string())),
         };
         for row in page {
-            let row = row.map_err(|error| Error::new(error.to_string()))?;
+            // an empty range's row of nulls names no partition
+            let CensusScanRow(row) = row.map_err(|error| Error::new(error.to_string()))?;
+            let Some(row) = row else {
+                continue;
+            };
             members.push((T::stream_key_from_row(namespace, &row), T::get_bucket(&row)));
         }
     }
