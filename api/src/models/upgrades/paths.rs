@@ -262,7 +262,7 @@ mod tests {
             floors: &[SupportFloor {
                 minimum: "2026-10-v02",
                 intermediate: "1.8.0",
-                since_version: "1.8.1",
+                since_version: "1.11.0",
             }],
             ..Catalog::PRODUCTION
         };

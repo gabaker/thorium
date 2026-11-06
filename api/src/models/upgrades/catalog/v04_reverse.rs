@@ -29,7 +29,7 @@ pub(super) const STEPS: &[StepDef] = &[StepDef {
 pub(super) const ENTRY: CatalogEntry = CatalogEntry {
     from: Some("2026-10-v04"),
     id: "2026-10-v03",
-    released_with: "1.8.1",
+    released_with: "1.11.0",
     description: "Revert the revision that converts images, pipelines, and provenance",
     schema: Some("86722e9607083db0e1f7d2b527ce3c4937c78b34fdc5cdb3ef5691eb70fbbdfd"),
     prerelease: false,

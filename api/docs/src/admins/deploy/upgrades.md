@@ -834,8 +834,9 @@ rollback points, and known issues of each.
 <!-- upgrade-paths:begin (generated from the catalog's support floors) -->
 | Thorium version | Revision | Oldest revision it upgrades from | From an older revision |
 |-----------------|----------|----------------------------------|------------------------|
-| 1.8.1 | `2026-10-v05` | `2026-10-v01` | — |
-| Pre-Helm, any version | `2026-10-v01` once converted | — | Convert with the `convert-to-helm.sh` of Thorium 1.8.1, then upgrade from `2026-10-v01` |
+| 1.11.0 | `2026-10-v05` | `2026-10-v01` | — |
+| 1.10.0 | `2026-10-v03` | `2026-10-v01` | — |
+| Pre-Helm, any version | `2026-10-v01` once converted | — | Convert with the `convert-to-helm.sh` of Thorium 1.11.0, then upgrade from `2026-10-v01` |
 <!-- upgrade-paths:end -->
 
 ## Revisions

@@ -277,7 +277,7 @@ set_profile "${MINITHOR_PROFILE:-${MINIKUBE_PROFILE:-}}"
 # The Thorium Helm charts deploy installs by default: the published charts at this version.
 # Use --chart/--operators-chart for a local chart directory or packaged .tgz instead.
 CHART_REPO="${MINITHOR_CHART_REPO:-oci://ghcr.io/cisagov/thorium/charts}"
-CHART_VERSION="${MINITHOR_CHART_VERSION:-1.8.1}"
+CHART_VERSION="${MINITHOR_CHART_VERSION:-1.11.0}"
 # The namespace the cluster-wide infra-operators chart is installed into
 OPERATORS_NAMESPACE="infra-operators"
 # The Helm release name of the thorium chart
@@ -1311,7 +1311,7 @@ Other:
 Examples:
   minithor deploy
   minithor --namespace-prefix dev deploy --rand-password
-  minithor deploy --chart ./thorium-1.8.1.tgz      # infra-operators-*.tgz alongside it
+  minithor deploy --chart ./thorium-1.11.0.tgz      # infra-operators-*.tgz alongside it
   minithor deploy --chart deploy/charts/thorium    # from a checkout
   minithor deploy --chart deploy/charts/thorium \
       --image ghcr.io/<owner>/thorium/infrastructure/thorium:<branch>   # a fork branch's CI image

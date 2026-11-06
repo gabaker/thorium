@@ -29,7 +29,7 @@ oci://ghcr.io/cisagov/thorium/charts/thorium
 ## Install
 
 ```bash
-VERSION=1.8.1
+VERSION=1.11.0
 # the operators, once per cluster
 helm install infra-operators oci://ghcr.io/cisagov/thorium/charts/infra-operators \
   --version $VERSION -n infra-operators --create-namespace --wait

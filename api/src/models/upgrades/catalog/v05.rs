@@ -37,7 +37,7 @@ pub(super) const STEPS: &[StepDef] = &[StepDef {
 pub(super) const ENTRY: CatalogEntry = CatalogEntry {
     from: Some("2026-10-v04"),
     id: "2026-10-v05",
-    released_with: "1.8.1",
+    released_with: "1.11.0",
     description: "The yara scanning schema: scan stats, exact-name entity reads, and the yara \
                   ruleset cache",
     schema: Some("63b181d952ed2125bbe9c8405a33fb96658ae07d8011196d309465e7fa3d1cac"),

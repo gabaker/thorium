@@ -40,7 +40,7 @@ Thoradm reads two configs:
 Thoradm and the API each read the Redis data into their own copy of it, so when they come from
 different Thorium versions, records or fields one version doesn't know are dropped without a word.
 Use the thoradm of the same Thorium version as the API: the version must match exactly, patch
-included (`1.8.1` and `1.8.2` don't match). Thoradm reads the API's version from the
+included (`1.11.0` and `1.11.1` don't match). Thoradm reads the API's version from the
 `thorium-version` header of its answers, and refuses a version other than its own, or an answer
 without the header, before it writes anything:
 
@@ -835,7 +835,7 @@ An abridged manifest:
 ```json
 {
   "format_version": 2,
-  "thoradm_version": "1.8.1",
+  "thoradm_version": "1.11.0",
   "thoradm_commit": null,
   "namespace": "thorium",
   "partition_sizes": { "associations": 180, "files": 180, "results": 60, "tags.files": 180 },

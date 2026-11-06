@@ -977,28 +977,28 @@ reaches, which `auto_target_dev` never targets); the shipped catalog has none. A
 changes data, the component it `scales down`, and the `migration` it runs:
 
 ```
-2026-10-v01 (released with Thorium 1.8.1): Thorium deployed by the minithor or megathor scripts before the Helm charts (the baseline every converted cluster starts from)
-2026-10-v02 (released with Thorium 1.8.1; from 2026-10-v01; one-way): Thorium deployed by the Helm charts with the chart-managed operator
+2026-10-v01 (released with Thorium 1.10.0): Thorium deployed by the minithor or megathor scripts before the Helm charts (the baseline every converted cluster starts from)
+2026-10-v02 (released with Thorium 1.10.0; from 2026-10-v01; one-way): Thorium deployed by the Helm charts with the chart-managed operator
   - scylla-role [Infra]: Check that Thorium's Scylla role logs in with the configured credentials
   - elastic-identity [Infra]: Check that Thorium's Elastic user authenticates and holds the index privileges Thorium needs
   - elastic-reindex-keyword-mappings [Data, needs approval + backup, scales down search-streamer, migration elastic-rebuild]: Reindex Elastic indexes created without mappings, whose group field is not a keyword (megathor deployments before the indexes were left to the search-streamer); skipped when every index is already correct
   - finalize [Config]: Record the new revision
-2026-10-v03 (released with Thorium 1.8.1; from 2026-10-v02): Schema apply runs before any step that changes data
+2026-10-v03 (released with Thorium 1.10.0; from 2026-10-v02): Schema apply runs before any step that changes data
   - schema-apply [Infra]: Apply the schema in a Job before any step that changes data, creating missing tables, columns, and views and recording what was applied
   - users-settings-theme [Data, needs approval + backup, scales down api, migration users-settings-theme]: Move each user's theme from its own field into the user's settings
-2026-10-v02 (released with Thorium 1.8.1; from 2026-10-v03; revert): Revert the revision that applies the schema first
+2026-10-v02 (released with Thorium 1.10.0; from 2026-10-v03; revert): Revert the revision that applies the schema first
   - users-settings-theme-reverse [Data, needs approval + backup, scales down api, migration users-settings-theme-reverse]: Move the theme of any user stored in its own field into the user's settings, the layout the first Helm revision reads; users already there are skipped
-2026-10-v04 (released with Thorium 1.8.1; from 2026-10-v03): Images, pipeline stages, and provenance are converted for tools
+2026-10-v04 (released with Thorium 1.11.0; from 2026-10-v03): Images, pipeline stages, and provenance are converted for tools
   - drain-reactions [Data, needs approval + backup, migration drain-reactions]: Wait until no reaction is Created or Started and no stage-path worker is registered, with Thorium running normally; the step only checks and deletes nothing, and is skipped when nothing is in flight
   - images-to-tools [Data, needs approval + backup, scales down api, scaler, baremetal-scaler, event-handler, search-streamer, migration images-to-tools]: Create a tool and its first tool instance for every image, tagged as migrated from that image
   - pipelines-to-tool-stages [Data, needs approval + backup, scales down api, scaler, baremetal-scaler, event-handler, search-streamer, migration pipelines-to-tool-stages]: Pin each image stage of every pipeline to the first tool instance created from its image
   - provenance-to-legacy-tools [Data, needs approval + backup, scales down api, scaler, baremetal-scaler, event-handler, search-streamer, migration provenance-to-legacy-tools]: Move the tool names stored in file system, decompiled function, and process tree provenance into their legacy tools field
   - finalize-tool-only [Config]: Record the revision once every conversion step is done or skipped
-2026-10-v03 (released with Thorium 1.8.1; from 2026-10-v04; revert): Revert the revision that converts images, pipelines, and provenance
+2026-10-v03 (released with Thorium 1.11.0; from 2026-10-v04; revert): Revert the revision that converts images, pipelines, and provenance
   - finalize-tool-only-reverse [Config]: Undo the record of the end of the revision that converts images, pipelines, and provenance; a revert that gets this far has no conversion to undo
-2026-10-v05 (released with Thorium 1.8.1; from 2026-10-v04): The yara scanning schema: scan stats, exact-name entity reads, and the yara ruleset cache
+2026-10-v05 (released with Thorium 1.11.0; from 2026-10-v04): The yara scanning schema: scan stats, exact-name entity reads, and the yara ruleset cache
   - finalize-yara-scanning [Config]: Record the revision; the operator applies the yara scanning schema after it
-2026-10-v04 (released with Thorium 1.8.1; from 2026-10-v05; revert): Revert the revision that applies the yara scanning schema
+2026-10-v04 (released with Thorium 1.11.0; from 2026-10-v05; revert): Revert the revision that applies the yara scanning schema
   - finalize-yara-scanning-reverse [Config]: Undo the record of the end of the revision that applies the yara scanning schema; the objects it added expire by TTL or are rebuilt, so nothing is dropped
 ```
 

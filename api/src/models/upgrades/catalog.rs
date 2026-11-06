@@ -527,7 +527,7 @@ mod tests {
     }
 
     /// The revision after it holds only the conversion steps in order, starts from the revision
-    /// that applies the schema first, and is documented as released with this version
+    /// that applies the schema first, and first shipped in a different release than that revision
     #[test]
     fn v04_is_the_revision_with_the_conversion_steps() {
         // the edge starts at the schema revision and reaches a newer id
@@ -536,7 +536,7 @@ mod tests {
         assert!(id > v03::ENTRY.revision());
         assert_eq!(edge.from, Some(v03::ENTRY.id));
         assert!(!edge.prerelease && !edge.sibling && !edge.is_downward());
-        assert_eq!(edge.released_with, v03::ENTRY.released_with);
+        assert_ne!(edge.released_with, v03::ENTRY.released_with);
         // its steps are the drain, the three conversions, and the record, in order
         let ids = edge.steps.iter().map(|step| step.id).collect::<Vec<_>>();
         assert_eq!(ids, V04_STEPS);
