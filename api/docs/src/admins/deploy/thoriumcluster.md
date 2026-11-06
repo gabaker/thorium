@@ -190,7 +190,7 @@ How soon the operator checks a cluster again:
 | `UpgradeRequired` or an invalid target | every hour, and immediately on a spec change |
 | An upgrade step waiting for a backend | every 15 seconds |
 | A rebuild's reingest after the rollout | every minute, until the search streamer has finished |
-| Schema drift | at most every hour, after a schema apply, and when the acknowledgements change |
+| Schema drift | at a reconcile once the last read is over an hour old, after a schema apply, or when the acknowledgements change |
 | A blocked upgrade step | every minute |
 | An unconverted pre-Helm cluster | every 10 minutes |
 | A second `ThoriumCluster` in the Kubernetes cluster | every 5 minutes |
