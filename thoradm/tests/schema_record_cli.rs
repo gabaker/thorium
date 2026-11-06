@@ -663,3 +663,166 @@ async fn record_takes_the_operators_done_of_a_run_it_started_once() {
     drop_keyspace(&ns).await;
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Read what a keyspace's record holds, failing the test unless a revision is recorded
+///
+/// # Arguments
+///
+/// * `ns` - The keyspace
+fn recorded(ns: &str) -> RecordStatus {
+    // the status Job's read of the record, without a probe
+    let (_, read) = status(ns, &[]);
+    assert!(
+        matches!(read.status, RecordStatus::Recorded { .. }),
+        "expected a record, read {:?}",
+        read.status
+    );
+    read.status
+}
+
+/// Stamp a keyspace's record the way a newer build leaves it: a revision and a deployment
+/// fingerprint
+///
+/// # Arguments
+///
+/// * `ns` - The keyspace
+/// * `revision` - The revision to record
+/// * `fingerprint` - The deployment fingerprint to record
+async fn stamp(ns: &str, revision: &str, fingerprint: &str) {
+    // the revision row and the deployment's backend row
+    exec(&format!(
+        "UPDATE {ns}.schema_migrations SET revision = '{revision}' \
+         WHERE kind = 'revision' AND id = 'deployment'"
+    ))
+    .await;
+    exec(&format!(
+        "UPDATE {ns}.schema_migrations SET fingerprint = '{fingerprint}' \
+         WHERE kind = 'backend' AND id = 'deployment'"
+    ))
+    .await;
+}
+
+/// A fingerprint no revision of any catalog names, as a newer build's would be to this one
+const NEWER_PRINT: &str = "feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface";
+
+/// A revision later than any this build's catalog knows
+const NEWER_REVISION: &str = "2099-01-v01";
+
+/// `schema apply`, plain or with `--seed-revision` naming the recorded revision, refuses with exit
+/// 1 a record a newer build wrote, naming both revisions and fingerprints, and leaves the record as
+/// it was; an apply at this build's own revision still goes ahead
+#[tokio::test]
+async fn apply_refuses_a_later_recorded_revision() {
+    // a fresh install, applied twice at this build's own revision
+    let ns = namespace("rcli_newer");
+    drop_keyspace(&ns).await;
+    for _ in 0..2 {
+        let output = run(thoradm(&ns).args(["schema", "apply", "--wait-for-scylla", "60"]));
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    }
+    // a newer build recorded its revision and fingerprint
+    stamp(&ns, NEWER_REVISION, NEWER_PRINT).await;
+    let before = recorded(&ns);
+    // a plain apply and a seed of the recorded revision are both refused
+    let log = scratch("newer.log");
+    for extra in [&[][..], &["--seed-revision", NEWER_REVISION][..]] {
+        let output = run(thoradm(&ns)
+            .args(["schema", "apply", "--wait-for-scylla", "60"])
+            .args(extra)
+            .env("THORIUM_TERMINATION_LOG", &log));
+        assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+        let message = stderr(&output);
+        for named in [NEWER_REVISION, NEWER_PRINT, latest().as_str(), "Helm chart"] {
+            assert!(message.contains(named), "{named} missing from: {message}");
+        }
+        let summary: Value =
+            serde_json::from_str(&std::fs::read_to_string(&log).expect("a summary")).expect("JSON");
+        assert_eq!(summary["outcome"], "failed_systematic", "{summary}");
+        // nothing in the record changed
+        assert_eq!(recorded(&ns), before);
+    }
+    drop_keyspace(&ns).await;
+    let _ = std::fs::remove_file(&log);
+}
+
+/// A downgrade along reverse edges moves the record to the older revision before the older build
+/// applies, leaving the newer build's fingerprint beside it; the older build's apply then goes ahead
+/// and records its own fingerprint
+#[tokio::test]
+async fn apply_after_a_reverse_edge_downgrade_moved_the_record() {
+    // a fresh install, then the record a newer build's downgrade leaves: this build's revision with
+    // the newer fingerprint
+    let ns = namespace("rcli_handed");
+    drop_keyspace(&ns).await;
+    let output = run(thoradm(&ns).args(["schema", "apply", "--wait-for-scylla", "60"]));
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let RecordStatus::Recorded { record: own, .. } = recorded(&ns) else {
+        unreachable!("checked by recorded")
+    };
+    stamp(&ns, latest().as_str(), NEWER_PRINT).await;
+    // the apply goes ahead and records this build's fingerprint again
+    let output = run(thoradm(&ns).args(["schema", "apply", "--wait-for-scylla", "60"]));
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let RecordStatus::Recorded { record, .. } = recorded(&ns) else {
+        unreachable!("checked by recorded")
+    };
+    assert_eq!(record.revision, latest());
+    assert_eq!(record.schema.deployment, own.schema.deployment);
+    assert_ne!(record.schema.deployment.as_str(), NEWER_PRINT);
+    drop_keyspace(&ns).await;
+}
+
+/// `migrate run` refuses with exit 1 a step the plan from the recorded revision doesn't hold, one
+/// naming a revision this build doesn't know, and any step over a record a newer build wrote,
+/// appending no history entry
+#[tokio::test]
+async fn migrate_run_refuses_a_step_outside_the_plan() {
+    // a fresh install records this build's revision, below which no forward step is planned
+    let ns = namespace("rcli_plan");
+    drop_keyspace(&ns).await;
+    let output = run(thoradm(&ns).args(["schema", "apply", "--wait-for-scylla", "60"]));
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let before = recorded(&ns);
+    // an older step by hand, which the record moved past
+    let output = run(thoradm(&ns).args(["migrate", "run", "--id", "users-settings-theme"]));
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let message = stderr(&output);
+    for named in [
+        "2026-10-v03/users-settings-theme",
+        latest().as_str(),
+        "--reason",
+    ] {
+        assert!(message.contains(named), "{named} missing from: {message}");
+    }
+    assert_eq!(recorded(&ns), before);
+    // a step the operator names at a revision this build doesn't know
+    let entry = AppliedStep {
+        revision: NEWER_REVISION.to_owned(),
+        step: "users-settings-theme".to_owned(),
+        outcome: StepState::Running,
+        ..AppliedStep::default()
+    };
+    let output = run(thoradm(&ns).args([
+        "migrate",
+        "run",
+        "--id",
+        "users-settings-theme",
+        "--running-entry",
+        &serde_json::to_string(&entry).expect("the entry serializes"),
+    ]));
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains(NEWER_REVISION),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(recorded(&ns), before);
+    // a record a newer build wrote refuses every run
+    stamp(&ns, NEWER_REVISION, NEWER_PRINT).await;
+    let before = recorded(&ns);
+    let output = run(thoradm(&ns).args(["migrate", "run", "--id", "users-settings-theme"]));
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(stderr(&output).contains(NEWER_PRINT), "{}", stderr(&output));
+    assert_eq!(recorded(&ns), before);
+    drop_keyspace(&ns).await;
+}

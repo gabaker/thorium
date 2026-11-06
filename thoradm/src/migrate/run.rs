@@ -14,6 +14,7 @@ use super::registry::{MigrationDef, Support};
 use crate::Error;
 use crate::args::{Args, RunMigration};
 use crate::outcome::RunOutcome;
+use crate::shared::record_guard;
 use crate::shared::termination::{TERMINATION_LIMIT, write_summary};
 
 /// How many of the largest issue groups a summary names
@@ -343,6 +344,43 @@ async fn consume(
     }
 }
 
+/// Refuse a run the planner wouldn't plan from the recorded revision
+///
+/// The step is the one the operator named in its `Running` entry or, for a run by hand, the catalog
+/// step that performs the migration.
+///
+/// # Arguments
+///
+/// * `env` - The backends
+/// * `def` - The registered migration
+/// * `cmd` - The migration to run
+/// * `running` - The `Running` entry passed, if any
+async fn check_plan(
+    env: &context::Env,
+    def: &MigrationDef,
+    cmd: &RunMigration,
+    running: Option<&AppliedStep>,
+) -> Result<(), Error> {
+    // read what the record holds now, under the lease
+    let recorded = record_guard::read(&env.backends.scylla, &env.conf).await?;
+    // the step the run performs, if it names one
+    let step = match running {
+        Some(entry) => Some((entry.revision.clone(), entry.step.clone())),
+        None => {
+            super::revision_of(def.id).zip(super::step_for(def.id).map(|step| step.id.to_owned()))
+        }
+    };
+    // a run of named objects or one issue group re-processes a pass the plan already ran
+    let reprocess = !cmd.objects.is_empty() || cmd.reason.is_some();
+    record_guard::check_step(
+        &super::catalog(),
+        &recorded,
+        step.as_ref()
+            .map(|(revision, id)| (revision.as_str(), id.as_str())),
+        reprocess,
+    )
+}
+
 /// Run the migration and return how its pass ended
 ///
 /// # Arguments
@@ -368,6 +406,12 @@ pub(super) async fn run(
     let env = context::connect(args).await?;
     let lease = context::take_lease(&env, cmd.force_break_lease, true).await?;
     let cancel = context::cancel_on_signal();
+    // a step the planner wouldn't plan from the recorded revision is refused before anything is
+    // written, and so is every run over a revision this build doesn't know
+    if let Err(err) = check_plan(&env, def, cmd, running.as_ref()).await {
+        lease.release().await;
+        return Err(err);
+    }
     // a lossy step's confirmation code is consumed before anything else is written, and a code
     // already consumed refuses the run
     if let Some(code) = cmd.confirm.as_deref()

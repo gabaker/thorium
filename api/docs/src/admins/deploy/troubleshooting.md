@@ -188,6 +188,18 @@ one of these messages.
 | `<setting>` differs from the value recorded for this deployment while data shaped by it exists; set it back to the recorded value | A data-shaping setting (such as a partition size) changed. Put the old value back, or let the operator move the data (see [Changing a partition size](./upgrades.md#changing-a-partition-size)) |
 | the schema record couldn't be read: ... | Scylla failed the read; the API tries again. See the Scylla pods |
 
+### thoradm refuses a record a newer build wrote
+
+`thoradm schema apply` and `thoradm migrate run` refuse, with exit 1 and nothing changed, to write
+behind a newer build, the same way the API refuses to start on a schema it doesn't know:
+
+| Message | Cause and fix |
+|---------|---------------|
+| This thoradm can't apply the schema: revision `<revision>` is later than this build knows (the keyspace records revision `<revision>` with schema fingerprint `<fingerprint>`; this build's catalog ends at revision `<revision>` with schema fingerprint `<fingerprint>`) | A newer release recorded its revision and this thoradm is older, as from an older image or chart run by hand. Applying it would record the older fingerprint over the newer revision, let the older API start, and stop the newer one. Use the thoradm of the release that recorded the revision, downgrade through the Helm chart and the operator (see [Downgrading](./upgrades.md#downgrading)), or restore a backup. `is unknown to this build` means the revision comes from another branch |
+| This thoradm can't apply the schema: schema fingerprint `<fingerprint>` is unknown to this build (the keyspace records no revision ...) | A newer build applied its schema to a keyspace with no recorded revision. The same fixes apply |
+| This thoradm can't run a migration: revision `<revision>` is later than this build knows (...) | Any `migrate run` over a newer build's record. The same fixes apply |
+| This thoradm can't run step `<revision>/<step>`: ... the plan from revision `<revision>` doesn't include it | The step belongs to a revision the deployment already moved past, the record shows it finished, or the planner refuses its path. Re-run a finished step's issue groups with `--reason <code>` or `--objects <keys>`, and move the deployment with its target revision (see [Data migrations](./upgrades.md#data-migrations)) |
+
 ### Logins refused after an upgrade
 
 Releases through 1.105.4 hashed passwords with argonautica's settings (argon2id with other costs

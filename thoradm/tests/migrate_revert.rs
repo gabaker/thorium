@@ -548,25 +548,35 @@ async fn a_revert_records_the_step_even_when_the_environment_names_a_job() {
     world.drop_keyspace().await;
 }
 
-/// A second run by hand of the reverse step, which finds the pass already finished, still records
-/// an outcome entry
+/// A second run by hand of the reverse step, once the record shows the first one finished, is
+/// refused, since the plan from the recorded revision no longer holds the step, and records no
+/// outcome entry of its own
 #[tokio::test]
-async fn a_rerun_by_hand_of_the_reverse_step_records_an_outcome() {
-    // a pass that converts one user, then a second run over the same data
+async fn a_rerun_by_hand_of_a_finished_reverse_step_is_refused() {
+    // a pass that converts one user
     let world = World::new("rvr05").await;
     seed_real_record(&world).await;
     seed_users(&world, true).await;
-    for _ in 0..2 {
-        let output = World::run(
-            world
-                .thoradm()
-                .args(["migrate", "run", "--id", REVERSE_STEP]),
-        );
-        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    }
-    // each run recorded its own entry
+    let first = World::run(
+        world
+            .thoradm()
+            .args(["migrate", "run", "--id", REVERSE_STEP]),
+    );
+    assert_eq!(first.status.code(), Some(0), "{}", stderr(&first));
+    // a second run over the same data is refused before it writes anything
+    let second = World::run(
+        world
+            .thoradm()
+            .args(["migrate", "run", "--id", REVERSE_STEP]),
+    );
+    assert_eq!(second.status.code(), Some(1), "{}", stderr(&second));
+    assert!(
+        stderr(&second).contains("the record shows it finished"),
+        "{}",
+        stderr(&second)
+    );
+    // only the first run recorded an entry
     let outcomes = reverse_outcomes(&world).await;
-    assert_eq!(outcomes.len(), 2, "{outcomes:?}");
-    assert_eq!(outcomes[0], StepState::Done, "{outcomes:?}");
+    assert_eq!(outcomes, [StepState::Done], "{outcomes:?}");
     world.drop_keyspace().await;
 }

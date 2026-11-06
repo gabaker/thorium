@@ -6,8 +6,10 @@
 mod common;
 
 use common::migrate::World;
+use common::record;
 use serde_json::{Value, json};
 use std::process::Output;
+use thorium::models::schema::MigrationRecordKind;
 use thorium::models::upgrades::CONSUMED_REFUSAL;
 
 /// The environment variable that points thoradm at the fixture catalog
@@ -15,6 +17,9 @@ const CATALOG_ENV: &str = "THORADM_FIXTURE_CATALOG";
 
 /// The revision the fixture step belongs to
 const TO: &str = "2026-10-v01";
+
+/// The revision the fixture deployment starts at, which the lossy forward step reached
+const FROM: &str = "2026-10-v02";
 
 /// A thoradm command that plans over the fixture catalog
 ///
@@ -26,6 +31,27 @@ fn thoradm(world: &World) -> std::process::Command {
     let mut command = world.thoradm();
     command.env(CATALOG_ENV, "1");
     command
+}
+
+/// Seed the record of a deployment at the second revision that finished the lossy forward step, so
+/// the plan from the recorded revision holds the step that reverses it
+///
+/// # Arguments
+///
+/// * `world` - The world to seed
+async fn seed_record(world: &World) {
+    // the revision row replaces the one the world's apply recorded, and the forward step is done
+    let mut revision = record::blank(MigrationRecordKind::Revision, "deployment");
+    revision.revision = Some(FROM.to_owned());
+    revision.version = Some("1.8.1".to_owned());
+    let mut rows = record::Rows::default();
+    rows.migrations.push(revision);
+    rows.migrations.push(record::history_row(&record::step(
+        FROM,
+        "fixture-forward",
+        1,
+    )));
+    record::insert(world.session(), &world.ns, &rows).await;
 }
 
 /// Describe a failed run
@@ -106,13 +132,15 @@ async fn a_check_estimates_what_a_lossy_reverse_loses() {
     world.drop_keyspace().await;
 }
 
-/// A run repeating a consumed code is refused before anything is written, even after the history
-/// that recorded the code is gone, because the `consumed_code` row outlives it
+/// A run repeating a consumed code is refused before anything is written: while the history shows
+/// the step finished the plan no longer holds it, and after that history is gone the `consumed_code`
+/// row, which outlives it, still refuses the code
 #[tokio::test]
 async fn a_consumed_code_is_refused_even_when_the_history_forgot_it() {
-    // a lossy step run once under a code
+    // a lossy step run once under a code, at the revision its forward step reached
     let world = World::new("loss03").await;
     world.seed_valid("a", 3).await;
+    seed_record(&world).await;
     let running = json!({
         "revision": TO, "step": "fixture-reverse", "outcome": "Running",
         "at": "2026-10-22T10:00:00Z", "by": "thorium-operator 1.8.1",
@@ -139,11 +167,11 @@ async fn a_consumed_code_is_refused_even_when_the_history_forgot_it() {
     };
     let first = World::run(thoradm(&world).args(args(&[])));
     assert_eq!(first.status.code(), Some(0), "{}", stderr(&first));
-    // the same code again is refused, with the exit code of a systematic failure
+    // the same step again is refused while the record shows it finished
     let second = World::run(thoradm(&world).args(args(&[])));
-    assert_eq!(second.status.code(), Some(6), "{}", stderr(&second));
+    assert_eq!(second.status.code(), Some(1), "{}", stderr(&second));
     assert!(
-        stderr(&second).contains(CONSUMED_REFUSAL),
+        stderr(&second).contains("the record shows it finished"),
         "{}",
         stderr(&second)
     );
@@ -160,6 +188,8 @@ async fn a_consumed_code_is_refused_even_when_the_history_forgot_it() {
         )
         .await
         .expect("the history deletes");
+    // the forward step's entry is seeded again, so the plan holds the reverse step once more
+    seed_record(&world).await;
     let third = World::run(thoradm(&world).args(args(&[])));
     assert_eq!(third.status.code(), Some(6), "{}", stderr(&third));
     assert!(

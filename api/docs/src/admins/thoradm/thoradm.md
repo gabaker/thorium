@@ -899,6 +899,25 @@ migration thoradm can't perform prints its manual procedure and exits 3 on `chec
 `verify`, and one it can only check does so on `run` and `verify`; this release registers neither
 kind.
 
+**Runs the planner wouldn't plan are refused.** Before it writes anything, `run` (and so `revert`,
+which runs through it) reads the recorded revision and history, and exits 1 when:
+
+- the recorded revision is one this build's catalog doesn't know, as when a newer build recorded
+  it, whatever the migration;
+- the step names a revision this build's catalog doesn't know;
+- the step is a catalog step that isn't in the plan from the recorded revision to the step's own
+  revision: a forward step at or below the recorded revision, a step the record shows finished, or
+  a reverse step whose path the planner refuses.
+
+The step is the one in the operator's `--running-entry`, or for a run by hand the catalog step the
+migration performs. The message names the step, the recorded revision and fingerprint, and the
+newest revision and fingerprint this build knows. Migrations no catalog step performs (the
+`rebucket-<data type>` migrations), runs with `--objects` or `--reason`, which re-process a pass the
+plan already ran, and a rebuild the record still shows reingesting, which the operator runs again
+when its reingest was lost, are only refused for an unknown recorded revision. Fix the objects of a
+finished step's issue groups with `--objects` or `--reason`; move the deployment by changing its
+target revision through the Helm chart and the operator, or restore a backup.
+
 | Subcommand | What it does |
 |---|---|
 | `check` | Classifies every object the migration would touch (`current`, `migratable`, `unrecognized`, `error`) and writes nothing but its own result. It prints the report as JSON: the counts, the rows a run would rewrite, how long the paused components would stay down, the largest issue groups by reason code, and, for a step that loses data, the loss estimate. `--all` prints every group and `--samples` up to 20 sample keys each, to the terminal only. Exits 0 |
@@ -1020,6 +1039,19 @@ default TTL differs from the live one is altered.
 - `--seed-revision <revision>` records that revision when `schema_migrations` holds none, after
   probing the live schema against the revision's snapshot; it is refused when another revision is
   recorded or the live schema doesn't match.
+- A record a newer build wrote is refused, with exit 1, before anything changes, as the API's
+  startup check refuses it (see [The API refuses to start](../deploy/troubleshooting.md#the-api-refuses-to-start)):
+  a recorded revision this build's catalog doesn't know (later than its newest revision, or from
+  another branch), or, when no revision is recorded, a deployment fingerprint that is neither this
+  build's nor one its catalog names. This holds with `--seed-revision` too, including one naming
+  the recorded revision. The message names the recorded revision and fingerprint and the newest
+  revision and fingerprint this build knows. Applying an older build's schema over a newer
+  revision would let older code write objects the newer revision's migrations never convert, so
+  roll forward to a release that knows the revision, downgrade through the Helm chart and the
+  operator, or restore a backup (see [Downgrading](../deploy/upgrades.md#downgrading)). A
+  downgrade along the catalog's reverse edges moves the record to the older revision first, so the
+  older build's apply then goes ahead even though the newer fingerprint is still recorded beside
+  it, and records its own.
 - `--to-revision <revision>` (which excludes `--seed-revision` and `--recreate-view`) converges to
   an older revision's committed snapshot instead of the declared schema: it creates the tables, columns, and views that snapshot has and the live schema
   lacks (what a later step dropped) and drops nothing a newer revision added. It is the first step
